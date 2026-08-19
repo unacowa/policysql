@@ -10,7 +10,7 @@ export const registerDiscoveryRoutes = (app: Hono<AppEnv>, dependencies: AppDepe
     const runtime = context.get("runtime");
     const headers = snapshotHeaders(runtime);
     if (notModified(context.req.raw, runtime)) return new Response(null, { status: 304, headers });
-    return jsonResponse(context, capabilities(runtime), 200, headers);
+    return jsonResponse(context, capabilities(runtime, dependencies.publicConfig), 200, headers);
   });
 
   app.get("/v1/catalog", authorize("catalog", "catalog"), runtimeContext(dependencies), (context) => {

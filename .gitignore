@@ -12,4 +12,3 @@ website/public/spec/
 spikes/**/.artifacts/
 deploy/cloudflare/.deployment/
 deploy/cloudflare/.wrangler-dry-run/
-deploy/cloudflare/pkg/

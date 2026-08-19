@@ -39,4 +39,9 @@ export type AppDependencies = {
   getRuntime: () => PolicySqlRuntime;
   transportFactory?: (...args: any[]) => any;
   costTransportFactory?: (...args: any[]) => any;
+  publicConfig?: {
+    schemaVersion: string;
+    policyVersion: string;
+    limits: Record<string, number>;
+  };
 };

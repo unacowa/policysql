@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createApp } from "../src/app.ts";
+import { capabilities } from "../src/presenters.ts";
 
 const runtime = {
   abi_version: 1,
@@ -43,4 +44,16 @@ test("Hono not-found handler preserves the safe error contract", async () => {
   assert.equal(body.error.path, null);
   assert.equal(typeof body.error.requestId, "string");
   assert.equal(runtimeCalls, 0, "routes that do not compile SQL must not initialize Wasm");
+});
+
+test("packaged deployments advertise their injected snapshot versions and limits", () => {
+  const result = capabilities(runtime, {
+    schemaVersion: "schema_demo_1",
+    policyVersion: "policy_demo_1",
+    limits: { maxRows: 17 },
+  });
+  assert.equal(result.schemaVersion, "schema_demo_1");
+  assert.equal(result.policyVersion, "policy_demo_1");
+  assert.equal(result.limits.maxRows, 17);
+  assert.equal(result.limits.maxStatements, 8);
 });

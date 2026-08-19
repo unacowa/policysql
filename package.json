@@ -1,7 +1,29 @@
 {
-  "name": "policysql-documentation",
-  "private": true,
+  "name": "@unacowa/policysql",
+  "version": "0.1.0",
+  "description": "Default-deny SQLite policy compiler and Cloudflare/Turso gateway",
+  "license": "MIT OR Apache-2.0",
   "type": "module",
+  "exports": {
+    "./client": {
+      "types": "./packages/client/index.d.ts",
+      "import": "./packages/client/index.js"
+    },
+    "./kysely": {
+      "types": "./packages/kysely/index.d.ts",
+      "import": "./packages/kysely/index.js"
+    },
+    "./cloudflare": "./deploy/cloudflare/src/package.ts"
+  },
+  "files": [
+    "deploy/cloudflare/pkg/",
+    "deploy/cloudflare/src/",
+    "packages/client/",
+    "packages/kysely/",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+    "README.md"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -16,10 +38,19 @@
     "spec:validate": "node scripts/validate-policy-spec.mjs",
     "test:clients": "node --test packages/*/*.test.mjs"
   },
+  "dependencies": {
+    "@tursodatabase/serverless": "1.4.0",
+    "hono": "4.13.0",
+    "jose": "6.2.8",
+    "kysely": "0.29.5",
+    "yaml": "2.9.0"
+  },
   "devDependencies": {
     "ajv": "8.20.0",
-    "kysely": "0.29.5",
-    "yaml": "2.9.0",
     "vitepress": "1.6.4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/unacowa/policysql.git"
   }
 }

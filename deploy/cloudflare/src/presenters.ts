@@ -66,12 +66,14 @@ export const explainResponse = (compiled: any, auth: AuthContext, id: string) =>
   },
 });
 
-export const capabilities = (runtime: any) => ({
+export const capabilities = (runtime: any, publicConfig: any = {}) => {
+  const limits = { ...LIMITS, ...(publicConfig.limits ?? {}) };
+  return ({
   id: runtime.snapshot,
   profile: runtime.profile,
   abiVersion: runtime.abi_version,
-  schemaVersion: SCHEMA_VERSION,
-  policyVersion: POLICY_VERSION,
+  schemaVersion: publicConfig.schemaVersion ?? SCHEMA_VERSION,
+  policyVersion: publicConfig.policyVersion ?? POLICY_VERSION,
   sqlDialect: "sqlite",
   statements: ["select", "insert", "update", "delete"],
   select: {
@@ -87,7 +89,7 @@ export const capabilities = (runtime: any) => ({
   },
   mutations: { presets: true, returning: true, atomicPostChecks: true },
   parameters: { named: true, positional: false },
-  limits: LIMITS,
+  limits,
   transactions: {
     atomic: true,
     interactive: true,
@@ -95,9 +97,9 @@ export const capabilities = (runtime: any) => ({
     commitChecksConfigured: runtime.commit_checks_enabled,
     commitCheckQueries: true,
     maxCommitChecks: 4,
-    maxCallbackQueriesPerCheck: LIMITS.maxStatements,
-    maxCallbackRowsPerCheck: LIMITS.maxRows,
-    maxCallbackBytesPerCheck: LIMITS.maxResultBytes,
+    maxCallbackQueriesPerCheck: limits.maxStatements,
+    maxCallbackRowsPerCheck: limits.maxRows,
+    maxCallbackBytesPerCheck: limits.maxResultBytes,
     maxHookDurationMs: 1500,
     maxInteractiveDurationMs: 4000,
   },
@@ -107,4 +109,5 @@ export const capabilities = (runtime: any) => ({
     binding: ["issuer", "subject", "role", "session", "endpoint", "payload"],
   },
   costObservation: { enabled: true, timing: "after_response", planner: "sqlite-explain-query-plan" },
-});
+  });
+};

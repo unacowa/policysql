@@ -1,4 +1,4 @@
-import type { PolicySqlClient } from '@policysql/client'
+import type { PolicySqlClient } from '@unacowa/policysql/client'
 import type { RootOperationNode } from 'kysely'
 export type NullableOnDenied<T> = T | null
 export interface CompilableQuery<Row> {
