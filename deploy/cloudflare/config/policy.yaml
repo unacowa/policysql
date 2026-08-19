@@ -1,0 +1,7 @@
+version: 1
+includes:
+  - resources/archived_posts.yaml
+  - resources/authors.yaml
+  - resources/comments.yaml
+  - resources/posts.yaml
+  - resources/projects.yaml

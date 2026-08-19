@@ -1,0 +1,1 @@
+SELECT "__policysql_t0"."id" AS "id", ROW_NUMBER () OVER (PARTITION BY "__policysql_t0"."tenant_id" ORDER BY "__policysql_t0"."id" ASC) AS "row_number" FROM "projects" AS "__policysql_t0" WHERE ("__policysql_t0"."tenant_id" = :__policysql_session_tenant_id) ORDER BY "__policysql_t0"."id" ASC

@@ -1,0 +1,9 @@
+resource: comments
+
+roles:
+  author:
+    insert:
+      columns: [body, author_id]
+      presets:
+        author_id:
+          session: subject_id

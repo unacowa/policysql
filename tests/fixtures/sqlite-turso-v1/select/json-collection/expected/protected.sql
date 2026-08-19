@@ -1,0 +1,1 @@
+SELECT JSON_GROUP_ARRAY ("__policysql_json"."value") AS "items" FROM "projects" AS "__policysql_t0", JSON_EACH ("__policysql_t0"."metadata", :path) AS "__policysql_json" WHERE (("__policysql_t0"."id" = :id) AND ("__policysql_t0"."tenant_id" = :__policysql_session_tenant_id))

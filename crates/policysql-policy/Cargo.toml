@@ -1,0 +1,22 @@
+[package]
+name = "policysql-policy"
+description = "Declarative policy model and compiler boundary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+policysql-catalog = { path = "../policysql-catalog" }
+policysql-core = { path = "../policysql-core" }
+policysql-ir = { path = "../policysql-ir" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+[dev-dependencies]
+policysql-parser = { path = "../policysql-parser" }
+policysql-testkit = { path = "../policysql-testkit" }

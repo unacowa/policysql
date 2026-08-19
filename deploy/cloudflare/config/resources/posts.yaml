@@ -1,0 +1,39 @@
+resource: posts
+roles:
+  member:
+    select:
+      columns:
+        - id
+        - author_id
+        - title
+        - status
+        - published_at
+        - created_at
+        - updated_by
+        - metadata
+        - view_count
+        - name: private_note
+          visible_if: { author_id: { eq: { session: subject_id } } }
+          on_deny: null
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      limit: 100
+      allow_aggregations: true
+      allow_windows: true
+    insert:
+      columns: [id, title, status, published_at, metadata, view_count]
+      presets:
+        tenant_id: { session: tenant_id }
+        author_id: { session: subject_id }
+        updated_by: { session: subject_id }
+      check: { tenant_id: { eq: { session: tenant_id } } }
+      returning: { columns: [id, title, status] }
+    update:
+      columns: [title, status, published_at, metadata, view_count]
+      presets:
+        updated_by: { session: subject_id }
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      check: { tenant_id: { eq: { session: tenant_id } } }
+      returning: { columns: [id, title, status] }
+    delete:
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      returning: { columns: [id] }

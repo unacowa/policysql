@@ -1,0 +1,16 @@
+version: 1
+resources:
+  projects:
+    source: { table: projects }
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      metadata:
+        type: json
+        representation: object
+        jsonSchema:
+          type: object
+          additionalProperties: false
+          properties:
+            label: { type: string }
+            score: { type: integer }

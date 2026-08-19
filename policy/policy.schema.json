@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://policysql.dev/schemas/policy.schema.json",
+  "title": "PolicySQL policy document",
+  "type": "object",
+  "required": [
+    "version",
+    "resources"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/resource"
+      }
+    },
+    "commit_checks": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_]*$" },
+      "additionalProperties": { "$ref": "#/$defs/commitCheck" }
+    }
+  },
+  "$defs": {
+    "resource": {
+      "type": "object",
+      "required": [
+        "roles"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "roles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/role"
+          }
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "select": {
+          "$ref": "#/$defs/select"
+        },
+        "insert": {
+          "$ref": "#/$defs/insert"
+        },
+        "update": {
+          "$ref": "#/$defs/update"
+        },
+        "delete": {
+          "$ref": "#/$defs/delete"
+        }
+      }
+    },
+    "select": {
+      "type": "object",
+      "required": [
+        "columns",
+        "filter"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "$ref": "#/$defs/outputColumns"
+        },
+        "filter": {
+          "type": "object"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "allow_aggregations": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_windows": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "insert": {
+      "type": "object",
+      "required": [
+        "columns",
+        "check"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "$ref": "#/$defs/columns"
+        },
+        "presets": {
+          "type": "object"
+        },
+        "check": {
+          "type": "object"
+        },
+        "returning": {
+          "$ref": "#/$defs/returning"
+        }
+      }
+    },
+    "update": {
+      "type": "object",
+      "required": [
+        "columns",
+        "filter",
+        "check"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "$ref": "#/$defs/columns"
+        },
+        "filter": {
+          "type": "object"
+        },
+        "presets": {
+          "type": "object"
+        },
+        "check": {
+          "type": "object"
+        },
+        "returning": {
+          "$ref": "#/$defs/returning"
+        }
+      }
+    },
+    "delete": {
+      "type": "object",
+      "required": [
+        "filter"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "filter": {
+          "type": "object"
+        },
+        "returning": {
+          "$ref": "#/$defs/returning"
+        }
+      }
+    },
+    "columns": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "outputColumns": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "oneOf": [
+          { "type": "string", "minLength": 1 },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "visible_if", "on_deny"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "visible_if": { "type": "object" },
+              "on_deny": { "type": "null" }
+            }
+          }
+        ]
+      }
+    },
+    "returning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns"],
+      "properties": {
+        "columns": { "$ref": "#/$defs/columns" }
+      }
+    },
+    "commitCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["triggered_by", "hook"],
+      "properties": {
+        "triggered_by": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "role": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "hook": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url_env", "timeout_ms", "hmac_secret_env"],
+          "properties": {
+            "url_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+            "timeout_ms": { "type": "integer", "minimum": 1 },
+            "hmac_secret_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
+          }
+        }
+      }
+    }
+  }
+}

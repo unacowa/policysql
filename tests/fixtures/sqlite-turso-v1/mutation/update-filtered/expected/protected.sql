@@ -1,0 +1,1 @@
+UPDATE "projects" SET "name" = :name, "created_by" = :__policysql_session_subject_id WHERE (("id" = :id) AND ("tenant_id" = :__policysql_session_tenant_id)) RETURNING "id" AS "id", "name" AS "name", CASE WHEN ("tenant_id" = :__policysql_session_tenant_id) THEN TRUE ELSE FALSE END AS "__policysql_check"

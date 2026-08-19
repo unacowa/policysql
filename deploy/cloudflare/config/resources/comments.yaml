@@ -1,0 +1,9 @@
+resource: comments
+roles:
+  member:
+    select:
+      columns: [id, post_id, parent_id, body]
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      limit: 100
+      allow_aggregations: false
+      allow_windows: false

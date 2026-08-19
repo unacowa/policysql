@@ -1,0 +1,1 @@
+SELECT "__policysql_t0"."tenant_id" AS "tenant_id", COUNT (*) AS "item_count" FROM "projects" AS "__policysql_t0" WHERE ("__policysql_t0"."tenant_id" = :__policysql_session_tenant_id) GROUP BY "__policysql_t0"."tenant_id" HAVING (COUNT (*) > :minimum)

@@ -1,0 +1,1 @@
+SELECT "__policysql_t0"."id" AS "id", "__policysql_t0"."name" AS "name" FROM "projects" AS "__policysql_t0" WHERE (((("__policysql_t0"."status" IN (:active, :pending)) AND (NOT ("__policysql_t0"."name" IS NULL))) AND ("__policysql_t0"."status" NOT IN (:archived))) AND ("__policysql_t0"."tenant_id" = :__policysql_session_tenant_id)) LIMIT 100

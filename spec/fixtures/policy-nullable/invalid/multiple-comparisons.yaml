@@ -1,0 +1,10 @@
+resource: comments
+
+roles:
+  author:
+    select:
+      columns: [id]
+      filter:
+        status:
+          eq: draft
+          neq: archived

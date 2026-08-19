@@ -1,0 +1,282 @@
+[
+  {
+    "path": ".editorconfig",
+    "sha256": "566da27cea124bd6cb62fbb44e94a1e44488f2e75635f800ef05ce79ee4f4f44",
+    "bytes": 202
+  },
+  {
+    "path": ".env.example",
+    "sha256": "741ae47393997bbc0e40b7662d880eb98f143b1223ac15c90844831c61363b2c",
+    "bytes": 119
+  },
+  {
+    "path": ".github/workflows/ci.yml",
+    "sha256": "ed692d1a44f8401b3c363d66b6c5b55fd2ee737f758d35c285a31e6c7f7d4f95",
+    "bytes": 461
+  },
+  {
+    "path": ".gitignore",
+    "sha256": "0a3e1fb5c339a5060021b2a101d62de0911bb4169f25c4c0787e8e090e1f3e83",
+    "bytes": 76
+  },
+  {
+    "path": "AGENTS.md",
+    "sha256": "dd3640e6e68c185753e4afc1b1ac62c04bbd935fbfc76bdc29e744c751a4caf4",
+    "bytes": 2763
+  },
+  {
+    "path": "CONTRIBUTING.md",
+    "sha256": "fb73e479ad7c27de4bc3665b8322905c940b673a8d99721d59f069289a14038c",
+    "bytes": 799
+  },
+  {
+    "path": "Cargo.toml",
+    "sha256": "1c46dc14fad37276c6593bab593f2ffcebc494b36e2bda03ee3fde6f7a5bed51",
+    "bytes": 606
+  },
+  {
+    "path": "LICENSE-APACHE",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "bytes": 11358
+  },
+  {
+    "path": "LICENSE-MIT",
+    "sha256": "07fdacd1228a253fe9e7bed8d670332b6784dc6f4e0b01331eea38474dfcff42",
+    "bytes": 1079
+  },
+  {
+    "path": "README.md",
+    "sha256": "9e232ca4f56eeecf97ba0452ad0ced638abf32bf221ea7f7a36cab67631f70e5",
+    "bytes": 3813
+  },
+  {
+    "path": "SECURITY.md",
+    "sha256": "99ff0199e0b4c7321cf7fe2cfa541a642125c1ddf40b8dd1322752ba1eaeb2b5",
+    "bytes": 733
+  },
+  {
+    "path": "crates/policysql-core/Cargo.toml",
+    "sha256": "de4045d5b42fe28ff67aa05a087e21f03a5b4fe4a24f777b9eb4b66f55d34a8c",
+    "bytes": 240
+  },
+  {
+    "path": "crates/policysql-core/src/lib.rs",
+    "sha256": "49e07c3bc5473838b3802c88276dc04d761ca198850cf2bf19d6342d05ab5489",
+    "bytes": 2105
+  },
+  {
+    "path": "crates/policysql-gateway/Cargo.toml",
+    "sha256": "f3cc520b019805b3570eaf0cb06de45626badf0cca3599e98cb085736640a578",
+    "bytes": 253
+  },
+  {
+    "path": "crates/policysql-gateway/src/main.rs",
+    "sha256": "679a309fb8dfa6d66929bda1dcbf2fff9c091f0bd00beafe6f3a89a3a3bd86e3",
+    "bytes": 125
+  },
+  {
+    "path": "crates/policysql-parser/Cargo.toml",
+    "sha256": "4d6214aa27160d723e7f3015ee4d86b2f5b90c10b65b6c101a5bb3cc71d3e1e8",
+    "bytes": 245
+  },
+  {
+    "path": "crates/policysql-parser/src/lib.rs",
+    "sha256": "e71972c66bcafb59d5fde95920814305a3786608edfbb201a5704f750cfa854c",
+    "bytes": 1774
+  },
+  {
+    "path": "crates/policysql-policy/Cargo.toml",
+    "sha256": "df866b6c57ee80dfca946d10f00b480b07cef84ffa1b619e9bc27e1bf0c3807e",
+    "bytes": 323
+  },
+  {
+    "path": "crates/policysql-policy/src/lib.rs",
+    "sha256": "623e15eec4fc87d109a04615bb0d58e9a1bca2bca12a87ad1bde23140001e353",
+    "bytes": 1593
+  },
+  {
+    "path": "crates/policysql-sqlite/Cargo.toml",
+    "sha256": "c5b33d00a364e3f54cd2a407ed63e31c1e7c49afdf86905f586e8db49e2754e9",
+    "bytes": 264
+  },
+  {
+    "path": "crates/policysql-sqlite/src/lib.rs",
+    "sha256": "745028bb8d9240df5c722338641f490cce3d1d9a08c2190391fb2ae4ce2dbc90",
+    "bytes": 1085
+  },
+  {
+    "path": "crates/policysql-testkit/Cargo.toml",
+    "sha256": "e3bcdda533c4b8f063c4ef3e3ba819e81221ae4c40988a3b36895872f6a08185",
+    "bytes": 255
+  },
+  {
+    "path": "crates/policysql-testkit/src/lib.rs",
+    "sha256": "7a2d3c0318991a10c8c17ad2fe684b541ae82e0ac33aa32244137e47e7474c57",
+    "bytes": 823
+  },
+  {
+    "path": "crates/policysql-turso/Cargo.toml",
+    "sha256": "1c98e2dd2cc6dc7c2847d216ae521d0bece53450a352b61f5bc7969772794ed5",
+    "bytes": 319
+  },
+  {
+    "path": "crates/policysql-turso/src/lib.rs",
+    "sha256": "4134b41f59d5a76f43484afce5431ec5e5ce070bef9daf3a8f6da4bc30794c47",
+    "bytes": 1486
+  },
+  {
+    "path": "docs/adr/0001-use-rust-for-the-policy-compiler.md",
+    "sha256": "d914241ecbbc6e58ac77bc8a98e604aacc82dd7e27d1d80f68c8e42e5a666001",
+    "bytes": 691
+  },
+  {
+    "path": "docs/adr/0002-use-sqlite-sql-as-the-public-query-language.md",
+    "sha256": "c95891a342f42b5def5190d823cd8638999dbe12725b422a8fda96d564d59cbf",
+    "bytes": 767
+  },
+  {
+    "path": "docs/adr/0003-default-deny-and-single-statement.md",
+    "sha256": "59c0a480a8adec0d5a99a1546ea74388a94222cd58f7ccfcf91a23cb41484d84",
+    "bytes": 446
+  },
+  {
+    "path": "docs/architecture.md",
+    "sha256": "467e5a57deb808c1ca5738dfd910f529d3d4abf1821da498ef0b3c0326f41fc7",
+    "bytes": 2820
+  },
+  {
+    "path": "docs/codex-handoff.md",
+    "sha256": "87a0ee4480541ebcd18e62704b9c163a68191393edbb9039cabd19c2c0ff73bd",
+    "bytes": 4576
+  },
+  {
+    "path": "docs/http-api.md",
+    "sha256": "773bf080d0bb8885819ffd2d1266033d38becf62f71458ecd5c9178de7723abe",
+    "bytes": 1712
+  },
+  {
+    "path": "docs/open-questions.md",
+    "sha256": "cd45a974b12af9ff08d80956ab6c682da19068a2826a4d3b952c34761e5dfe21",
+    "bytes": 1311
+  },
+  {
+    "path": "docs/policy-semantics.md",
+    "sha256": "3142441d6e7f83444703db41e777c9e877e5359f3d98a86d8a9428ebec7789bf",
+    "bytes": 2502
+  },
+  {
+    "path": "docs/roadmap.md",
+    "sha256": "b46a40d6a67c95e9df49ce0ca9a87218c39c2687702c6b8c7f9ace382782d29d",
+    "bytes": 1422
+  },
+  {
+    "path": "docs/security-model.md",
+    "sha256": "43a7eba422846605279fb388c6775c67d72f3c973f2bea89e6faa1116623ed5e",
+    "bytes": 2948
+  },
+  {
+    "path": "docs/sql-subset.md",
+    "sha256": "b7e6dd01f419a57b92054a5ab776479ce194cc22f65db31fc9f58c87789a844d",
+    "bytes": 1806
+  },
+  {
+    "path": "docs/validation-hooks.md",
+    "sha256": "c406b9ec725b2497b4e142c7a891fe43f1ffe8bf1b354e8151b64db480ae6028",
+    "bytes": 1667
+  },
+  {
+    "path": "docs/vision.md",
+    "sha256": "533b2c1fe62ab5aef90de6ad014f7c7242cfe42bb136f4b193347cee299c7498",
+    "bytes": 1633
+  },
+  {
+    "path": "examples/basic/README.md",
+    "sha256": "a0cf1ff97a97bc488edea474f4339202c37e23f45cce2039c01b3ac2413ea342",
+    "bytes": 417
+  },
+  {
+    "path": "examples/basic/input.sql",
+    "sha256": "b23c75c5c54a60d0db0f3a01ec2e3b7d0e16b6b42bea1be64824bf1694a44638",
+    "bytes": 67
+  },
+  {
+    "path": "examples/basic/params.json",
+    "sha256": "503c8248b962868209c5e097f28b777ac456c0c849e64fb8a29db86c134ffddd",
+    "bytes": 130
+  },
+  {
+    "path": "examples/basic/protected.sql",
+    "sha256": "118943bf3e8522920ffca92a5d4d559f4ea0f5577b547a07978285c5ee078e54",
+    "bytes": 117
+  },
+  {
+    "path": "examples/basic/schema.sql",
+    "sha256": "9c3cc04ae53e34678abfb004f6d3f3c81feb09f87f12057081fa7998438d93f6",
+    "bytes": 295
+  },
+  {
+    "path": "justfile",
+    "sha256": "5f6b96d960e28213c18f1eb3e2f01b25a85a02ae42110f6faafb15673422f160",
+    "bytes": 295
+  },
+  {
+    "path": "policy/example.yaml",
+    "sha256": "0f5a0e1a041702784f421bdbf414f63413f837b6dde63000de5a6102deebffc2",
+    "bytes": 1350
+  },
+  {
+    "path": "policy/policy.schema.json",
+    "sha256": "e6e6e69618ef6a1934174d87ce6d36de5a1272f8ea9fd2f623d2ee3b3a7986ee",
+    "bytes": 3575
+  },
+  {
+    "path": "rust-toolchain.toml",
+    "sha256": "0c9b811689c2817b6404b2858b3e8f7aebf513af379da94774521025b7008863",
+    "bytes": 86
+  },
+  {
+    "path": "scripts/tree.sh",
+    "sha256": "6a270f520349fb3aeaa2ea7584933eb0818ffee7cbe02e577df9db7bcc80ae78",
+    "bytes": 111
+  },
+  {
+    "path": "tests/fixtures/select/allowed/expected.sql",
+    "sha256": "118943bf3e8522920ffca92a5d4d559f4ea0f5577b547a07978285c5ee078e54",
+    "bytes": 117
+  },
+  {
+    "path": "tests/fixtures/select/allowed/input.sql",
+    "sha256": "74996d456d1fc835bdb36794cbd6fe760ec8c39b472a7d170ec258e08ff37c1d",
+    "bytes": 54
+  },
+  {
+    "path": "tests/fixtures/select/forbidden-column/error.txt",
+    "sha256": "836b8dfd9d03a2cd8ab13a3ff34197ea0beb6d3e5386cc2242b96d33851b656f",
+    "bytes": 27
+  },
+  {
+    "path": "tests/fixtures/select/forbidden-column/input.sql",
+    "sha256": "ba204d6f1306a6f9518969bb2e1c6b6fe63df1712b10036b3e01d11e0fb08b90",
+    "bytes": 55
+  },
+  {
+    "path": "tests/fixtures/select/multiple-statements/error.txt",
+    "sha256": "b2daf096ef283e8fd13f4e901110fd17c698ab8ed172c9b8daa63bc328edbfcf",
+    "bytes": 30
+  },
+  {
+    "path": "tests/fixtures/select/multiple-statements/input.sql",
+    "sha256": "41c4a6bff2f4efa82cebc501786d31c7f9e34ab65b234c2ca70ae73818f3a776",
+    "bytes": 47
+  },
+  {
+    "path": "tests/fixtures/select/server-parameter-collision/error.txt",
+    "sha256": "d5c2dc3d11149292fac1f0a0721a828d3034b3f50e3ff1901e4b0bfa3be0c22d",
+    "bytes": 29
+  },
+  {
+    "path": "tests/fixtures/select/server-parameter-collision/input.sql",
+    "sha256": "cdae0ce1027eaa5763ec0905c2c00aad4f89c0dcb172192475bba1c28447c4c3",
+    "bytes": 74
+  }
+]

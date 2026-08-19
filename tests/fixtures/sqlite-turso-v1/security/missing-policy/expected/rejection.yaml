@@ -1,0 +1,4 @@
+stage: authorization
+code: POLICYSQL_MISSING_POLICY
+executor_calls: 0
+public_message_contains_hidden_identifier: false

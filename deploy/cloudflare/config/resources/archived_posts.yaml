@@ -1,0 +1,9 @@
+resource: archived_posts
+roles:
+  member:
+    select:
+      columns: [id, title]
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      limit: 100
+      allow_aggregations: false
+      allow_windows: false

@@ -1,0 +1,14 @@
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+  tasks:
+    roles:
+      member:
+        select:
+          columns: [project_id, title]
+          filter: { tenant_id: { eq: { session: tenant_id } } }

@@ -1,0 +1,10 @@
+id: sqlite.security.server-parameter-collision
+profile: sqlite-turso-v1
+description: clientによるserver-owned parameter namespaceの使用を拒否する
+covers:
+  - statement.select.single-table
+  - expression.named-parameter
+  - parameter.server-namespace
+  - threat.parameter-name-collision
+tests: [negative, bypass]
+expected: deny

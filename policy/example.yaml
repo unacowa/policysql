@@ -1,0 +1,59 @@
+version: 1
+
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns:
+            - id
+            - name
+            - status
+            - customer_id
+            - updated_at
+          filter:
+            tenant_id:
+              eq:
+                session: tenant_id
+          limit: 100
+          allow_aggregations: false
+
+        insert:
+          columns:
+            - name
+            - customer_id
+            - status
+          presets:
+            tenant_id:
+              session: tenant_id
+            created_by:
+              session: user_id
+          check:
+            tenant_id:
+              eq:
+                session: tenant_id
+        update:
+          columns:
+            - name
+            - status
+            - customer_id
+          filter:
+            tenant_id:
+              eq:
+                session: tenant_id
+          presets:
+            updated_by:
+              session: user_id
+          check:
+            tenant_id:
+              eq:
+                session: tenant_id
+
+        delete:
+          filter:
+            and:
+              - tenant_id:
+                  eq:
+                    session: tenant_id
+              - status:
+                  neq: locked

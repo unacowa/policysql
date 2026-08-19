@@ -1,0 +1,21 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "main": "./worker.mjs",
+  "compatibility_date": "2026-08-04",
+  "workers_dev": true,
+  "preview_urls": true,
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TX_OWNER",
+        "class_name": "TransactionOwner"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TransactionOwner"]
+    }
+  ]
+}

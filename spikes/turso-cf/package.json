@@ -1,0 +1,13 @@
+{
+  "name": "policysql-turso-cf-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compiler": "node compiler.mjs",
+    "spike": "node run.mjs"
+  },
+  "dependencies": {
+    "@tursodatabase/database": "0.7.2",
+    "@tursodatabase/serverless": "1.4.0"
+  }
+}

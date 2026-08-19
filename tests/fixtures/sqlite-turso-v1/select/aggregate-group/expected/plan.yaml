@@ -1,0 +1,4 @@
+operation: select
+resources: [projects]
+policies: [member.projects.select]
+invariant: aggregation gate and grouped column permission are both required

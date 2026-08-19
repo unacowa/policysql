@@ -1,0 +1,30 @@
+{
+  "name": "policysql-cloudflare-deployment",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "stage:policy": "node scripts/stage-policy.mjs",
+    "catalog:build": "node scripts/catalog-build.mjs",
+    "build:wasm": "npm run stage:policy && wasm-pack build ../../crates/policysql-cloudflare --release --target web --out-dir ../../deploy/cloudflare/pkg",
+    "check": "tsc --noEmit",
+    "verify": "npm run check && npm test",
+    "predeploy:dry": "npm run check && npm run stage:policy",
+    "deploy:dry": "wrangler deploy --dry-run",
+    "predeploy": "npm run verify && npm run stage:policy",
+    "deploy": "wrangler deploy",
+    "provision:dev": "npm run verify && node scripts/provision-dev.mjs",
+    "token:dev": "node scripts/mint-dev-token.mjs",
+    "rollback": "node scripts/rollback.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@tursodatabase/serverless": "1.4.0",
+    "hono": "4.13.0",
+    "jose": "6.2.8",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260819.1",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,258 @@
+version: 1
+profile: sqlite-turso-v1
+leaves:
+  - id: statement.select.single-table
+    profile: sqlite-turso-v1
+    kind: statement
+    status: planned
+    required_tests: [positive, negative, bypass, differential]
+  - id: statement.multiple
+    profile: sqlite-turso-v1
+    kind: statement
+    status: disabled
+    required_tests: [negative, bypass]
+  - id: statement.insert.values
+    profile: sqlite-turso-v1
+    kind: statement
+    status: advertised
+    contexts: [write]
+    required_tests: [positive, negative, bypass, differential]
+  - id: statement.update.direct
+    profile: sqlite-turso-v1
+    kind: statement
+    status: advertised
+    contexts: [write]
+    required_tests: [positive, negative, bypass, differential]
+  - id: statement.delete.filtered
+    profile: sqlite-turso-v1
+    kind: statement
+    status: advertised
+    contexts: [write]
+    required_tests: [positive, negative, bypass, differential]
+  - id: clause.projection.explicit
+    profile: sqlite-turso-v1
+    kind: clause
+    status: planned
+    contexts: [projection]
+    required_tests: [positive, negative, bypass, differential]
+  - id: clause.where
+    profile: sqlite-turso-v1
+    kind: clause
+    status: planned
+    contexts: [filter]
+    required_tests: [positive, negative, bypass, differential]
+  - id: clause.limit
+    profile: sqlite-turso-v1
+    kind: clause
+    status: planned
+    required_tests: [positive, negative, bypass, differential]
+  - id: clause.offset
+    profile: sqlite-turso-v1
+    kind: clause
+    status: advertised
+    required_tests: [positive, negative, bypass, differential]
+  - id: clause.order-by.direct
+    profile: sqlite-turso-v1
+    kind: clause
+    status: advertised
+    contexts: [order]
+    required_tests: [positive, negative, bypass, differential]
+  - id: clause.order-by.projection-alias
+    profile: sqlite-turso-v1
+    kind: clause
+    status: advertised
+    contexts: [order]
+    required_tests: [positive, negative, bypass, differential]
+  - id: source.join.inner
+    profile: sqlite-turso-v1
+    kind: source
+    status: advertised
+    contexts: [join]
+    required_tests: [positive, negative, bypass, differential]
+  - id: source.join.left
+    profile: sqlite-turso-v1
+    kind: source
+    status: advertised
+    contexts: [join]
+    required_tests: [positive, negative, bypass, differential]
+  - id: source.derived.transparent
+    profile: sqlite-turso-v1
+    kind: source
+    status: advertised
+    contexts: [source]
+    required_tests: [positive, negative, bypass, differential]
+  - id: source.cte.transparent
+    profile: sqlite-turso-v1
+    kind: source
+    status: advertised
+    contexts: [source]
+    required_tests: [positive, negative, bypass, differential]
+  - id: source.subquery.correlated-exists
+    profile: sqlite-turso-v1
+    kind: source
+    status: advertised
+    contexts: [filter]
+    required_tests: [positive, negative, bypass, differential]
+  - id: clause.group-by.direct
+    profile: sqlite-turso-v1
+    kind: clause
+    status: advertised
+    contexts: [group]
+    required_tests: [positive, negative, bypass, differential]
+  - id: clause.having.closed
+    profile: sqlite-turso-v1
+    kind: clause
+    status: advertised
+    contexts: [having]
+    required_tests: [positive, negative, bypass, differential]
+  - id: clause.returning.direct
+    profile: sqlite-turso-v1
+    kind: clause
+    status: advertised
+    contexts: [returning]
+    required_tests: [positive, negative, bypass, differential]
+  - id: expression.aggregate.count-all
+    profile: sqlite-turso-v1
+    kind: expression
+    status: advertised
+    contexts: [aggregate]
+    required_tests: [positive, negative, bypass, differential]
+  - id: source.json-table.collection
+    profile: sqlite-turso-v1
+    kind: source
+    status: advertised
+    contexts: [source, aggregate]
+    required_tests: [positive, negative, bypass, differential]
+  - id: expression.aggregate.json-group-array
+    profile: sqlite-turso-v1
+    kind: expression
+    status: advertised
+    contexts: [aggregate]
+    required_tests: [positive, negative, bypass, differential]
+  - id: result.json-array-schema
+    profile: sqlite-turso-v1
+    kind: result
+    status: advertised
+    required_tests: [positive, negative, bypass, differential]
+  - id: expression.window.row-number
+    profile: sqlite-turso-v1
+    kind: expression
+    status: advertised
+    contexts: [window]
+    required_tests: [positive, negative, bypass, differential]
+  - id: expression.string.like-glob
+    profile: sqlite-turso-v1
+    kind: expression
+    status: advertised
+    contexts: [filter]
+    required_tests: [positive, negative, bypass, differential]
+  - id: expression.function.scalar-registered
+    profile: sqlite-turso-v1
+    kind: expression
+    status: advertised
+    contexts: [projection, order]
+    required_tests: [positive, negative, bypass, differential]
+  - id: expression.projection.typed-composite
+    profile: sqlite-turso-v1
+    kind: expression
+    status: advertised
+    contexts: [projection]
+    required_tests: [positive, negative, bypass, differential]
+  - id: expression.binary.eq
+    profile: sqlite-turso-v1
+    kind: expression
+    status: planned
+    contexts: [filter, policy_filter]
+    required_tests: [positive, negative, bypass, differential]
+  - id: expression.named-parameter
+    profile: sqlite-turso-v1
+    kind: expression
+    status: planned
+    required_tests: [positive, negative, bypass, differential]
+  - id: binding.known-column
+    profile: sqlite-turso-v1
+    kind: binding
+    status: planned
+    required_tests: [positive, negative, bypass, differential]
+  - id: policy.select.missing
+    profile: sqlite-turso-v1
+    kind: policy
+    status: planned
+    required_tests: [negative]
+  - id: policy.select.row-filter
+    profile: sqlite-turso-v1
+    kind: policy
+    status: planned
+    contexts: [policy_filter]
+    required_tests: [positive, negative, bypass, differential]
+  - id: policy.select.column-regular
+    profile: sqlite-turso-v1
+    kind: policy
+    status: planned
+    required_tests: [positive, negative, bypass, differential]
+  - id: policy.select.forbidden-column
+    profile: sqlite-turso-v1
+    kind: policy
+    status: planned
+    required_tests: [negative, bypass]
+  - id: policy.select.limit
+    profile: sqlite-turso-v1
+    kind: policy
+    status: planned
+    required_tests: [positive, negative, bypass, differential]
+  - id: policy.mutation.write-columns
+    profile: sqlite-turso-v1
+    kind: policy
+    status: advertised
+    contexts: [write]
+    required_tests: [positive, negative, bypass, differential]
+  - id: policy.mutation.row-filter
+    profile: sqlite-turso-v1
+    kind: policy
+    status: advertised
+    contexts: [policy_filter]
+    required_tests: [positive, negative, bypass, differential]
+  - id: policy.mutation.preset
+    profile: sqlite-turso-v1
+    kind: policy
+    status: advertised
+    contexts: [write]
+    required_tests: [positive, negative, bypass, differential]
+  - id: policy.mutation.operation-check
+    profile: sqlite-turso-v1
+    kind: policy
+    status: advertised
+    contexts: [write]
+    required_tests: [positive, negative, bypass, differential]
+  - id: policy.mutation.returning
+    profile: sqlite-turso-v1
+    kind: policy
+    status: advertised
+    contexts: [returning]
+    required_tests: [positive, negative, bypass, differential]
+  - id: execution.transaction.rollback
+    profile: sqlite-turso-v1
+    kind: execution
+    status: advertised
+    contexts: [write]
+    required_tests: [positive, negative, bypass, differential]
+  - id: emission.server-parameter
+    profile: sqlite-turso-v1
+    kind: emission
+    status: planned
+    required_tests: [positive, negative, bypass, differential]
+  - id: emission.reparse
+    profile: sqlite-turso-v1
+    kind: emission
+    status: planned
+    required_tests: [positive, negative, bypass, differential]
+  - id: result.unique-name
+    profile: sqlite-turso-v1
+    kind: result
+    status: planned
+    required_tests: [positive, negative, bypass, differential]
+  - id: parameter.server-namespace
+    profile: sqlite-turso-v1
+    kind: parameter
+    status: planned
+    required_tests: [negative, bypass]

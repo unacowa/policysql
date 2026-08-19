@@ -1,0 +1,1 @@
+{"operation":"select","resources":["projects","tasks"],"policies":["member.projects.select","member.tasks.select"]}

@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://policysql.dev/schemas/policy.schema.json",
+  "title": "PolicySQL policy document",
+  "oneOf": [
+    { "$ref": "#/$defs/rootManifest" },
+    { "$ref": "#/$defs/resourcePolicy" }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "columnList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/identifier" },
+      "uniqueItems": true
+    },
+    "scalar": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" }
+      ]
+    },
+    "valueOperand": {
+      "oneOf": [
+        { "$ref": "#/$defs/scalar" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["literal"],
+          "properties": { "literal": { "$ref": "#/$defs/scalar" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["session"],
+          "properties": { "session": { "$ref": "#/$defs/identifier" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["column"],
+          "properties": { "column": { "$ref": "#/$defs/identifier" } }
+        }
+      ]
+    },
+    "valueList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/scalar" }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "eq": { "$ref": "#/$defs/valueOperand" },
+        "neq": { "$ref": "#/$defs/valueOperand" },
+        "lt": { "$ref": "#/$defs/valueOperand" },
+        "lte": { "$ref": "#/$defs/valueOperand" },
+        "gt": { "$ref": "#/$defs/valueOperand" },
+        "gte": { "$ref": "#/$defs/valueOperand" },
+        "in": { "$ref": "#/$defs/valueList" },
+        "not_in": { "$ref": "#/$defs/valueList" },
+        "is_null": { "type": "boolean" },
+        "like": { "$ref": "#/$defs/valueOperand" }
+      }
+    },
+    "columnPredicate": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/identifier" },
+      "additionalProperties": { "$ref": "#/$defs/comparison" }
+    },
+    "andPredicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["and"],
+      "properties": {
+        "and": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/predicate" }
+        }
+      }
+    },
+    "orPredicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["or"],
+      "properties": {
+        "or": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/predicate" }
+        }
+      }
+    },
+    "notPredicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["not"],
+      "properties": { "not": { "$ref": "#/$defs/predicate" } }
+    },
+    "predicate": {
+      "oneOf": [
+        { "$ref": "#/$defs/columnPredicate" },
+        { "$ref": "#/$defs/andPredicate" },
+        { "$ref": "#/$defs/orPredicate" },
+        { "$ref": "#/$defs/notPredicate" }
+      ]
+    },
+    "conditionalOutputColumn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "visible_if", "on_deny"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "visible_if": { "$ref": "#/$defs/predicate" },
+        "on_deny": { "type": "null" }
+      }
+    },
+    "outputColumn": {
+      "oneOf": [
+        { "$ref": "#/$defs/identifier" },
+        { "$ref": "#/$defs/conditionalOutputColumn" }
+      ]
+    },
+    "outputColumnList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/outputColumn" }
+    },
+    "returning": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "columns": { "$ref": "#/$defs/outputColumnList" }
+      }
+    },
+    "presetValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "session": { "$ref": "#/$defs/identifier" },
+        "literal": {}
+      }
+    },
+    "presets": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/identifier" },
+      "additionalProperties": { "$ref": "#/$defs/presetValue" }
+    },
+    "selectPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "columns": { "$ref": "#/$defs/outputColumnList" },
+        "filter": { "$ref": "#/$defs/predicate" },
+        "limit": { "type": "integer", "minimum": 1 },
+        "allow_aggregations": { "type": "boolean" },
+        "allow_windows": { "type": "boolean" }
+      }
+    },
+    "insertPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "columns": { "$ref": "#/$defs/columnList" },
+        "presets": { "$ref": "#/$defs/presets" },
+        "check": { "$ref": "#/$defs/predicate" },
+        "returning": { "$ref": "#/$defs/returning" }
+      }
+    },
+    "updatePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "columns": { "$ref": "#/$defs/columnList" },
+        "filter": { "$ref": "#/$defs/predicate" },
+        "presets": { "$ref": "#/$defs/presets" },
+        "check": { "$ref": "#/$defs/predicate" },
+        "returning": { "$ref": "#/$defs/returning" }
+      }
+    },
+    "deletePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "filter": { "$ref": "#/$defs/predicate" },
+        "returning": { "$ref": "#/$defs/returning" }
+      }
+    },
+    "rolePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "select": { "$ref": "#/$defs/selectPolicy" },
+        "insert": { "$ref": "#/$defs/insertPolicy" },
+        "update": { "$ref": "#/$defs/updatePolicy" },
+        "delete": { "$ref": "#/$defs/deletePolicy" }
+      }
+    },
+    "resourcePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resource", "roles"],
+      "properties": {
+        "resource": { "$ref": "#/$defs/identifier" },
+        "roles": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/rolePolicy" }
+        }
+      }
+    },
+    "commitCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["triggered_by", "hook"],
+      "properties": {
+        "triggered_by": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        },
+        "role": { "$ref": "#/$defs/identifier" },
+        "hook": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url_env", "timeout_ms", "hmac_secret_env"],
+          "properties": {
+            "url_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
+            "timeout_ms": { "type": "integer", "minimum": 1 },
+            "hmac_secret_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
+          }
+        }
+      }
+    },
+    "rootManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "includes"],
+      "properties": {
+        "version": { "const": 1 },
+        "includes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "commit_checks": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/commitCheck" }
+        }
+      }
+    }
+  }
+}

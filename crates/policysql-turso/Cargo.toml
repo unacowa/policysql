@@ -1,0 +1,21 @@
+[package]
+name = "policysql-turso"
+description = "Turso/libSQL execution adapter boundary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+regex-lite = "0.1"
+policysql-core = { path = "../policysql-core" }
+policysql-execution = { path = "../policysql-execution" }
+policysql-sqlite = { path = "../policysql-sqlite" }
+
+[dev-dependencies]
+policysql-catalog = { path = "../policysql-catalog" }
+policysql-ir = { path = "../policysql-ir" }

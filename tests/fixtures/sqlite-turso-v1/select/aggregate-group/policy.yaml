@@ -1,0 +1,9 @@
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [tenant_id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          allow_aggregations: true

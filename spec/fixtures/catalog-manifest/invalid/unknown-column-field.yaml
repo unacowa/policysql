@@ -1,0 +1,9 @@
+version: 1
+
+resources:
+  posts:
+    source:
+      table: posts
+    columns:
+      title:
+        inferred_type: string

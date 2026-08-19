@@ -1,0 +1,6 @@
+id: sqlite.security.forbidden-order-column
+profile: sqlite-turso-v1
+description: 投影されない秘密列によるORDER BY推論を拒否する
+covers: [clause.order-by.direct, policy.select.forbidden-column, threat.forbidden-column-inference]
+tests: [negative, bypass]
+expected: deny

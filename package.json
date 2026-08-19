@@ -1,0 +1,25 @@
+{
+  "name": "policysql-documentation",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "docs:stage": "node scripts/stage-spec-assets.mjs",
+    "predocs:dev": "npm run docs:stage",
+    "docs:dev": "vitepress dev website",
+    "predocs:build": "npm run docs:stage",
+    "docs:build": "vitepress build website",
+    "docs:preview": "vitepress preview website",
+    "docs:search:test": "node scripts/verify-docs-search.mjs",
+    "spec:validate": "node scripts/validate-policy-spec.mjs",
+    "test:clients": "node --test packages/*/*.test.mjs"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "kysely": "0.29.5",
+    "yaml": "2.9.0",
+    "vitepress": "1.6.4"
+  }
+}

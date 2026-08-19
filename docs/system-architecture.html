@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="PolicySQLの開発者向けシステム構成、信頼境界、SQLコンパイルおよびトランザクション実行フロー">
+  <title>PolicySQL システム構成 — Developer Architecture</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --surface: #0d1a2b;
+      --surface-2: #12233a;
+      --line: #29415f;
+      --text: #e8f0f8;
+      --muted: #9fb0c3;
+      --cyan: #63d9d5;
+      --blue: #77a8ff;
+      --amber: #f3bd69;
+      --red: #ff8585;
+      --green: #7ce0a3;
+      --code: #091522;
+      --radius: 16px;
+      --shadow: 0 18px 55px rgb(0 0 0 / 22%);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 82% 2%, rgb(65 125 190 / 18%), transparent 34rem),
+        radial-gradient(circle at 5% 18%, rgb(67 196 185 / 10%), transparent 28rem),
+        var(--bg);
+      font-family: Inter, "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", system-ui, sans-serif;
+      line-height: 1.75;
+    }
+
+    a { color: var(--cyan); text-underline-offset: 0.2em; }
+    a:hover { color: #a4f3ef; }
+    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    code { color: #b9d3ff; }
+    .shell { width: min(1180px, calc(100% - 40px)); margin-inline: auto; }
+
+    .skip-link {
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      z-index: 20;
+      padding: 8px 12px;
+      color: #06111d;
+      background: var(--cyan);
+      border-radius: 8px;
+      transform: translateY(-150%);
+    }
+    .skip-link:focus { transform: translateY(0); }
+
+    header {
+      padding: 72px 0 48px;
+      border-bottom: 1px solid var(--line);
+    }
+    .eyebrow {
+      margin: 0 0 14px;
+      color: var(--cyan);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3 { line-height: 1.28; }
+    h1 { max-width: 860px; margin: 0; font-size: clamp(2.4rem, 7vw, 5rem); letter-spacing: -0.045em; }
+    h1 span { color: var(--cyan); }
+    .lead { max-width: 820px; margin: 24px 0 0; color: #c5d2df; font-size: clamp(1.05rem, 2vw, 1.28rem); }
+    .meta-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
+    .pill {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      padding: 7px 12px;
+      color: var(--muted);
+      background: rgb(13 26 43 / 76%);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      font-size: 0.84rem;
+    }
+    .pill::before { width: 7px; height: 7px; background: var(--amber); border-radius: 50%; content: ""; }
+
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgb(7 17 31 / 90%);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(14px);
+    }
+    nav .shell { display: flex; gap: 24px; overflow-x: auto; padding-block: 13px; }
+    nav a { flex: 0 0 auto; color: var(--muted); font-size: 0.84rem; font-weight: 700; text-decoration: none; }
+    nav a:hover { color: var(--text); }
+
+    main { padding-block: 36px 90px; }
+    section { scroll-margin-top: 72px; padding-block: 42px; }
+    h2 { margin: 0 0 12px; font-size: clamp(1.7rem, 4vw, 2.5rem); letter-spacing: -0.025em; }
+    h3 { margin: 0 0 8px; font-size: 1.05rem; }
+    .section-intro { max-width: 800px; margin: 0 0 26px; color: var(--muted); }
+
+    .notice {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 18px;
+      align-items: start;
+      padding: 20px;
+      background: rgb(243 189 105 / 8%);
+      border: 1px solid rgb(243 189 105 / 40%);
+      border-radius: var(--radius);
+    }
+    .notice strong { color: var(--amber); }
+    .notice p { margin: 0; color: #d8c9ae; }
+    .notice-icon { color: var(--amber); font-size: 1.4rem; }
+
+    .architecture {
+      display: grid;
+      grid-template-columns: 1fr 72px minmax(280px, 1.5fr) 72px 1fr;
+      gap: 12px;
+      align-items: stretch;
+      margin-top: 30px;
+    }
+    .zone {
+      padding: 20px;
+      background: linear-gradient(145deg, rgb(18 35 58 / 95%), rgb(13 26 43 / 95%));
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .zone.untrusted { border-top: 3px solid var(--red); }
+    .zone.trusted { border-top: 3px solid var(--cyan); }
+    .zone.engine { border-top: 3px solid var(--blue); }
+    .zone-label { color: var(--muted); font-size: 0.7rem; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+    .zone h3 { margin-top: 8px; font-size: 1.25rem; }
+    .zone ul { padding-left: 19px; margin: 14px 0 0; color: var(--muted); font-size: 0.92rem; }
+    .boundary { display: grid; place-items: center; color: var(--muted); text-align: center; }
+    .boundary .arrow { color: var(--cyan); font-size: 2rem; line-height: 1; }
+    .boundary small { font-size: 0.66rem; writing-mode: vertical-rl; letter-spacing: 0.12em; }
+    .pipeline-mini { display: grid; gap: 7px; margin-top: 14px; }
+    .pipeline-mini div { padding: 9px 11px; background: rgb(7 17 31 / 75%); border: 1px solid #26415e; border-radius: 8px; font-size: 0.82rem; }
+
+    .legend { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 18px; color: var(--muted); font-size: 0.82rem; }
+    .legend span { display: inline-flex; gap: 7px; align-items: center; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; }
+    .dot.red { background: var(--red); }
+    .dot.cyan { background: var(--cyan); }
+    .dot.blue { background: var(--blue); }
+
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .card { padding: 21px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+    .card p { margin: 0; color: var(--muted); font-size: 0.94rem; }
+    .card-top { display: flex; justify-content: space-between; gap: 12px; align-items: start; margin-bottom: 9px; }
+    .tag { flex: 0 0 auto; padding: 3px 8px; color: var(--green); background: rgb(124 224 163 / 8%); border: 1px solid rgb(124 224 163 / 32%); border-radius: 999px; font-size: 0.69rem; }
+    .tag.design { color: var(--amber); background: rgb(243 189 105 / 8%); border-color: rgb(243 189 105 / 32%); }
+
+    .steps { position: relative; display: grid; gap: 0; margin-top: 28px; counter-reset: step; }
+    .step { position: relative; display: grid; grid-template-columns: 52px 1fr; gap: 16px; counter-increment: step; }
+    .step:not(:last-child)::before { position: absolute; top: 46px; bottom: -4px; left: 25px; width: 2px; background: var(--line); content: ""; }
+    .step-number { z-index: 1; display: grid; place-items: center; width: 52px; height: 52px; color: #06111d; background: var(--cyan); border-radius: 14px; font-weight: 900; }
+    .step-number::after { content: counter(step, decimal-leading-zero); }
+    .step-body { padding: 5px 0 30px; }
+    .step-body p { max-width: 830px; margin: 5px 0 0; color: var(--muted); }
+
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .flow-box { padding: 22px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+    .flow-box > p { color: var(--muted); }
+    .flow-line { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: center; margin-top: 18px; }
+    .flow-node { padding: 12px; background: var(--code); border: 1px solid var(--line); border-radius: 10px; text-align: center; font-size: 0.85rem; }
+    .flow-arrow { color: var(--cyan); }
+
+    .invariants { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; counter-reset: invariant; }
+    .invariant { position: relative; padding: 18px 18px 18px 52px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; counter-increment: invariant; }
+    .invariant::before { position: absolute; top: 17px; left: 17px; color: var(--cyan); font-weight: 900; content: counter(invariant, decimal-leading-zero); }
+    .invariant strong { display: block; margin-bottom: 4px; }
+    .invariant span { color: var(--muted); font-size: 0.86rem; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+    table { width: 100%; border-collapse: collapse; background: var(--surface); font-size: 0.91rem; }
+    th, td { padding: 14px 16px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--cyan); background: var(--surface-2); font-size: 0.75rem; letter-spacing: 0.05em; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    td:nth-child(1) { white-space: nowrap; }
+    td:nth-child(3) { color: var(--muted); }
+
+    pre { overflow-x: auto; margin: 18px 0 0; padding: 20px; color: #c8d8e8; background: var(--code); border: 1px solid var(--line); border-radius: 12px; font-size: 0.84rem; line-height: 1.65; }
+    .sql-keyword { color: var(--blue); }
+    .sql-server { color: var(--amber); }
+
+    .status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+    .status-card { padding: 20px; border-radius: var(--radius); }
+    .status-card h3 { font-size: 1rem; }
+    .status-card ul { padding-left: 18px; margin-bottom: 0; color: var(--muted); font-size: 0.88rem; }
+    .status-card.done { background: rgb(124 224 163 / 7%); border: 1px solid rgb(124 224 163 / 28%); }
+    .status-card.spike { background: rgb(119 168 255 / 7%); border: 1px solid rgb(119 168 255 / 28%); }
+    .status-card.todo { background: rgb(243 189 105 / 7%); border: 1px solid rgb(243 189 105 / 28%); }
+    .status-card.done h3 { color: var(--green); }
+    .status-card.spike h3 { color: var(--blue); }
+    .status-card.todo h3 { color: var(--amber); }
+    .status-notice { margin-top: 18px; }
+
+    .profile-map { margin-top: 28px; }
+    .profile-core {
+      max-width: 760px;
+      margin-inline: auto;
+      padding: 20px;
+      background: linear-gradient(135deg, rgb(99 217 213 / 12%), rgb(119 168 255 / 10%));
+      border: 1px solid rgb(99 217 213 / 48%);
+      border-radius: var(--radius);
+      text-align: center;
+    }
+    .profile-core p { margin: 5px 0 0; color: var(--muted); }
+    .profile-branch { color: var(--cyan); text-align: center; font-size: 1.6rem; line-height: 1.4; }
+    .profile-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .profile {
+      overflow: hidden;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+    .profile.initial { border-top: 3px solid var(--green); }
+    .profile.future { border-top: 3px solid var(--amber); }
+    .profile header { padding: 18px 20px; border-bottom: 1px solid var(--line); }
+    .profile header h3 { margin: 3px 0 0; }
+    .profile-stage { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 8px; align-items: center; padding: 20px; }
+    .profile-stage div:not(.flow-arrow) { padding: 11px 8px; background: var(--code); border: 1px solid var(--line); border-radius: 9px; text-align: center; font-size: 0.78rem; }
+    .profile-rules { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 18px; }
+    .profile-rule { padding: 15px; color: var(--muted); background: var(--surface); border: 1px solid var(--line); border-radius: 11px; font-size: 0.84rem; }
+    .profile-rule strong { display: block; margin-bottom: 4px; color: var(--text); }
+
+    .sources { columns: 2; column-gap: 32px; padding-left: 20px; }
+    .sources li { break-inside: avoid; margin-bottom: 7px; color: var(--muted); }
+    footer { padding: 30px 0 46px; color: var(--muted); border-top: 1px solid var(--line); font-size: 0.82rem; }
+
+    @media (max-width: 900px) {
+      .architecture { grid-template-columns: 1fr; }
+      .boundary { grid-template-columns: auto auto; gap: 10px; }
+      .boundary small { writing-mode: horizontal-tb; }
+      .boundary .arrow { transform: rotate(90deg); }
+      .cards, .split { grid-template-columns: 1fr; }
+      .invariants { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .status-grid { grid-template-columns: 1fr; }
+      .profile-columns, .profile-rules { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      .shell { width: min(100% - 24px, 1180px); }
+      header { padding-top: 48px; }
+      .invariants { grid-template-columns: 1fr; }
+      .sources { columns: 1; }
+      .flow-line { grid-template-columns: 1fr; }
+      .flow-arrow { transform: rotate(90deg); text-align: center; }
+      .profile-stage { grid-template-columns: 1fr; }
+      .profile-stage .flow-arrow { transform: rotate(90deg); }
+    }
+    @media print {
+      :root { color-scheme: light; --bg: #fff; --surface: #fff; --surface-2: #eef3f7; --line: #aab7c3; --text: #12202d; --muted: #435467; --code: #f4f7fa; }
+      body { background: #fff; }
+      nav { display: none; }
+      header { padding-top: 24px; }
+      section { break-inside: avoid; }
+      .zone, .card { box-shadow: none; }
+      a { color: #086e7b; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へ移動</a>
+
+  <header>
+    <div class="shell">
+      <p class="eyebrow">PolicySQL / Developer Architecture</p>
+      <h1>SQLを信頼せず、<span>意味を証明してから</span>実行する。</h1>
+      <p class="lead">
+        PolicySQLは、信頼できないSQLをCatalogへバインドし、宣言的ポリシーを組み込んだ保護済みSQLへ変換する
+        default-denyのポリシーコンパイラです。初期profileはSQLite/Turso、将来のDB対応はdialect一式をversioned Backend Profileとして追加します。
+      </p>
+      <div class="meta-row">
+        <span class="pill">仕様基準日 2026-08-05</span>
+        <span class="pill">初期 SQLite / Turso / libSQL</span>
+        <span class="pill">将来 PostgreSQL profile</span>
+        <span class="pill">状態 SELECT運用Worker deployed</span>
+      </div>
+    </div>
+  </header>
+
+  <nav aria-label="ページ内ナビゲーション">
+    <div class="shell">
+      <a href="#overview">全体像</a>
+      <a href="#components">コンポーネント</a>
+      <a href="#backend-profiles">Backend Profile</a>
+      <a href="#compile-flow">コンパイル</a>
+      <a href="#transaction">実行・トランザクション</a>
+      <a href="#security">安全性</a>
+      <a href="#crates">Crate構成</a>
+      <a href="#status">実装状況</a>
+      <a href="#sources">参照仕様</a>
+    </div>
+  </nav>
+
+  <main id="main" class="shell">
+    <section id="overview">
+      <p class="eyebrow">01 / System boundary</p>
+      <h2>全体構成と信頼境界</h2>
+      <p class="section-intro">
+        PolicySQLプロセスがセキュリティ境界です。SQL、パラメータ、HTTP入力、外部検証応答、DBエラーはすべて未信頼として扱い、
+        検証済みのポリシー、論理Catalog、認証済みセッションだけをコンパイル入力として信頼します。
+      </p>
+
+      <div class="notice" role="note">
+        <div class="notice-icon" aria-hidden="true">◆</div>
+        <p><strong>重要:</strong> PolicySQLの中心成果物はHTTPサーバーやSQLパーサ単体ではなく、入力SQLの意味を解決し、ポリシーを保持したSQLを生成・再検証するコンパイラです。</p>
+      </div>
+
+      <div class="architecture" aria-label="PolicySQLの信頼境界を示す構成図">
+        <article class="zone untrusted">
+          <span class="zone-label">Untrusted zone</span>
+          <h3>Caller / External</h3>
+          <ul>
+            <li>アプリケーション、AI生成コード</li>
+            <li>SQLite SQL + named parameters</li>
+            <li>HTTP header / body</li>
+            <li>commit-check validator応答</li>
+          </ul>
+        </article>
+
+        <div class="boundary" aria-hidden="true">
+          <span class="arrow">→</span>
+          <small>AUTHENTICATE &amp; VALIDATE</small>
+        </div>
+
+        <article class="zone trusted">
+          <span class="zone-label">Trusted boundary</span>
+          <h3>PolicySQL Gateway</h3>
+          <div class="pipeline-mini">
+            <div>JWT検証 → Trusted session</div>
+            <div>Parser → Binder / Catalog resolver</div>
+            <div>Policy Kernel → Protected bound IR</div>
+            <div>Backend Profile → Emitter / Verifier</div>
+            <div>Transaction owner → Result validation</div>
+          </div>
+        </article>
+
+        <div class="boundary" aria-hidden="true">
+          <span class="arrow">→</span>
+          <small>PROTECTED SQL ONLY</small>
+        </div>
+
+        <article class="zone engine">
+          <span class="zone-label">Configured backend profile</span>
+          <h3>DB Execution</h3>
+          <ul>
+            <li>初期: SQLite → Turso / libSQL</li>
+            <li>将来: PostgreSQL → PostgreSQL</li>
+            <li>1つの所有されたtransaction</li>
+            <li>時間・行数・byte数制限</li>
+            <li>profile固有codecで戻り値を検証</li>
+          </ul>
+        </article>
+      </div>
+      <div class="legend" aria-label="構成図の凡例">
+        <span><i class="dot red"></i>未信頼入力</span>
+        <span><i class="dot cyan"></i>PolicySQLの信頼境界</span>
+        <span><i class="dot blue"></i>制約付き実行先</span>
+      </div>
+    </section>
+
+    <section id="components">
+      <p class="eyebrow">02 / Components</p>
+      <h2>コンポーネント責務</h2>
+      <p class="section-intro">各レイヤーは、前段を暗黙に信頼しません。構文解析、名前解決、ポリシー適用、SQL生成、再検証を分離し、曖昧さがあれば閉じて拒否します。</p>
+
+      <div class="cards">
+        <article class="card">
+          <div class="card-top"><h3>Gateway</h3><span class="tag">Workerへ実装済み</span></div>
+          <p>JWTとaccess scopeを検証し、trusted sessionを構築。request envelope、version precondition、resource limitを検査し、compiler・adapter・監査を統合します。</p>
+        </article>
+        <article class="card">
+          <div class="card-top"><h3>Dialect Frontend</h3><span class="tag">SQLiteを検証済み</span></div>
+          <p>profileがadvertiseするSQL dialectで、itemごとに厳密に1 statementを解析します。parser固有ASTは外へ漏らさず、project-owned bound IRへ変換します。</p>
+        </article>
+        <article class="card">
+          <div class="card-top"><h3>Binder / Catalog Resolver</h3><span class="tag">Rustで実装済み</span></div>
+          <p>table、alias、CTE、columnを安定したResourceId / ColumnIdへ解決し、曖昧な参照を拒否。式・出力・相関参照のprovenanceと論理型を追跡します。</p>
+        </article>
+        <article class="card">
+          <div class="card-top"><h3>Policy Kernel</h3><span class="tag">Rustで実装済み</span></div>
+          <p>resource × role × operationでpolicyを選択。row filter、column permission、limit、preset、operation check、commit check計画をbound IRへ適用します。</p>
+        </article>
+        <article class="card">
+          <div class="card-top"><h3>Backend Emitter</h3><span class="tag">SQLite実装済み</span></div>
+          <p>protected relational planをprofile固有のtyped ASTへ変換し、server-owned parameterを割り当て、parser libraryのtoken emitterだけでSQL化します。PostgreSQLを含む別dialectは独立emitterとして追加します。</p>
+        </article>
+        <article class="card">
+          <div class="card-top"><h3>Invariant Verifier</h3><span class="tag">SQLite実装済み</span></div>
+          <p>同じpublic dialectで出力SQLを再parseし、protected statementとAST構造を比較します。さらにoperation、parameter ownership、result、snapshot、mutation invariantを照合し、文字列整形の一致には依存しません。</p>
+        </article>
+        <article class="card">
+          <div class="card-top"><h3>Database Executor</h3><span class="tag">実Tursoへ常設</span></div>
+          <p>matching profileが生成したexecution handleとprotected SQLだけをatomic batchへ送り、raw resultをRustで再検証します。任意のSQL文字列や別profileのplanは実行できません。</p>
+        </article>
+        <article class="card">
+          <div class="card-top"><h3>Transaction Owner</h3><span class="tag">DOで検証済み</span></div>
+          <p>1つのopen Turso transactionを所有し、client操作、commit / rollbackを直列化。auth/session fingerprint、sequence、exact retry、4秒期限を固定し、ownerやconnectionの喪失をterminal failureとして扱います。外部commit checkは未advertiseです。</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="backend-profiles">
+      <p class="eyebrow">03 / Multi-database boundary</p>
+      <h2>Policy Kernelは共有し、dialect一式を交換する</h2>
+      <p class="section-intro">
+        DB対応の交換単位はdriverだけではありません。parser、binder規則、type/function registry、emitter、verifier、codec、executorを
+        1つのimmutableなBackend Profileとしてversion管理します。
+      </p>
+
+      <div class="profile-map" aria-label="共通Policy KernelとBackend Profileの関係図">
+        <div class="profile-core">
+          <h3>Backend-neutral Rust Core</h3>
+          <p>Stable identity · Logical Catalog · Bound IR · Policy Kernel · Protected relational plan · Explain</p>
+        </div>
+        <div class="profile-branch" aria-hidden="true">↓</div>
+        <div class="profile-columns">
+          <article class="profile initial">
+            <header>
+              <span class="zone-label">Initial / Advertised</span>
+              <h3>SQLite + Turso Profile</h3>
+            </header>
+            <div class="profile-stage">
+              <div>SQLite<br>Frontend</div><div class="flow-arrow">→</div>
+              <div>SQLite<br>Emit + Verify</div><div class="flow-arrow">→</div>
+              <div>Turso/libSQL<br>Executor</div>
+            </div>
+          </article>
+          <article class="profile future">
+            <header>
+              <span class="zone-label">Future / Not advertised</span>
+              <h3>PostgreSQL Profile</h3>
+            </header>
+            <div class="profile-stage">
+              <div>PostgreSQL<br>Frontend</div><div class="flow-arrow">→</div>
+              <div>PostgreSQL<br>Emit + Verify</div><div class="flow-arrow">→</div>
+              <div>PostgreSQL<br>Executor</div>
+            </div>
+          </article>
+        </div>
+      </div>
+
+      <div class="profile-rules">
+        <div class="profile-rule"><strong>Endpointで固定</strong>requestやtransactionの途中でdialect、profile、executorをclientが選択・変更することはできません。</div>
+        <div class="profile-rule"><strong>暗黙transpileなし</strong>SQLite SQLをPostgreSQL SQLへ自動変換しません。endpointがadvertiseするpublic dialectを入力します。</div>
+        <div class="profile-rule"><strong>型で実行を封印</strong>executorはmatching profileのopaqueなVerified Execution Planのみ受け取り、raw SQLは受け取りません。</div>
+      </div>
+    </section>
+
+    <section id="compile-flow">
+      <p class="eyebrow">04 / Compile pipeline</p>
+      <h2>1 statementのコンパイル経路</h2>
+      <p class="section-intro">実行前に、すべてのstatementをコンパイル・認可します。構文ASTだけでpolicyを適用せず、Catalogへ解決したbound representationを必ず経由します。</p>
+
+      <div class="steps">
+        <article class="step"><div class="step-number"></div><div class="step-body"><h3>入力を正規化する</h3><p>endpoint access、JWT、role、session、request size、statement数、named parameterを検証。client parameterとserver namespaceを分離します。</p></div></article>
+        <article class="step"><div class="step-number"></div><div class="step-body"><h3>不変snapshotを固定する</h3><p>1 request / transactionでpolicy、Catalog、registry、compiler、Backend Profileの同一versionをpinします。古いexpected versionはDBを開く前に失敗します。</p></div></article>
+        <article class="step"><div class="step-number"></div><div class="step-body"><h3>Parseしてsubsetを絞る</h3><p>各sql fieldを厳密に1 statementとしてparse。DDL、transaction control、PRAGMA、ATTACH、unknown functionなど、advertiseしていない構文はdefault-denyで拒否します。</p></div></article>
+        <article class="step"><div class="step-number"></div><div class="step-body"><h3>CatalogへBindする</h3><p>すべてのtable / alias / column / CTEを安定IDへ解決。usage contextとprovenanceを追跡し、unknown・ambiguous・unprovableな参照を拒否します。</p></div></article>
+        <article class="step"><div class="step-number"></div><div class="step-body"><h3>Policyを合成する</h3><p>operation・resource・roleに対応するpolicyを選択し、client predicateを置換せずANDでrow filterを合成。column permission、limit、preset、RETURNINGも独立に検査します。</p></div></article>
+        <article class="step"><div class="step-number"></div><div class="step-body"><h3>Protected planからSQLをEmitする</h3><p>選択済みprofileがserver-owned parameterを割り当て、dialect固有SQL、result descriptor、operation-check計画、explain traceを生成します。</p></div></article>
+        <article class="step"><div class="step-number"></div><div class="step-body"><h3>再Parseして不変条件を検証する</h3><p>生成物を独立にparse / bindし直し、policy coverage、resource / column access、statement count、join placement、parameter ownershipを照合。合格したSQLだけを実行層へ渡します。</p></div></article>
+      </div>
+
+      <div class="split">
+        <article class="flow-box">
+          <h3>SELECT row policyの合成例（SQLite profile）</h3>
+          <p>caller条件は保持し、policy条件を同一statementへ組み込みます。policy limitはcaller limitとの小さい方です。</p>
+          <pre><span class="sql-keyword">SELECT</span> id, title
+<span class="sql-keyword">FROM</span> posts
+<span class="sql-keyword">WHERE</span> (status = :status)
+  <span class="sql-keyword">AND</span> (tenant_id = <span class="sql-server">:__policysql_session_tenant_id</span>)
+<span class="sql-keyword">LIMIT</span> 100</pre>
+        </article>
+        <article class="flow-box">
+          <h3>LEFT JOINのpolicy配置</h3>
+          <p>nullable側のfilterをWHEREへ置くとouter joinが壊れます。右側resourceのpolicyは、そのnull-extension境界のON predicateへ配置します。</p>
+          <div class="flow-line">
+            <div class="flow-node">posts policy<br><code>WHERE</code></div>
+            <div class="flow-arrow">＋</div>
+            <div class="flow-node">authors policy<br><code>JOIN ... ON</code></div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="transaction">
+      <p class="eyebrow">05 / Execution envelope</p>
+      <h2>Atomic実行とcommit check</h2>
+      <p class="section-intro">
+        stateless実行は <code>POST /v1/transactions:execute</code> の1 endpointへ統一します。ordered array内の全itemを先にcompileし、
+        全件SELECTならread、1件でもmutationならwriteとしてmodeを推論します。
+      </p>
+
+      <div class="split">
+        <article class="flow-box">
+          <h3>Atomic Execute</h3>
+          <div class="pipeline-mini">
+            <div>全statementsをcompile / authorize</div>
+            <div>mode、idempotency、累積limitを検査</div>
+            <div>1 transactionで配列順に実行</div>
+            <div>operation checks → commit checks</div>
+            <div>全成功ならcommit、失敗なら全rollback</div>
+          </div>
+          <p>partial resultは返しません。responseの<code>results[]</code>は0-based indexでrequestと対応します。writeにはIdempotency-Keyが必須です。</p>
+        </article>
+        <article class="flow-box">
+          <h3>External Commit Check</h3>
+          <div class="pipeline-mini">
+            <div>Transaction ownerがvalidating phaseへ遷移</div>
+            <div>短命・read-only callback capabilityを発行</div>
+            <div>validatorのSELECTも通常のcompilerを通す</div>
+            <div>allow → commit / deny・timeout・owner loss → rollback</div>
+          </div>
+          <p>validatorはroleを選べず、mutation、commit、rollback、DB credential取得もできません。明示roleはclient入力ではなくimmutable policyが与えるsystem privilegeです。</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="security">
+      <p class="eyebrow">06 / Mandatory invariants</p>
+      <h2>実装が守る主要不変条件</h2>
+      <p class="section-intro">この一覧は開発時の最小チェックリストです。新しいSQL surfaceを増やすたびに、positive / negative / bypass / differential testを追加します。</p>
+      <div class="invariants">
+        <div class="invariant"><strong>Default deny</strong><span>未知のstatement、node、clause、function、metadataは拒否。</span></div>
+        <div class="invariant"><strong>Exactly one statement</strong><span>1 sql fieldにつき厳密に1 statement。semicolon smugglingを許可しない。</span></div>
+        <div class="invariant"><strong>Bound authorization</strong><span>text matchではなく、解決済みResourceId / ColumnIdへpolicyを適用。</span></div>
+        <div class="invariant"><strong>Complete coverage</strong><span>すべてのbase-table accessにoperation policyが必要。missing policyはdeny。</span></div>
+        <div class="invariant"><strong>Column non-interference</strong><span>禁止columnはprojection以外のfilter、join、sort、aggregate等でも使用不可。</span></div>
+        <div class="invariant"><strong>Server namespace integrity</strong><span>clientはsession parameterやpreset columnを定義・上書きできない。</span></div>
+        <div class="invariant"><strong>Atomic checks</strong><span>mutationとpost-state checkは同じtransaction内。check-then-query認可は禁止。</span></div>
+        <div class="invariant"><strong>Emission verification</strong><span>出力SQLを再parseし、別checkerで実行前に不変条件を再確認。</span></div>
+        <div class="invariant"><strong>Bounded resources</strong><span>時間、行、bytes、depth、joins、params、complexity、statement数を制限。</span></div>
+        <div class="invariant"><strong>Unique result identity</strong><span>出力名は非空で、profileが定める識別規則のもとで一意。</span></div>
+        <div class="invariant"><strong>Snapshot integrity</strong><span>transaction中のpolicy / Catalog / registry / backend profileを不変に固定。</span></div>
+        <div class="invariant"><strong>Safe errors</strong><span>hidden schema、policy、credential、protected SQL、raw DB errorを漏らさない。</span></div>
+      </div>
+    </section>
+
+    <section id="crates">
+      <p class="eyebrow">07 / Rust workspace</p>
+      <h2>Crateと論理レイヤーの対応</h2>
+      <p class="section-intro">現行workspaceはbackend-neutral coreとSQLite/Turso profile固有crateを一方向依存で分離しています。parser/binder、policy compiler、typed emitter、独立verifier、sealed plan、owned transaction transportまで実装済みです。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Crate / Target boundary</th><th>責務</th><th>主な依存・境界</th></tr></thead>
+          <tbody>
+            <tr><td><code>policysql-core</code></td><td>stable identity、logical type、snapshot、共通error</td><td>parser AST、driver value、transportへ依存させない。</td></tr>
+            <tr><td><code>policysql-ir</code></td><td>backend-neutralなBound IRとProtected Relational Plan</td><td>未検証SQL fragmentを保持せず、provenanceをstable IDで表現。</td></tr>
+            <tr><td><code>policysql-policy</code></td><td>policy model、semantic validation、policy compiler</td><td><code>policysql-core</code>のstable identityへ認可を適用。</td></tr>
+            <tr><td><code>policysql-frontend-sqlite</code>（現parser）</td><td>SQLite parse、subset validation、binding、provenance</td><td>parser固有ASTを閉じ込め、backend-neutral IRへ変換。</td></tr>
+            <tr><td><code>policysql-backend-sqlite</code>（現sqlite）</td><td>SQLite emission、dialect rule、second-pass verification、codec</td><td>SQLite profileのVerified Execution Planだけを生成。</td></tr>
+            <tr><td><code>policysql-executor-turso</code>（現turso）</td><td>Turso / libSQL transport、transaction、limit、error normalization</td><td>matching profileのopaque verified planだけを受け取る。</td></tr>
+            <tr><td><code>*-postgres</code>（将来）</td><td>PostgreSQL frontend、backend、executor</td><td>SQLite実装を再利用せず、独立conformance suiteを要求。</td></tr>
+            <tr><td><code>policysql-gateway</code></td><td>HTTP composition root、auth、session、request orchestration、audit</td><td>compilerとadapterを結合する外部境界。</td></tr>
+            <tr><td><code>policysql-cloudflare</code></td><td>versioned Rust/Wasm ABI、Catalog投影、sealed execution handle、remote result validation</td><td>Worker JavaScriptへdomain ASTを公開せず、JSON DTOだけを受け渡す。</td></tr>
+            <tr><td><code>policysql-testkit</code></td><td>golden、adversarial、fuzz、profile別differential helper</td><td>各accepted nodeと新profileのpolicy preservationを独立検証。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="status">
+      <p class="eyebrow">08 / Current state</p>
+      <h2>現在地と実装順序</h2>
+      <p class="section-intro">SQLite/Turso v1 compiler、JWT、Capabilities、Catalog、Explain、単一table SELECT、bounded mutation、response後のcost observation、persistent idempotency、Durable Object interactive transactionをCloudflare Workerと実Tursoへ常設しました。外部commit checkと未対応SQLはCapabilitiesでadvertiseせず拒否します。</p>
+      <div class="status-grid">
+        <article class="status-card done">
+          <h3>仕様として確定</h3>
+          <ul>
+            <li>default-deny / single statement</li>
+            <li>policy semanticsとtrusted session</li>
+            <li>atomic envelope / commit-check protocol</li>
+            <li>Catalog・result descriptor contract</li>
+            <li>versioned Backend Profile境界</li>
+          </ul>
+        </article>
+        <article class="status-card spike">
+          <h3>常設環境で運用検証</h3>
+          <ul>
+            <li>実Tursoのexact rows read / written</li>
+            <li>mutation post-state checkとrollback</li>
+            <li>persistent idempotency replay / conflict</li>
+            <li>DO transaction owner / expiry / owner loss</li>
+          </ul>
+        </article>
+        <article class="status-card todo">
+          <h3>常設Workerでadvertise</h3>
+          <ul>
+            <li>single-table parameterized SELECT</li>
+            <li>explicit projected columns</li>
+            <li>simple boolean predicate + row filter</li>
+            <li>policy limit、emission、re-parse、explain</li>
+            <li>JWT / rate limit / Turso result再検証</li>
+            <li>response後のEXPLAIN QUERY PLAN cost観測（planner proseは非authoritative）</li>
+            <li>INSERT / UPDATE / DELETE</li>
+            <li>interactive transaction / exact retry</li>
+          </ul>
+        </article>
+      </div>
+      <div class="notice status-notice" role="note">
+        <div class="notice-icon" aria-hidden="true">→</div>
+        <p><strong>拡張原則:</strong> 初期実装はSQLite/Turso profileへ集中します。PostgreSQLはfrontend、Catalog、emitter、独立verifier、codec、executor、conformance testが揃うまでadvertiseしません。</p>
+      </div>
+    </section>
+
+    <section id="sources">
+      <p class="eyebrow">09 / Source of truth</p>
+      <h2>参照した現行仕様</h2>
+      <p class="section-intro">このHTMLは下記文書の要約です。詳細な規範、machine-readable contract、未解決事項は原文を優先してください。</p>
+      <ul class="sources">
+        <li><a href="../README.md">README.md</a> — project overview / repository map</li>
+        <li><a href="codex-handoff.md">codex-handoff.md</a> — implementation sequence</li>
+        <li><a href="architecture.md">architecture.md</a> — components / data flow</li>
+        <li><a href="security-model.md">security-model.md</a> — trust boundary / invariants</li>
+        <li><a href="policy-semantics.md">policy-semantics.md</a> — policy behavior</li>
+        <li><a href="sql-subset.md">sql-subset.md</a> — accepted / rejected SQL</li>
+        <li><a href="http-api.md">http-api.md</a> — HTTP envelope / response</li>
+        <li><a href="commit-checks.md">commit-checks.md</a> — external validation</li>
+        <li><a href="test-plan.md">test-plan.md</a> — SQL fixture pairs / security coverage gates</li>
+        <li><a href="implementation-plan.md">implementation-plan.md</a> — security-first delivery milestones</li>
+        <li><a href="roadmap.md">roadmap.md</a> — phased delivery</li>
+        <li><a href="review-concerns/phase-7-implementation-feasibility-spike.md">phase-7 feasibility spike</a> — verified implementation constraints</li>
+        <li><a href="adr/0003-default-deny-and-single-statement.md">ADR 0003</a> — default deny</li>
+        <li><a href="adr/0009-unified-atomic-execution-envelope.md">ADR 0009</a> — atomic execution</li>
+        <li><a href="adr/0011-use-versioned-backend-profiles-for-multi-database-support.md">ADR 0011</a> — multi-database backend profiles</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">PolicySQL developer architecture · Generated from repository specifications · Last aligned 2026-08-05</div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "iss": "https://auth.example.com/",
+  "aud": "policysql-api",
+  "sub": "build_ci",
+  "iat": 1785686400,
+  "exp": 1785690000,
+  "policysql": {
+    "roles": ["author"],
+    "default_role": "author",
+    "access": ["catalog", "explain"]
+  }
+}

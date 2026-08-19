@@ -1,0 +1,562 @@
+openapi: 3.1.0
+info:
+  title: PolicySQL HTTP API
+  version: 1.0.0
+  description: Versioned public and commit-check callback contracts for PolicySQL.
+servers:
+  - url: https://gateway.example.com
+security:
+  - jwt: []
+paths:
+  /v1/catalog:
+    get:
+      operationId: getCatalog
+      description: Requires JWT access `catalog`.
+      parameters:
+        - $ref: '#/components/parameters/Role'
+        - name: If-None-Match
+          in: header
+          schema: { type: string }
+      responses:
+        '200':
+          description: Role-visible logical Catalog.
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                $ref: './schemas/catalog.schema.json'
+        '304':
+          description: Catalog has not changed.
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/capabilities:
+    get:
+      operationId: getCapabilities
+      description: Requires JWT access `catalog`.
+      parameters:
+        - name: If-None-Match
+          in: header
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deployment SQL features and enforced limits.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Capabilities'
+        '304':
+          description: Capabilities have not changed.
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/transactions:execute:
+    post:
+      operationId: executeAtomicTransaction
+      description: Requires JWT access `execute`.
+      parameters:
+        - $ref: '#/components/parameters/Role'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './schemas/atomic-execute.schema.json'
+      responses:
+        '200':
+          description: Committed atomic transaction.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AtomicExecuteResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/transactions:explain:
+    post:
+      operationId: explainAtomicTransaction
+      description: Requires JWT access `explain`. Compiles statements and infers parameter and result types without execution.
+      parameters:
+        - $ref: '#/components/parameters/Role'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './schemas/atomic-execute.schema.json'
+      responses:
+        '200':
+          description: Compiled explanation for every statement without database execution.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExplainResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/transactions:
+    post:
+      operationId: beginTransaction
+      description: Requires JWT access `execute`.
+      parameters:
+        - $ref: '#/components/parameters/Role'
+        - $ref: '#/components/parameters/RequiredIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BeginTransactionRequest'
+      responses:
+        '201':
+          description: New or idempotently recovered interactive transaction.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionState'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/transactions/{transactionId}/statements:
+    post:
+      operationId: executeTransactionStatement
+      description: Requires JWT access `execute` and the transaction's immutable session fingerprint.
+      parameters:
+        - $ref: '#/components/parameters/TransactionId'
+        - $ref: '#/components/parameters/Role'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SequencedSqlRequest'
+      responses:
+        '200':
+          description: Statement result and next sequence.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionStatementResponse'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/transactions/{transactionId}/commit:
+    post:
+      operationId: commitTransaction
+      description: Requires JWT access `execute` and the transaction's immutable session fingerprint.
+      parameters:
+        - $ref: '#/components/parameters/TransactionId'
+        - $ref: '#/components/parameters/Role'
+      requestBody:
+        $ref: '#/components/requestBodies/SequenceCommand'
+      responses:
+        '200':
+          description: Terminal transaction state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionState'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/transactions/{transactionId}/rollback:
+    post:
+      operationId: rollbackTransaction
+      description: Requires JWT access `execute` and the transaction's immutable session fingerprint.
+      parameters:
+        - $ref: '#/components/parameters/TransactionId'
+        - $ref: '#/components/parameters/Role'
+      requestBody:
+        $ref: '#/components/requestBodies/SequenceCommand'
+      responses:
+        '200':
+          description: Terminal transaction state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionState'
+        default:
+          $ref: '#/components/responses/Error'
+  /v1/commit-checks/{validationId}/query:
+    post:
+      operationId: executeCommitCheckQuery
+      security:
+        - callbackCapability: []
+      parameters:
+        - name: validationId
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CallbackQueryRequest'
+      responses:
+        '200':
+          description: Callback SELECT result from the owned transaction.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallbackQueryResponse'
+        default:
+          $ref: '#/components/responses/Error'
+webhooks:
+  commitCheck:
+    post:
+      operationId: receiveCommitCheck
+      security: []
+      parameters:
+        - name: PolicySQL-Hook-Version
+          in: header
+          required: true
+          schema: { const: '1' }
+        - name: PolicySQL-Hook-Timestamp
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[0-9]+$' }
+        - name: PolicySQL-Hook-Signature
+          in: header
+          required: true
+          schema: { type: string, pattern: '^v1=[0-9a-f]{64}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommitCheckHookRequest'
+      responses:
+        '200':
+          description: Validator decision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommitCheckDecision'
+components:
+  securitySchemes:
+    jwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    callbackCapability:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  parameters:
+    Role:
+      name: PolicySQL-Role
+      in: header
+      required: false
+      schema: { $ref: '#/components/schemas/Identifier' }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Required when any statement is a mutation.
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    RequiredIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    TransactionId:
+      name: transactionId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+  requestBodies:
+    SequenceCommand:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [sequence]
+            properties:
+              sequence: { type: integer, minimum: 1 }
+  responses:
+    Error:
+      description: Request failed without exposing protected SQL or hidden metadata.
+      headers:
+        PolicySQL-Request-Id: { schema: { type: string } }
+        Retry-After: { schema: { type: string } }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    Identifier:
+      type: string
+      pattern: '^[a-z][a-z0-9_]*$'
+    JsonValue: {}
+    Parameters:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/JsonValue'
+    SnapshotExpectation:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, policyVersion]
+      properties:
+        schemaVersion: { type: string, minLength: 1 }
+        policyVersion: { type: string, minLength: 1 }
+    SequencedSqlRequest:
+      type: object
+      additionalProperties: false
+      required: [sequence, sql, params]
+      properties:
+        sequence: { type: integer, minimum: 1 }
+        sql: { type: string, minLength: 1 }
+        params: { $ref: '#/components/schemas/Parameters' }
+        expect: { $ref: '#/components/schemas/Expectation' }
+    CallbackQueryRequest:
+      type: object
+      additionalProperties: false
+      required: [sequence, sql, params]
+      properties:
+        sequence: { type: integer, minimum: 1 }
+        sql: { type: string, minLength: 1 }
+        params: { $ref: '#/components/schemas/Parameters' }
+    Expectation:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        affectedRows: { type: integer, minimum: 0 }
+        rowCount: { type: integer, minimum: 0 }
+    ResultColumn:
+      type: object
+      additionalProperties: false
+      required: [name, type, representation, nullable]
+      properties:
+        name: { type: string, minLength: 1 }
+        type:
+          oneOf:
+            - { $ref: '#/components/schemas/Identifier' }
+            - type: array
+              minItems: 2
+              uniqueItems: true
+              items: { $ref: '#/components/schemas/Identifier' }
+        representation: { enum: [string, number, boolean, object, array] }
+        format: { $ref: '#/components/schemas/Identifier' }
+        constraints: { type: object }
+        jsonSchema: { type: object }
+        nullable: { type: boolean }
+    ParameterDescriptor:
+      type: object
+      additionalProperties: false
+      required: [name, type, representation, nullable]
+      properties:
+        name: { $ref: '#/components/schemas/Identifier' }
+        type: { $ref: '#/components/schemas/Identifier' }
+        representation: { enum: [string, number, boolean, object, array] }
+        format: { $ref: '#/components/schemas/Identifier' }
+        nullable: { type: boolean }
+        constraints: { type: object }
+    CompileResultDescriptor:
+      type: object
+      additionalProperties: false
+      required: [columns]
+      properties:
+        columns: { type: array, items: { $ref: '#/components/schemas/ResultColumn' } }
+    Redaction:
+      type: object
+      additionalProperties: false
+      required: [row, column, code]
+      properties:
+        row: { type: integer, minimum: 0 }
+        column: { type: string, minLength: 1 }
+        code: { const: POLICY_REDACTED }
+    ResultMeta:
+      type: object
+      additionalProperties: false
+      required: [columns, redactions]
+      properties:
+        columns: { type: array, items: { $ref: '#/components/schemas/ResultColumn' } }
+        redactions: { type: array, items: { $ref: '#/components/schemas/Redaction' } }
+    SqlMeta:
+      type: object
+      additionalProperties: false
+      required: [requestId, policyVersion, schemaVersion, role, operation, result]
+      properties:
+        requestId: { type: string, minLength: 1 }
+        policyVersion: { type: string, minLength: 1 }
+        schemaVersion: { type: string, minLength: 1 }
+        role: { $ref: '#/components/schemas/Identifier' }
+        operation: { enum: [select, insert, update, delete] }
+        result: { $ref: '#/components/schemas/ResultMeta' }
+        mutation: { type: object }
+    StatementMeta:
+      type: object
+      additionalProperties: false
+      required: [operation, result]
+      properties:
+        operation: { enum: [select, insert, update, delete] }
+        result: { $ref: '#/components/schemas/ResultMeta' }
+        mutation: { type: object }
+    StatementResult:
+      type: object
+      additionalProperties: false
+      required: [columns, rows, rowCount, meta]
+      properties:
+        columns: { type: array, items: { type: string } }
+        rows: { type: array, items: { type: object } }
+        rowCount: { type: integer, minimum: 0 }
+        affectedRows: { type: integer, minimum: 0 }
+        meta: { $ref: '#/components/schemas/StatementMeta' }
+    TransactionMeta:
+      type: object
+      additionalProperties: false
+      required: [requestId, policyVersion, schemaVersion, role, commitChecks]
+      properties:
+        requestId: { type: string, minLength: 1 }
+        policyVersion: { type: string, minLength: 1 }
+        schemaVersion: { type: string, minLength: 1 }
+        role: { $ref: '#/components/schemas/Identifier' }
+        commitChecks: { enum: [not_triggered, passed] }
+    AtomicExecuteResponse:
+      type: object
+      additionalProperties: false
+      required: [transactionId, status, results, meta]
+      properties:
+        transactionId: { type: string }
+        status: { const: committed }
+        results: { type: array, minItems: 1, items: { $ref: '#/components/schemas/StatementResult' } }
+        meta: { $ref: '#/components/schemas/TransactionMeta' }
+    BeginTransactionRequest:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode: { enum: [read, write] }
+        expected: { $ref: '#/components/schemas/SnapshotExpectation' }
+    TransactionState:
+      type: object
+      required: [transactionId, status]
+      properties:
+        transactionId: { type: string }
+        status: { enum: [active, validating, committed, rolled_back, failed, expired] }
+        nextSequence: { type: integer, minimum: 1 }
+        expiresAt: { type: string, format: date-time }
+        meta: { type: object }
+    TransactionStatementResponse:
+      type: object
+      required: [transactionId, status, nextSequence, result, meta]
+      properties:
+        transactionId: { type: string }
+        status: { const: active }
+        nextSequence: { type: integer, minimum: 1 }
+        result: { $ref: '#/components/schemas/StatementResult' }
+        meta: { type: object }
+    CallbackQueryResponse:
+      type: object
+      additionalProperties: false
+      required: [sequence, columns, rows, rowCount, meta]
+      properties:
+        sequence: { type: integer, minimum: 1 }
+        columns: { type: array, items: { type: string } }
+        rows: { type: array, items: { type: object } }
+        rowCount: { type: integer, minimum: 0 }
+        meta: { $ref: '#/components/schemas/SqlMeta' }
+    CommitCheckHookRequest:
+      type: object
+      additionalProperties: false
+      required: [version, validationId, check, requestId, policyVersion, schemaVersion, role, session, statements, query]
+      properties:
+        version: { const: '1' }
+        validationId: { type: string, minLength: 1 }
+        check: { $ref: '#/components/schemas/Identifier' }
+        requestId: { type: string, minLength: 1 }
+        policyVersion: { type: string, minLength: 1 }
+        schemaVersion: { type: string, minLength: 1 }
+        role: { $ref: '#/components/schemas/Identifier' }
+        session:
+          type: object
+          additionalProperties: { type: string }
+        statements:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [index, type, resource]
+            properties:
+              index: { type: integer, minimum: 0 }
+              type: { enum: [insert, update, delete] }
+              resource: { $ref: '#/components/schemas/Identifier' }
+        query:
+          type: object
+          additionalProperties: false
+          required: [url, token, expiresAt]
+          properties:
+            url: { type: string, format: uri }
+            token: { type: string, minLength: 32 }
+            expiresAt: { type: string, format: date-time }
+    CommitCheckDecision:
+      type: object
+      additionalProperties: false
+      required: [version, allowed]
+      properties:
+        version: { const: '1' }
+        allowed: { type: boolean }
+        error:
+          type: object
+          additionalProperties: false
+          required: [code]
+          properties:
+            code: { type: string, pattern: '^[A-Z][A-Z0-9_]*$' }
+    ExplainResponse:
+      type: object
+      additionalProperties: false
+      required: [statements, meta]
+      properties:
+        statements:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [index, operation, parameters, result, resources, serverParameters, warnings]
+            properties:
+              index: { type: integer, minimum: 0 }
+              operation: { enum: [select, insert, update, delete] }
+              parameters: { type: array, items: { $ref: '#/components/schemas/ParameterDescriptor' } }
+              result: { $ref: '#/components/schemas/CompileResultDescriptor' }
+              resources: { type: array, items: { type: object } }
+              effectiveLimit: { type: [integer, 'null'], minimum: 1 }
+              serverParameters: { type: array, items: { type: string } }
+              warnings: { type: array, items: { type: string } }
+        meta:
+          type: object
+          additionalProperties: false
+          required: [requestId, policyVersion, schemaVersion, role, transactionMode]
+          properties:
+            requestId: { type: string }
+            policyVersion: { type: string }
+            schemaVersion: { type: string }
+            role: { $ref: '#/components/schemas/Identifier' }
+            transactionMode: { enum: [read, write] }
+    Capabilities:
+      type: object
+      additionalProperties: true
+      required: [sqlDialect, statements, limits, transactions, idempotency]
+      properties:
+        sqlDialect: { const: sqlite }
+        statements: { type: array, items: { enum: [select, insert, update, delete] } }
+        limits: { type: object }
+        transactions: { type: object }
+        idempotency: { type: object }
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, path, requestId]
+          properties:
+            code: { type: string, pattern: '^POLICYSQL_[A-Z0-9_]+$' }
+            message: { type: string }
+            path: { type: [string, 'null'] }
+            requestId: { type: string }

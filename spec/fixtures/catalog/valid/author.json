@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "schema_18",
+  "policyVersion": "policy_42",
+  "role": "author",
+  "resources": [
+    {
+      "name": "posts",
+      "operations": {
+        "select": {
+          "columns": [
+            { "name": "id", "type": "string", "representation": "string", "nullable": false, "nullableOnDenied": false, "usage": ["projection", "predicate", "join", "order"] },
+            { "name": "private_note", "type": "string", "representation": "string", "nullable": false, "nullableOnDenied": true, "usage": ["projection"] }
+          ],
+          "allowAggregations": false,
+          "allowWindows": false,
+          "maxRows": 100
+        },
+        "insert": {
+          "columns": [
+            { "name": "title", "type": "string", "representation": "string", "nullable": false, "required": true }
+          ],
+          "returning": {
+            "columns": [
+              { "name": "id", "type": "string", "representation": "string", "nullable": false, "nullableOnDenied": false, "usage": ["projection"] }
+            ]
+          }
+        },
+        "update": {
+          "columns": [
+            { "name": "title", "type": "string", "representation": "string", "nullable": false }
+          ]
+        }
+      }
+    }
+  ]
+}

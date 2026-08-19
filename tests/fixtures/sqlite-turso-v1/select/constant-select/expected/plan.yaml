@@ -1,0 +1,4 @@
+operation: select
+resources: []
+policies: []
+invariant: numeric literals expose no Catalog resource and cannot bypass column policy

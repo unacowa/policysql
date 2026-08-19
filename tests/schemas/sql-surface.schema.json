@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://policysql.dev/schemas/sql-surface.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "profile", "leaves"],
+  "properties": {
+    "version": { "const": 1 },
+    "profile": { "type": "string", "minLength": 1 },
+    "leaves": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "profile", "kind", "status", "required_tests"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9.-]*$" },
+          "profile": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["advertised", "planned", "disabled"] },
+          "contexts": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "required_tests": {
+            "type": "array",
+            "items": { "enum": ["positive", "negative", "bypass", "differential"] },
+            "uniqueItems": true
+          }
+        }
+      }
+    }
+  }
+}

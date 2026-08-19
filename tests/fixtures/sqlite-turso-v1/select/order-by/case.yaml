@@ -1,0 +1,6 @@
+id: sqlite.select.order-by
+profile: sqlite-turso-v1
+description: 認可済み列を直接ORDER BYしpolicy filter後の結果を並べる
+covers: [clause.order-by.direct]
+tests: [positive, differential]
+expected: allow

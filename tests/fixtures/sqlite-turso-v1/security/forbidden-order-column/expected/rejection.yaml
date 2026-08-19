@@ -1,0 +1,4 @@
+stage: policy
+code: forbidden_column
+executor_calls: 0
+public_message_contains_hidden_identifier: false

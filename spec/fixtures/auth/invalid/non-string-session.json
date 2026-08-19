@@ -1,0 +1,15 @@
+{
+  "iss": "https://auth.example.com/",
+  "aud": "policysql-api",
+  "sub": "author_01",
+  "iat": 1785686400,
+  "exp": 1785690000,
+  "policysql": {
+    "roles": ["author"],
+    "default_role": "author",
+    "access": ["catalog", "explain", "execute"],
+    "session": {
+      "tenant_id": 42
+    }
+  }
+}

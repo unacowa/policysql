@@ -1,0 +1,17 @@
+[package]
+name = "policysql-parser"
+description = "SQL parsing and binding boundary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+policysql-catalog = { path = "../policysql-catalog" }
+policysql-core = { path = "../policysql-core" }
+policysql-ir = { path = "../policysql-ir" }
+turso_parser = "=0.7.2"

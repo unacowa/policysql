@@ -1,0 +1,13 @@
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, name, status]
+          filter:
+            tenant_id:
+              eq:
+                session: tenant_id
+          limit: 100
+          allow_aggregations: false

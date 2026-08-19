@@ -1,0 +1,6 @@
+id: sqlite.security.missing-policy
+profile: sqlite-turso-v1
+description: roleとresourceに対応するselect policyがなければdefault denyする
+covers: [statement.select.single-table, policy.select.missing]
+tests: [negative]
+expected: deny

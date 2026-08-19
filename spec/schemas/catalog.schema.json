@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://policysql.dev/schemas/catalog.schema.json",
+  "title": "PolicySQL role-visible Catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "policyVersion", "role", "resources"],
+  "properties": {
+    "schemaVersion": { "type": "string", "minLength": 1 },
+    "policyVersion": { "type": "string", "minLength": 1 },
+    "role": { "$ref": "#/$defs/identifier" },
+    "resources": { "type": "array", "items": { "$ref": "#/$defs/resource" } }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "logicalType": {
+      "anyOf": [
+        { "$ref": "#/$defs/identifier" },
+        {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/identifier" }
+        }
+      ]
+    },
+    "representation": { "enum": ["string", "number", "boolean", "object", "array"] },
+    "descriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "representation", "nullable"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "type": { "$ref": "#/$defs/logicalType" },
+        "representation": { "$ref": "#/$defs/representation" },
+        "format": { "$ref": "#/$defs/identifier" },
+        "nullable": { "type": "boolean" },
+        "constraints": { "type": "object" }
+      }
+    },
+    "readColumn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "representation", "nullable", "nullableOnDenied", "usage"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "type": { "$ref": "#/$defs/identifier" },
+        "representation": { "$ref": "#/$defs/representation" },
+        "format": { "$ref": "#/$defs/identifier" },
+        "nullable": { "type": "boolean" },
+        "constraints": { "type": "object" },
+        "nullableOnDenied": { "type": "boolean" },
+        "usage": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["projection", "predicate", "join", "order", "group", "aggregate", "window"] }
+        }
+      }
+    },
+    "insertColumn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "representation", "nullable", "required"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "type": { "$ref": "#/$defs/identifier" },
+        "representation": { "$ref": "#/$defs/representation" },
+        "format": { "$ref": "#/$defs/identifier" },
+        "nullable": { "type": "boolean" },
+        "constraints": { "type": "object" },
+        "required": { "type": "boolean" }
+      }
+    },
+    "returning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns"],
+      "properties": { "columns": { "type": "array", "items": { "$ref": "#/$defs/readColumn" } } }
+    },
+    "operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "select": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["columns", "allowAggregations", "allowWindows", "maxRows"],
+          "properties": {
+            "columns": { "type": "array", "items": { "$ref": "#/$defs/readColumn" } },
+            "allowAggregations": { "type": "boolean" },
+            "allowWindows": { "type": "boolean" },
+            "maxRows": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "insert": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["columns"],
+          "properties": {
+            "columns": { "type": "array", "items": { "$ref": "#/$defs/insertColumn" } },
+            "returning": { "$ref": "#/$defs/returning" }
+          }
+        },
+        "update": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["columns"],
+          "properties": {
+            "columns": { "type": "array", "items": { "$ref": "#/$defs/descriptor" } },
+            "returning": { "$ref": "#/$defs/returning" }
+          }
+        },
+        "delete": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "returning": { "$ref": "#/$defs/returning" } }
+        }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "operations"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "operations": { "$ref": "#/$defs/operations" }
+      }
+    }
+  }
+}

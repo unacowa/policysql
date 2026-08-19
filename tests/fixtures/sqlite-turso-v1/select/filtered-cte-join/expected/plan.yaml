@@ -1,0 +1,4 @@
+operation: select
+resources: [projects, tasks]
+policies: [member.projects.select, member.tasks.select]
+invariant: filtered CTE provenance survives flattening and every joined base resource receives its row policy

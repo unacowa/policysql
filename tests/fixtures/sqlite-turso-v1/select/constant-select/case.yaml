@@ -1,0 +1,6 @@
+id: sqlite.select.constant-select
+profile: sqlite-turso-v1
+description: resource-free numeric literal SELECT is typed, sealed, and differentially executed
+covers: [ast.expr.literal-supported, threat.forbidden-column-inference]
+tests: [positive, negative, bypass, differential]
+expected: allow

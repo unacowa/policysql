@@ -1,0 +1,14 @@
+resource: comments
+
+roles:
+  author:
+    select:
+      columns:
+        - id
+        - private_note
+        - name: private_note
+          visible_if:
+            author_id:
+              eq:
+                session: subject_id
+          on_deny: null

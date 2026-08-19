@@ -1,0 +1,36 @@
+version: 1
+
+resources:
+  posts:
+    source:
+      table: posts
+    columns:
+      id:
+        type: string
+      title: {}
+      published_at:
+        type: instant
+        representation: string
+        format: rfc3339
+      status:
+        type: string
+        constraints:
+          enum: [draft, published, archived]
+      metadata:
+        type: json
+        representation: object
+        jsonSchema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          type: object
+          additionalProperties: false
+          required: [profile]
+          properties:
+            profile:
+              type: object
+              additionalProperties: false
+              properties:
+                name: { type: string }
+                score:
+                  anyOf:
+                    - { type: integer }
+                    - { type: 'null' }

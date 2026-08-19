@@ -1,0 +1,6 @@
+id: sqlite.mutation.delete-filtered
+profile: sqlite-turso-v1
+description: DELETEへcaller predicate AND pre-state policy filterと独立RETURNING認可を組み込む
+covers: [statement.delete.filtered, clause.returning.direct, policy.mutation.row-filter, policy.mutation.returning, execution.transaction.rollback, threat.row-policy-replacement]
+tests: [positive, negative, bypass, differential]
+expected: allow

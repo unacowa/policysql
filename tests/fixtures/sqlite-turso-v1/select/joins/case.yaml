@@ -1,0 +1,6 @@
+id: sqlite.select.joins
+profile: sqlite-turso-v1
+description: INNER/LEFT JOINの全resourceへrow policyを適用しLEFT nullable側はONへ置く
+covers: [source.join.inner, source.join.left, threat.outer-join-policy-placement]
+tests: [positive, negative, bypass, differential]
+expected: allow

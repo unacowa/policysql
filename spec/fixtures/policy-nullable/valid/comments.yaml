@@ -1,0 +1,38 @@
+resource: comments
+
+roles:
+  author:
+    select:
+      columns:
+        - id
+        - post_id
+        - body
+        - author_id
+        - name: private_note
+          visible_if:
+            author_id:
+              eq:
+                session: subject_id
+          on_deny: null
+      filter:
+        tenant_id:
+          eq:
+            session: tenant_id
+      limit: 100
+
+    update:
+      columns: [body, private_note]
+      filter:
+        author_id:
+          eq:
+            session: subject_id
+      returning:
+        columns:
+          - id
+          - body
+          - name: private_note
+            visible_if:
+              author_id:
+                eq:
+                  session: subject_id
+            on_deny: null

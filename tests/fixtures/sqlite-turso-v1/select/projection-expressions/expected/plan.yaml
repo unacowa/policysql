@@ -1,0 +1,4 @@
+operation: select
+resources: [projects]
+policies: [member.projects.select]
+invariant: every CASE condition and branch, concatenation operand, and CAST input is provenance checked and independently sealed

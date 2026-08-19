@@ -1,0 +1,10 @@
+[package]
+name = "policysql-sql-binder-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+turso_parser = "=0.7.2"

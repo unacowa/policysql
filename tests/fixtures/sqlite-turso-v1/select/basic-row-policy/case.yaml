@@ -1,0 +1,20 @@
+id: sqlite.select.basic-row-policy
+profile: sqlite-turso-v1
+description: caller predicateへtenant row policyとpolicy limitを合成する
+covers:
+  - statement.select.single-table
+  - clause.projection.explicit
+  - clause.where
+  - clause.limit
+  - expression.binary.eq
+  - expression.named-parameter
+  - binding.known-column
+  - policy.select.row-filter
+  - policy.select.column-regular
+  - policy.select.limit
+  - emission.server-parameter
+  - emission.reparse
+  - result.unique-name
+  - threat.row-policy-replacement
+tests: [positive, differential]
+expected: allow

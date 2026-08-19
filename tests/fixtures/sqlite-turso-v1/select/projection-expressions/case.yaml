@@ -1,0 +1,6 @@
+id: sqlite.select.projection-expressions
+profile: sqlite-turso-v1
+description: 型が証明できるCASE、文字列連結、TEXT CASTだけをprojectionで許可する
+covers: [expression.projection.typed-composite, ast.expr.binary-supported, ast.expr.case, ast.expr.cast, threat.forbidden-column-inference]
+tests: [positive, negative, bypass, differential]
+expected: allow

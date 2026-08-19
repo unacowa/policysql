@@ -1,0 +1,77 @@
+version: 1
+resources:
+  archived_posts:
+    source:
+      table: archived_posts
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      title: { type: string }
+  authors:
+    source:
+      table: authors
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      name: { type: string }
+  comments:
+    source:
+      table: comments
+    columns:
+      id: { type: string }
+      post_id: { type: string }
+      tenant_id: { type: string }
+      parent_id: { type: string }
+      body: { type: string }
+  posts:
+    source:
+      table: posts
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      author_id: { type: string }
+      title: { type: string }
+      status:
+        type: string
+        constraints:
+          enum: [active, archived, draft, pending, published]
+      published_at:
+        type: instant
+        representation: string
+        format: rfc3339
+      created_at:
+        type: datetime
+        representation: string
+        format: sqlite-datetime
+      updated_by: { type: string }
+      metadata:
+        type: json
+        representation: object
+        storage: text
+        jsonSchema:
+          $schema: https://json-schema.org/draft/2020-12/schema
+          type: object
+          additionalProperties: false
+          properties:
+            label: { type: string }
+            score: { type: integer }
+            tags:
+              type: array
+              items: { type: string }
+          required: [label, score, tags]
+      view_count:
+        type: integer
+        representation: number
+        storage: integer
+        constraints: { minimum: 0 }
+      internal_notes: { type: string }
+      private_note: { type: string }
+  projects:
+    source:
+      table: projects
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      name: { type: string }
+      status: { type: string }
+      created_by: { type: string }

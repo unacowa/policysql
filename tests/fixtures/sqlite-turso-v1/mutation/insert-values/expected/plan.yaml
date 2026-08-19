@@ -1,0 +1,3 @@
+operation: insert
+resource: projects
+invariants: [caller-preset-disjoint, affected-rows-equals-values-count, post-state-check-true]

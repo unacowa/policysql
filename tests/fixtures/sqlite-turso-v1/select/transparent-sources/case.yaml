@@ -1,0 +1,6 @@
+id: sqlite.select.transparent-sources
+profile: sqlite-turso-v1
+description: policy適用前にprovenanceを失わない透明derived tableと単一非再帰CTEだけをflattenする
+covers: [source.derived.transparent, source.cte.transparent, threat.source-shadowing]
+tests: [positive, negative, bypass, differential]
+expected: allow

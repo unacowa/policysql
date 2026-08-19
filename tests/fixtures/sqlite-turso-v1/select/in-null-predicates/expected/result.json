@@ -1,0 +1,8 @@
+{
+  "columns": ["id", "name"],
+  "rows": [
+    { "id": "project_1", "name": "Visible" },
+    { "id": "project_4", "name": "Pending" }
+  ],
+  "rowCount": 2
+}

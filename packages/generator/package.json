@@ -1,0 +1,7 @@
+{
+  "name": "@policysql/generator",
+  "version": "0.0.0",
+  "type": "module",
+  "bin": { "policysql": "./cli.js" },
+  "exports": { ".": "./index.js" }
+}

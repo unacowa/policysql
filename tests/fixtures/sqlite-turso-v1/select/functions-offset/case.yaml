@@ -1,0 +1,6 @@
+id: sqlite.select.functions-offset
+profile: sqlite-turso-v1
+description: registered scalar functions, LIKE/GLOB, projection alias ordering, and OFFSET are sealed and executed together
+covers: [clause.offset, clause.order-by.projection-alias, expression.string.like-glob, expression.function.scalar-registered, ast.expr.like, ast.expr.function-call, threat.forbidden-column-inference]
+tests: [positive, negative, bypass, differential]
+expected: allow

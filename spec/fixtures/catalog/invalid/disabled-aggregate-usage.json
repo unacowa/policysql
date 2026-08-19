@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "schema_18",
+  "policyVersion": "policy_42",
+  "role": "author",
+  "resources": [
+    {
+      "name": "posts",
+      "operations": {
+        "select": {
+          "columns": [
+            { "name": "id", "type": "string", "representation": "string", "nullable": false, "nullableOnDenied": false, "usage": ["projection", "aggregate"] }
+          ],
+          "allowAggregations": false,
+          "allowWindows": false,
+          "maxRows": 100
+        }
+      }
+    }
+  ]
+}

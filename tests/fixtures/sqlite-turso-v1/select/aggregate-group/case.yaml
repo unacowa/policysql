@@ -1,0 +1,6 @@
+id: sqlite.select.aggregate-group
+profile: sqlite-turso-v1
+description: COUNT(*)とdirect GROUP BY/HAVINGをpolicy gate付きで検証する
+covers: [clause.group-by.direct, clause.having.closed, expression.aggregate.count-all, ast.expr.function-call-star, threat.forbidden-column-inference]
+tests: [positive, negative, bypass, differential]
+expected: allow

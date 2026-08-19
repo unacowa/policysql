@@ -1,0 +1,5 @@
+{
+  "columns": ["id", "name"],
+  "rows": [{ "id": "project_1", "name": "Visible" }],
+  "rowCount": 1
+}

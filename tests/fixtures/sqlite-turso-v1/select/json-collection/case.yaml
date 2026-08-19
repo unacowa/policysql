@@ -1,0 +1,6 @@
+id: sqlite.select.json-collection
+profile: sqlite-turso-v1
+description: json_eachの要素をpolicy filter内でJSON配列1行へ集約する
+covers: [source.json-table.collection, expression.aggregate.json-group-array, result.json-array-schema, ast.expr.function-call, threat.forbidden-column-inference, threat.row-policy-replacement]
+tests: [positive, negative, bypass, differential]
+expected: allow

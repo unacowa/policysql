@@ -1,0 +1,6 @@
+id: sqlite.select.correlated-exists
+profile: sqlite-turso-v1
+description: correlated EXISTSの内外provenanceと両resourceのrow policyを検証する
+covers: [source.subquery.correlated-exists, ast.expr.exists, threat.source-shadowing]
+tests: [positive, negative, bypass, differential]
+expected: allow

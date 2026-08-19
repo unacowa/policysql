@@ -1,0 +1,41 @@
+[
+  {
+    "name": "direct projection",
+    "sql": "SELECT id, private_note FROM comments",
+    "expected": "allow"
+  },
+  {
+    "name": "aliased direct projection",
+    "sql": "SELECT id, private_note AS note FROM comments",
+    "expected": "allow"
+  },
+  {
+    "name": "conditional output predicate",
+    "sql": "SELECT id FROM comments WHERE private_note IS NOT NULL",
+    "expected": "deny",
+    "error": "POLICYSQL_FORBIDDEN_COLUMN_CONTEXT"
+  },
+  {
+    "name": "conditional output function argument",
+    "sql": "SELECT lower(private_note) FROM comments",
+    "expected": "deny",
+    "error": "POLICYSQL_FORBIDDEN_COLUMN_CONTEXT"
+  },
+  {
+    "name": "duplicate implicit output names",
+    "sql": "SELECT comments.id, posts.id FROM comments JOIN posts ON posts.id = comments.post_id",
+    "expected": "deny",
+    "error": "POLICYSQL_DUPLICATE_RESULT_COLUMN"
+  },
+  {
+    "name": "case-colliding aliases",
+    "sql": "SELECT comments.id AS id, posts.id AS ID FROM comments JOIN posts ON posts.id = comments.post_id",
+    "expected": "deny",
+    "error": "POLICYSQL_DUPLICATE_RESULT_COLUMN"
+  },
+  {
+    "name": "unique aliases",
+    "sql": "SELECT comments.id AS comment_id, posts.id AS post_id FROM comments JOIN posts ON posts.id = comments.post_id",
+    "expected": "allow"
+  }
+]

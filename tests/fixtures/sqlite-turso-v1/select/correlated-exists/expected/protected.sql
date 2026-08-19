@@ -1,0 +1,1 @@
+SELECT "__policysql_t0"."id" AS "id" FROM "projects" AS "__policysql_t0" WHERE (EXISTS (SELECT 1 AS "exists_value" FROM "tasks" AS "__policysql_t1" WHERE (("__policysql_t1"."project_id" = "__policysql_t0"."id") AND ("__policysql_t1"."tenant_id" = :__policysql_session_tenant_id))) AND ("__policysql_t0"."tenant_id" = :__policysql_session_tenant_id))

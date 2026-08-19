@@ -1,0 +1,6 @@
+id: sqlite.mutation.insert-values
+profile: sqlite-turso-v1
+description: INSERT VALUESへpresetとper-row post-state checkとRETURNINGを一体化する
+covers: [statement.insert.values, clause.returning.direct, policy.mutation.write-columns, policy.mutation.preset, policy.mutation.operation-check, policy.mutation.returning, execution.transaction.rollback, threat.row-policy-replacement]
+tests: [positive, negative, bypass, differential]
+expected: allow

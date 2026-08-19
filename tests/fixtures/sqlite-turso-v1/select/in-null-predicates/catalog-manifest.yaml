@@ -1,0 +1,10 @@
+version: 1
+resources:
+  projects:
+    source:
+      table: projects
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      name: { type: string, nullable: true }
+      status: { type: string }

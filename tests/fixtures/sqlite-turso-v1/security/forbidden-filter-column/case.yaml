@@ -1,0 +1,11 @@
+id: sqlite.security.forbidden-filter-column
+profile: sqlite-turso-v1
+description: select不可columnをWHEREで推測する攻撃をauthorization stageで拒否する
+covers:
+  - statement.select.single-table
+  - clause.where
+  - binding.known-column
+  - policy.select.forbidden-column
+  - threat.forbidden-column-inference
+tests: [negative, bypass]
+expected: deny

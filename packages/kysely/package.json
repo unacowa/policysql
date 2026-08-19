@@ -1,0 +1,7 @@
+{
+  "name": "@policysql/kysely",
+  "version": "0.0.0",
+  "type": "module",
+  "peerDependencies": { "@policysql/client": "0.0.0", "kysely": ">=0.27" },
+  "exports": { ".": { "types": "./index.d.ts", "import": "./index.js" } }
+}

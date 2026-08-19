@@ -1,0 +1,14 @@
+id: sqlite.select.in-null-predicates
+profile: sqlite-turso-v1
+description: IN、NOT IN、IS NOT NULLをpolicy filterと同一statementへ封印する
+covers:
+  - ast.expr.in-list
+  - ast.expr.is-null
+  - ast.expr.not-null
+  - clause.where
+  - expression.named-parameter
+  - policy.select.row-filter
+  - emission.reparse
+  - threat.row-policy-replacement
+tests: [positive, negative, bypass, differential]
+expected: allow

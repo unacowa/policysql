@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/policysql-core",
+  "crates/policysql-catalog",
+  "crates/policysql-ir",
+  "crates/policysql-execution",
+  "crates/policysql-parser",
+  "crates/policysql-policy",
+  "crates/policysql-sqlite",
+  "crates/policysql-turso",
+  "crates/policysql-gateway",
+  "crates/policysql-testkit",
+  "crates/policysql-cloudflare",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/unacowa/policysql"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

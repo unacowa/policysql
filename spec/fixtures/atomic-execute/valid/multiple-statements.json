@@ -1,0 +1,14 @@
+{
+  "statements": [
+    {
+      "sql": "UPDATE posts SET status = :status WHERE id = :id",
+      "params": { "status": "published", "id": "post_01" },
+      "expect": { "affectedRows": 1 }
+    },
+    {
+      "sql": "INSERT INTO audit_logs (post_id, action) VALUES (:post_id, :action)",
+      "params": { "post_id": "post_01", "action": "post.published" },
+      "expect": { "affectedRows": 1 }
+    }
+  ]
+}

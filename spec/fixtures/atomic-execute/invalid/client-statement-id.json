@@ -1,0 +1,9 @@
+{
+  "statements": [
+    {
+      "id": "read-posts",
+      "sql": "SELECT id FROM posts",
+      "params": {}
+    }
+  ]
+}

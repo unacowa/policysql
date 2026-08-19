@@ -1,0 +1,1 @@
+SELECT "__policysql_t0"."id" AS "id", "__policysql_t1"."title" AS "title" FROM "projects" AS "__policysql_t0" LEFT JOIN "tasks" AS "__policysql_t1" ON (("__policysql_t1"."project_id" = "__policysql_t0"."id") AND ("__policysql_t1"."tenant_id" = :__policysql_session_tenant_id)) WHERE ("__policysql_t0"."tenant_id" = :__policysql_session_tenant_id) ORDER BY "__policysql_t0"."id" ASC

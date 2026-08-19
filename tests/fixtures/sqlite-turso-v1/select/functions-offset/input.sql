@@ -1,0 +1,1 @@
+SELECT LOWER(name) AS normalized_name, UPPER(name) AS upper_name, JSON_EXTRACT(metadata, :path) AS selected_metadata FROM projects WHERE name GLOB :pattern AND name LIKE :prefix ORDER BY normalized_name LIMIT :limit OFFSET :offset;

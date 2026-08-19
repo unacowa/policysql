@@ -1,0 +1,136 @@
+{
+  "tables": {
+    "archived_posts": {
+      "columns": {
+        "id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "tenant_id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "title": {
+          "declaredType": "TEXT",
+          "nullable": false
+        }
+      }
+    },
+    "authors": {
+      "columns": {
+        "id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "tenant_id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "name": {
+          "declaredType": "TEXT",
+          "nullable": false
+        }
+      }
+    },
+    "comments": {
+      "columns": {
+        "id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "post_id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "tenant_id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "parent_id": {
+          "declaredType": "TEXT",
+          "nullable": true
+        },
+        "body": {
+          "declaredType": "TEXT",
+          "nullable": false
+        }
+      }
+    },
+    "posts": {
+      "columns": {
+        "id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "tenant_id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "author_id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "title": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "status": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "published_at": {
+          "declaredType": "TEXT",
+          "nullable": true
+        },
+        "created_at": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "updated_by": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "metadata": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "view_count": {
+          "declaredType": "INTEGER",
+          "nullable": false
+        },
+        "internal_notes": {
+          "declaredType": "TEXT",
+          "nullable": true
+        },
+        "private_note": {
+          "declaredType": "TEXT",
+          "nullable": false
+        }
+      }
+    },
+    "projects": {
+      "columns": {
+        "id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "tenant_id": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "name": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "status": {
+          "declaredType": "TEXT",
+          "nullable": false
+        },
+        "created_by": {
+          "declaredType": "TEXT",
+          "nullable": false
+        }
+      }
+    }
+  }
+}

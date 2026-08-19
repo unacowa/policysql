@@ -1,0 +1,19 @@
+[package]
+name = "policysql-cloudflare-policy-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+policysql-catalog = { path = "../../crates/policysql-catalog" }
+policysql-core = { path = "../../crates/policysql-core" }
+policysql-execution = { path = "../../crates/policysql-execution" }
+policysql-parser = { path = "../../crates/policysql-parser" }
+policysql-policy = { path = "../../crates/policysql-policy" }
+policysql-sqlite = { path = "../../crates/policysql-sqlite" }
+wasm-bindgen = "0.2.104"
+
+[workspace]

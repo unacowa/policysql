@@ -1,0 +1,2 @@
+CREATE TABLE projects (id TEXT NOT NULL, tenant_id TEXT NOT NULL) STRICT;
+CREATE TABLE tasks (id TEXT NOT NULL, project_id TEXT NOT NULL, tenant_id TEXT NOT NULL) STRICT;

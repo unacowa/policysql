@@ -1,0 +1,33 @@
+version: 1
+profile: common
+leaves:
+  - id: threat.statement-smuggling
+    profile: common
+    kind: threat
+    status: planned
+    required_tests: [bypass]
+  - id: threat.forbidden-column-inference
+    profile: common
+    kind: threat
+    status: planned
+    required_tests: [bypass]
+  - id: threat.parameter-name-collision
+    profile: common
+    kind: threat
+    status: planned
+    required_tests: [bypass]
+  - id: threat.row-policy-replacement
+    profile: common
+    kind: threat
+    status: planned
+    required_tests: [bypass, differential]
+  - id: threat.outer-join-policy-placement
+    profile: common
+    kind: threat
+    status: advertised
+    required_tests: [negative, bypass, differential]
+  - id: threat.source-shadowing
+    profile: common
+    kind: threat
+    status: advertised
+    required_tests: [negative, bypass, differential]

@@ -1,0 +1,12 @@
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        update:
+          columns: [name]
+          presets:
+            created_by: { session: subject_id }
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, name] }

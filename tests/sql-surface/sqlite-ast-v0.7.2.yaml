@@ -1,0 +1,38 @@
+version: 1
+profile: sqlite-turso-v1
+leaves:
+  - { id: ast.expr.between, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.binary-supported, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.binary-other, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.register, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative] }
+  - { id: ast.expr.case, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.cast, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.collate, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.doubly-qualified, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.exists, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.field-access, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative] }
+  - { id: ast.expr.function-call, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.function-call-star, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.identifier, profile: sqlite-turso-v1, kind: ast_expr, status: planned, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.resolved-column, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative] }
+  - { id: ast.expr.rowid, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.in-list, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.in-select, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.in-table, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.is-null, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.like, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.literal-supported, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.literal-other, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.not-null, profile: sqlite-turso-v1, kind: ast_expr, status: advertised, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.parenthesized, profile: sqlite-turso-v1, kind: ast_expr, status: planned, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.qualified, profile: sqlite-turso-v1, kind: ast_expr, status: planned, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.raise, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.subquery, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.unary-not, profile: sqlite-turso-v1, kind: ast_expr, status: planned, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.unary-other, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.variable-named, profile: sqlite-turso-v1, kind: ast_expr, status: planned, required_tests: [positive, negative, bypass, differential] }
+  - { id: ast.expr.variable-positional, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.subquery-result, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative] }
+  - { id: ast.expr.default, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative] }
+  - { id: ast.expr.array, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }
+  - { id: ast.expr.subscript, profile: sqlite-turso-v1, kind: ast_expr, status: disabled, required_tests: [negative, bypass] }

@@ -1,0 +1,6 @@
+id: sqlite.security.statement-smuggling
+profile: sqlite-turso-v1
+description: 1つのsql fieldに複数statementを入れる攻撃をparse stageで拒否する
+covers: [statement.multiple, threat.statement-smuggling]
+tests: [negative, bypass]
+expected: deny

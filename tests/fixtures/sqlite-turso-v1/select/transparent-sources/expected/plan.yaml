@@ -1,0 +1,13 @@
+operation: select
+resources: [projects]
+accesses:
+  - { column: projects.id, usage: projection }
+  - { column: projects.name, usage: projection }
+  - { column: projects.id, usage: order }
+  - { column: projects.tenant_id, usage: policy_filter }
+policies: [member.projects.select]
+client_parameters: []
+server_parameters: [session.tenant_id]
+result:
+  - { name: id, type: string, nullable: false }
+  - { name: name, type: string, nullable: false }

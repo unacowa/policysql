@@ -1,0 +1,4 @@
+operation: select
+resources: [projects]
+policies: [member.projects.select]
+invariant: window gate and every partition/order column permission are required

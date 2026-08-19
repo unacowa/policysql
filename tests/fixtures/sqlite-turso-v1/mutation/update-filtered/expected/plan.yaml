@@ -1,0 +1,3 @@
+operation: update
+resource: projects
+invariants: [caller-filter-and-policy-filter, preset-disjoint, post-state-check-true]

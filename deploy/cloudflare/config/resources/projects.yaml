@@ -1,0 +1,29 @@
+resource: projects
+roles:
+  member:
+    select:
+      columns: [id, name, status]
+      filter:
+        tenant_id:
+          eq:
+            session: tenant_id
+      limit: 100
+      allow_aggregations: false
+      allow_windows: false
+    insert:
+      columns: [id, name, status]
+      presets:
+        tenant_id: { session: tenant_id }
+        created_by: { session: subject_id }
+      check: { tenant_id: { eq: { session: tenant_id } } }
+      returning: { columns: [id, name, status] }
+    update:
+      columns: [name, status]
+      presets:
+        created_by: { session: subject_id }
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      check: { tenant_id: { eq: { session: tenant_id } } }
+      returning: { columns: [id, name, status] }
+    delete:
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      returning: { columns: [id] }

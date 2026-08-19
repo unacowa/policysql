@@ -1,0 +1,12 @@
+version: 1
+
+resources:
+  posts:
+    source:
+      table: posts
+    columns:
+      metadata:
+        type: json
+        representation: object
+        jsonSchema:
+          $ref: https://example.com/schema.json

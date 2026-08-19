@@ -1,0 +1,4 @@
+operation: select
+resources: [projects, tasks]
+policies: [member.projects.select, member.tasks.select]
+invariant: both nested and outer row filters are present

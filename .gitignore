@@ -1,0 +1,15 @@
+node_modules/
+target/
+*.log
+website/.vitepress/cache/
+website/.vitepress/dist/
+website/public/spec/
+.env
+.env.*
+!.env.example
+.dev.vars*
+.wrangler/
+spikes/**/.artifacts/
+deploy/cloudflare/.deployment/
+deploy/cloudflare/.wrangler-dry-run/
+deploy/cloudflare/pkg/

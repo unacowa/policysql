@@ -1,0 +1,4 @@
+operation: select
+resources: [projects]
+policies: [member.projects.select]
+invariant: JSON table expansion executes inside the protected statement and returns exactly one typed JSON array row

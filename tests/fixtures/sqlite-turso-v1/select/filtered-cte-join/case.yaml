@@ -1,0 +1,6 @@
+id: sqlite.select.filtered-cte-join
+profile: sqlite-turso-v1
+description: 単一のfiltered CTEをbase provenanceへflattenして別resource JOIN policyも適用する
+covers: [source.cte.transparent, source.join.inner, threat.source-shadowing, threat.row-policy-replacement]
+tests: [positive, negative, bypass, differential]
+expected: allow

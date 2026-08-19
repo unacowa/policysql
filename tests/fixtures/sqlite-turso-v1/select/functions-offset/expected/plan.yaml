@@ -1,0 +1,4 @@
+operation: select
+resources: [projects]
+policies: [member.projects.select]
+invariant: every function argument, filter, alias ordering expression, and offset is typed and sealed

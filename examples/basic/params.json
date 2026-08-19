@@ -1,0 +1,9 @@
+{
+  "client": {
+    "status": "active",
+    "limit": 200
+  },
+  "server": {
+    "__policysql_session_tenant_id": "tenant_1"
+  }
+}

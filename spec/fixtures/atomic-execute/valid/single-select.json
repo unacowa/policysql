@@ -1,0 +1,13 @@
+{
+  "expected": {
+    "schemaVersion": "schema_17",
+    "policyVersion": "policy_42"
+  },
+  "statements": [
+    {
+      "sql": "SELECT id, title FROM posts WHERE status = :status",
+      "params": { "status": "published" },
+      "expect": { "rowCount": 1 }
+    }
+  ]
+}

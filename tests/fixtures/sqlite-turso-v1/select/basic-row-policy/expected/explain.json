@@ -1,0 +1,6 @@
+{
+  "operation": "select",
+  "resources": ["projects"],
+  "policies": ["member.projects.select"],
+  "effectiveLimit": 100
+}
