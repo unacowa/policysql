@@ -8,7 +8,13 @@ import {
   SqliteQueryCompiler,
   sql,
 } from "kysely";
-import { bindPolicyKysely, policySelect } from "./index.js";
+import {
+  bindPolicyKysely,
+  compilePolicyQuery,
+  createPolicyKysely,
+  policyMutation,
+  policySelect,
+} from "./index.js";
 
 class TestSqliteDialect {
   createAdapter() { return new SqliteAdapter(); }
@@ -74,4 +80,83 @@ test("bound Kysely builder chains retain the PolicySQL client", async () => {
   const policyDb = bindPolicyKysely({ selectFrom: () => ({ select: () => terminal }) }, client);
   const query = policyDb.selectFrom("posts").select(["id"]);
   assert.deepEqual(await policySelect(query, "posts").execute(), [{ value: 1 }]);
+});
+
+test("bound Kysely execute routes selects directly through PolicySQL", async () => {
+  let captured;
+  const client = {
+    async execute(sql, params, options) {
+      captured = { sql, params, options };
+      return { rows: [{ id: "post_1" }], meta: { operation: "select" }, envelopeMeta: {} };
+    },
+  };
+  const rawDb = new Kysely({ dialect: new TestSqliteDialect() });
+  const db = createPolicyKysely({ kysely: rawDb, client });
+  const rows = await db.selectFrom("posts").select("id").where("id", "=", "post_1").execute();
+  assert.deepEqual(rows, [{ id: "post_1" }]);
+  assert.deepEqual(captured, {
+    sql: 'select "id" from "posts" where "id" = :p1',
+    params: { p1: "post_1" },
+    options: {},
+  });
+  await rawDb.destroy();
+});
+
+test("bound Kysely execute routes returning mutations with idempotency", async () => {
+  const events = [];
+  let captured;
+  const client = {
+    async execute(sql, params, options) {
+      captured = { sql, params, options };
+      return { rows: [{ id: "post_2" }], meta: { operation: "insert" }, envelopeMeta: {} };
+    },
+  };
+  const rawDb = new Kysely({ dialect: new TestSqliteDialect() });
+  const db = createPolicyKysely({
+    kysely: rawDb,
+    client,
+    onQuery: (request) => events.push(["query", request.operation]),
+    onResult: ({ request }) => events.push(["result", request.operation]),
+  });
+  const rows = await db
+    .insertInto("posts")
+    .values({ id: "post_2", title: "Mutation" })
+    .returning("id")
+    .execute();
+  assert.deepEqual(rows, [{ id: "post_2" }]);
+  assert.equal(captured.sql, 'insert into "posts" ("id", "title") values (:p1, :p2) returning "id"');
+  assert.deepEqual(captured.params, { p1: "post_2", p2: "Mutation" });
+  assert.equal(typeof captured.options.idempotencyKey, "string");
+  assert.deepEqual(events, [["query", "insert"], ["result", "insert"]]);
+  await rawDb.destroy();
+});
+
+test("policyMutation supports update and delete with caller execution options", async () => {
+  const calls = [];
+  const client = {
+    async execute(sql, params, options) {
+      calls.push({ sql, params, options });
+      return { rows: [{ id: "post_3" }], meta: {}, envelopeMeta: {} };
+    },
+  };
+  const db = new Kysely({ dialect: new TestSqliteDialect() });
+  const update = db.updateTable("posts").set({ title: "Updated" }).where("id", "=", "post_3").returning("id");
+  const remove = db.deleteFrom("posts").where("id", "=", "post_3").returning("id");
+  assert.equal(compilePolicyQuery(update).operation, "update");
+  assert.equal(compilePolicyQuery(remove).operation, "delete");
+  await policyMutation(update, { idempotencyKey: "update-post-3", expect: { affectedRows: 1 } }, client).execute();
+  await policyMutation(remove, { idempotencyKey: "delete-post-3" }, client).execute();
+  assert.equal(calls[0].options.idempotencyKey, "update-post-3");
+  assert.deepEqual(calls[0].options.expect, { affectedRows: 1 });
+  assert.equal(calls[1].options.idempotencyKey, "delete-post-3");
+  await db.destroy();
+});
+
+test("executeTakeFirst helpers use PolicySQL rows", async () => {
+  const client = { async execute() { return { rows: [{ id: "one" }], meta: {}, envelopeMeta: {} }; } };
+  const rawDb = new Kysely({ dialect: new TestSqliteDialect() });
+  const db = bindPolicyKysely(rawDb, client);
+  assert.deepEqual(await db.selectFrom("posts").select("id").executeTakeFirst(), { id: "one" });
+  assert.deepEqual(await db.selectFrom("posts").select("id").executeTakeFirstOrThrow(), { id: "one" });
+  await rawDb.destroy();
 });

@@ -10,13 +10,21 @@ export interface PolicyExecuteOptions {
   idempotencyKey?: string
   expect?: { affectedRows?: number; rowCount?: number }
 }
+export interface PolicyExecuteResult<Row> {
+  columns?: string[]
+  rows: Row[]
+  rowCount?: number
+  affectedRows?: number
+  meta: unknown
+  envelopeMeta: unknown
+}
 export class PolicySqlClient {
   constructor(options: PolicySqlClientOptions)
   execute<Row = Record<string, unknown>>(
     sql: string,
     params?: Record<string, unknown>,
     options?: PolicyExecuteOptions,
-  ): Promise<{ rows: Row[]; meta: unknown; envelopeMeta: unknown }>
+  ): Promise<PolicyExecuteResult<Row>>
 }
 export interface GeneratedPolicyQuery<Params, Row> {
   readonly sql: string

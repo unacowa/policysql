@@ -20,19 +20,15 @@ Kyselyの型は開発補助であり、セキュリティ境界ではありま�
 ## 実行の形
 
 ```ts
-import { policySelect } from '@policysql/kysely'
+import { createPolicyKysely } from '@unacowa/policysql/kysely'
 
-const query = policySelect(
-  policyDb
-    .selectFrom('posts')
-    .select(['id', 'title'])
-    .where('status', '=', 'published')
-    .limit(20),
-  'posts',
-  ['author_email'],
-)
-
-const rows = await query.execute()
+const policyDb = createPolicyKysely({ kysely: db, client })
+const rows = await policyDb
+  .selectFrom('posts')
+  .select(['id', 'title'])
+  .where('status', '=', 'published')
+  .limit(20)
+  .execute()
 ```
 
 公式clientは、Kysely queryをPolicySQLのrequestへ変換します。
@@ -140,10 +136,10 @@ export interface AdminDB {
 PolicySQLのwire responseは単一statementでもtop-level `results[]`と`meta`を返します。公式Kysely clientはstatement単位のKysely APIに合わせて`results[0]`を取り出し、通常の`execute()`では`rows`だけを返します。必要な場合はstatement meta付き結果を取得できます。
 
 ```ts
-const result = await policySelect(
+import { policyQuery } from '@unacowa/policysql/kysely'
+
+const result = await policyQuery(
   policyDb.selectFrom('posts').select(['id', 'title']),
-  'posts',
-  ['author_email'],
 ).executeWithPolicyMeta()
 
 result.rows
@@ -177,13 +173,19 @@ const wasRedacted = result.meta.result.redactions.some(
 INSERT、UPDATE、DELETEはKyselyのmutation builderから実行できます。
 
 ```ts
-const result = await policyDb
-  .updateTable('posts')
-  .set({ title: 'Updated title' })
-  .where('id', '=', 'post_01')
-  .returning(['id', 'title'])
-  .executeWithPolicyMeta()
+import { policyMutation } from '@unacowa/policysql/kysely'
+
+const result = await policyMutation(
+  policyDb
+    .updateTable('posts')
+    .set({ title: 'Updated title' })
+    .where('id', '=', 'post_01')
+    .returning(['id', 'title']),
+  { idempotencyKey: crypto.randomUUID() },
+).executeWithPolicyMeta()
 ```
+
+`createPolicyKysely`でbindしたbuilderの通常の`.execute()`も同じPolicySQL境界を通ります。mutationでidempotency keyを省略した場合、Web Cryptoを利用できるruntimeではclientがrequestごとに生成します。再試行を同じoperationとして扱うapplicationは、`policyMutation`へ安定したkeyを明示します。
 
 `RETURNING`がある場合、`result.rows`、`result.meta.result.columns`、`result.meta.result.redactions`が返ります。`RETURNING`がない場合、`result.rows`と`result.meta.result.redactions`は空配列で、`result.affectedRows`と`result.meta.mutation`を確認します。
 
@@ -195,7 +197,7 @@ result.meta.mutation?.commitChecks
 
 ## Transaction
 
-複数statementを事前にまとめてatomicに実行するclient APIは、一つの`statements[]`としてAtomic Executeへ送ります。次のKysely transaction callbackは各`await`のresultをapplicationへ返せるため、対話型Transaction APIへ対応付けます。
+複数statementを事前にまとめてatomicに実行する場合は、一つの`statements[]`としてAtomic Executeへ送ります。現行のKysely adapterは`transaction()`をPolicySQLの対話型Transaction APIへ接続しません。次の形は未対応であり、使用するとPolicySQL境界を通るtransactionにはなりません。
 
 ```ts
 await policyDb.transaction().execute(async (trx) => {
@@ -212,7 +214,7 @@ await policyDb.transaction().execute(async (trx) => {
 })
 ```
 
-clientは`BEGIN`、`COMMIT`、`ROLLBACK`をSQLとして送信しません。公式clientがPolicySQLのTransaction APIへ対応付けます。
+対応済みのatomic client APIまたはHTTP APIを使用し、client SQLとして`BEGIN`、`COMMIT`、`ROLLBACK`を送信しません。
 
 ## 制限
 

@@ -4,7 +4,7 @@ const required = (value, name) => {
 };
 
 export class PolicySqlClient {
-  constructor({ endpoint, token, role, schemaVersion, policyVersion, fetchImpl = globalThis.fetch }) {
+  constructor({ endpoint, token, role, schemaVersion, policyVersion, fetchImpl = globalThis.fetch?.bind(globalThis) }) {
     this.endpoint = new URL(required(endpoint, "endpoint"));
     if (this.endpoint.protocol !== "https:" && this.endpoint.hostname !== "localhost") {
       throw new TypeError("endpoint must use HTTPS");
@@ -13,6 +13,7 @@ export class PolicySqlClient {
     this.role = required(role, "role");
     this.schemaVersion = required(schemaVersion, "schemaVersion");
     this.policyVersion = required(policyVersion, "policyVersion");
+    if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl is required");
     this.fetchImpl = fetchImpl;
   }
 
@@ -37,6 +38,7 @@ export class PolicySqlClient {
       error.status = response.status;
       throw error;
     }
-    return { rows: body.results[0].rows, meta: body.results[0].meta, envelopeMeta: body.meta };
+    const result = body.results[0];
+    return { ...result, rows: result.rows, meta: result.meta, envelopeMeta: body.meta };
   }
 }
