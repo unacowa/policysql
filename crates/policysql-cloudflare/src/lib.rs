@@ -1657,6 +1657,7 @@ fn endpoint_permission(value: &str) -> Result<EndpointPermission, RuntimeError> 
         "execute" => Ok(EndpointPermission::Execute),
         "explain" => Ok(EndpointPermission::Explain),
         "catalog" => Ok(EndpointPermission::Catalog),
+        "debug" => Ok(EndpointPermission::Debug),
         _ => Err(RuntimeError::Access),
     }
 }
@@ -2633,6 +2634,13 @@ resources:
     #[test]
     fn rejects_access_and_snapshot_mismatch_without_exposing_detail() {
         let request = r#"{"statements":[{"sql":"SELECT id FROM projects","params":{}}]}"#;
+        let debug = runtime().compile_json(
+            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["execute","debug"],"session":{"tenant_id":"tenant_1"}}"#,
+            request,
+            "execute",
+        );
+        assert!(!debug.contains("POLICYSQL_FORBIDDEN_ACCESS"), "{debug}");
+
         let denied = runtime().compile_json(
             r#"{"subject":"user_1","role":"member","roles":["member"],"access":["catalog"],"session":{"tenant_id":"tenant_1"}}"#,
             request,

@@ -21,6 +21,7 @@ pub enum EndpointPermission {
     Execute,
     Explain,
     Catalog,
+    Debug,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -24,6 +24,31 @@ export type WorkerBindings = {
   [key: string]: unknown;
 };
 
+export type ExecutionTraceParameter = {
+  name: string;
+  source: "client" | "server";
+  value: "[redacted]";
+};
+
+export type ExecutionTraceStatement = {
+  index: number;
+  operation: "select" | "insert" | "update" | "delete";
+  resource?: string;
+  inputSql: string;
+  executedSql: string;
+  parameters: ExecutionTraceParameter[];
+};
+
+export type ExecutionTrace = {
+  source: "turso-egress";
+  requestId: string;
+  disposition: "executed" | "idempotency_replay";
+  attempt: 1;
+  statements: ExecutionTraceStatement[];
+};
+
+export type ExecutionTraceSink = (trace: ExecutionTrace) => void | Promise<void>;
+
 export type AppVariables = {
   requestId: string;
   runtime: PolicySqlRuntime;
@@ -39,6 +64,10 @@ export type AppDependencies = {
   getRuntime: () => PolicySqlRuntime;
   transportFactory?: (...args: any[]) => any;
   costTransportFactory?: (...args: any[]) => any;
+  executionTrace?: {
+    enabled: boolean;
+    sink?: ExecutionTraceSink;
+  };
   publicConfig?: {
     schemaVersion: string;
     policyVersion: string;

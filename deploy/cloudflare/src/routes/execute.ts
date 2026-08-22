@@ -24,6 +24,7 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDepend
     const requestId = context.get("requestId");
     const body = await readJsonBody(context.req.raw);
     const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body.text, "execute"));
+    const debugAuthorized = dependencies.executionTrace?.enabled === true && auth.access.includes("debug");
     const idempotency = compiled.transactionMode === "write"
       ? await mutationIdempotency(context.req.raw, context.env, auth, body.value)
       : null;
@@ -55,6 +56,9 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDepend
           role: auth.role,
           commitChecks: executed.commitChecks,
         },
+        ...(debugAuthorized && executed.executionTrace
+          ? { debug: { executionTrace: executed.executionTrace } }
+          : {}),
       });
     }
 
@@ -65,6 +69,11 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDepend
       requestId,
       dependencies.transportFactory,
       idempotency,
+      dependencies.executionTrace?.enabled ? {
+        enabled: true,
+        sink: dependencies.executionTrace.sink,
+        inputStatements: body.value.statements,
+      } : null,
     );
     const executionContext = context.executionCtx as Partial<ExecutionContext>;
     executionContext?.waitUntil?.(
@@ -81,6 +90,9 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDepend
         role: auth.role,
         commitChecks: "not_triggered",
       },
+      ...(debugAuthorized && executed.executionTrace
+        ? { debug: { executionTrace: executed.executionTrace } }
+        : {}),
     });
   });
 };

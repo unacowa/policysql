@@ -13,6 +13,40 @@ Content-Type: application/json
 Idempotency-Key: <required when any statement mutates data>
 ```
 
+An authorized development deployment may add `debug.executionTrace` after execution. The trace is
+present only when the deployment enables execution tracing and the verified JWT has `debug` access.
+It is captured from the statement objects handed to the Turso transport, not by running Explain a
+second time. Parameter values are never returned:
+
+```json
+{
+  "debug": {
+    "executionTrace": {
+      "source": "turso-egress",
+      "requestId": "req_01",
+      "disposition": "executed",
+      "attempt": 1,
+      "statements": [{
+        "index": 0,
+        "operation": "select",
+        "resource": "posts",
+        "inputSql": "SELECT id, title FROM posts",
+        "executedSql": "SELECT ... WHERE author_id = :__policysql_session_subject_id",
+        "parameters": [{
+          "name": "__policysql_session_subject_id",
+          "source": "server",
+          "value": "[redacted]"
+        }]
+      }]
+    }
+  }
+}
+```
+
+An idempotency replay reports `disposition: "idempotency_replay"` and an empty statement list,
+because the protected business statement was not executed again. Production deployments should
+leave execution tracing disabled.
+
 ```json
 {
   "expected": {
@@ -125,3 +159,5 @@ Each interactive statement request is scalar and sequenced because it depends on
 ```
 
 Errors do not reveal hidden columns, policies, credentials, protected SQL, or raw remote database errors.
+The optional development trace is returned only after successful execution and never changes this
+error contract.

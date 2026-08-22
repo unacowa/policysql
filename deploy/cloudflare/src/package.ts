@@ -7,7 +7,16 @@ import { createApp } from "./app.ts";
 
 export { createApp } from "./app.ts";
 export { TransactionOwnerCore } from "./transaction-owner.ts";
-export type { AppDependencies, AppEnv, AuthContext, WorkerBindings } from "./types.ts";
+export type {
+  AppDependencies,
+  AppEnv,
+  AuthContext,
+  ExecutionTrace,
+  ExecutionTraceParameter,
+  ExecutionTraceSink,
+  ExecutionTraceStatement,
+  WorkerBindings,
+} from "./types.ts";
 
 export type RuntimeLimits = {
   maxRows: number;
@@ -23,6 +32,10 @@ export type RuntimeConfiguration = {
   schemaVersion: string;
   policyVersion: string;
   limits: RuntimeLimits;
+  developer?: {
+    executionTrace?: boolean;
+    executionTraceSink?: import("./types.ts").ExecutionTraceSink;
+  };
 };
 
 let wasmInitialized = false;
@@ -65,6 +78,10 @@ export const createPolicySqlWorker = (configuration: RuntimeConfiguration) => {
     getRuntime,
     app: createApp({
       getRuntime,
+      executionTrace: {
+        enabled: configuration.developer?.executionTrace === true,
+        sink: configuration.developer?.executionTraceSink,
+      },
       publicConfig: {
         schemaVersion: configuration.schemaVersion,
         policyVersion: configuration.policyVersion,

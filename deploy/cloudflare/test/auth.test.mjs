@@ -15,7 +15,7 @@ const fixture = async () => {
     policysql: {
       roles: ["member"],
       default_role: "member",
-      access: ["catalog", "explain"],
+      access: ["catalog", "explain", "debug"],
       session: { tenant_id: "tenant_a" },
     },
   })
@@ -45,7 +45,7 @@ test("verifies signature and canonicalizes the trusted session", async () => {
     subject: "user_1",
     role: "member",
     roles: ["member"],
-    access: ["catalog", "explain"],
+    access: ["catalog", "explain", "debug"],
     session: { tenant_id: "tenant_a" },
   });
 });

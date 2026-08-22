@@ -1,0 +1,13 @@
+{
+  "iss": "https://issuer.example.com",
+  "aud": "policysql-api",
+  "sub": "developer_1",
+  "iat": 1710000000,
+  "exp": 1710003600,
+  "policysql": {
+    "roles": ["member"],
+    "default_role": "member",
+    "access": ["catalog", "explain", "execute", "debug"],
+    "session": { "tenant_id": "tenant_1" }
+  }
+}

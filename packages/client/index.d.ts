@@ -17,6 +17,9 @@ export interface PolicyExecuteResult<Row> {
   affectedRows?: number
   meta: unknown
   envelopeMeta: unknown
+  debug?: {
+    executionTrace?: unknown
+  }
 }
 export class PolicySqlClient {
   constructor(options: PolicySqlClientOptions)

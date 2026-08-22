@@ -37,7 +37,7 @@
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "enum": ["catalog", "explain", "execute"] }
+          "items": { "enum": ["catalog", "explain", "execute", "debug"] }
         },
         "session": {
           "type": "object",

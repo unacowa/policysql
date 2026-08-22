@@ -16,7 +16,7 @@ Session values are strings. PolicySQL performs no implicit string-to-number, str
 
 The optional `PolicySQL-Role` header may select only a role in the verified token. Duplicate role or authorization headers are rejected. Other client headers cannot add or override trusted-session values.
 
-`access` is a non-empty set containing only `catalog`, `explain`, and `execute`. It is checked before SQL parsing and is independent of role selection. Code-generation credentials use `catalog` and `explain` without `execute`.
+`access` is a non-empty set containing only `catalog`, `explain`, `execute`, and `debug`. It is checked before SQL parsing and is independent of role selection. Code-generation credentials use `catalog` and `explain` without `execute`. `debug` never grants execution by itself; a deployment must also explicitly enable developer execution traces before a response can expose the exact protected SQL sent at the database egress boundary.
 
 An interactive transaction stores a fingerprint of issuer, subject, selected role, trusted session, and policy/schema snapshots. Every subsequent request is re-authenticated and must match that fingerprint. Token expiry or revocation known to the verifier prevents further operations and commit.
 

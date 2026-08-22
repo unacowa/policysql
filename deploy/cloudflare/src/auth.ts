@@ -75,7 +75,7 @@ export const authenticate = async (request, env, requiredAccess) => {
     typeof claims.default_role !== "string" ||
     !claims.roles.includes(claims.default_role) ||
     !uniqueIdentifiers(claims.access) ||
-    !claims.access.every((value) => ["catalog", "explain", "execute"].includes(value)) ||
+    !claims.access.every((value) => ["catalog", "explain", "execute", "debug"].includes(value)) ||
     !claims.access.includes(requiredAccess)
   ) {
     throw authenticationFailed();

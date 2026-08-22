@@ -155,10 +155,12 @@ const executeRequest = async ({
   fetchImpl,
   idempotencyKey = undefined,
   requestId = "req_egress",
+  executionTrace = undefined,
 }) => {
   const handler = createHandlerCore({
     getRuntime: () => runtime,
     transportFactory: (env, id) => new TursoHttpTransport(env, id, fetchImpl),
+    executionTrace,
   });
   return handler.fetch(
     new Request("https://worker.test/v1/transactions:execute", {
@@ -181,9 +183,9 @@ const executeRequest = async ({
   );
 };
 
-test("captures the Turso egress SQL and transaction envelope for an HTTP execute request", async () => {
+test("returns exact redacted Turso egress SQL only to an authorized developer", async () => {
   const expectedProtectedSql = 'SELECT "__policysql_t0"."id" AS "id", "__policysql_t0"."name" AS "name" FROM "projects" AS "__policysql_t0" WHERE (("__policysql_t0"."status" = :status) AND ("__policysql_t0"."tenant_id" = :__policysql_session_tenant_id)) LIMIT MIN (:limit, 100)';
-  const { token, authEnv } = await tokenFixture();
+  const { token, authEnv } = await tokenFixture(["execute", "debug"]);
   const pipelineBodies = [];
   const fetchImpl = async function (_url, init) {
     assert.equal(this, undefined, "host fetch must not be invoked as a transport method");
@@ -214,6 +216,7 @@ test("captures the Turso egress SQL and transaction envelope for an HTTP execute
     token,
     authEnv,
     fetchImpl,
+    executionTrace: { enabled: true },
     body: {
         statements: [{
           sql: "SELECT id, name FROM projects WHERE status = :status LIMIT :limit",
@@ -235,6 +238,37 @@ test("captures the Turso egress SQL and transaction envelope for an HTTP execute
     { name: "name", type: "string", representation: "string", nullable: false },
   ]);
   assert.equal("logicalType" in body.results[0].meta.result.columns[0], false);
+  assert.deepEqual(body.debug.executionTrace, {
+    source: "turso-egress",
+    requestId: "req_egress",
+    disposition: "executed",
+    attempt: 1,
+    statements: [{
+      index: 0,
+      operation: "select",
+      resource: "projects",
+      inputSql: "SELECT id, name FROM projects WHERE status = :status LIMIT :limit",
+      executedSql: expectedProtectedSql,
+      parameters: [
+        { name: "__policysql_session_tenant_id", source: "server", value: "[redacted]" },
+        { name: "limit", source: "client", value: "[redacted]" },
+        { name: "status", source: "client", value: "[redacted]" },
+      ],
+    }, {
+      index: 1,
+      operation: "select",
+      resource: "projects",
+      inputSql: "SELECT id, name FROM projects WHERE status = :status LIMIT :limit",
+      executedSql: expectedProtectedSql,
+      parameters: [
+        { name: "__policysql_session_tenant_id", source: "server", value: "[redacted]" },
+        { name: "limit", source: "client", value: "[redacted]" },
+        { name: "status", source: "client", value: "[redacted]" },
+      ],
+    }],
+  });
+  assert.equal(JSON.stringify(body.debug).includes("tenant_1"), false);
+  assert.equal(JSON.stringify(body.debug).includes("active"), false);
   assert.equal(pipelineBodies.length, 3);
   assert.deepEqual(pipelineBodies.map((item) => item.requests.length), [1, 2, 2]);
   assert.equal(pipelineBodies[0].baton, undefined);
@@ -267,6 +301,48 @@ test("captures the Turso egress SQL and transaction envelope for an HTTP execute
       __policysql_session_tenant_id: { type: "text", value: "tenant_1" },
     },
   );
+});
+
+test("execution trace requires both deployment enablement and JWT debug access", async () => {
+  const fetchImpl = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    const sql = body.requests[0]?.stmt?.sql;
+    if (sql === "BEGIN DEFERRED") {
+      return new Response(JSON.stringify({ baton: "baton_1", results: [result([], [])] }));
+    }
+    if (sql === "COMMIT") {
+      return new Response(JSON.stringify({
+        baton: null,
+        results: [result([], []), { type: "ok", response: { type: "close" } }],
+      }));
+    }
+    return new Response(JSON.stringify({
+      baton: "baton_2",
+      results: [result(["id"], [["project_1"]])],
+    }));
+  };
+  const requestBody = { statements: [{ sql: "SELECT id FROM projects", params: {} }] };
+
+  const withoutAccess = await tokenFixture(["execute"]);
+  const responseWithoutAccess = await executeRequest({
+    runtime: getRuntime(),
+    token: withoutAccess.token,
+    authEnv: withoutAccess.authEnv,
+    fetchImpl,
+    body: requestBody,
+    executionTrace: { enabled: true },
+  });
+  assert.equal((await responseWithoutAccess.json()).debug, undefined);
+
+  const withAccess = await tokenFixture(["execute", "debug"]);
+  const responseWithoutDeploymentFlag = await executeRequest({
+    runtime: getRuntime(),
+    token: withAccess.token,
+    authEnv: withAccess.authEnv,
+    fetchImpl,
+    body: requestBody,
+  });
+  assert.equal((await responseWithoutDeploymentFlag.json()).debug, undefined);
 });
 
 const selectVariations = [

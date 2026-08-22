@@ -39,6 +39,12 @@ export class PolicySqlClient {
       throw error;
     }
     const result = body.results[0];
-    return { ...result, rows: result.rows, meta: result.meta, envelopeMeta: body.meta };
+    return {
+      ...result,
+      rows: result.rows,
+      meta: result.meta,
+      envelopeMeta: body.meta,
+      ...(body.debug ? { debug: body.debug } : {}),
+    };
   }
 }

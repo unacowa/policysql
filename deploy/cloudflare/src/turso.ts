@@ -1,5 +1,6 @@
 import { HttpError, wasmError } from "./errors.ts";
 import { TursoHttpTransport } from "./turso-http.ts";
+import type { ExecutionTrace } from "./types.ts";
 
 const remoteFailure = (timeout = false) =>
   new HttpError(
@@ -14,6 +15,47 @@ const driverArgs = (statement) => {
   );
   if (overlap) throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
   return { ...statement.clientParameters, ...statement.serverParameters };
+};
+
+const executionTrace = (compiled, statements, requestId, inputStatements): ExecutionTrace => ({
+  source: "turso-egress",
+  requestId,
+  disposition: "executed",
+  attempt: 1,
+  statements: statements.map((statement, index) => ({
+    index,
+    operation: compiled.statements[index].operation,
+    ...(compiled.statements[index].resource
+      ? { resource: compiled.statements[index].resource }
+      : {}),
+    inputSql: inputStatements?.[index]?.sql ?? "",
+    executedSql: statement.sql,
+    parameters: [
+      ...Object.keys(compiled.statements[index].clientParameters).map((name) => ({
+        name,
+        source: "client" as const,
+        value: "[redacted]" as const,
+      })),
+      ...Object.keys(compiled.statements[index].serverParameters).map((name) => ({
+        name,
+        source: "server" as const,
+        value: "[redacted]" as const,
+      })),
+    ].sort((left, right) => left.name.localeCompare(right.name)),
+  })),
+});
+
+const publishExecutionTrace = async (trace, sink) => {
+  if (!sink) return;
+  try {
+    await sink(trace);
+  } catch (error) {
+    console.log(JSON.stringify({
+      event: "execution_trace_sink_failed",
+      requestId: trace.requestId,
+      internalClass: error?.constructor?.name ?? "UnknownError",
+    }));
+  }
 };
 
 const jsonSafeValue = (value) => {
@@ -173,6 +215,7 @@ export const executeSealedEnvelope = async (
   requestId,
   transportFactory = (bindings, id) => new TursoHttpTransport(bindings, id),
   idempotency = null,
+  traceOptions = null,
 ) => {
   if (!env.TURSO_DATABASE_URL || !env.TURSO_AUTH_TOKEN) throw remoteFailure();
   if (!Number.isSafeInteger(compiled.executionHandle)) {
@@ -227,9 +270,25 @@ export const executeSealedEnvelope = async (
         }
         await transaction.rollback();
         transaction = undefined;
-        return { ...stored, replayed: true };
+        return {
+          ...stored,
+          replayed: true,
+          ...(traceOptions?.enabled ? {
+            executionTrace: {
+              source: "turso-egress",
+              requestId,
+              disposition: "idempotency_replay",
+              attempt: 1,
+              statements: [],
+            },
+          } : {}),
+        };
       }
     }
+    const trace = traceOptions?.enabled
+      ? executionTrace(compiled, statements, requestId, traceOptions.inputStatements)
+      : undefined;
+    if (trace) await publishExecutionTrace(trace, traceOptions.sink);
     const driverResults = await transaction.execute(statements);
     const results = validateDriverResults(
       runtime,
@@ -280,7 +339,7 @@ export const executeSealedEnvelope = async (
       queryDurationMs: transaction.usage.reduce((sum, usage) => sum + usage.queryDurationMs, 0),
     }));
     transaction = undefined;
-    return terminal;
+    return { ...terminal, ...(trace ? { executionTrace: trace } : {}) };
   } catch (error) {
     if (transaction) {
       try { await transaction.rollback(); } catch { /* server timeout is terminal */ }

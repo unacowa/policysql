@@ -55,7 +55,7 @@ paths:
   /v1/transactions:execute:
     post:
       operationId: executeAtomicTransaction
-      description: Requires JWT access `execute`.
+      description: Requires JWT access `execute`. Optional exact egress SQL additionally requires deployment enablement and JWT access `debug`.
       parameters:
         - $ref: '#/components/parameters/Role'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -423,6 +423,46 @@ components:
         status: { const: committed }
         results: { type: array, minItems: 1, items: { $ref: '#/components/schemas/StatementResult' } }
         meta: { $ref: '#/components/schemas/TransactionMeta' }
+        debug: { $ref: '#/components/schemas/DeveloperDebug' }
+    ExecutionTraceParameter:
+      type: object
+      additionalProperties: false
+      required: [name, source, value]
+      properties:
+        name: { type: string, minLength: 1 }
+        source: { enum: [client, server] }
+        value: { const: '[redacted]' }
+    ExecutionTraceStatement:
+      type: object
+      additionalProperties: false
+      required: [index, operation, inputSql, executedSql, parameters]
+      properties:
+        index: { type: integer, minimum: 0 }
+        operation: { enum: [select, insert, update, delete] }
+        resource: { type: string, minLength: 1 }
+        inputSql: { type: string, minLength: 1 }
+        executedSql: { type: string, minLength: 1 }
+        parameters:
+          type: array
+          items: { $ref: '#/components/schemas/ExecutionTraceParameter' }
+    ExecutionTrace:
+      type: object
+      additionalProperties: false
+      required: [source, requestId, disposition, attempt, statements]
+      properties:
+        source: { const: turso-egress }
+        requestId: { type: string, minLength: 1 }
+        disposition: { enum: [executed, idempotency_replay] }
+        attempt: { const: 1 }
+        statements:
+          type: array
+          items: { $ref: '#/components/schemas/ExecutionTraceStatement' }
+    DeveloperDebug:
+      type: object
+      additionalProperties: false
+      required: [executionTrace]
+      properties:
+        executionTrace: { $ref: '#/components/schemas/ExecutionTrace' }
     BeginTransactionRequest:
       type: object
       additionalProperties: false
