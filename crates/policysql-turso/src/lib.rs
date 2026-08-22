@@ -544,15 +544,9 @@ fn valid_datetime(value: &str, require_offset: bool) -> bool {
     if time.as_bytes().get(2) != Some(&b':') || time.as_bytes().get(5) != Some(&b':') {
         return false;
     }
-    let valid_time = time[0..2].parse::<u32>().ok().is_some_and(|hour| hour < 24)
-        && time[3..5]
-            .parse::<u32>()
-            .ok()
-            .is_some_and(|minute| minute < 60)
-        && time[6..8]
-            .parse::<u32>()
-            .ok()
-            .is_some_and(|second| second < 60);
+    let valid_time = time[0..2].parse::<u32>().is_ok_and(|hour| hour < 24)
+        && time[3..5].parse::<u32>().is_ok_and(|minute| minute < 60)
+        && time[6..8].parse::<u32>().is_ok_and(|second| second < 60);
     if !valid_time {
         return false;
     }
@@ -573,14 +567,8 @@ fn valid_datetime(value: &str, require_offset: bool) -> bool {
     suffix.len() == 6
         && matches!(suffix.as_bytes().first(), Some(b'+' | b'-'))
         && suffix.as_bytes().get(3) == Some(&b':')
-        && suffix[1..3]
-            .parse::<u32>()
-            .ok()
-            .is_some_and(|hour| hour <= 23)
-        && suffix[4..6]
-            .parse::<u32>()
-            .ok()
-            .is_some_and(|minute| minute <= 59)
+        && suffix[1..3].parse::<u32>().is_ok_and(|hour| hour <= 23)
+        && suffix[4..6].parse::<u32>().is_ok_and(|minute| minute <= 59)
 }
 
 fn value_size(value: &LogicalValue) -> u64 {
