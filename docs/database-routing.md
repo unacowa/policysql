@@ -67,9 +67,13 @@ endpoint access. Supplying a DB does not bypass that authentication. Conversely,
 cannot supply or override a missing database argument. Database injection and policy
 session authentication are separate contracts.
 
-Each provider call has a 1,000 ms deadline. Exceptions/timeouts produce a generic
-`POLICYSQL_DATABASE_UNAVAILABLE` without exposing provider error text. Provider time is
-also subject to the enclosing transaction deadline. A timeout cannot cancel arbitrary
+Each provider call is bounded by the shorter of 1,000 ms and the remaining transaction
+time. Provider exceptions or exhaustion of the provider-only budget produce a generic
+`POLICYSQL_DATABASE_UNAVAILABLE` without exposing provider error text; exhaustion of the
+shared transaction budget produces HTTP 504 `POLICYSQL_DATABASE_TIMEOUT`. The absolute
+deadline is established before connection preparation and is not restarted at BEGIN.
+Preparation, SQL execution, and commit authorization all consume that same budget.
+A timeout cannot cancel arbitrary
 wrapper code: providers must bound their own network work and perform no database
 operations before PolicySQL starts a transaction. An in-memory registration map needs
 no per-request registry SQL.
@@ -84,6 +88,13 @@ It does not read env or select a URL. It rejects unsafe URL forms and HTTP redir
 Every custom transport must preserve exclusive transaction ownership and the advertised
 SQLite/Turso semantics. The library cannot prove the physical identity behind an
 arbitrary trusted transport; registration and conformance tests must establish it.
+
+The transport's `begin(mode, timeoutMs, deadlineMs?)` receives a per-operation timeout
+and an absolute deadline in Unix milliseconds. Bound BEGIN, statement execution, and
+COMMIT by the remaining time as well as the operation limit. The Turso HTTP adapter
+passes that remaining budget to each HTTP call. ROLLBACK retains its bounded cleanup
+budget after expiry so an expired transaction can still be released. Cost observation
+has its own budget; it does not reuse an expired execution deadline.
 
 ## Immutable binding and DO integration
 

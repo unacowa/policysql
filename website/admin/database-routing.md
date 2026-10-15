@@ -65,7 +65,7 @@ Tursoを使う場合も、接続設定を明示します。
 new TursoHttpTransport({ url: registeredUrl, authToken: serverOwnedToken }, requestId)
 ```
 
-providerの各呼出しは1秒以内に制限され、transactionの期限も延長しません。例外やtimeoutは詳細を伏せた`POLICYSQL_DATABASE_UNAVAILABLE`になります。別DBへのフォールバックは行いません。
+providerの各呼出しは、1秒とtransactionの残り時間の短い方に制限されます。期限は接続準備前に決め、BEGINで設定し直しません。providerの例外・単独の1秒上限は詳細を伏せた`POLICYSQL_DATABASE_UNAVAILABLE`、transaction全体の期限超過はHTTP 504の`POLICYSQL_DATABASE_TIMEOUT`になります。TursoへのBEGIN・SQL・COMMITにも残り時間を適用し、期限切れ後のROLLBACKには後処理用の上限時間を確保します。別DBへのフォールバックは行いません。
 
 ## DBの束縛とcallback
 

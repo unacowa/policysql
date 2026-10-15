@@ -226,7 +226,8 @@ export const executeSealedEnvelope = async (
   try {
     if (typeof transportFactory !== "function") throw databaseRequired();
     const timeoutMs = Math.min(...compiled.statements.map((item) => item.limits.timeoutMs));
-    const transport = await transportFactory(env, requestId);
+    const deadlineMs = Date.now() + timeoutMs;
+    const transport = await transportFactory(env, requestId, deadlineMs);
     transaction = await transport.begin(compiled.transactionMode, timeoutMs);
     const statements = compiled.statements.map((statement) => ({
       sql: statement.protectedSql,

@@ -495,6 +495,34 @@ test("DO atomic SQL failure rolls back every preceding item on the selected data
   assert.equal(h.hooksSeen.length, 0);
 });
 
+for (const scenario of JSON.parse(readFileSync(new URL("./fixtures/database-deadlines.json", import.meta.url), "utf8"))) {
+  test(`atomic deadline: ${scenario.name}`, async (t) => {
+    let now = Date.now();
+    let connected = false;
+    t.mock.method(Date, "now", () => now);
+    const h = await harness(t, { hooks: false, customizeProvider: (provider) => ({
+      check(...args) {
+        if (connected) now += scenario.commitCheckMs;
+        return provider.check(...args);
+      },
+      connect(...args) {
+        now += scenario.connectMs;
+        connected = true;
+        return provider.connect(...args);
+      },
+    }) });
+    const response = await h.request("a", "/v1/transactions:execute", envelope(insert("deadline")));
+    assert.equal(response.status, scenario.status, JSON.stringify(response));
+    const succeeds = scenario.status === 200;
+    assert.equal(h.events.some(({ sql }) => sql.startsWith("BEGIN")), scenario.begins);
+    assert.equal(h.events.some(({ sql }) => sql === "COMMIT"), succeeds);
+    assert.equal(h.events.some(({ sql }) => sql === "ROLLBACK"), !succeeds && scenario.begins);
+    assert.equal(h.rows("a").some(({ id }) => id === "deadline"), succeeds);
+    assert.equal(h.databases.get("a").database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, succeeds ? 1 : 0);
+    if (!succeeds) assert.equal(response.body.error.code, "POLICYSQL_DATABASE_TIMEOUT");
+  });
+}
+
 test("a slow commit authorization cannot extend the transaction deadline", async () => {
   const binding = { version: 1, scope: "test:a", databaseId: "a", generation: "1", snapshot: "snapshot" };
   let committed = false;

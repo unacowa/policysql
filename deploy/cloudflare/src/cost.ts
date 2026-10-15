@@ -109,7 +109,7 @@ export const estimateSealedEnvelope = async (
       .filter(({ statement }) => statement.operation !== "insert");
     let results = [];
     if (planned.length > 0) {
-      const transport = await transportFactory(env, `${requestId}-cost`);
+      const transport = await transportFactory(env, `${requestId}-cost`, Date.now() + 1_000);
       transaction = await transport.begin("read", 1_000);
       results = await transaction.execute(planned.map(({ statement }) => ({
         sql: statement.costExplainSql,

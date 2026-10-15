@@ -90,10 +90,11 @@ export class TransactionOwnerCore {
     return { databaseBinding, snapshot };
   }
 
-  async checkCurrent(current) {
+  async checkCurrent(current, deadlineMs = current.expiresAtMs) {
     try {
       if (current.snapshot !== this.getRuntime().snapshot) throw unavailable();
-      await checkDatabaseBinding(this.database, current.databaseBinding, this.env, current.snapshot);
+      await checkDatabaseBinding(this.database, current.databaseBinding, this.env, current.snapshot,
+        ["active", "validating"].includes(current.status) ? deadlineMs : undefined);
       if (current.snapshot !== this.getRuntime().snapshot ||
         (["active", "validating"].includes(current.status) && Date.now() >= current.expiresAtMs)) throw unavailable();
     } catch (error) {
@@ -452,7 +453,7 @@ export class TransactionOwnerCore {
       typeof command.sql !== "string" || !command.params || Array.isArray(command.params) ||
       typeof command.params !== "object") throw unavailable();
     if (!sameDatabaseBinding(session.databaseBinding, current.databaseBinding) || session.snapshot !== current.snapshot) throw unavailable();
-    await this.checkCurrent(current);
+    await this.checkCurrent(current, Math.min(current.expiresAtMs, session.expiresAtMs));
     if (Date.now() >= session.expiresAtMs) throw unavailable();
     const digest = await sha256(stableJson(command));
     if (command.sequence === session.nextSequence - 1 && session.last?.digest === digest) {

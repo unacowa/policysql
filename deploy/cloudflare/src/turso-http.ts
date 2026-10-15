@@ -1,4 +1,5 @@
 import { HttpError } from "./errors.ts";
+import { remainingDatabaseTime } from "./database.ts";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
 const databaseFailure = () =>
@@ -139,15 +140,15 @@ export class TursoHttpTransport {
     return body;
   }
 
-  async begin(mode, timeoutMs) {
+  async begin(mode, timeoutMs, deadlineMs?: number) {
     const body = await this.pipeline(
       [executeRequest({ sql: mode === "write" ? "BEGIN IMMEDIATE" : "BEGIN DEFERRED" })],
       undefined,
-      timeoutMs,
+      Math.min(timeoutMs, remainingDatabaseTime(deadlineMs)),
     );
     const beginResult = decodeResult(body.results[0]);
     if (!body.baton) throw databaseFailure();
-    return new TursoHttpTransaction(this, body.baton, timeoutMs, beginResult.usage);
+    return new TursoHttpTransaction(this, body.baton, timeoutMs, beginResult.usage, deadlineMs);
   }
 }
 
@@ -155,13 +156,15 @@ class TursoHttpTransaction {
   readonly transport: TursoHttpTransport;
   baton: string;
   readonly timeoutMs: number;
+  readonly deadlineMs?: number;
   open: boolean;
   readonly usage: any[];
 
-  constructor(transport, baton, timeoutMs, beginUsage) {
+  constructor(transport, baton, timeoutMs, beginUsage, deadlineMs?: number) {
     this.transport = transport;
     this.baton = baton;
     this.timeoutMs = timeoutMs;
+    this.deadlineMs = deadlineMs;
     this.open = true;
     this.usage = [beginUsage];
   }
@@ -171,7 +174,7 @@ class TursoHttpTransaction {
     const body = await this.transport.pipeline(
       statements.map(executeRequest),
       this.baton,
-      this.timeoutMs,
+      Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
     );
     if (!body.baton) throw databaseFailure();
     this.baton = body.baton;
@@ -185,7 +188,8 @@ class TursoHttpTransaction {
     const body = await this.transport.pipeline(
       [executeRequest({ sql }), { type: "close" }],
       this.baton,
-      this.timeoutMs,
+      // Cleanup still gets a bounded attempt after the execution deadline expires.
+      sql === "ROLLBACK" ? this.timeoutMs : Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
     );
     const terminal = decodeResult(body.results[0]);
     this.usage.push(terminal.usage);
