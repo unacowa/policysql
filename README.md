@@ -87,6 +87,10 @@ examples/basic/         Example schema, SQL, and expected transformation
 
 ## Start here
 
+Cloudflare embedders can supply request-scoped database connections from their own
+wrapper. See the [database binding API](docs/database-routing.md) and the
+[two-tenant Worker/DO example](examples/database-routing/README.md).
+
 1. Read [`docs/codex-handoff.md`](docs/codex-handoff.md).
 2. Read [`docs/security-model.md`](docs/security-model.md) before implementing rewrites.
 3. Keep the initial SQL subset intentionally small.

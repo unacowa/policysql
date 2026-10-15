@@ -102,7 +102,7 @@ crates/
   policysql-turso/             sealed-plan Turso validation and ports
 
 deploy/cloudflare/
-  src/index.ts                 fetch entrypoint and route dispatch
+  wrapper/index.ts             deployment fetch wrapper with explicit DB injection
   src/auth.ts                  JWKS/JWT transport adapter
   src/config.ts                immutable snapshot/config loader
   src/turso.ts                 sealed-plan-only remote transport
