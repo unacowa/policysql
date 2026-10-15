@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_cloudflare.js";
+import { testBinding, testProvider } from "./helpers/database.mjs";
 import { createApp as createHandlerCore } from "../src/app.ts";
 import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
@@ -117,7 +118,7 @@ const tokenFixture = async (access = ["execute"]) => {
 
 test("Explain exposes role-visible resource names instead of internal identities", async () => {
   const { token, authEnv } = await tokenFixture(["explain"]);
-  const handler = createHandlerCore({ getRuntime });
+  const handler = createHandlerCore({ getRuntime, database: testProvider() });
   const response = await handler.fetch(
     new Request("https://worker.test/v1/transactions:explain", {
       method: "POST",
@@ -135,6 +136,7 @@ test("Explain exposes role-visible resource names instead of internal identities
       POLICYSQL_RATE_LIMITER: { async limit() { return { success: true }; } },
     },
     {},
+    testBinding(getRuntime().snapshot),
   );
   const body = await response.json();
   assert.equal(response.status, 200);
@@ -159,7 +161,7 @@ const executeRequest = async ({
 }) => {
   const handler = createHandlerCore({
     getRuntime: () => runtime,
-    transportFactory: (env, id) => new TursoHttpTransport(env, id, fetchImpl),
+    database: testProvider((_binding, _env, id) => new TursoHttpTransport({ url: "https://db.test", authToken: "secret" }, id, fetchImpl)),
     executionTrace,
   });
   return handler.fetch(
@@ -180,6 +182,7 @@ const executeRequest = async ({
       POLICYSQL_RATE_LIMITER: { async limit() { return { success: true }; } },
     },
     {},
+    testBinding(runtime.snapshot),
   );
 };
 

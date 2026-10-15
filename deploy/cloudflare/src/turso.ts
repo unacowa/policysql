@@ -1,5 +1,5 @@
 import { HttpError, wasmError } from "./errors.ts";
-import { TursoHttpTransport } from "./turso-http.ts";
+import { databaseRequired } from "./database.ts";
 import type { ExecutionTrace } from "./types.ts";
 
 const remoteFailure = (timeout = false) =>
@@ -213,11 +213,10 @@ export const executeSealedEnvelope = async (
   compiled,
   env,
   requestId,
-  transportFactory = (bindings, id) => new TursoHttpTransport(bindings, id),
+  transportFactory: (...args: any[]) => any,
   idempotency = null,
   traceOptions = null,
 ) => {
-  if (!env.TURSO_DATABASE_URL || !env.TURSO_AUTH_TOKEN) throw remoteFailure();
   if (!Number.isSafeInteger(compiled.executionHandle)) {
     throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
   }
@@ -225,8 +224,9 @@ export const executeSealedEnvelope = async (
   const started = performance.now();
   let transaction;
   try {
+    if (typeof transportFactory !== "function") throw databaseRequired();
     const timeoutMs = Math.min(...compiled.statements.map((item) => item.limits.timeoutMs));
-    const transport = transportFactory(env, requestId);
+    const transport = await transportFactory(env, requestId);
     transaction = await transport.begin(compiled.transactionMode, timeoutMs);
     const statements = compiled.statements.map((statement) => ({
       sql: statement.protectedSql,

@@ -5,14 +5,15 @@ import { authFingerprint, requestIdempotency } from "../idempotency.ts";
 import { authorize } from "../middleware/authorization.ts";
 import { jsonResponse } from "../responses.ts";
 import { POLICY_VERSION, SCHEMA_VERSION } from "../config.ts";
-import type { AppEnv } from "../types.ts";
+import { checkDatabaseBinding } from "../database.ts";
+import type { AppDependencies, AppEnv } from "../types.ts";
 
 const TRANSACTION_ID = /^tx_[a-f0-9]{32}$/u;
 
 const invalidRequest = () =>
   new HttpError(400, "POLICYSQL_INVALID_REQUEST", "The request is invalid.");
 
-export const registerTransactionRoutes = (app: Hono<AppEnv>) => {
+export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDependencies) => {
   app.post("/v1/transactions", authorize("execute", "interactive"), async (context) => {
     const auth = context.get("auth");
     const body = await readJsonBody(context.req.raw);
@@ -22,7 +23,7 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>) => {
       !["read", "write"].includes(body.value.mode)) {
       throw invalidRequest();
     }
-    if (body.value.expected &&
+    if (body.value.expected !== undefined &&
       (!body.value.expected || Array.isArray(body.value.expected) || typeof body.value.expected !== "object" ||
         Object.keys(body.value.expected).length !== 2 ||
         !Object.hasOwn(body.value.expected, "schemaVersion") ||
@@ -30,19 +31,23 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>) => {
       throw invalidRequest();
     }
     if (body.value.expected &&
-      (body.value.expected.schemaVersion !== SCHEMA_VERSION || body.value.expected.policyVersion !== POLICY_VERSION)) {
+      (body.value.expected.schemaVersion !== (dependencies.publicConfig?.schemaVersion ?? SCHEMA_VERSION) ||
+       body.value.expected.policyVersion !== (dependencies.publicConfig?.policyVersion ?? POLICY_VERSION))) {
       throw new HttpError(409, "POLICYSQL_STALE_OPERATION", "The operation was compiled for a different active snapshot.");
     }
+    const snapshot = dependencies.getRuntime().snapshot;
+    const databaseBinding = await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, snapshot);
     const idempotency = await requestIdempotency(
       context.req.raw,
-      context.env,
+      context.env.deployment,
       auth,
       body.value,
       "interactive-start",
+      databaseBinding,
     );
     const transactionId = `tx_${idempotency.keyHash.slice(0, 32)}`;
-    const fingerprint = await authFingerprint(context.env, auth);
-    const owner = context.env.TRANSACTION_OWNER.get(context.env.TRANSACTION_OWNER.idFromName(transactionId));
+    const fingerprint = await authFingerprint(context.env.deployment, auth, databaseBinding);
+    const owner = context.env.deployment.TRANSACTION_OWNER.get(context.env.deployment.TRANSACTION_OWNER.idFromName(transactionId));
     return owner.fetch("https://owner/begin", {
       method: "POST",
       headers: { "content-type": "application/json", "x-policysql-request-id": context.get("requestId") },
@@ -53,6 +58,8 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>) => {
         mode: body.value.mode,
         auth,
         expected: body.value.expected,
+        databaseBinding,
+        snapshot,
       }),
     });
   });
@@ -65,12 +72,14 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>) => {
     }
     const auth = context.get("auth");
     const body = await readJsonBody(context.req.raw);
-    const fingerprint = await authFingerprint(context.env, auth);
-    const owner = context.env.TRANSACTION_OWNER.get(context.env.TRANSACTION_OWNER.idFromName(transactionId));
+    const snapshot = dependencies.getRuntime().snapshot;
+    const databaseBinding = await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, snapshot);
+    const fingerprint = await authFingerprint(context.env.deployment, auth, databaseBinding);
+    const owner = context.env.deployment.TRANSACTION_OWNER.get(context.env.deployment.TRANSACTION_OWNER.idFromName(transactionId));
     return owner.fetch(`https://owner/${command === "statements" ? "statement" : command}`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-policysql-request-id": context.get("requestId") },
-      body: JSON.stringify({ transactionId, authFingerprint: fingerprint, command: body.value }),
+      body: JSON.stringify({ transactionId, authFingerprint: fingerprint, command: body.value, databaseBinding, snapshot }),
     });
   });
 };

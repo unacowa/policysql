@@ -1,5 +1,5 @@
 import { HttpError } from "./errors.ts";
-import { TursoHttpTransport } from "./turso-http.ts";
+import { databaseRequired } from "./database.ts";
 
 const invalidPlanner = () =>
   new HttpError(403, "POLICYSQL_COST_UNKNOWN", "The query cost could not be bounded safely.");
@@ -98,8 +98,9 @@ export const estimateSealedEnvelope = async (
   compiled,
   env,
   requestId,
-  transportFactory = (bindings, id) => new TursoHttpTransport(bindings, id),
+  transportFactory: (...args: any[]) => any,
 ) => {
+  if (typeof transportFactory !== "function") throw databaseRequired();
   const catalog = parseCatalog(env);
   let transaction;
   try {
@@ -108,7 +109,7 @@ export const estimateSealedEnvelope = async (
       .filter(({ statement }) => statement.operation !== "insert");
     let results = [];
     if (planned.length > 0) {
-      const transport = transportFactory(env, `${requestId}-cost`);
+      const transport = await transportFactory(env, `${requestId}-cost`);
       transaction = await transport.begin("read", 1_000);
       results = await transaction.execute(planned.map(({ statement }) => ({
         sql: statement.costExplainSql,
@@ -148,7 +149,7 @@ export const observeCostEnvelope = async (
   compiled,
   env,
   requestId,
-  transportFactory = (bindings, id) => new TursoHttpTransport(bindings, id),
+  transportFactory: (...args: any[]) => any,
 ) => {
   try {
     const observation = await estimateSealedEnvelope(compiled, env, requestId, transportFactory);

@@ -38,7 +38,7 @@ test("decodes exact usage metrics while preserving transaction ownership", async
     }));
   };
   const transport = new TursoHttpTransport(
-    { TURSO_DATABASE_URL: "https://db.test", TURSO_AUTH_TOKEN: "secret" },
+    { url: "https://db.test", authToken: "secret" },
     "req_1",
     fetchImpl,
   );
@@ -52,7 +52,7 @@ test("decodes exact usage metrics while preserving transaction ownership", async
 
 test("rejects missing per-query billing metrics", async () => {
   const transport = new TursoHttpTransport(
-    { TURSO_DATABASE_URL: "https://db.test", TURSO_AUTH_TOKEN: "secret" },
+    { url: "https://db.test", authToken: "secret" },
     "req_1",
     async () => new Response(JSON.stringify({
       baton: "baton",

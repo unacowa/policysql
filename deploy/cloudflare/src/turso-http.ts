@@ -92,14 +92,14 @@ export class TursoHttpTransport {
   readonly requestId: string;
   readonly fetchImpl: typeof fetch;
 
-  constructor(env, requestId, fetchImpl = undefined) {
-    if (!env.TURSO_DATABASE_URL || !env.TURSO_AUTH_TOKEN) throw databaseFailure();
-    const url = new URL(env.TURSO_DATABASE_URL);
+  constructor(connection: { url: string; authToken: string }, requestId, fetchImpl = undefined) {
+    if (!connection?.url || !connection?.authToken) throw databaseFailure();
+    const url = new URL(connection.url);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
       throw databaseFailure();
     }
     this.url = new URL("/v2/pipeline", url).toString();
-    this.token = env.TURSO_AUTH_TOKEN;
+    this.token = connection.authToken;
     this.requestId = requestId;
     // Cloudflare requires its host fetch receiver; test adapters remain ordinary functions.
     this.fetchImpl = fetchImpl
@@ -110,6 +110,7 @@ export class TursoHttpTransport {
   async pipeline(requests, baton = undefined, timeoutMs = 1_000) {
     const response = await this.fetchImpl(this.url, {
       method: "POST",
+      redirect: "error",
       headers: {
         authorization: `Bearer ${this.token}`,
         "content-type": "application/json",

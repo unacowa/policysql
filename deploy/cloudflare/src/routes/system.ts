@@ -10,11 +10,11 @@ export const registerSystemRoutes = (app: Hono<AppEnv>, dependencies: AppDepende
       status: "ok",
       live: true,
       ready: Boolean(
-        (context.env.POLICYSQL_JWKS_JSON || context.env.POLICYSQL_JWKS_URL) &&
-          context.env.POLICYSQL_JWT_ISSUER &&
-          context.env.POLICYSQL_JWT_AUDIENCE,
+        (context.env.deployment.POLICYSQL_JWKS_JSON || context.env.deployment.POLICYSQL_JWKS_URL) &&
+          context.env.deployment.POLICYSQL_JWT_ISSUER &&
+          context.env.deployment.POLICYSQL_JWT_AUDIENCE,
       ),
-      environment: context.env.POLICYSQL_ENVIRONMENT,
+      environment: context.env.deployment.POLICYSQL_ENVIRONMENT,
       abiVersion: runtime.abi_version,
       profile: runtime.profile,
       snapshot: runtime.snapshot,

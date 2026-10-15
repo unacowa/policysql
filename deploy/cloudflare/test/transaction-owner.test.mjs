@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { testBinding, testProvider } from "./helpers/database.mjs";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 
 const makeStorage = () => {
@@ -29,6 +30,7 @@ const transaction = () => ({
 });
 
 const runtime = () => ({
+  snapshot: "test-snapshot",
   released: 0,
   compile_json() {
     return JSON.stringify({
@@ -66,7 +68,7 @@ const auth = { subject: "u1", role: "member", roles: ["member"], access: ["execu
 const call = (owner, action, body) => owner.fetch(new Request(`https://owner/${action}`, {
   method: "POST",
   headers: { "content-type": "application/json", "x-policysql-request-id": "req" },
-  body: JSON.stringify(body),
+  body: JSON.stringify({ databaseBinding: testBinding(owner.getRuntime().snapshot), snapshot: owner.getRuntime().snapshot, ...body }),
 }));
 
 const setup = async () => {
@@ -77,7 +79,7 @@ const setup = async () => {
     { storage },
     environment,
     () => compiler,
-    () => ({ begin: async () => database }),
+    testProvider(() => ({ begin: async () => database })),
   );
   const begin = await call(owner, "begin", { transactionId: txId, authFingerprint: fingerprint, startFingerprint, mode: "read", auth });
   assert.equal(begin.status, 201);
@@ -107,7 +109,7 @@ test("rolls back on a sequence gap", async () => {
 test("fails closed after owner replacement and on alarm expiry", async () => {
   const { storage, database, compiler } = await setup();
   const replacement = new TransactionOwnerCore(
-    { storage }, environment, () => compiler, () => ({ begin: async () => transaction() }),
+    { storage }, environment, () => compiler, testProvider(() => ({ begin: async () => transaction() })),
   );
   const lost = await call(replacement, "statement", { transactionId: txId, authFingerprint: fingerprint, command: { sequence: 1, sql: "SELECT id FROM projects", params: {} } });
   assert.equal(lost.status, 409);
@@ -121,6 +123,7 @@ test("fails closed after owner replacement and on alarm expiry", async () => {
 });
 
 const commitRuntime = () => ({
+  snapshot: "test-snapshot",
   released: 0,
   compile_json(_auth, envelope) {
     const sql = JSON.parse(envelope).statements[0].sql;
@@ -204,7 +207,7 @@ test("commit check callback SELECT uses the same owner transaction before commit
       VALIDATOR_SECRET: "0123456789abcdef0123456789abcdef",
     },
     () => compiler,
-    () => ({ begin: async () => database }),
+    testProvider(() => ({ begin: async () => database })),
     hookFetch,
   );
   await call(owner, "begin", { transactionId: txId, authFingerprint: fingerprint, startFingerprint, mode: "write", auth });
@@ -243,7 +246,7 @@ test("commit check denial rolls back and suppresses commit", async () => {
       VALIDATOR_SECRET: "0123456789abcdef0123456789abcdef",
     },
     () => commitRuntime(),
-    () => ({ begin: async () => database }),
+    testProvider(() => ({ begin: async () => database })),
     async () => new Response(JSON.stringify({ version: "1", allowed: false }), { status: 200 }),
   );
   await call(owner, "begin", { transactionId: txId, authFingerprint: fingerprint, startFingerprint, mode: "write", auth });
@@ -303,7 +306,7 @@ test("atomic mutation runs commit check and callback query before idempotency co
       VALIDATOR_SECRET: "0123456789abcdef0123456789abcdef",
     },
     () => compiler,
-    () => ({ begin: async () => database }),
+    testProvider(() => ({ begin: async () => database })),
     hookFetch,
   );
   const response = await call(owner, "atomic", {
@@ -340,7 +343,7 @@ test("atomic replay rejects malformed database-owned response JSON", async () =>
     { storage },
     environment,
     () => commitRuntime(),
-    () => ({ begin: async () => database }),
+    testProvider(() => ({ begin: async () => database })),
   );
   const response = await call(owner, "atomic", {
     validationId: `cval_${"d".repeat(32)}`,
