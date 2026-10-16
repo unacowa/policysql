@@ -23,6 +23,8 @@ export interface PolicyQueryExecution<Row> {
 export interface PolicyKyselyOptions<DB> {
   kysely: DB
   client: PolicySqlClient
+  /** Generate a new key for each mutation execution without an explicit key. Default: false. */
+  autoIdempotencyKey?: boolean
   onQuery?: (request: CompiledPolicyQuery) => void
   onResult?: (event: { request: CompiledPolicyQuery; result: PolicyQueryResult<unknown> }) => void
   onError?: (event: { request: CompiledPolicyQuery; error: unknown }) => void

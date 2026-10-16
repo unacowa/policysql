@@ -8,6 +8,18 @@ permissions:
   contents: read
 
 jobs:
+  clients:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:clients
+      - run: npm run spec:validate
+
   cloudflare:
     runs-on: ubuntu-latest
     steps:

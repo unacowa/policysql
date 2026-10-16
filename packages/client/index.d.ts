@@ -7,6 +7,7 @@ export interface PolicySqlClientOptions {
   fetchImpl?: typeof fetch
 }
 export interface PolicyExecuteOptions {
+  /** Optional replay key (16-128 ASCII letters, digits, . _ : -). Reuse with identical payloads. */
   idempotencyKey?: string
   expect?: { affectedRows?: number; rowCount?: number }
 }
