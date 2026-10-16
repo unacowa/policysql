@@ -17,6 +17,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run check:clients
       - run: npm run test:clients
       - run: npm run spec:validate
 
@@ -28,7 +29,10 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: deploy/cloudflare/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            deploy/cloudflare/package-lock.json
+      - run: npm ci
       - run: npm ci --prefix deploy/cloudflare
       - run: npm --prefix deploy/cloudflare run verify
 

@@ -1,151 +1,47 @@
-import { SqliteQueryCompiler, createQueryId } from "kysely";
+import { SqliteAdapter, SqliteQueryCompiler } from "kysely";
+import { copyJson } from "../client/protocol.js";
+import { PolicySqlDriver } from "./driver.js";
+import { extractOptions, operation } from "./options.js";
+export { policyOptions } from "./options.js";
 
-const bindings = new WeakMap();
-
-class PolicySqliteQueryCompiler extends SqliteQueryCompiler {
-  getCurrentParameterPlaceholder() {
-    return `:p${this.numParameters}`;
+const freezeJson = (value) => {
+  if (value && typeof value === "object") {
+    Object.values(value).forEach(freezeJson);
+    Object.freeze(value);
+  }
+  return value;
+};
+class PolicySqlQueryCompiler extends SqliteQueryCompiler {
+  #compiled;
+  constructor(compiled) { super(); this.#compiled = compiled; }
+  getCurrentParameterPlaceholder() { return `:p${this.numParameters}`; }
+  compileQuery(root, queryId) {
+    const { node, options } = extractOptions(root);
+    const compiled = super.compileQuery(node, queryId);
+    const query = Object.freeze({ ...compiled, parameters: freezeJson(copyJson(compiled.parameters)) });
+    this.#compiled.set(query, Object.freeze({ operation: operation(node), options }));
+    return query;
   }
 }
-
-const compiler = new PolicySqliteQueryCompiler();
-
-const operationFromNode = (node) => {
-  switch (node?.kind) {
-    case "SelectQueryNode": return "select";
-    case "InsertQueryNode": return "insert";
-    case "UpdateQueryNode": return "update";
-    case "DeleteQueryNode": return "delete";
-    default: throw new TypeError("unsupported Kysely query operation");
+class PolicySqlAdapter extends SqliteAdapter {
+  get supportsMultipleConnections() { return true; }
+  async acquireMigrationLock() { throw new TypeError("PolicySQL migrations are not supported"); }
+  async releaseMigrationLock() { throw new TypeError("PolicySQL migrations are not supported"); }
+}
+export class PolicySqlDialect {
+  #client;
+  #config;
+  #compiled = new WeakMap();
+  constructor({ client, autoIdempotencyKey = false }) {
+    if (typeof client?.execute !== "function" || typeof client?.beginTransaction !== "function") {
+      throw new TypeError("PolicySqlDialect requires a PolicySqlClient");
+    }
+    if (typeof autoIdempotencyKey !== "boolean") throw new TypeError("autoIdempotencyKey must be a boolean");
+    this.#client = client;
+    this.#config = Object.freeze({ autoIdempotencyKey });
   }
-};
-
-export const compilePolicyQuery = (query) => {
-  if (typeof query?.toOperationNode === "function") {
-    const node = query.toOperationNode();
-    const compiled = compiler.compileQuery(node, createQueryId());
-    return {
-      operation: operationFromNode(node),
-      sql: compiled.sql,
-      params: Object.fromEntries(compiled.parameters.map((value, index) => [`p${index + 1}`, value])),
-    };
-  }
-
-  // A precompiled query has already discarded the boundary between SQL syntax and string
-  // literals/comments. It is safe only when there are no positional values to rewrite.
-  const compiled = query?.compile?.();
-  if (!compiled) throw new TypeError("query must expose Kysely toOperationNode()");
-  const parameters = compiled.parameters ?? [];
-  if (parameters.length !== 0) {
-    throw new TypeError("parameterized queries must expose Kysely toOperationNode()");
-  }
-  return { operation: "select", sql: compiled.sql, params: {} };
-};
-
-const randomIdempotencyKey = () => {
-  if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
-  throw new TypeError("autoIdempotencyKey requires crypto.randomUUID or an explicit idempotencyKey");
-};
-
-const executeQuery = async (query, binding, options = {}) => {
-  const request = compilePolicyQuery(query);
-  const idempotencyKey = request.operation === "select" ? undefined
-    : options.idempotencyKey !== undefined ? options.idempotencyKey
-    : binding.autoIdempotencyKey ? randomIdempotencyKey() : undefined;
-  const executeOptions = {
-    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-    ...(options.expect ? { expect: options.expect } : {}),
-  };
-  binding.onQuery?.(request);
-  try {
-    const result = await binding.client.execute(request.sql, request.params, executeOptions);
-    binding.onResult?.({ request, result });
-    return result;
-  } catch (error) {
-    binding.onError?.({ request, error });
-    throw error;
-  }
-};
-
-const policyExecution = (query, binding, options = {}) => ({
-  async execute() {
-    return (await executeQuery(query, binding, options)).rows;
-  },
-  async executeTakeFirst() {
-    return (await executeQuery(query, binding, options)).rows[0];
-  },
-  async executeTakeFirstOrThrow() {
-    const row = (await executeQuery(query, binding, options)).rows[0];
-    if (row === undefined) throw new Error("PolicySQL query returned no result");
-    return row;
-  },
-  async executeWithPolicyMeta() {
-    return await executeQuery(query, binding, options);
-  },
-});
-
-const wrap = (value, binding, proxies) => {
-  if ((typeof value !== "object" || value === null) && typeof value !== "function") return value;
-  const existing = proxies.get(value);
-  if (existing) return existing;
-  const proxy = new Proxy(value, {
-    get(target, property, receiver) {
-      if (typeof target.toOperationNode === "function") {
-        const execution = policyExecution(target, binding);
-        if (property === "execute") return execution.execute;
-        if (property === "executeTakeFirst") return execution.executeTakeFirst;
-        if (property === "executeTakeFirstOrThrow") return execution.executeTakeFirstOrThrow;
-        if (property === "executeWithPolicyMeta") return execution.executeWithPolicyMeta;
-      }
-      const member = Reflect.get(target, property, receiver);
-      if (typeof member !== "function") return member;
-      return (...args) => wrap(Reflect.apply(member, target, args), binding, proxies);
-    },
-  });
-  bindings.set(proxy, binding);
-  proxies.set(value, proxy);
-  return proxy;
-};
-
-export const bindPolicyKysely = (kysely, clientOrOptions) => {
-  const binding = clientOrOptions?.client
-    ? clientOrOptions
-    : { client: clientOrOptions };
-  if (!binding.client?.execute) throw new TypeError("PolicySQL client is required");
-  if (binding.autoIdempotencyKey !== undefined && typeof binding.autoIdempotencyKey !== "boolean") {
-    throw new TypeError("autoIdempotencyKey must be a boolean");
-  }
-  return wrap(kysely, { ...binding, autoIdempotencyKey: binding.autoIdempotencyKey ?? false }, new WeakMap());
-};
-
-const resolveBinding = (query, explicitClient) => {
-  if (explicitClient) return { client: explicitClient };
-  const binding = bindings.get(query);
-  if (!binding) throw new TypeError("PolicySQL client is not bound");
-  return binding;
-};
-
-export const policyQuery = (query, options = {}, explicitClient) => {
-  // Compile eagerly so unsupported/precompiled parameterized queries fail before execution.
-  compilePolicyQuery(query);
-  return policyExecution(query, resolveBinding(query, explicitClient), options);
-};
-
-export const policySelect = (query, _resource, _conditionalColumns = [], explicitClient) => {
-  const execution = policyQuery(query, {}, explicitClient);
-  return {
-    execute: execution.execute,
-    executeTakeFirst: execution.executeTakeFirst,
-    executeTakeFirstOrThrow: execution.executeTakeFirstOrThrow,
-    executeWithPolicyMeta: execution.executeWithPolicyMeta,
-  };
-};
-
-export const policyMutation = (query, options = {}, explicitClient) => {
-  const compiled = compilePolicyQuery(query);
-  if (compiled.operation === "select") throw new TypeError("policyMutation requires a mutation query");
-  return policyExecution(query, resolveBinding(query, explicitClient), options);
-};
-
-export const createPolicyKysely = ({ kysely, client, autoIdempotencyKey = false, onQuery, onResult, onError }) =>
-  bindPolicyKysely(kysely, { client, autoIdempotencyKey, onQuery, onResult, onError });
+  createAdapter() { return new PolicySqlAdapter(); }
+  createQueryCompiler() { return new PolicySqlQueryCompiler(this.#compiled); }
+  createDriver() { return new PolicySqlDriver(this.#client, this.#config, this.#compiled); }
+  createIntrospector() { throw new TypeError("PolicySQL database introspection is not supported; use the public Catalog"); }
+}

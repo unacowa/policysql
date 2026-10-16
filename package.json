@@ -25,7 +25,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "docs:stage": "node scripts/stage-spec-assets.mjs",
@@ -36,7 +36,8 @@
     "docs:preview": "vitepress preview website",
     "docs:search:test": "node scripts/verify-docs-search.mjs",
     "spec:validate": "node scripts/validate-policy-spec.mjs",
-    "test:clients": "node --test packages/*/*.test.mjs"
+    "test:clients": "node --test packages/*/*.test.mjs",
+    "check:clients": "tsc -p packages/tsconfig.json"
   },
   "dependencies": {
     "@tursodatabase/serverless": "1.4.0",
@@ -47,6 +48,7 @@
   },
   "devDependencies": {
     "ajv": "8.20.0",
+    "typescript": "5.9.3",
     "vitepress": "1.6.4"
   },
   "repository": {

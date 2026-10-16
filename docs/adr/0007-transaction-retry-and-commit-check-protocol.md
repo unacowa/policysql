@@ -37,3 +37,21 @@ unkeyed request into a keyed retry or require `policysql_idempotency`.
 - Idempotency storage is security and availability state and must be bounded, encrypted as appropriate, and retained at least as long as advertised.
 - Validators can inspect any resource visible to the configured role, including unchanged tables and uncommitted post-state, without receiving raw SQL or a database connection.
 - Multiple validators increase transaction hold time because checks and callback queries are serialized.
+
+### Kysely client contract (Spec #6)
+
+The Kysely Dialect does not expose or generate interactive start keys. It may retry an
+unkeyed start before returning a transaction or running its callback. Each attempt may
+create a new owner; unused empty transactions expire. This does not remove the HTTP
+API's optional start-key support. Once started, the driver uses the same transaction ID,
+command sequence and serialized payload for retries and never replays the callback.
+
+An unresolved command blocks contradictory commands. In particular a lost commit response
+is not proof of rollback: repeat that same commit to confirm it, and require a committed
+response status. Kysely's rollback-on-error path must not reverse an unresolved commit.
+
+Driver shutdown rejects new work but preserves the outcome of an in-flight command.
+Kysely's rollback-on-error cleanup still consults the existing transaction after shutdown:
+an uncertain or failed command retains its original error, while an already confirmed
+rollback needs no further request. Shutdown completion is resource cleanup, not proof of
+commit or rollback; the application must also observe its transaction promise.

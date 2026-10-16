@@ -91,6 +91,12 @@ Cloudflare embedders can supply request-scoped database connections from their o
 wrapper. See the [database binding API](docs/database-routing.md) and the
 [two-tenant Worker/DO example](examples/database-routing/README.md).
 
+TypeScript applications can use standard Kysely CRUD and interactive transactions through
+`PolicySqlDialect`. Start with `new PolicySqlClient({ endpoint, token })`; role selection,
+paired version preconditions, and atomic idempotency keys are optional. See the
+[Kysely guide and migration table](website/clients/kysely.md) and
+[runnable client example](examples/database-routing/client.mjs).
+
 1. Read [`docs/codex-handoff.md`](docs/codex-handoff.md).
 2. Read [`docs/security-model.md`](docs/security-model.md) before implementing rewrites.
 3. Keep the initial SQL subset intentionally small.

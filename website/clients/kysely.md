@@ -1,278 +1,228 @@
 ---
-title: Kysely client
-description: TypeScriptとKyselyからPolicySQLを利用する公式サポート方針です。
+title: Kysely
+description: Kysely標準のクエリ・更新結果・対話型トランザクションをPolicySQL経由で利用します。
 ---
 
-# Kysely client
+# Kysely
 
-PolicySQLは、TypeScript application向けの公式サポートクライアントとしてKyselyを対象にします。
+PolicySQL の Dialect を設定すると、Kysely 標準のクエリとトランザクションを、PolicySQL の認可・検証を通して実行できます。対応する Kysely は **0.29.5** です。Node.js は 22 以上が必要で、CI は Node.js 24 で検証します。
 
-KyselyはSQL builderとして使い、最終的なSQL実行先はdatabase driverではなくPolicySQL gatewayにします。PolicySQL clientは、Kyselyが生成したSQL、parameters、JWT、roleを受け取り、通常は`POST /v1/transactions:execute`へ送信します。途中結果から次のSQLを作る場合だけ対話型Transaction APIを使用します。
-
-## 対象
-
-- TypeScript application
-- KyselyでSQLを組み立てたいclient
-- PolicySQLの型生成を使い、roleごとの参照可能列を開発時に確認したいclient
-
-Kyselyの型は開発補助であり、セキュリティ境界ではありません。最終的な認可は、gatewayがrequestごとにSQLをparse、bind、policy適用して判断します。
-
-## 実行の形
+## 接続する
 
 ```ts
-import { createPolicyKysely } from '@unacowa/policysql/kysely'
+import { Kysely } from 'kysely'
+import { PolicySqlClient } from '@unacowa/policysql/client'
+import { PolicySqlDialect, policyOptions } from '@unacowa/policysql/kysely'
 
-const policyDb = createPolicyKysely({ kysely: db, client })
-const rows = await policyDb
-  .selectFrom('posts')
+interface Database {
+  posts: {
+    id: string
+    title: string
+    status: 'draft' | 'published'
+  }
+}
+
+const client = new PolicySqlClient({ endpoint, token })
+const db = new Kysely<Database>({
+  dialect: new PolicySqlDialect({ client }),
+})
+```
+
+`endpoint` と `token` はアプリケーションの設定から渡します。DB の接続情報は gateway 側の wrapper が管理します。クライアントに Turso の認証情報を渡しません。
+
+`role` を省略すると、gateway が検証した JWT の `default_role` を使います。別の許可済みロールを選ぶ場合や、想定する schema / policy と一致するときだけ実行したい場合は、追加のオプションを指定します。
+
+```ts
+const client = new PolicySqlClient({
+  endpoint,
+  token,
+  role: 'author',
+  schemaVersion: 'schema_17',
+  policyVersion: 'policy_42',
+})
+```
+
+`role` とバージョン条件は独立して省略できます。`schemaVersion` と `policyVersion` は **両方指定するか、両方省略**します。片方だけの指定、空文字、`null`、不正な型は送信前にエラーになります。
+
+バージョン条件を省略すると、現在の schema / policy で検証・認可・実行します。指定して不一致だった場合は `POLICYSQL_STALE_OPERATION` で拒否し、条件を外して再送しません。Catalog の自動取得は行いません。
+
+## 検索・更新する
+
+```ts
+const posts = await db.selectFrom('posts')
   .select(['id', 'title'])
   .where('status', '=', 'published')
-  .limit(20)
   .execute()
-```
 
-公式clientは、Kysely queryをPolicySQLのrequestへ変換します。
-
-```json
-{
-  "expected": {
-    "schemaVersion": "schema_17",
-    "policyVersion": "policy_42"
-  },
-  "statements": [
-    {
-      "sql": "select id, title, author_email from posts where status = :p1 limit :p2",
-      "params": { "p1": "published", "p2": 20 }
-    }
-  ]
-}
-```
-
-公式clientはKyselyの`OperationNode`を専用SQLite query compilerで再compileし、parameter nodeだけを衝突しないnamed parameterへ変換して上記のwire formatで送信します。SQL文字列への正規表現置換は行わないため、string literalやcomment内の`?`は変更されません。parameter付きqueryが`toOperationNode()`を公開せず、compile済みSQL textしか渡さない場合は、安全に構文境界を復元できないため送信前に拒否します。client applicationはdatabase credentialを持ちません。
-
-生成clientは型生成に使用したCatalogの`schemaVersion`と`policyVersion`を各requestの`expected`へ自動的に付けます。stale errorを受けた場合はCatalogを再取得し、生成物を更新するまで型不一致のrequestを自動retryしません。
-
-## Table型生成
-
-PolicySQLはcompiled CatalogからKysely table用の型定義を生成します。CatalogはSQLite schema、logical type補足、role policyを統合したclient contractです。
-
-```ts
-import type { ColumnType } from 'kysely'
-
-export type NullableOnDenied<T> = T | null
-
-export interface DB {
-  posts: {
-    id: ColumnType<string, never, never>
-    title: ColumnType<string, string, string>
-    body: ColumnType<string, string, string>
-    author_id: ColumnType<string, never, never>
-  }
-}
-```
-
-条件付き出力列は通常のKysely table interfaceへ含めません。これにより標準の`.where()`、`.orderBy()`、JOINなどへ候補として現れません。projectionには公式clientの`policySelect` helperを使用します。helperの生成型は`NullableOnDenied<T>`を通常の`T | null`として返しながら、source mapと生成ドキュメントへpolicy nullable情報を保持します。
-
-日時、UUID、JSONなどはCatalogの`type`、`representation`、`format`から生成します。標準では日時をJavaScriptの`Date`へ暗黙変換せず、意味を保持するbranded stringとして生成します。型体系は[型・フォーマット・制約](../data-validity/types-and-formats)、client実装規則は[Client開発ガイド](./driver-development)を参照してください。
-
-## Query固有の型生成
-
-raw SQL、literal、function、aggregateなどquery固有のparameter/result型はCatalogだけでは決めません。公式generatorがbuild時にPolicySQLのExplain APIへonline compileを行います。
-
-```sql
-SELECT 1 AS value;
-```
-
-```ts
-export interface ConstantRow {
-  value: number
-}
-```
-
-Kysely builder自身が推論できる型はeditor上でそのまま利用できます。生成対象queryについてはExplainのdescriptorを正とし、Kyselyの推論または`sql<T>` annotationと一致しない場合はcode generationを失敗させます。
-
-生成時だけPolicySQLへ接続し、生成されたTypeScriptを通常のbuild inputとして保存します。`tsc`とapplication runtimeは型生成目的のnetwork requestを行いません。CLI、build token、snapshot管理は[TypeScript型生成](./type-generation)を参照してください。
-
-## Role別の型
-
-roleが固定できる環境では、role別DB型を生成できます。
-
-```ts
-import type { AuthorDB, AdminDB } from './policysql.generated'
-
-const authorDb = createPolicyKysely<AuthorDB>({ role: 'author' })
-const adminDb = createPolicyKysely<AdminDB>({ role: 'admin' })
-```
-
-role別型では、そもそも参照できないtableやcolumnを型から外します。行条件によって値が見える場合と`null`化される場合が混在するcolumnは、別のpolicy projection型へ`NullableOnDenied<T>`として生成します。
-
-policy nullable columnはCatalog上で`usage: ["projection"]`を持ち、通常table interfaceとは別の生成interfaceへ出力します。gatewayはWHERE、JOIN、ORDER、GROUP、functionなどでの利用を拒否します。raw SQLやTypeScriptの型escapeは可能なので、gateway enforcementが最終保証です。
-
-```ts
-export interface AuthorDB {
-  posts: {
-    id: string
-    title: string
-  }
-}
-
-export interface AuthorPolicyProjection {
-  posts: {
-    author_email: NullableOnDenied<string>
-  }
-}
-
-export interface AdminDB {
-  posts: {
-    id: string
-    title: string
-    author_email: string | null
-  }
-}
-```
-
-## Response meta
-
-PolicySQLのwire responseは単一statementでもtop-level `results[]`と`meta`を返します。公式Kysely clientはstatement単位のKysely APIに合わせて`results[0]`を取り出し、通常の`execute()`では`rows`だけを返します。必要な場合はstatement meta付き結果を取得できます。
-
-```ts
-import { policyQuery } from '@unacowa/policysql/kysely'
-
-const result = await policyQuery(
-  policyDb.selectFrom('posts').select(['id', 'title']),
-).executeWithPolicyMeta()
-
-result.rows
-result.meta.result.columns
-result.meta.result.redactions
-```
-
-`meta.result.columns`には、aliasや式を反映した結果列の型と最終的なnullable性が含まれます。基底columnの`nullableOnDenied`はCatalogと生成型に含まれ、query responseでは繰り返しません。
-
-```json
-{
-  "name": "author_email",
-  "type": "string",
-  "representation": "string",
-  "nullable": true
-}
-```
-
-`meta.result.redactions`はpolicyのvisibilityがdenyだったcellを示します。値が`null`でもredactionがなければ、visibilityはTRUEで元データがNULLです。元データ自体がNULLでもvisibilityがdenyならredactionを記録します。
-
-```ts
-const wasRedacted = result.meta.result.redactions.some(
-  (item) => item.row === 0 && item.column === 'author_email',
-)
-```
-
-`row`は`result.rows`に対する0始まりのindex、`column`はKyselyで指定したalias適用後の結果列名です。公式clientはこの情報を隠しません。利用するかどうかはclient applicationの責務です。
-
-## Mutation
-
-INSERT、UPDATE、DELETEはKyselyのmutation builderから実行できます。
-
-```ts
-import { policyMutation } from '@unacowa/policysql/kysely'
-
-const result = await policyMutation(
-  policyDb
-    .updateTable('posts')
-    .set({ title: 'Updated title' })
-    .where('id', '=', 'post_01')
-    .returning(['id', 'title']),
-  { idempotencyKey: crypto.randomUUID() },
-).executeWithPolicyMeta()
-```
-
-`createPolicyKysely`でbindしたbuilderの通常の`.execute()`も同じPolicySQL境界を通ります。`policyMutation`はPolicySQL独自の実行ラッパーで、optionsをHTTPクライアントへ直接渡します。`idempotencyKey`はHTTPヘッダー、`expect`はrequest本文に入ります。`executeWithPolicyMeta()`も独自APIです。現在はKyselyの標準Driverやpluginの`transformResult`を経由しません。標準Dialect／Driverへの移行は[Issue #4](https://github.com/unacowa/policysql/issues/4)で扱います。
-
-### キーの自動付与
-
-作成時の`autoIdempotencyKey`で、更新時のキー自動生成を設定します。既定値は`false`です。`bindPolicyKysely(db, { client, autoIdempotencyKey })`にも同じ設定を渡せます。
-
-```ts
-const policyDb = createPolicyKysely({
-  kysely: db,
-  client,
-  autoIdempotencyKey: false,
-})
-
-// キーを送らず、利用DBのpolicysql_idempotencyを使用しない
-await policyDb.updateTable('posts')
+const result = await db.updateTable('posts')
   .set({ title: 'Updated title' })
   .where('id', '=', 'post_01')
+  .executeTakeFirstOrThrow()
+
+result.numUpdatedRows // bigint
+```
+
+INSERT / UPDATE / DELETE で RETURNING を指定しない場合は、Kysely 標準の `InsertResult` / `UpdateResult` / `DeleteResult` を返します。更新後の値や生成された ID が必要なら `returning()` を使用します。`insertId` は提供しません。
+
+```ts
+const post = await db.insertInto('posts')
+  .values({ id: 'post_02', title: 'New post', status: 'draft' })
+  .returning(['id', 'title'])
+  .executeTakeFirstOrThrow()
+```
+
+通常の `.execute()`、`.executeTakeFirst()`、`.executeTakeFirstOrThrow()` をそのまま使えます。Kysely の型は認可を保証せず、gateway が毎回 SQL を検証します。
+
+## 成功する件数を指定する
+
+`expect` を付けると、PolicySQL が commit 前に件数を検証します。条件を満たさない場合は rollback します。
+
+```ts
+await db.updateTable('posts')
+  .set({ status: 'published' })
+  .where('id', '=', 'post_01')
+  .withPlugin(policyOptions({ expect: { affectedRows: 1 } }))
   .execute()
 ```
 
-| 作成時の設定 | 操作ごとのキー | 動作 |
-| --- | --- | --- |
-| `false`または省略 | 省略 | キーを送信しない。冪等性テーブル不要 |
-| `true` | 省略 | 更新の実行ごとにキーを自動生成して送信。テーブルが必要 |
-| どちらでも | 明示 | 指定したキーを送信。テーブルが必要 |
+`affectedRows` は更新件数、`rowCount` は SELECT / RETURNING の行数です。非対話型の更新が返った後にアプリケーションで件数を検査しても、既に行われた commit は取り消せません。
 
-以前のクライアントは省略時に自動生成していました。同じ動作が必要な場合は`autoIdempotencyKey: true`を指定してください。自動生成時に`crypto.randomUUID`が利用できなければ、送信前にエラーになります。自動生成を無効にした場合と明示キーを使う場合はWeb Cryptoを必要としません。空値や不正形式の明示キーは、省略や自動生成に置き換えずエラーにします。
+## 対話型トランザクション
 
-キー省略を使う前にgatewayも任意キー対応版へ更新してください。旧gatewayを利用している間は、`autoIdempotencyKey: true`または明示キーを使用します。
-
-### 同じ更新の再送
-
-キーは一つの業務操作につき一度生成し、再送時にも更新内容とともに保持します。
+先行クエリの結果を使い、次の処理を決められます。
 
 ```ts
-// 新しい業務操作を開始するときに一度だけ作る
-const idempotencyKey = crypto.randomUUID()
-const operation = policyMutation(
-  policyDb.updateTable('posts')
-    .set({ title: 'Updated title' })
+const postId = await db.transaction().execute(async (trx) => {
+  const post = await trx.selectFrom('posts')
+    .select(['id', 'status'])
     .where('id', '=', 'post_01')
-    .returning(['id', 'title']),
-  { idempotencyKey, expect: { affectedRows: 1 } },
-)
+    .executeTakeFirstOrThrow()
 
-await operation.executeWithPolicyMeta()
+  if (post.status !== 'draft') throw new Error('Post must be a draft')
 
-// 応答が届かなかった場合の再送ボタンなどから呼ぶ
-async function retry() {
-  return operation.executeWithPolicyMeta()
-}
-```
-
-自動生成は実行ごとに別キーを作るため、applicationでの再送の重複排除には明示キーを使います。キー付きAtomic Executeでは`policysql_idempotency`の事前作成が必要です。同じ認証context・DB binding・payloadと、保存済みの再送記録を使う前提です。ページ再読み込み後にも再送する場合は、キーと更新内容を保存して復元します。キーなしの更新は要求ごとに実行されるため、結果不明時に自動再送すると二重更新になり得ます。
-
-`RETURNING`がある場合、`result.rows`、`result.meta.result.columns`、`result.meta.result.redactions`が返ります。`RETURNING`がない場合、`result.rows`と`result.meta.result.redactions`は空配列で、`result.affectedRows`と`result.meta.mutation`を確認します。
-
-```ts
-result.affectedRows
-result.meta.mutation?.operationCheck
-result.meta.mutation?.commitChecks
-```
-
-## Transaction
-
-複数statementを事前にまとめてatomicに実行する場合は、一つの`statements[]`としてAtomic Executeへ送ります。現行のKysely adapterは`transaction()`をPolicySQLの対話型Transaction APIへ接続しません。次の形は未対応であり、使用するとPolicySQL境界を通るtransactionにはなりません。
-
-```ts
-await policyDb.transaction().execute(async (trx) => {
-  await trx
-    .updateTable('posts')
+  await trx.updateTable('posts')
     .set({ status: 'published' })
-    .where('id', '=', 'post_01')
+    .where('id', '=', post.id)
+    .withPlugin(policyOptions({ expect: { affectedRows: 1 } }))
     .execute()
 
-  await trx
-    .insertInto('audit_logs')
-    .values({ action: 'post.published', post_id: 'post_01' })
-    .execute()
+  return post.id
 })
 ```
 
-対応済みのatomic client APIまたはHTTP APIを使用し、client SQLとして`BEGIN`、`COMMIT`、`ROLLBACK`を送信しません。
+callback の正常終了後に commit し、その成功を確認してから戻り値を返します。処理中に例外を投げると rollback します。callback 全体を自動で再実行しません。
 
-## 制限
+commit / rollback を自分で管理する形式にも対応します。
 
-- Kyselyの型は認可を保証しない
-- 生SQLを使う場合もPolicySQL gatewayで再検証される
-- database固有関数や未対応SQLはKyselyで表現できてもPolicySQLで拒否される
-- `sql<T>`の`T`は利用者のassertionであり、生成対象queryではExplain descriptorとの一致を検証する
-- `NullableOnDenied<T>`は`T | null`として扱えるヒントであり、行ごとの`null`理由は`meta.result.redactions`で区別する
+```ts
+const trx = await db.startTransaction().setAccessMode('read only').execute()
+const posts = await trx.selectFrom('posts').select(['id', 'title']).execute()
+await trx.commit().execute()
+// 破棄する場合は commit の代わりに await trx.rollback().execute()
+```
+
+既定は write transaction です。read-only transaction で更新はできません。現在の server 上限は **4 秒、8 statements、累積結果 64,000 bytes** です。アプリケーションの待機と commit checks の時間も含みます。
+
+対話型では、利用 DB に `policysql_idempotency` テーブルは不要です。開始キーを指定する補助 API はなく、開始時のキー自動生成も行いません。transaction 内のクエリに `idempotencyKey` を付けると送信前エラーになります。`expect` は利用できます。
+
+開始応答を受け取れず SQL が未実行の場合、開始要求のみを最大 2 回、合計 4 秒以内で試行します。取り残された空の transaction は server の期限処理で閉じます。開始後は同じ transaction ID と sequence によって command を再送します。
+
+## 同じ atomic 更新を再送する
+
+transaction 外の更新には、任意の `idempotencyKey` を付けられます。同じ業務操作を再送するときは、キーと更新内容を保持してください。
+
+```ts
+const idempotencyKey = crypto.randomUUID()
+const operation = db.updateTable('posts')
+  .set({ title: 'Updated title' })
+  .where('id', '=', 'post_01')
+  .withPlugin(policyOptions({ idempotencyKey }))
+
+await operation.execute()
+
+// 応答を受け取れなかった場合の再送ボタン等から呼ぶ
+async function retry() {
+  return operation.execute()
+}
+```
+
+キー付き atomic 更新では、利用 DB に `policysql_idempotency` を事前作成します。同じ認証 context・endpoint・DB binding・payload と、保持中の記録を使う前提です。キーの形式は 16〜128 文字の英数字と `._:-` です。不正な明示キーを省略や自動生成で補いません。
+
+| 設定 | 操作ごとのキー | 動作 |
+| --- | --- | --- |
+| 既定 / `autoIdempotencyKey: false` | 省略 | キーなし。冪等性テーブル不要 |
+| `autoIdempotencyKey: true` | 省略 | atomic 更新の実行ごとに新規生成 |
+| どちらでも | 明示 | 指定したキーを送信 |
+
+```ts
+const db = new Kysely<Database>({
+  dialect: new PolicySqlDialect({ client, autoIdempotencyKey: true }),
+})
+```
+
+自動生成時は `crypto.randomUUID()` が必要です。同じ builder を再実行しても別キーになるため、業務操作の再送には明示キーを使います。SELECT と対話型 transaction には自動付与しません。atomic 更新の通信再試行は自動で行いません。
+
+## 結果の metadata と plugin
+
+```ts
+const posts = await db.selectFrom('posts')
+  .select(['id', 'title'])
+  .withPlugin(policyOptions({
+    onResponse(response) {
+      console.log(response.rows, response.meta)
+    },
+  }))
+  .execute()
+```
+
+`onResponse` は同じ gateway 応答の rows と metadata のコピーを受け取ります。通常の `.execute()` の戻り値は Kysely 標準のままです。`meta.result.columns` は結果型、`meta.result.redactions` はポリシーで伏せられたセルを表します。`NullableOnDenied<T>` は `T | null` の型ヒントとして引き続き使えます。
+
+`CamelCasePlugin` などの `transformQuery` / `transformResult` に対応します。`policyOptions` は、そのクエリの **最後の plugin** として、実行する root query に付けてください。subquery への設定や重複付与は未対応です。
+
+通常の AST コピー・変換による順序不正と、設定の重複・破損は送信前に検出します。ただし、後続の自作 plugin が AST 全体を独立した別の tree に置き換えて設定を消す場合、標準 Dialect から完全には検出できません。自作の query plugin も必ず `policyOptions` より前に設定してください。
+
+metadata は結果変換前の rows に対応します。列名変更や行の並べ替え後の結果へ、元の redaction index / 列名をそのまま適用しないでください。observer が例外を投げても、commit 済みの atomic 更新は取り消されません。
+
+`onResponse` の待機上限は対話型では transaction の残り時間、atomic では応答受信から 5 秒です。超過時は `POLICYSQL_OBSERVER_TIMEOUT` または transaction 期限切れのエラーになります。同じ transaction の次の SQL は `onResponse` 内で待たず、外側のクエリを `await` した後に実行してください。Kysely は observer が返るまでその connection を使用中として扱います。
+
+## エラーと終了処理
+
+`PolicySqlError` の `code` と、HTTP エラーの場合の `status` を確認できます。通信断や不正応答で実行結果を確定できない場合は `PolicySqlOutcomeUnknownError` を返します。
+
+```ts
+import { PolicySqlOutcomeUnknownError } from '@unacowa/policysql/client'
+
+try {
+  await operation.execute()
+} catch (error) {
+  if (error instanceof PolicySqlOutcomeUnknownError) {
+    console.log(error.phase, error.transactionId, error.sequence)
+  }
+  throw error
+}
+```
+
+対話型の command 再送は同じ command ごとに最大 2 回です。statement は transaction の期限以内で試行し、終端 command の記録を確認する場合だけ最大 2 秒の確認時間を確保します。commit の結果が不明な場合に、別 transaction で callback を実行し直したり、反対の rollback を送ったりしません。controlled transaction では同じ `trx.commit().execute()` で pending commit を再確認できます。
+
+利用終了時は `await db.destroy()` で資源を解放します。controlled transaction の終了操作は利用者が管理してください。期限や結果不明のため閉じられない remote transaction は server の期限処理に従います。
+
+`destroy()` は新しい処理の受付を停止します。送信済みの commit と重なった場合は、既定の時間・回数の範囲でその結果を確認し、transaction の Promise に成功または元のエラーを返します。結果不明なら `POLICYSQL_OUTCOME_UNKNOWN` と `phase`・`transactionId`・`sequence` を保持し、rollback 要求は送りません。`destroy()` の完了は commit 成功や rollback 完了の保証ではないため、transaction の Promise も必ず確認してください。
+
+## 旧 API からの移行
+
+Proxy による旧 API は削除しました。
+
+| 旧 API | 移行先 |
+| --- | --- |
+| `createPolicyKysely` / `bindPolicyKysely` | `new Kysely({ dialect: new PolicySqlDialect({ client }) })` |
+| `policyQuery` / `policySelect` / `policyMutation` | 標準 builder。必要な設定は `.withPlugin(policyOptions(...))` |
+| `executeWithPolicyMeta` | `.execute()` と `policyOptions({ onResponse })` |
+| `compilePolicyQuery` | この Dialect の builder の `.compile()` |
+| `onQuery` / `onResult` / `onError` | Kysely の logging / plugin、`onResponse`、通常の例外処理 |
+| `PolicyKyselyOptions` / `PolicyQueryExecution` などの旧 wrapper 型 | `PolicySqlDialectOptions` / `PolicyOptions` と Kysely 標準の builder・結果型 |
+
+RETURNING なしの更新結果も Kysely 標準へ変わります。行が必要なら RETURNING を付けてください。既存の別 Dialect の Kysely instance に client を後付け bind する方式は廃止しました。
+
+## 対応範囲
+
+利用できる SQL は [SELECT](../sql/select)・[更新 SQL](../sql/mutations) と各ポリシーで制限されます。明示的な isolation level、savepoint、nested transaction、stream、schema / migration / DB introspection、トップレベル raw statement は未対応です。query 内の SQL 式も gateway の検証対象です。バッチ実行には既存の HTTP Atomic Execute を使用します。

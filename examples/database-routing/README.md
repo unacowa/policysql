@@ -88,8 +88,9 @@ creates a new transaction, whose subsequent commands still enforce sequence-base
 ## Kysely client
 
 `client.mjs` contains a runnable factory and a helper that retains an operation's key and
-payload. The current Kysely integration is a PolicySQL execution wrapper; standard
-Dialect/Driver integration is tracked separately in issue #4.
+payload. It creates a standard `Kysely` instance with `PolicySqlDialect`. Ordinary
+`.execute()` methods return Kysely rows or mutation results; `policyOptions()` attaches
+per-query keys, expectations, and metadata observers.
 
 ```js
 import { createExampleClient, prepareProjectRename } from './client.mjs'
@@ -97,9 +98,6 @@ import { createExampleClient, prepareProjectRename } from './client.mjs'
 const db = createExampleClient({
   endpoint: 'https://gateway.example.com',
   token: runtimeJwt,
-  role: 'member',
-  schemaVersion: 'schema_routing_1',
-  policyVersion: 'policy_routing_1',
   autoIdempotencyKey: false, // default: omit keys unless explicitly supplied
 })
 
@@ -115,9 +113,19 @@ await operation.send()
 
 Set `autoIdempotencyKey: true` to generate keys for mutation executions without an explicit
 key. Each execution gets a new key, so this alone does not deduplicate application retries.
-Explicit keys take precedence in either mode. Persist the key and payload to retry after
+Explicit keys take precedence in either mode. `role` is optional (the verified JWT default
+role applies); `schemaVersion` and `policyVersion` can optionally be specified together.
+Neither setting selects the database. Persist the key and payload to retry after
 an application reload, using the same authenticated context and DB binding while the
 record remains available. Do not automatically resend an unkeyed write with an unknown outcome.
+
+Standard interactive transactions need no idempotency table, including with
+`autoIdempotencyKey: true`. Start requests carry no key, and statements use the owner ID
+and sequence for retries. `renameExistingProject()` in `client.mjs` shows a callback
+transaction whose update depends on a preceding SELECT. Controlled transactions use
+`db.startTransaction().execute()` and explicit `trx.commit().execute()` or rollback.
+Call `await db.destroy()` when the client is no longer needed. See the
+[Kysely guide](../../website/clients/kysely.md) for retries, limits, metadata, and migration.
 
 ## Lifecycle and verification
 
@@ -134,7 +142,7 @@ record remains available. Do not automatically resend an unkeyed write with an u
 Local regression tests require Node 24+ and run with:
 
 ```sh
-node --test deploy/cloudflare/test/database-routing.test.mjs
+node --test deploy/cloudflare/test/database-routing.test.mjs deploy/cloudflare/test/kysely-client.test.mjs
 ```
 
 They use this registry, real JWT verification for SQL sessions, Rust/Wasm, HTTP transport,

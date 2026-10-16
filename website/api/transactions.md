@@ -140,7 +140,7 @@ Content-Type: application/json
 }
 ```
 
-commit済みtransactionへのrollback、rollback済みtransactionへのcommitは状態を変更せず、既存のterminal statusを返します。期限までにcommitされなかったtransactionは自動rollbackされます。
+terminal status の再確認は、直前と同じ command（commit または rollback）、同じ sequence、同じ payload の再送で行います。反対の terminal command は再送として扱わず拒否します。HTTP 200 だけで commit 成功を判断せず、`status: committed` を確認してください。`failed` は rollback 完了の保証ではありません。期限までに commit されなかった transaction は自動 rollback されます。
 
 ## Failure
 
