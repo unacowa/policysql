@@ -104,7 +104,7 @@ export interface ConstantRow {
 
 ## Snapshotと再生成
 
-生成物には使用した`schemaVersion`、`policyVersion`、role、compiler version、query hashを埋め込みます。runtime requestは両versionを`expected`として送ります。不一致なら自動的に新しい型へ読み替えず、`POLICYSQL_STALE_OPERATION`で失敗します。
+生成物には使用した`schemaVersion`、`policyVersion`、query hashを埋め込みます。型は生成時に指定した role に対応します。runtime requestは両versionを`expected`として送ります。不一致なら自動的に新しい型へ読み替えず、`POLICYSQL_STALE_OPERATION`で失敗します。
 
 生成結果はsource repositoryまたはCI artifactへ保存できます。`tsc`とapplication runtimeは型生成のためにPolicySQLへ接続しません。online接続が必要なのは明示的な`policysql generate`だけです。
 
@@ -124,3 +124,23 @@ export interface ConstantRow {
 runtimeで構築され、build時にSQL textを確定できないqueryは静的生成対象外です。Kysely自身が推論できる型を利用するか、`unknown`としてruntime result descriptorで検証します。利用者の型assertionはPolicySQLの認可やruntime validationを置き換えません。
 
 parameter化されたJSON pathを値なしでExplainする場合、generatorはCatalog JSON Schema上の全到達型から作られたunionを生成します。path値を固定してExplainした生成物は、その値とquery hashを生成artifactへ含めます。
+
+## 生成済みクエリのバージョン条件
+
+通常の `PolicySqlClient` は endpoint と token だけで作れます。生成済みクエリは
+生成時の schema / policy version を保持するため、実行する client にその両方を明示します。
+一致しない client（version 未指定を含む）は送信前に `POLICYSQL_STALE_OPERATION` になります。
+実際の server snapshot との一致は gateway が検証します。
+
+```ts
+const client = new PolicySqlClient({
+  endpoint,
+  token,
+  role: 'author',
+  schemaVersion: getPublishedPosts.schemaVersion,
+  policyVersion: getPublishedPosts.policyVersion,
+})
+const posts = await getPublishedPosts.execute(client, { status: 'published', limit: 20 })
+```
+
+ロールを選択する header は `PolicySQL-Role` です。generator の role 指定は引き続き必須です。
