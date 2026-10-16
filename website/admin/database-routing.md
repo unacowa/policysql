@@ -80,7 +80,7 @@ validatorのcallbackだけは、ラッパーで`app.fetchCallback(request, env, 
 - 再送はDB識別子で分離し、同じキーで経路世代やsnapshotが変わった場合は競合として拒否します。
 - 資格情報の更新だけではDB識別子を変更しません。既存接続を失ったtransactionは再接続して続行しません。
 - 別の物理DBには新しい識別子を割り当て、旧DBで結果不明の書込みを自動再送しないでください。
-- 各DBの実schemaと冪等記録用テーブルは登録時に管理者が検証・準備します。
+- 各DBの実schemaは登録時に管理者が検証・準備します。`Idempotency-Key`付きAtomic Executeを使う場合だけ、`policysql_idempotency`も必要です。キーなしの更新と対話型transactionはこのテーブルを必要としません。
 - 固定envを暗黙に使う旧APIからは移行が必要です。未解決の再送を残したまま切り替えないでください。
 
 リポジトリの`examples/database-routing/`にJWTから独立したregistryとWorker/DOサンプルがあります。既存の固定DB配備コードは`deploy/cloudflare/wrapper/`に移し、そこから明示的にDBを注入しています。

@@ -185,7 +185,60 @@ const result = await policyMutation(
 ).executeWithPolicyMeta()
 ```
 
-`createPolicyKysely`でbindしたbuilderの通常の`.execute()`も同じPolicySQL境界を通ります。mutationでidempotency keyを省略した場合、Web Cryptoを利用できるruntimeではclientがrequestごとに生成します。再試行を同じoperationとして扱うapplicationは、`policyMutation`へ安定したkeyを明示します。
+`createPolicyKysely`でbindしたbuilderの通常の`.execute()`も同じPolicySQL境界を通ります。`policyMutation`はPolicySQL独自の実行ラッパーで、optionsをHTTPクライアントへ直接渡します。`idempotencyKey`はHTTPヘッダー、`expect`はrequest本文に入ります。`executeWithPolicyMeta()`も独自APIです。現在はKyselyの標準Driverやpluginの`transformResult`を経由しません。標準Dialect／Driverへの移行は[Issue #4](https://github.com/unacowa/policysql/issues/4)で扱います。
+
+### キーの自動付与
+
+作成時の`autoIdempotencyKey`で、更新時のキー自動生成を設定します。既定値は`false`です。`bindPolicyKysely(db, { client, autoIdempotencyKey })`にも同じ設定を渡せます。
+
+```ts
+const policyDb = createPolicyKysely({
+  kysely: db,
+  client,
+  autoIdempotencyKey: false,
+})
+
+// キーを送らず、利用DBのpolicysql_idempotencyを使用しない
+await policyDb.updateTable('posts')
+  .set({ title: 'Updated title' })
+  .where('id', '=', 'post_01')
+  .execute()
+```
+
+| 作成時の設定 | 操作ごとのキー | 動作 |
+| --- | --- | --- |
+| `false`または省略 | 省略 | キーを送信しない。冪等性テーブル不要 |
+| `true` | 省略 | 更新の実行ごとにキーを自動生成して送信。テーブルが必要 |
+| どちらでも | 明示 | 指定したキーを送信。テーブルが必要 |
+
+以前のクライアントは省略時に自動生成していました。同じ動作が必要な場合は`autoIdempotencyKey: true`を指定してください。自動生成時に`crypto.randomUUID`が利用できなければ、送信前にエラーになります。自動生成を無効にした場合と明示キーを使う場合はWeb Cryptoを必要としません。空値や不正形式の明示キーは、省略や自動生成に置き換えずエラーにします。
+
+キー省略を使う前にgatewayも任意キー対応版へ更新してください。旧gatewayを利用している間は、`autoIdempotencyKey: true`または明示キーを使用します。
+
+### 同じ更新の再送
+
+キーは一つの業務操作につき一度生成し、再送時にも更新内容とともに保持します。
+
+```ts
+// 新しい業務操作を開始するときに一度だけ作る
+const idempotencyKey = crypto.randomUUID()
+const operation = policyMutation(
+  policyDb.updateTable('posts')
+    .set({ title: 'Updated title' })
+    .where('id', '=', 'post_01')
+    .returning(['id', 'title']),
+  { idempotencyKey, expect: { affectedRows: 1 } },
+)
+
+await operation.executeWithPolicyMeta()
+
+// 応答が届かなかった場合の再送ボタンなどから呼ぶ
+async function retry() {
+  return operation.executeWithPolicyMeta()
+}
+```
+
+自動生成は実行ごとに別キーを作るため、applicationでの再送の重複排除には明示キーを使います。キー付きAtomic Executeでは`policysql_idempotency`の事前作成が必要です。同じ認証context・DB binding・payloadと、保存済みの再送記録を使う前提です。ページ再読み込み後にも再送する場合は、キーと更新内容を保存して復元します。キーなしの更新は要求ごとに実行されるため、結果不明時に自動再送すると二重更新になり得ます。
 
 `RETURNING`がある場合、`result.rows`、`result.meta.result.columns`、`result.meta.result.redactions`が返ります。`RETURNING`がない場合、`result.rows`と`result.meta.result.redactions`は空配列で、`result.affectedRows`と`result.meta.mutation`を確認します。
 

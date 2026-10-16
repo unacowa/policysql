@@ -10,8 +10,36 @@ All stateless SQL execution uses one endpoint:
 POST /v1/transactions:execute
 Authorization: Bearer <token>
 Content-Type: application/json
-Idempotency-Key: <required when any statement mutates data>
+Idempotency-Key: <optional replay key>
 ```
+
+`Idempotency-Key` is optional, including for mutations and interactive transaction start.
+An explicitly supplied key must contain 16–128 ASCII letters, digits, `.`, `_`, `:`, or `-`;
+empty or malformed keys are rejected on those entry points. With a key, atomic mutations
+use `policysql_idempotency` in the selected database to look up and persist results in
+the same transaction as the mutation. Without a key, no lookup, insert, existence check,
+or automatic creation of that table occurs. Each unkeyed request is a new execution and
+does not guarantee deduplication if resent. These rules also apply to the commit-check DO
+path; policy checks, callbacks, and transaction rollback remain enforced.
+
+Interactive start without a key creates a fresh transaction ID/owner for each request.
+Keyed starts retain their existing DO replay behavior. Once started, interactive commands
+retain sequence-based retries with or without a start key and do not use this DB table.
+
+### Durable Object ownership without a key
+
+| Request | Owner assignment |
+| --- | --- |
+| Atomic Execute without a potentially triggered commit check | Executes directly without a transaction-owner DO |
+| Atomic Execute with a potentially triggered commit check | Creates a fresh random owner/validation ID for each unkeyed execution request |
+| Interactive transaction start | Creates a fresh random transaction ID/owner for each unkeyed start request |
+| Interactive statement, commit, or rollback | Routes by the returned transaction ID to the same DO assigned at start |
+
+For both DO execution paths, commit checks and their callbacks stay with the owner holding
+the same open database transaction. A new internal ID is not generated per statement or
+callback. These routing IDs do not enable idempotency or require a table in the user's DB.
+Resending an unkeyed atomic execution or start request creates a separate operation;
+commands within an existing interactive transaction retain their sequence-based retry rules.
 
 An authorized development deployment may add `debug.executionTrace` after execution. The trace is
 present only when the deployment enables execution tracing and the verified JWT has `debug` access.

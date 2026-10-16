@@ -511,7 +511,7 @@
             <div>operation checks → commit checks</div>
             <div>全成功ならcommit、失敗なら全rollback</div>
           </div>
-          <p>partial resultは返しません。responseの<code>results[]</code>は0-based indexでrequestと対応します。writeにはIdempotency-Keyが必須です。</p>
+          <p>partial resultは返しません。responseの<code>results[]</code>は0-based indexでrequestと対応します。Idempotency-Keyは任意です。未指定なら冪等性テーブルを使用せず、要求ごとに実行します。</p>
         </article>
         <article class="flow-box">
           <h3>External Commit Check</h3>

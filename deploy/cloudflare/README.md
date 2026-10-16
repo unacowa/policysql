@@ -81,7 +81,11 @@ curl -sS -X POST \
   https://gateway.example.com/v1/transactions:execute
 ```
 
-Writes require an `Idempotency-Key`. Interactive transactions use `POST /v1/transactions`, then
+`Idempotency-Key` is optional for writes and interactive transaction start. Keyed atomic
+writes require `policysql_idempotency` in the selected DB; the development provisioning
+script creates it for those examples. Without a key, direct and commit-check DO paths
+never access the table and repeated requests can execute again. Empty or malformed keys
+are rejected. Interactive transactions use `POST /v1/transactions`, then
 monotonic `statements`, `commit`, or `rollback` commands within the advertised four-second window.
 The production-shaped deployment requires Cloudflare Workers Paid: measured Execute CPU exceeded
 the Free plan's 10 ms request CPU limit. The upload size remains within Worker limits.

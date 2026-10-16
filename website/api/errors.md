@@ -71,7 +71,8 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_TRANSACTION_SEQUENCE` | 対話型operationの順序が一致しない |
 | `POLICYSQL_TRANSACTION_FAILED` | transactionが失敗状態になり継続できない |
 | `POLICYSQL_EXPECTATION_FAILED` | transaction operationの期待条件を満たさない |
-| `POLICYSQL_IDEMPOTENCY_KEY_REUSED` | 同じkeyが異なるrequestに使われた |
+| `POLICYSQL_IDEMPOTENCY_KEY_REQUIRED` | 明示されたkeyが空または形式不正。省略時には発生しない（互換性のため既存codeを維持） |
+| `POLICYSQL_IDEMPOTENCY_CONFLICT` | 通常atomicで同じkeyが異なるrequestに使われた |
 | `POLICYSQL_REQUEST_IN_PROGRESS` | 同じidempotency keyのrequestがまだ実行中 |
 | `POLICYSQL_INTERNAL` | 公開できない内部エラー |
 
@@ -92,4 +93,4 @@ error codeはAPI versionごとの安定したcontractです。minor releaseで�
 
 ## Retry
 
-SQL・policy・parameter errorは、同じrequestを再送しても成功しません。requestを修正してください。timeout、rate limit、一時的なadapter error、commit conflictだけを、上限とbackoffを設けてretryします。write retryでは必ず同じidempotency keyと同じpayloadを使用し、結果が確定する前に新しいkeyで再実行しません。
+SQL・policy・parameter errorは、同じrequestを再送しても成功しません。requestを修正してください。timeout、rate limit、一時的なadapter error、commit conflictのretryは上限とbackoffを設けます。初回からkeyを指定したwriteの再送には、同じidempotency keyと同じpayloadを使用し、結果が確定する前に新しいkeyで再実行しません。keyなしのwriteは重複排除を保証しないため、結果不明時に自動再送すると二重更新になり得ます。

@@ -29,8 +29,9 @@ claims and still exercise real policy-session authentication.
 ## Setup
 
 1. Create two development Turso databases. Apply `schema.sql` administratively to each
-   and validate their actual schema against `physical-schema.json`. Provision the
-   `policysql_idempotency` table included in that script. DDL is not a public API operation.
+   and validate their actual schema against `physical-schema.json`. Only when using keyed
+   atomic mutations, also apply `idempotency.sql` to provision `policysql_idempotency`.
+   Unkeyed mutations and interactive transactions do not require it. DDL is not a public API operation.
 2. Replace the two `.invalid` URLs in `worker.ts` with registered HTTPS origins and
    configure separate `TENANT_A_TOKEN` / `TENANT_B_TOKEN` secrets.
 3. Configure the SQL session verifier using `POLICYSQL_JWKS_JSON`, `POLICYSQL_JWT_ISSUER`,
@@ -76,8 +77,47 @@ Ordinary requests keep their existing SQL envelopes and JWT policy authenticatio
 {"statements":[{"sql":"INSERT INTO projects (id, name) VALUES (:id, :name) RETURNING id, name","params":{"id":"demo_1","name":"Example"}}]}
 ```
 
-Writes require `Idempotency-Key`. The validator can read the uncommitted row on the same
-transaction and DB without receiving a database credential.
+`Idempotency-Key` is optional. Without it, each write is a new execution and neither the
+Worker nor the commit-check DO reads or writes `policysql_idempotency`. With a key, provision
+the optional table first and reuse the same key and payload for retries. A missing table
+on the keyed path remains an error; empty or malformed keys are also rejected.
+The validator can read the uncommitted row on the same transaction and DB without receiving
+a database credential. Interactive start also accepts an optional key; an unkeyed start
+creates a new transaction, whose subsequent commands still enforce sequence-based retries.
+
+## Kysely client
+
+`client.mjs` contains a runnable factory and a helper that retains an operation's key and
+payload. The current Kysely integration is a PolicySQL execution wrapper; standard
+Dialect/Driver integration is tracked separately in issue #4.
+
+```js
+import { createExampleClient, prepareProjectRename } from './client.mjs'
+
+const db = createExampleClient({
+  endpoint: 'https://gateway.example.com',
+  token: runtimeJwt,
+  role: 'member',
+  schemaVersion: 'schema_routing_1',
+  policyVersion: 'policy_routing_1',
+  autoIdempotencyKey: false, // default: omit keys unless explicitly supplied
+})
+
+// Requires only schema.sql; no idempotency table is accessed.
+await db.updateTable('projects').set({ name: 'Changed' })
+  .where('id', '=', 'demo_1').execute()
+
+// Requires idempotency.sql. Prepare once, then keep this operation for retry.
+const operation = prepareProjectRename(db, { id: 'demo_1', name: 'With replay' })
+await operation.send()
+// If a response is lost, call operation.send() again with this same operation.
+```
+
+Set `autoIdempotencyKey: true` to generate keys for mutation executions without an explicit
+key. Each execution gets a new key, so this alone does not deduplicate application retries.
+Explicit keys take precedence in either mode. Persist the key and payload to retry after
+an application reload, using the same authenticated context and DB binding while the
+record remains available. Do not automatically resend an unkeyed write with an unknown outcome.
 
 ## Lifecycle and verification
 

@@ -64,11 +64,23 @@ clientは`mode`を指定しません。PolicySQLが全statementを実行前にpa
 - すべてSELECT: read transaction
 - 一つでもINSERT、UPDATE、DELETEを含む: write transaction
 
-write transactionでは`Idempotency-Key` headerが必須です。SELECTだけのrequestでは任意です。mutationをkeyなしで送った場合、database execution前に拒否します。
+`Idempotency-Key` headerは更新を含むrequestでも任意です。キーを指定した更新は、利用DBの`policysql_idempotency`で既存結果を照合し、更新と同じtransactionに結果を保存します。キーを省略すると同テーブルの参照・追記・存在確認を行わないため、テーブルがなくても実行できます。通常経路とcommit checkを行うDO経路の両方に適用します。
+
+キーなしの要求はそれぞれ新しい実行です。同じ内容を再送すると更新が再実行される可能性があります。安全な再送が必要な場合は、初回からキーを指定し、同じキー・payload・認証context・DB bindingで再送してください。キー付きの更新では引き続き同テーブルが必要で、未作成時に冪等性を無効化して続行することはありません。
+
+キーを指定する場合は16〜128文字の英数字と`._:-`を使用します。空値・形式不正・重複キーはエラーです。SELECTだけのrequestはこのテーブルを使用しません。
 
 ```http
-Idempotency-Key: 0198f8f1-...
+Idempotency-Key: 0198f8f1-0f64-7000-8000-000000000001
 ```
+
+### DOの割り当て
+
+compileした更新がcommit checkの対象になり得る場合は、DOがDBトランザクションを保持して実行します。キーなしでは、実行要求ごとにランダムなowner／validation IDを生成します。その要求のcommit checkとcallbackは同じDO・同じDBトランザクションを使い、未コミット状態を検証します。
+
+内部IDは処理の識別とcallbackの振り分け用です。生成しても冪等キーを指定した扱いにはならず、`policysql_idempotency`を使用しません。commit checkを必要としないAtomic ExecuteはDOを経由しません。
+
+[対話型Transaction](./transactions#idempotencyと再送)では、開始時に担当DOを決め、開始後の操作は同じDOへ送ります。
 
 ## Atomicity
 
