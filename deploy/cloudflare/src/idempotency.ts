@@ -14,7 +14,8 @@ export const sha256 = async (value) => {
   return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 };
 
-export const requestIdempotency = async (request, env, auth, body, endpoint) => {
+export const requestIdempotency = async (request, env, auth, body, endpoint, databaseBinding) => {
+  if (!databaseBinding) throw new HttpError(500, "POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
   const key = request.headers.get("idempotency-key");
   if (!key || key.includes(",") || !/^[A-Za-z0-9._:-]{16,128}$/.test(key)) {
     throw new HttpError(
@@ -29,19 +30,24 @@ export const requestIdempotency = async (request, env, auth, body, endpoint) => 
     role: auth.role,
     session: auth.session,
     endpoint,
+    database: { scope: databaseBinding.scope, databaseId: databaseBinding.databaseId },
   });
   return {
     keyHash: await sha256(`${identity}:${key}`),
-    fingerprint: await sha256(`${identity}:${stableJson(body)}`),
+    fingerprint: await sha256(`${identity}:${stableJson(body)}:${stableJson(databaseBinding)}`),
   };
 };
 
-export const mutationIdempotency = (request, env, auth, body) =>
-  requestIdempotency(request, env, auth, body, "execute");
+export const mutationIdempotency = (request, env, auth, body, databaseBinding) =>
+  requestIdempotency(request, env, auth, body, "execute", databaseBinding);
 
-export const authFingerprint = (env, auth) => sha256(stableJson({
-  issuer: env.POLICYSQL_JWT_ISSUER,
-  subject: auth.subject,
-  role: auth.role,
-  session: auth.session,
-}));
+export const authFingerprint = (env, auth, databaseBinding) => {
+  if (!databaseBinding) throw new HttpError(500, "POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
+  return sha256(stableJson({
+    issuer: env.POLICYSQL_JWT_ISSUER,
+    subject: auth.subject,
+    role: auth.role,
+    session: auth.session,
+    databaseBinding,
+  }));
+};

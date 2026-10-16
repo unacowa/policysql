@@ -13,7 +13,7 @@ export const registerCommitCheckRoutes = (app: Hono<AppEnv>) => {
     }
     const body = await readJsonBody(context.req.raw);
     const ownerName = `tx_${validationId.slice("cval_".length)}`;
-    const owner = context.env.TRANSACTION_OWNER.get(context.env.TRANSACTION_OWNER.idFromName(ownerName));
+    const owner = context.env.deployment.TRANSACTION_OWNER.get(context.env.deployment.TRANSACTION_OWNER.idFromName(ownerName));
     return owner.fetch("https://owner/validation-query", {
       method: "POST",
       headers: {

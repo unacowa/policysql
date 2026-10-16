@@ -1,5 +1,10 @@
 # External commit checks
 
+For wrapper-provided databases, callbacks use the binding and connection pinned by the
+initiating transaction. Changing to the policy-owned validator role never reselects a
+database. The owner rechecks route availability before callback SQL and commit; revocation
+fails closed. See [wrapper-provided databases](database-routing.md).
+
 Commit checks delegate transaction-wide integrity validation to trusted external code after all statements and mutation-level operation checks have completed, but before commit.
 
 ## Principles

@@ -8,6 +8,18 @@ permissions:
   contents: read
 
 jobs:
+  cloudflare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: deploy/cloudflare/package-lock.json
+      - run: npm ci --prefix deploy/cloudflare
+      - run: npm --prefix deploy/cloudflare run verify
+
   rust:
     runs-on: ubuntu-latest
     steps:

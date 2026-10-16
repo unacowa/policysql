@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "types": ["@cloudflare/workers-types"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "wrapper/**/*.ts", "test/types/**/*.ts", "../../examples/database-routing/**/*.ts"]
 }

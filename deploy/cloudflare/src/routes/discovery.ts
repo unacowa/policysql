@@ -4,17 +4,20 @@ import { runtimeContext } from "../middleware/request-context.ts";
 import { capabilities, parsedRuntimeCall } from "../presenters.ts";
 import { jsonResponse, notModified, snapshotHeaders } from "../responses.ts";
 import type { AppDependencies, AppEnv } from "../types.ts";
+import { checkDatabaseBinding } from "../database.ts";
 
 export const registerDiscoveryRoutes = (app: Hono<AppEnv>, dependencies: AppDependencies) => {
-  app.get("/v1/capabilities", authorize("catalog", "capabilities"), runtimeContext(dependencies), (context) => {
+  app.get("/v1/capabilities", authorize("catalog", "capabilities"), runtimeContext(dependencies), async (context) => {
     const runtime = context.get("runtime");
+    await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, runtime.snapshot);
     const headers = snapshotHeaders(runtime);
     if (notModified(context.req.raw, runtime)) return new Response(null, { status: 304, headers });
     return jsonResponse(context, capabilities(runtime, dependencies.publicConfig), 200, headers);
   });
 
-  app.get("/v1/catalog", authorize("catalog", "catalog"), runtimeContext(dependencies), (context) => {
+  app.get("/v1/catalog", authorize("catalog", "catalog"), runtimeContext(dependencies), async (context) => {
     const runtime = context.get("runtime");
+    await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, runtime.snapshot);
     const headers = snapshotHeaders(runtime);
     if (notModified(context.req.raw, runtime)) return new Response(null, { status: 304, headers });
     const catalog = parsedRuntimeCall(runtime.catalog_json(JSON.stringify(context.get("auth"))));

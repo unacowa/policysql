@@ -44,6 +44,7 @@ Untrusted:
 20. **Endpoint access separation** — JWT access to Catalog, Explain, execution, and developer debug output is explicit; a code-generation credential cannot execute SQL, open a transaction, or retrieve an execution trace.
 21. **Generated-artifact integrity** — query types are bound to endpoint, role, schema/policy/compiler/registry versions, and SQL hash; partial or stale generation never silently replaces current artifacts.
 22. **Execution-trace confidentiality** — exact protected SQL is captured only at the verified database-egress boundary, parameter values are redacted, and a response exposes it only when both deployment configuration and JWT `debug` access allow it.
+23. **Database binding integrity** — the wrapper must explicitly supply a DB independently of policy-session authentication; no implicit fixed-env or JWT-based DB selection exists; one transaction pins one authorized database identity and runtime snapshot. DO delegation, callbacks, cost observations, and retries cannot substitute a different binding. Credentials remain local to the wrapper/transport. See [the binding contract](database-routing.md).
 
 ## Threats to test explicitly
 

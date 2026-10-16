@@ -1,0 +1,12 @@
+{
+  "valid": { "version": 1, "scope": "test:tenant_a", "databaseId": "db_a", "generation": "1", "snapshot": "snapshot_1" },
+  "invalidOverrides": [
+    { "version": 2 },
+    { "scope": "" },
+    { "databaseId": "https://attacker.invalid" },
+    { "generation": null },
+    { "snapshot": "other_snapshot" },
+    { "token": "must-not-cross-owner-boundary" },
+    { "url": "https://attacker.invalid" }
+  ]
+}

@@ -1,10 +1,11 @@
 import { HttpError, safeError, wasmError } from "./errors.ts";
 import { stableJson, sha256 } from "./idempotency.ts";
-import { TursoHttpTransport } from "./turso-http.ts";
 import { observeCostEnvelope } from "./cost.ts";
 import { executeSealedOnTransaction } from "./turso.ts";
 import { enforceCumulativeLimits } from "./turso.ts";
 import { runCommitChecks, verifyCapabilityToken } from "./commit-checks.ts";
+import { checkDatabaseBinding, databaseTransportFactory, sameDatabaseBinding, validateDatabaseProvider } from "./database.ts";
+import type { DatabaseProvider } from "./database.ts";
 
 const MAX_TRANSACTION_MS = 4_000;
 const MAX_STATEMENTS = 8;
@@ -52,33 +53,58 @@ export class TransactionOwnerCore {
   state: any;
   env: any;
   getRuntime: any;
-  transportFactory: any;
   fetchImpl: typeof fetch;
   transaction: any;
   validation: any;
   queue: Promise<any>;
   validationQueue: Promise<any>;
+  database: DatabaseProvider;
 
   constructor(
     state,
     env,
     getRuntime,
-    transportFactory = (bindings, requestId) => new TursoHttpTransport(bindings, requestId),
+    database: DatabaseProvider,
     fetchImpl = fetch,
   ) {
+    validateDatabaseProvider(database);
     this.state = state;
     this.env = env;
     this.getRuntime = getRuntime;
-    this.transportFactory = transportFactory;
     this.fetchImpl = fetchImpl;
+    this.database = database;
     this.transaction = null;
     this.validation = null;
     this.queue = Promise.resolve();
     this.validationQueue = Promise.resolve();
   }
 
-  observeCost(compiled, requestId) {
-    this.state.waitUntil?.(observeCostEnvelope(compiled, this.env, `${requestId}-cost`, this.transportFactory));
+  connectionFactory(binding, deadlineMs = undefined) {
+    return databaseTransportFactory(this.database, binding, deadlineMs);
+  }
+
+  async checkContext(body) {
+    const snapshot = this.getRuntime().snapshot;
+    if (body.snapshot !== snapshot) throw conflict();
+    const databaseBinding = await checkDatabaseBinding(this.database, body.databaseBinding, this.env, snapshot);
+    return { databaseBinding, snapshot };
+  }
+
+  async checkCurrent(current, deadlineMs = current.expiresAtMs) {
+    try {
+      if (current.snapshot !== this.getRuntime().snapshot) throw unavailable();
+      await checkDatabaseBinding(this.database, current.databaseBinding, this.env, current.snapshot,
+        ["active", "validating"].includes(current.status) ? deadlineMs : undefined);
+      if (current.snapshot !== this.getRuntime().snapshot ||
+        (["active", "validating"].includes(current.status) && Date.now() >= current.expiresAtMs)) throw unavailable();
+    } catch (error) {
+      if (this.transaction?.open) await this.close("failed");
+      throw error;
+    }
+  }
+
+  observeCost(compiled, requestId, binding) {
+    this.state.waitUntil?.(observeCostEnvelope(compiled, this.env, `${requestId}-cost`, this.connectionFactory(binding)));
   }
 
   fetch(request) {
@@ -140,6 +166,9 @@ export class TransactionOwnerCore {
     if (!current || current.transactionId !== body.transactionId || current.authFingerprint !== body.authFingerprint) {
       throw unavailable();
     }
+    if (!sameDatabaseBinding(current.databaseBinding, body.databaseBinding) ||
+      (body.snapshot !== undefined && current.snapshot !== body.snapshot)) throw unavailable();
+    await this.checkCurrent(current);
     if (current.status !== "active") return current;
     if (!this.transaction || Date.now() >= current.expiresAtMs) {
       console.log(JSON.stringify({
@@ -154,14 +183,16 @@ export class TransactionOwnerCore {
   }
 
   async begin(body, requestId) {
-    if (!exactKeys(body, ["transactionId", "authFingerprint", "startFingerprint", "mode", "auth", "expected"], ["transactionId", "authFingerprint", "startFingerprint", "mode", "auth"]) ||
+    if (!exactKeys(body, ["transactionId", "authFingerprint", "startFingerprint", "mode", "auth", "expected", "databaseBinding", "snapshot"], ["transactionId", "authFingerprint", "startFingerprint", "mode", "auth"]) ||
       !/^tx_[a-f0-9]{32}$/.test(body.transactionId) ||
       !/^[a-f0-9]{64}$/.test(body.authFingerprint) ||
       !/^[a-f0-9]{64}$/.test(body.startFingerprint) ||
       !["read", "write"].includes(body.mode)) throw invalid();
+    const bindingContext = await this.checkContext(body);
     const previous = await this.stored();
     if (previous) {
-      if (previous.startFingerprint !== body.startFingerprint || previous.authFingerprint !== body.authFingerprint) {
+      if (previous.startFingerprint !== body.startFingerprint || previous.authFingerprint !== body.authFingerprint ||
+        previous.snapshot !== bindingContext.snapshot || !sameDatabaseBinding(previous.databaseBinding, bindingContext.databaseBinding)) {
         throw conflict();
       }
       if (previous.status === "active" && !this.transaction) {
@@ -170,10 +201,11 @@ export class TransactionOwnerCore {
       }
       return this.publicState(previous, requestId);
     }
-    const transport = this.transportFactory(this.env, requestId);
-    this.transaction = await transport.begin(body.mode, 1_000);
     const expiresAtMs = Date.now() + MAX_TRANSACTION_MS;
+    const transport = await this.connectionFactory(bindingContext.databaseBinding, expiresAtMs)(this.env, requestId);
+    this.transaction = await transport.begin(body.mode, 1_000);
     const value = await this.persist({
+      ...bindingContext,
       transactionId: body.transactionId,
       authFingerprint: body.authFingerprint,
       startFingerprint: body.startFingerprint,
@@ -234,7 +266,7 @@ export class TransactionOwnerCore {
   }
 
   async statement(body, requestId) {
-    if (!exactKeys(body, ["transactionId", "authFingerprint", "command"], ["transactionId", "authFingerprint", "command"]) ||
+    if (!exactKeys(body, ["transactionId", "authFingerprint", "command", "databaseBinding", "snapshot"], ["transactionId", "authFingerprint", "command"]) ||
       !exactKeys(body.command, ["sequence", "sql", "params", "expect"], ["sequence", "sql", "params"]) ||
       typeof body.command.sql !== "string" ||
       !body.command.params || Array.isArray(body.command.params) || typeof body.command.params !== "object") throw invalid();
@@ -269,7 +301,7 @@ export class TransactionOwnerCore {
       await this.close("failed");
       throw error;
     }
-    this.observeCost(compiled, requestId);
+    this.observeCost(compiled, requestId, current.databaseBinding);
     const usage = {
       rowsRead: current.usage.rowsRead + executed.usage.rowsRead,
       rowsWritten: current.usage.rowsWritten + executed.usage.rowsWritten,
@@ -311,7 +343,7 @@ export class TransactionOwnerCore {
   }
 
   async terminal(body, requestId, kind) {
-    if (!exactKeys(body, ["transactionId", "authFingerprint", "command"], ["transactionId", "authFingerprint", "command"]) ||
+    if (!exactKeys(body, ["transactionId", "authFingerprint", "command", "databaseBinding", "snapshot"], ["transactionId", "authFingerprint", "command"]) ||
       !exactKeys(body.command, ["sequence"], ["sequence"])) throw invalid();
     const prepared = await this.prepareCommand(body, kind);
     if (prepared.replay) return prepared.replay;
@@ -325,6 +357,8 @@ export class TransactionOwnerCore {
         throw error;
       }
     }
+    // A route can be revoked while an external validator is running.
+    if (kind === "commit") await this.checkCurrent(current);
     const status = await this.close(kind === "commit" ? "committed" : "rolled_back");
     const response = {
       transactionId: current.transactionId,
@@ -359,7 +393,7 @@ export class TransactionOwnerCore {
   }
 
   async activateValidation(current, session) {
-    this.validation = session;
+    this.validation = { ...session, databaseBinding: current.databaseBinding, snapshot: current.snapshot };
     await this.persist({ ...current, status: "validating" });
   }
 
@@ -418,6 +452,9 @@ export class TransactionOwnerCore {
       !Number.isSafeInteger(command.sequence) || command.sequence < 1 ||
       typeof command.sql !== "string" || !command.params || Array.isArray(command.params) ||
       typeof command.params !== "object") throw unavailable();
+    if (!sameDatabaseBinding(session.databaseBinding, current.databaseBinding) || session.snapshot !== current.snapshot) throw unavailable();
+    await this.checkCurrent(current, Math.min(current.expiresAtMs, session.expiresAtMs));
+    if (Date.now() >= session.expiresAtMs) throw unavailable();
     const digest = await sha256(stableJson(command));
     if (command.sequence === session.nextSequence - 1 && session.last?.digest === digest) {
       return session.last.response;
@@ -460,10 +497,14 @@ export class TransactionOwnerCore {
   }
 
   async atomic(body, requestId) {
-    if (!exactKeys(body, ["validationId", "auth", "request", "idempotency"], ["validationId", "auth", "request", "idempotency"]) ||
+    if (!exactKeys(body, ["validationId", "auth", "request", "idempotency", "databaseBinding", "snapshot"], ["validationId", "auth", "request", "idempotency"]) ||
       !/^cval_[a-f0-9]{32}$/u.test(body.validationId) || typeof body.request !== "string" ||
       !body.idempotency || typeof body.idempotency.keyHash !== "string" ||
       typeof body.idempotency.fingerprint !== "string") throw invalid();
+    const bindingContext = await this.checkContext(body);
+    const previous = await this.stored();
+    if (previous && (!sameDatabaseBinding(previous.databaseBinding, bindingContext.databaseBinding) ||
+      previous.snapshot !== bindingContext.snapshot)) throw conflict();
     const runtime = this.getRuntime();
     const compiled = JSON.parse(runtime.compile_json(JSON.stringify(body.auth), body.request, "execute"));
     const compileError = wasmError(compiled);
@@ -472,25 +513,27 @@ export class TransactionOwnerCore {
       runtime.release_execution(BigInt(compiled.executionHandle));
       throw invalid();
     }
-    const transport = this.transportFactory(this.env, requestId);
     let released = false;
+    const expiresAtMs = Date.now() + MAX_TRANSACTION_MS;
     try {
+      const transport = await this.connectionFactory(bindingContext.databaseBinding, expiresAtMs)(this.env, requestId);
       this.transaction = await transport.begin("write", Math.min(...compiled.statements.map((item) => item.limits.timeoutMs)));
     } catch (error) {
       runtime.release_execution(BigInt(compiled.executionHandle));
       throw error;
     }
     const current = {
+      ...bindingContext,
       transactionId: `atomic_${body.idempotency.keyHash.slice(0, 24)}`,
       validationId: body.validationId,
       auth: body.auth,
       status: "active",
-      expiresAtMs: Date.now() + MAX_TRANSACTION_MS,
+      expiresAtMs,
     };
-    await this.persist(current);
-    await this.state.storage.setAlarm(current.expiresAtMs);
     const started = performance.now();
     try {
+      await this.persist(current);
+      await this.state.storage.setAlarm(current.expiresAtMs);
       const [existing] = await this.transaction.execute([{
         sql: "SELECT fingerprint, response_json FROM policysql_idempotency WHERE key_hash = :key_hash",
         args: { key_hash: body.idempotency.keyHash },
@@ -500,17 +543,20 @@ export class TransactionOwnerCore {
         if (fingerprint !== body.idempotency.fingerprint) throw conflict();
         const stored = storedAtomicTerminal(responseJson);
         runtime.release_execution(BigInt(compiled.executionHandle));
+        released = true;
         await this.transaction.rollback();
         this.transaction = null;
         await this.persist({ ...current, status: "committed" });
         return stored;
       }
       if (existing.rows.length !== 0) throw conflict();
-      const executed = await executeSealedOnTransaction(runtime, compiled, this.transaction, requestId);
+      // executeSealedOnTransaction releases its handle on both success and failure.
       released = true;
-      this.observeCost(compiled, requestId);
+      const executed = await executeSealedOnTransaction(runtime, compiled, this.transaction, requestId);
+      this.observeCost(compiled, requestId, current.databaseBinding);
       enforceCumulativeLimits(compiled, executed.results, performance.now() - started);
       const commitChecks = await this.checksForCurrent(current, requestId, compiled, executed.results);
+      await this.checkCurrent(current);
       const usage = {
         rowsReturned: executed.results.reduce((sum, result) => sum + result.rowCount, 0),
         rowsAffected: executed.results.reduce((sum, result) => sum + (result.affectedRows ?? 0), 0),

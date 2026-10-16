@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { testBinding, testProvider } from "./helpers/database.mjs";
 import { createApp } from "../src/app.ts";
 import { capabilities } from "../src/presenters.ts";
 
@@ -18,8 +19,8 @@ const env = {
 };
 
 test("Hono health route preserves the public response and security headers", async () => {
-  const app = createApp({ getRuntime: () => runtime });
-  const response = await app.request("https://worker.test/healthz", {}, env);
+  const app = createApp({ getRuntime: () => runtime, database: testProvider() });
+  const response = await app.fetch(new Request("https://worker.test/healthz"), env, {}, testBinding(runtime.snapshot));
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -35,8 +36,8 @@ test("Hono not-found handler preserves the safe error contract", async () => {
   const app = createApp({ getRuntime: () => {
     runtimeCalls += 1;
     return runtime;
-  } });
-  const response = await app.request("https://worker.test/not-a-route", {}, env);
+  }, database: testProvider() });
+  const response = await app.fetch(new Request("https://worker.test/not-a-route"), env, {}, testBinding(runtime.snapshot));
   const body = await response.json();
 
   assert.equal(response.status, 404);

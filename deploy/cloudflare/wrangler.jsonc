@@ -1,7 +1,7 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "policysql-sqlite-turso-dev",
-  "main": "./src/index.ts",
+  "main": "./wrapper/index.ts",
   "compatibility_date": "2026-08-05",
   "workers_dev": true,
   "preview_urls": true,
@@ -38,6 +38,8 @@
   ],
   "vars": {
     "POLICYSQL_ENVIRONMENT": "development",
+    "APPLICATION_DATABASE_ID": "development_db",
+    "APPLICATION_DATABASE_GENERATION": "1",
     "POLICYSQL_PUBLIC_BASE_URL": "https://gateway.example.com",
     "POLICYSQL_COST_CATALOG_JSON": "{\"maxEstimatedRowsRead\":10000,\"maxEstimatedRowsWritten\":100,\"resources\":{\"1\":{\"upperRows\":1000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_archived_posts_1\"]},\"2\":{\"upperRows\":1000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_authors_1\"]},\"3\":{\"upperRows\":10000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_comments_1\"]},\"4\":{\"upperRows\":10000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_posts_1\"]},\"5\":{\"upperRows\":10000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_projects_1\"]}}}"
   },

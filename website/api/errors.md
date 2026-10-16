@@ -62,6 +62,9 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_STALE_OPERATION` | policyまたはcatalog versionが古い |
 | `POLICYSQL_SCHEMA_MISMATCH` | database値がcompiled logical contractと一致しない |
 | `POLICYSQL_DATABASE_UNAVAILABLE` | database adapterまたはtransaction ownerを利用できない |
+| `POLICYSQL_DATABASE_TIMEOUT` | DB接続準備・実行・commit確認の期限を超えた（HTTP 504） |
+| `POLICYSQL_DATABASE_REQUIRED` | ラッパーが必須のDB引数を渡していない（HTTP 500） |
+| `POLICYSQL_DATABASE_BINDING_REJECTED` | DB bindingが不正、未登録、または現在の経路設定で許可されていない |
 | `POLICYSQL_COMMIT_CONFLICT` | MVCC conflictによりcommitできなかった |
 | `POLICYSQL_TRANSACTION_NOT_FOUND` | transactionが存在しないか、利用者に属していない |
 | `POLICYSQL_TRANSACTION_EXPIRED` | transactionの有効期限を超えた |

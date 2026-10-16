@@ -38,7 +38,7 @@ test("decodes exact usage metrics while preserving transaction ownership", async
     }));
   };
   const transport = new TursoHttpTransport(
-    { TURSO_DATABASE_URL: "https://db.test", TURSO_AUTH_TOKEN: "secret" },
+    { url: "https://db.test", authToken: "secret" },
     "req_1",
     fetchImpl,
   );
@@ -52,7 +52,7 @@ test("decodes exact usage metrics while preserving transaction ownership", async
 
 test("rejects missing per-query billing metrics", async () => {
   const transport = new TursoHttpTransport(
-    { TURSO_DATABASE_URL: "https://db.test", TURSO_AUTH_TOKEN: "secret" },
+    { url: "https://db.test", authToken: "secret" },
     "req_1",
     async () => new Response(JSON.stringify({
       baton: "baton",
@@ -63,4 +63,41 @@ test("rejects missing per-query billing metrics", async () => {
     })),
   );
   await assert.rejects(transport.begin("read", 1000), (error) => error.code === "POLICYSQL_DATABASE_UNAVAILABLE");
+});
+
+test("HTTP operations share an absolute deadline while rollback retains its cleanup budget", async (t) => {
+  let now = 10_000;
+  const budgets = [];
+  const requests = [];
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(AbortSignal, "timeout", (timeout) => {
+    budgets.push(timeout);
+    return new AbortController().signal;
+  });
+  const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "secret" }, "deadline", async (_url, init) => {
+    const { requests: commands } = JSON.parse(init.body);
+    requests.push(commands[0].stmt.sql);
+    return Response.json({
+      baton: commands.length === 1 ? "baton" : null,
+      results: commands.map((command) => command.type === "close"
+        ? { type: "ok", response: { type: "close" } } : result([], [])),
+    });
+  });
+  const first = await transport.begin("read", 1000, 10_200);
+  now += 120;
+  await first.execute([{ sql: "SELECT id FROM projects" }]);
+  now += 50;
+  await first.commit();
+  assert.deepEqual(budgets, [200, 80, 30]);
+
+  const second = await transport.begin("read", 1000, 10_200);
+  now = 10_200;
+  const count = requests.length;
+  await assert.rejects(second.execute([{ sql: "SELECT id FROM projects" }]), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
+  await assert.rejects(second.commit(), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
+  assert.equal(requests.length, count, "no SQL or COMMIT after expiry");
+  await second.rollback();
+  assert.equal(requests.at(-1), "ROLLBACK");
+  assert.equal(budgets.at(-1), 1000);
+  assert.equal(second.open, false);
 });

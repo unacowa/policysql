@@ -1,4 +1,5 @@
 import { HttpError } from "./errors.ts";
+import { remainingDatabaseTime } from "./database.ts";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
 const databaseFailure = () =>
@@ -92,14 +93,14 @@ export class TursoHttpTransport {
   readonly requestId: string;
   readonly fetchImpl: typeof fetch;
 
-  constructor(env, requestId, fetchImpl = undefined) {
-    if (!env.TURSO_DATABASE_URL || !env.TURSO_AUTH_TOKEN) throw databaseFailure();
-    const url = new URL(env.TURSO_DATABASE_URL);
+  constructor(connection: { url: string; authToken: string }, requestId, fetchImpl = undefined) {
+    if (!connection?.url || !connection?.authToken) throw databaseFailure();
+    const url = new URL(connection.url);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
       throw databaseFailure();
     }
     this.url = new URL("/v2/pipeline", url).toString();
-    this.token = env.TURSO_AUTH_TOKEN;
+    this.token = connection.authToken;
     this.requestId = requestId;
     // Cloudflare requires its host fetch receiver; test adapters remain ordinary functions.
     this.fetchImpl = fetchImpl
@@ -110,6 +111,7 @@ export class TursoHttpTransport {
   async pipeline(requests, baton = undefined, timeoutMs = 1_000) {
     const response = await this.fetchImpl(this.url, {
       method: "POST",
+      redirect: "error",
       headers: {
         authorization: `Bearer ${this.token}`,
         "content-type": "application/json",
@@ -138,15 +140,15 @@ export class TursoHttpTransport {
     return body;
   }
 
-  async begin(mode, timeoutMs) {
+  async begin(mode, timeoutMs, deadlineMs?: number) {
     const body = await this.pipeline(
       [executeRequest({ sql: mode === "write" ? "BEGIN IMMEDIATE" : "BEGIN DEFERRED" })],
       undefined,
-      timeoutMs,
+      Math.min(timeoutMs, remainingDatabaseTime(deadlineMs)),
     );
     const beginResult = decodeResult(body.results[0]);
     if (!body.baton) throw databaseFailure();
-    return new TursoHttpTransaction(this, body.baton, timeoutMs, beginResult.usage);
+    return new TursoHttpTransaction(this, body.baton, timeoutMs, beginResult.usage, deadlineMs);
   }
 }
 
@@ -154,13 +156,15 @@ class TursoHttpTransaction {
   readonly transport: TursoHttpTransport;
   baton: string;
   readonly timeoutMs: number;
+  readonly deadlineMs?: number;
   open: boolean;
   readonly usage: any[];
 
-  constructor(transport, baton, timeoutMs, beginUsage) {
+  constructor(transport, baton, timeoutMs, beginUsage, deadlineMs?: number) {
     this.transport = transport;
     this.baton = baton;
     this.timeoutMs = timeoutMs;
+    this.deadlineMs = deadlineMs;
     this.open = true;
     this.usage = [beginUsage];
   }
@@ -170,7 +174,7 @@ class TursoHttpTransaction {
     const body = await this.transport.pipeline(
       statements.map(executeRequest),
       this.baton,
-      this.timeoutMs,
+      Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
     );
     if (!body.baton) throw databaseFailure();
     this.baton = body.baton;
@@ -184,7 +188,8 @@ class TursoHttpTransaction {
     const body = await this.transport.pipeline(
       [executeRequest({ sql }), { type: "close" }],
       this.baton,
-      this.timeoutMs,
+      // Cleanup still gets a bounded attempt after the execution deadline expires.
+      sql === "ROLLBACK" ? this.timeoutMs : Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
     );
     const terminal = decodeResult(body.results[0]);
     this.usage.push(terminal.usage);

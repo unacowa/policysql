@@ -4,9 +4,16 @@ import { initSync, PolicySqlRuntime } from "../pkg/policysql_cloudflare.js";
 // @ts-ignore
 import wasm from "../pkg/policysql_cloudflare_bg.wasm";
 import { createApp } from "./app.ts";
+import { TransactionOwnerCore } from "./transaction-owner.ts";
 
 export { createApp } from "./app.ts";
+export type { PolicySqlApp } from "./app.ts";
 export { TransactionOwnerCore } from "./transaction-owner.ts";
+export { TursoHttpTransport } from "./turso-http.ts";
+export type {
+  DatabaseBinding, DatabaseProvider, DatabaseTransport, DatabaseTransaction,
+  DatabaseResult, DatabaseUsage,
+} from "./database.ts";
 export type {
   AppDependencies,
   AppEnv,
@@ -32,6 +39,7 @@ export type RuntimeConfiguration = {
   schemaVersion: string;
   policyVersion: string;
   limits: RuntimeLimits;
+  database: import("./database.ts").DatabaseProvider;
   developer?: {
     executionTrace?: boolean;
     executionTraceSink?: import("./types.ts").ExecutionTraceSink;
@@ -44,7 +52,7 @@ let wasmInitialized = false;
  * Creates an isolate-local, lazily initialized PolicySQL runtime factory.
  * Configuration belongs to the deployment; authorization and SQL compilation remain in Rust/Wasm.
  */
-export const createRuntimeFactory = (configuration: RuntimeConfiguration) => {
+export const createRuntimeFactory = (configuration: Omit<RuntimeConfiguration, "database">) => {
   let runtime: PolicySqlRuntime | undefined;
   return () => {
     if (runtime) return runtime;
@@ -76,8 +84,14 @@ export const createPolicySqlWorker = (configuration: RuntimeConfiguration) => {
   const getRuntime = createRuntimeFactory(configuration);
   return {
     getRuntime,
+    TransactionOwner: class extends TransactionOwnerCore {
+      constructor(state, env) {
+        super(state, env, getRuntime, configuration.database);
+      }
+    },
     app: createApp({
       getRuntime,
+      database: configuration.database,
       executionTrace: {
         enabled: configuration.developer?.executionTrace === true,
         sink: configuration.developer?.executionTraceSink,

@@ -6,8 +6,20 @@ It must never pass caller SQL directly to Turso.
 The public HTTP adapter is implemented in TypeScript with Hono. `src/app.ts` composes the app,
 `src/routes/` owns endpoint handlers, and `src/middleware/` owns request context and endpoint access
 checks. Transport, authentication, idempotency, and Durable Object state-machine modules remain
-framework-independent. Routes that only forward an interactive transaction or commit-check request
-do not initialize the Rust/Wasm compiler in the outer Worker isolate.
+framework-independent. Interactive routes obtain the runtime snapshot in the outer Worker
+before delegating to the DO; callback routes forward the opaque capability to its owner.
+
+Applications must inject a `database` provider into `createApp` or `createPolicySqlWorker`
+and pass an already-selected binding to each `app.fetch(request, env, context, binding)`.
+Database injection has no JWT dependency. The wrapper authorizes and chooses its DB;
+PolicySQL pins the binding across execution, DOs, callbacks, retries, and cost observations.
+The packaged factory also returns the matching `TransactionOwner` class. See the
+[API contract](../../docs/database-routing.md) and [complete example](../../examples/database-routing/README.md).
+Omitting the provider fails at construction; omitting the request binding returns
+`POLICYSQL_DATABASE_REQUIRED`. The library has no fixed-env fallback.
+`wrapper/index.ts` and `wrapper/database.ts` explicitly construct the bundled deployment
+connections from env and pass them into the library. Callback requests use `fetchCallback`
+and their existing owner binding. These wrapper files are not the public library API.
 
 Build and validate without deployment:
 

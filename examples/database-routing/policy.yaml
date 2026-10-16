@@ -1,0 +1,26 @@
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          limit: 100
+        insert:
+          columns: [id, name]
+          presets: { tenant_id: { session: tenant_id } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, name] }
+        update:
+          columns: [name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, name] }
+commit_checks:
+  consistency:
+    triggered_by: [projects]
+    hook:
+      url_env: VALIDATOR_URL
+      timeout_ms: 1500
+      hmac_secret_env: VALIDATOR_SECRET

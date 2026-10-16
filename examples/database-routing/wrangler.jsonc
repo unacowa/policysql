@@ -1,0 +1,18 @@
+{
+  "name": "policysql-database-routing",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-08-05",
+  "durable_objects": { "bindings": [{ "name": "TRANSACTION_OWNER", "class_name": "TransactionOwner" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TransactionOwner"] }],
+  "ratelimits": [{ "name": "POLICYSQL_RATE_LIMITER", "namespace_id": "73002", "simple": { "limit": 100, "period": 60 } }],
+  "rules": [{ "type": "Text", "globs": ["**/*.yaml"], "fallthrough": true }],
+  "vars": {
+    "POLICYSQL_ENVIRONMENT": "development",
+    "APPLICATION_DATABASE_ID": "db_a",
+    "POLICYSQL_PUBLIC_BASE_URL": "https://replace-with-worker.invalid",
+    "POLICYSQL_COST_CATALOG_JSON": "{\"maxEstimatedRowsRead\":10000,\"maxEstimatedRowsWritten\":10000,\"resources\":{\"1\":{\"upperRows\":1000}}}",
+    "TENANT_A_ENABLED": "true",
+    "TENANT_B_ENABLED": "true"
+  },
+  "secrets": { "required": ["POLICYSQL_JWKS_JSON", "POLICYSQL_JWT_ISSUER", "POLICYSQL_JWT_AUDIENCE", "TENANT_A_TOKEN", "TENANT_B_TOKEN", "VALIDATOR_URL", "VALIDATOR_SECRET"] }
+}
