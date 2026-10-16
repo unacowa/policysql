@@ -1,25 +1,25 @@
-import { Kysely, DummyDriver, SqliteAdapter, SqliteIntrospector, SqliteQueryCompiler } from "kysely";
+import { Kysely } from "kysely";
 import { PolicySqlClient } from "@unacowa/policysql/client";
-import { createPolicyKysely, policyMutation } from "@unacowa/policysql/kysely";
+import { PolicySqlDialect, policyOptions } from "@unacowa/policysql/kysely";
 
-// The current adapter uses Kysely to build queries and PolicySqlClient to execute them.
-// The DummyDriver is never used for database execution through this adapter.
-export const createExampleClient = ({ autoIdempotencyKey = false, ...clientOptions }) => {
-  const kysely = new Kysely({ dialect: {
-    createAdapter: () => new SqliteAdapter(),
-    createDriver: () => new DummyDriver(),
-    createIntrospector: (db) => new SqliteIntrospector(db),
-    createQueryCompiler: () => new SqliteQueryCompiler(),
-  } });
-  return createPolicyKysely({ kysely, client: new PolicySqlClient(clientOptions), autoIdempotencyKey });
-};
+// endpoint and token are sufficient. role and the paired version precondition are optional.
+export const createExampleClient = ({ autoIdempotencyKey = false, ...clientOptions }) => new Kysely({
+  dialect: new PolicySqlDialect({ client: new PolicySqlClient(clientOptions), autoIdempotencyKey }),
+});
 
-// Prepare once per business operation. Call send() again with the same key and payload
-// if the response is lost. Persist the key and payload if retries must survive a reload.
+// Keep the key and payload together when retrying the same atomic business operation.
 export const prepareProjectRename = (db, { id, name, idempotencyKey = crypto.randomUUID() }) => {
-  const operation = policyMutation(
-    db.updateTable("projects").set({ name }).where("id", "=", id).returning(["id", "name"]),
-    { idempotencyKey, expect: { affectedRows: 1 } },
-  );
-  return { idempotencyKey, send: () => operation.executeWithPolicyMeta() };
+  const operation = db.updateTable("projects").set({ name }).where("id", "=", id)
+    .returning(["id", "name"])
+    .withPlugin(policyOptions({ idempotencyKey, expect: { affectedRows: 1 } }));
+  return { idempotencyKey, send: () => operation.execute() };
 };
+
+// Standard Kysely interactive transaction. No idempotency key or user DB table is needed.
+export const renameExistingProject = (db, { id, name }) => db.transaction().execute(async (trx) => {
+  const project = await trx.selectFrom("projects").select(["id", "name"])
+    .where("id", "=", id).executeTakeFirstOrThrow();
+  await trx.updateTable("projects").set({ name }).where("id", "=", project.id)
+    .withPlugin(policyOptions({ expect: { affectedRows: 1 } })).execute();
+  return project;
+});
