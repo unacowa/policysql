@@ -17,11 +17,12 @@ export const sha256 = async (value) => {
 export const requestIdempotency = async (request, env, auth, body, endpoint, databaseBinding) => {
   if (!databaseBinding) throw new HttpError(500, "POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
   const key = request.headers.get("idempotency-key");
-  if (!key || key.includes(",") || !/^[A-Za-z0-9._:-]{16,128}$/.test(key)) {
+  if (key === null) return null;
+  if (key.includes(",") || !/^[A-Za-z0-9._:-]{16,128}$/.test(key)) {
     throw new HttpError(
       400,
       "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED",
-      "A valid Idempotency-Key is required for mutation requests.",
+      "Idempotency-Key must contain 16-128 letters, digits, dots, underscores, colons, or hyphens when provided.",
     );
   }
   const identity = stableJson({

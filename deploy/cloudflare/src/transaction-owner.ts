@@ -497,10 +497,13 @@ export class TransactionOwnerCore {
   }
 
   async atomic(body, requestId) {
-    if (!exactKeys(body, ["validationId", "auth", "request", "idempotency", "databaseBinding", "snapshot"], ["validationId", "auth", "request", "idempotency"]) ||
+    if (!exactKeys(body, ["validationId", "auth", "request", "idempotency", "databaseBinding", "snapshot"], ["validationId", "auth", "request"]) ||
       !/^cval_[a-f0-9]{32}$/u.test(body.validationId) || typeof body.request !== "string" ||
-      !body.idempotency || typeof body.idempotency.keyHash !== "string" ||
-      typeof body.idempotency.fingerprint !== "string") throw invalid();
+      (body.idempotency != null && (
+        !exactKeys(body.idempotency, ["keyHash", "fingerprint"]) ||
+        typeof body.idempotency.keyHash !== "string" || !/^[a-f0-9]{64}$/.test(body.idempotency.keyHash) ||
+        typeof body.idempotency.fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(body.idempotency.fingerprint)
+      ))) throw invalid();
     const bindingContext = await this.checkContext(body);
     const previous = await this.stored();
     if (previous && (!sameDatabaseBinding(previous.databaseBinding, bindingContext.databaseBinding) ||
@@ -524,7 +527,7 @@ export class TransactionOwnerCore {
     }
     const current = {
       ...bindingContext,
-      transactionId: `atomic_${body.idempotency.keyHash.slice(0, 24)}`,
+      transactionId: `atomic_${body.idempotency?.keyHash.slice(0, 24) ?? body.validationId.slice("cval_".length)}`,
       validationId: body.validationId,
       auth: body.auth,
       status: "active",
@@ -534,22 +537,24 @@ export class TransactionOwnerCore {
     try {
       await this.persist(current);
       await this.state.storage.setAlarm(current.expiresAtMs);
-      const [existing] = await this.transaction.execute([{
-        sql: "SELECT fingerprint, response_json FROM policysql_idempotency WHERE key_hash = :key_hash",
-        args: { key_hash: body.idempotency.keyHash },
-      }]);
-      if (existing.rows.length === 1) {
-        const [fingerprint, responseJson] = existing.rows[0];
-        if (fingerprint !== body.idempotency.fingerprint) throw conflict();
-        const stored = storedAtomicTerminal(responseJson);
-        runtime.release_execution(BigInt(compiled.executionHandle));
-        released = true;
-        await this.transaction.rollback();
-        this.transaction = null;
-        await this.persist({ ...current, status: "committed" });
-        return stored;
+      if (body.idempotency) {
+        const [existing] = await this.transaction.execute([{
+          sql: "SELECT fingerprint, response_json FROM policysql_idempotency WHERE key_hash = :key_hash",
+          args: { key_hash: body.idempotency.keyHash },
+        }]);
+        if (existing.rows.length === 1) {
+          const [fingerprint, responseJson] = existing.rows[0];
+          if (fingerprint !== body.idempotency.fingerprint) throw conflict();
+          const stored = storedAtomicTerminal(responseJson);
+          runtime.release_execution(BigInt(compiled.executionHandle));
+          released = true;
+          await this.transaction.rollback();
+          this.transaction = null;
+          await this.persist({ ...current, status: "committed" });
+          return stored;
+        }
+        if (existing.rows.length !== 0) throw conflict();
       }
-      if (existing.rows.length !== 0) throw conflict();
       // executeSealedOnTransaction releases its handle on both success and failure.
       released = true;
       const executed = await executeSealedOnTransaction(runtime, compiled, this.transaction, requestId);
@@ -574,14 +579,16 @@ export class TransactionOwnerCore {
         replayed: false,
         commitChecks,
       };
-      await this.transaction.execute([{
-        sql: "INSERT INTO policysql_idempotency (key_hash, fingerprint, response_json) VALUES (:key_hash, :fingerprint, :response_json)",
-        args: {
-          key_hash: body.idempotency.keyHash,
-          fingerprint: body.idempotency.fingerprint,
-          response_json: JSON.stringify(terminal),
-        },
-      }]);
+      if (body.idempotency) {
+        await this.transaction.execute([{
+          sql: "INSERT INTO policysql_idempotency (key_hash, fingerprint, response_json) VALUES (:key_hash, :fingerprint, :response_json)",
+          args: {
+            key_hash: body.idempotency.keyHash,
+            fingerprint: body.idempotency.fingerprint,
+            response_json: JSON.stringify(terminal),
+          },
+        }]);
+      }
       await this.transaction.commit();
       this.transaction = null;
       this.validation = null;

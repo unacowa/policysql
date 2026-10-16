@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 import { HttpError } from "../errors.ts";
 import { readJsonBody } from "../http.ts";
-import { authFingerprint, requestIdempotency } from "../idempotency.ts";
+import { authFingerprint, requestIdempotency, sha256, stableJson } from "../idempotency.ts";
 import { authorize } from "../middleware/authorization.ts";
 import { jsonResponse } from "../responses.ts";
 import { POLICY_VERSION, SCHEMA_VERSION } from "../config.ts";
@@ -45,8 +45,10 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDe
       "interactive-start",
       databaseBinding,
     );
-    const transactionId = `tx_${idempotency.keyHash.slice(0, 32)}`;
+    const transactionId = `tx_${idempotency?.keyHash.slice(0, 32) ?? crypto.randomUUID().replaceAll("-", "")}`;
     const fingerprint = await authFingerprint(context.env.deployment, auth, databaseBinding);
+    // The owner still validates its start command; this digest is not a public retry key.
+    const startFingerprint = idempotency?.fingerprint ?? await sha256(stableJson({ transactionId, request: body.value }));
     const owner = context.env.deployment.TRANSACTION_OWNER.get(context.env.deployment.TRANSACTION_OWNER.idFromName(transactionId));
     return owner.fetch("https://owner/begin", {
       method: "POST",
@@ -54,7 +56,7 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDe
       body: JSON.stringify({
         transactionId,
         authFingerprint: fingerprint,
-        startFingerprint: idempotency.fingerprint,
+        startFingerprint,
         mode: body.value.mode,
         auth,
         expected: body.value.expected,

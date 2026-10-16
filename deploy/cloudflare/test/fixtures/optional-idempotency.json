@@ -1,0 +1,11 @@
+{
+  "invalidDelegatedValues": [
+    false,
+    0,
+    "",
+    [],
+    {},
+    { "keyHash": "invalid", "fingerprint": "invalid" },
+    { "keyHash": null, "fingerprint": null }
+  ]
+}

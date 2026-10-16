@@ -45,7 +45,7 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDepend
 
     if (potentiallyTriggered) {
       runtime.release_execution(BigInt(compiled.executionHandle));
-      const validationId = `cval_${idempotency.keyHash.slice(0, 32)}`;
+      const validationId = `cval_${idempotency?.keyHash.slice(0, 32) ?? crypto.randomUUID().replaceAll("-", "")}`;
       const ownerName = `tx_${validationId.slice("cval_".length)}`;
       const owner = context.env.deployment.TRANSACTION_OWNER.get(context.env.deployment.TRANSACTION_OWNER.idFromName(ownerName));
       const response = await owner.fetch("https://owner/atomic", {
