@@ -57,4 +57,7 @@ test("packaged deployments advertise their injected snapshot versions and limits
   assert.equal(result.policyVersion, "policy_demo_1");
   assert.equal(result.limits.maxRows, 17);
   assert.equal(result.limits.maxStatements, 8);
+  assert.equal(result.idempotency.mutationsRequired, false);
+  assert.equal(result.idempotency.interactiveStartRequired, false);
+  assert.equal(result.idempotency.persistent, true);
 });

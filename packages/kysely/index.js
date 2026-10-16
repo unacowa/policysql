@@ -1,7 +1,6 @@
 import { SqliteQueryCompiler, createQueryId } from "kysely";
 
 const bindings = new WeakMap();
-const proxies = new WeakMap();
 
 class PolicySqliteQueryCompiler extends SqliteQueryCompiler {
   getCurrentParameterPlaceholder() {
@@ -45,15 +44,16 @@ export const compilePolicyQuery = (query) => {
 
 const randomIdempotencyKey = () => {
   if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
-  throw new TypeError("mutation execution requires an idempotencyKey when crypto.randomUUID is unavailable");
+  throw new TypeError("autoIdempotencyKey requires crypto.randomUUID or an explicit idempotencyKey");
 };
 
 const executeQuery = async (query, binding, options = {}) => {
   const request = compilePolicyQuery(query);
+  const idempotencyKey = request.operation === "select" ? undefined
+    : options.idempotencyKey !== undefined ? options.idempotencyKey
+    : binding.autoIdempotencyKey ? randomIdempotencyKey() : undefined;
   const executeOptions = {
-    ...(request.operation === "select"
-      ? {}
-      : { idempotencyKey: options.idempotencyKey ?? randomIdempotencyKey() }),
+    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
     ...(options.expect ? { expect: options.expect } : {}),
   };
   binding.onQuery?.(request);
@@ -84,7 +84,7 @@ const policyExecution = (query, binding, options = {}) => ({
   },
 });
 
-const wrap = (value, binding) => {
+const wrap = (value, binding, proxies) => {
   if ((typeof value !== "object" || value === null) && typeof value !== "function") return value;
   const existing = proxies.get(value);
   if (existing) return existing;
@@ -99,7 +99,7 @@ const wrap = (value, binding) => {
       }
       const member = Reflect.get(target, property, receiver);
       if (typeof member !== "function") return member;
-      return (...args) => wrap(Reflect.apply(member, target, args), binding);
+      return (...args) => wrap(Reflect.apply(member, target, args), binding, proxies);
     },
   });
   bindings.set(proxy, binding);
@@ -112,7 +112,10 @@ export const bindPolicyKysely = (kysely, clientOrOptions) => {
     ? clientOrOptions
     : { client: clientOrOptions };
   if (!binding.client?.execute) throw new TypeError("PolicySQL client is required");
-  return wrap(kysely, binding);
+  if (binding.autoIdempotencyKey !== undefined && typeof binding.autoIdempotencyKey !== "boolean") {
+    throw new TypeError("autoIdempotencyKey must be a boolean");
+  }
+  return wrap(kysely, { ...binding, autoIdempotencyKey: binding.autoIdempotencyKey ?? false }, new WeakMap());
 };
 
 const resolveBinding = (query, explicitClient) => {
@@ -144,5 +147,5 @@ export const policyMutation = (query, options = {}, explicitClient) => {
   return policyExecution(query, resolveBinding(query, explicitClient), options);
 };
 
-export const createPolicyKysely = ({ kysely, client, onQuery, onResult, onError }) =>
-  bindPolicyKysely(kysely, { client, onQuery, onResult, onError });
+export const createPolicyKysely = ({ kysely, client, autoIdempotencyKey = false, onQuery, onResult, onError }) =>
+  bindPolicyKysely(kysely, { client, autoIdempotencyKey, onQuery, onResult, onError });

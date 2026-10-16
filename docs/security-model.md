@@ -39,7 +39,7 @@ Untrusted:
 15. **Authentication canonicalization** — duplicated or ambiguous authentication headers, role identifiers, claim mappings, or reserved session keys are rejected before SQL parsing.
 16. **No session coercion** — trusted-session strings are never implicitly coerced through SQLite affinity; policy activation proves descriptor compatibility.
 17. **Snapshot integrity** — one request or transaction uses one immutable policy, Catalog, type-registry, and function-registry snapshot; stale preconditions fail before execution.
-18. **Retry integrity** — a write retry is bound to authenticated context, endpoint, idempotency key, and canonical payload and cannot execute a different request.
+18. **Retry integrity** — when an optional idempotency key is supplied, a write retry is bound to authenticated context, endpoint, DB binding, key, and canonical payload and cannot execute a different request. Without a key, independent requests may each execute; transaction checks and interactive command sequencing still apply. Malformed supplied keys are never treated as omission.
 19. **Atomic envelope integrity** — all items are compiled and authorized before execution; mode is inferred from bound operations, results map by index, and no partial result is returned after rollback.
 20. **Endpoint access separation** — JWT access to Catalog, Explain, execution, and developer debug output is explicit; a code-generation credential cannot execute SQL, open a transaction, or retrieve an execution trace.
 21. **Generated-artifact integrity** — query types are bound to endpoint, role, schema/policy/compiler/registry versions, and SQL hash; partial or stale generation never silently replaces current artifacts.

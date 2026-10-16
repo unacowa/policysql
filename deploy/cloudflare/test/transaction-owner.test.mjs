@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { testBinding, testProvider } from "./helpers/database.mjs";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 
@@ -64,6 +65,22 @@ const txId = `tx_${"a".repeat(32)}`;
 const fingerprint = "b".repeat(64);
 const startFingerprint = "c".repeat(64);
 const auth = { subject: "u1", role: "member", roles: ["member"], access: ["execute"], session: { tenant_id: "tenant_a" } };
+
+test("malformed delegated idempotency cannot silently disable replay protection", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("./fixtures/optional-idempotency.json", import.meta.url), "utf8"));
+  const owner = new TransactionOwnerCore({ storage: makeStorage() }, environment, () => runtime(), {
+    check() { assert.fail("must reject before checking or opening a database"); },
+    connect() { assert.fail("must not execute"); },
+  });
+  for (const idempotency of fixture.invalidDelegatedValues) {
+    const response = await call(owner, "atomic", {
+      validationId: `cval_${"d".repeat(32)}`, auth,
+      request: JSON.stringify({ statements: [{ sql: "DELETE FROM projects", params: {} }] }), idempotency,
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, "POLICYSQL_INVALID_REQUEST");
+  }
+});
 
 const call = (owner, action, body) => owner.fetch(new Request(`https://owner/${action}`, {
   method: "POST",

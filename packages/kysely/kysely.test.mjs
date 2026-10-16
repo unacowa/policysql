@@ -115,6 +115,7 @@ test("bound Kysely execute routes returning mutations with idempotency", async (
   const db = createPolicyKysely({
     kysely: rawDb,
     client,
+    autoIdempotencyKey: true,
     onQuery: (request) => events.push(["query", request.operation]),
     onResult: ({ request }) => events.push(["result", request.operation]),
   });
@@ -158,5 +159,68 @@ test("executeTakeFirst helpers use PolicySQL rows", async () => {
   const db = bindPolicyKysely(rawDb, client);
   assert.deepEqual(await db.selectFrom("posts").select("id").executeTakeFirst(), { id: "one" });
   assert.deepEqual(await db.selectFrom("posts").select("id").executeTakeFirstOrThrow(), { id: "one" });
+  await rawDb.destroy();
+});
+
+test("automatic idempotency is opt-in per binding and explicit keys take precedence", async () => {
+  const calls = [];
+  const client = { async execute(sql, params, options) {
+    calls.push({ sql, params, options });
+    return { rows: [], meta: {}, envelopeMeta: {} };
+  } };
+  const rawDb = new Kysely({ dialect: new TestSqliteDialect() });
+  const ordinary = createPolicyKysely({ kysely: rawDb, client });
+  const automatic = bindPolicyKysely(rawDb, { client, autoIdempotencyKey: true });
+  const disabled = createPolicyKysely({ kysely: rawDb, client, autoIdempotencyKey: false });
+  const mutation = (db) => db.updateTable("posts").set({ title: "Updated" }).where("id", "=", "post_1");
+  await mutation(ordinary).execute();
+  await mutation(disabled).execute();
+  assert.deepEqual(calls.slice(0, 2).map(({ options }) => options), [{}, {}]);
+  const automaticQuery = mutation(automatic);
+  await automaticQuery.execute();
+  await automaticQuery.execute();
+  assert.match(calls[2].options.idempotencyKey, /^[a-f0-9-]{36}$/);
+  assert.notEqual(calls[2].options.idempotencyKey, calls[3].options.idempotencyKey);
+  for (const db of [ordinary, automatic, disabled]) {
+    const operation = policyMutation(mutation(db), { idempotencyKey: "same-operation-key-01", expect: { affectedRows: 1 } });
+    await operation.execute();
+    await operation.execute();
+    assert.deepEqual(calls.at(-1), calls.at(-2));
+    assert.deepEqual(calls.at(-1).options, { idempotencyKey: "same-operation-key-01", expect: { affectedRows: 1 } });
+  }
+  await automatic.selectFrom("posts").select("id").execute();
+  assert.deepEqual(calls.at(-1).options, {});
+  // A later binding must not silently replace an earlier binding's configuration.
+  await mutation(ordinary).execute();
+  assert.deepEqual(calls.at(-1).options, {});
+  await rawDb.destroy();
+});
+
+test("keyless and explicit-key writes work without Web Crypto; opt-in generation fails clearly", async () => {
+  const calls = [];
+  const client = { async execute(_sql, _params, options) { calls.push(options); return { rows: [] }; } };
+  const rawDb = new Kysely({ dialect: new TestSqliteDialect() });
+  const ordinary = createPolicyKysely({ kysely: rawDb, client });
+  const automatic = createPolicyKysely({ kysely: rawDb, client, autoIdempotencyKey: true });
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", { configurable: true, value: undefined });
+  try {
+    await ordinary.deleteFrom("posts").where("id", "=", "post_1").execute();
+    await policyMutation(automatic.deleteFrom("posts"), { idempotencyKey: "explicit-operation-key" }).execute();
+    await assert.rejects(automatic.deleteFrom("posts").execute(), /autoIdempotencyKey requires/);
+    assert.deepEqual(calls, [{}, { idempotencyKey: "explicit-operation-key" }]);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "crypto", descriptor);
+    else delete globalThis.crypto;
+    await rawDb.destroy();
+  }
+});
+
+test("invalid automatic-key configuration is rejected at binding time", async () => {
+  const rawDb = new Kysely({ dialect: new TestSqliteDialect() });
+  const client = { execute() { assert.fail("must not execute"); } };
+  for (const autoIdempotencyKey of [null, "false", 0, {}]) {
+    assert.throws(() => createPolicyKysely({ kysely: rawDb, client, autoIdempotencyKey }), /must be a boolean/);
+  }
   await rawDb.destroy();
 });

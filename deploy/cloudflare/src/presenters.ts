@@ -104,7 +104,8 @@ export const capabilities = (runtime: any, publicConfig: any = {}) => {
     maxInteractiveDurationMs: 4000,
   },
   idempotency: {
-    mutationsRequired: true,
+    mutationsRequired: false,
+    interactiveStartRequired: false,
     persistent: true,
     binding: ["issuer", "subject", "role", "session", "endpoint", "payload"],
   },

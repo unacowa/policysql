@@ -18,13 +18,17 @@ export class PolicySqlClient {
   }
 
   async execute(sql, params = {}, options = {}) {
+    if (options.idempotencyKey !== undefined &&
+      (typeof options.idempotencyKey !== "string" || !/^[A-Za-z0-9._:-]{16,128}$/.test(options.idempotencyKey))) {
+      throw new TypeError("idempotencyKey must contain 16-128 letters, digits, dots, underscores, colons, or hyphens");
+    }
     const response = await this.fetchImpl(new URL("/v1/transactions:execute", this.endpoint), {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.token}`,
         "content-type": "application/json",
         "x-policysql-role": this.role,
-        ...(options.idempotencyKey ? { "idempotency-key": options.idempotencyKey } : {}),
+        ...(options.idempotencyKey === undefined ? {} : { "idempotency-key": options.idempotencyKey }),
       },
       body: JSON.stringify({
         expected: { schemaVersion: this.schemaVersion, policyVersion: this.policyVersion },

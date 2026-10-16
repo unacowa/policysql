@@ -5,7 +5,7 @@
 - `POST /v1/transactions:execute` is the only stateless SQL endpoint. Its `statements[]` contains one or more scalar SQL items and its response always contains ordered `results[]`.
 - Transaction mode is inferred from all bound statements. Clients do not provide atomic mode or statement IDs; errors and results use array indexes.
 - Interactive flow remains scalar and sequenced because later statements may depend on earlier results.
-- Every public write entry point requires a scoped idempotency key and canonical payload hash.
+- Atomic mutations and interactive start accept an optional scoped idempotency key. Keyed requests retain canonical-payload replay; unkeyed requests are independent executions without accessing the user's idempotency table.
 - Interactive and callback commands support safe retry of the immediately completed sequence only when the payload is identical.
 - Commit checks run after all statements, only for resources with changed rows, in deterministic check-name order.
 - A policy-owned callback role may elevate independently of caller roles. The initiating trusted session is retained.
@@ -24,9 +24,10 @@
 ## Implementation checks
 
 - Canonicalize request hashes without including hop-by-hop headers and bind them to issuer, subject, role, and endpoint.
-- Persist terminal idempotency state before acknowledging success.
+- For keyed requests, persist terminal idempotency state before acknowledging success.
 - Keep one owner for client statements, callback SELECTs, checks, and final commit; serialize all commands.
 - Test response loss before and after commit, duplicate sequence, conflicting payload, expiry, owner loss, hook replay, and multi-check ordering.
 - Count callback queries and bytes against stricter commit-check-specific and transaction-wide limits.
-- Compile and authorize every item, infer mode, and validate mutation idempotency requirements before opening the database transaction.
+- Compile and authorize every item, infer mode, and validate any supplied mutation idempotency key before opening the database transaction.
+- Exercise unkeyed direct/DO mutations without an idempotency table, rollback, fresh owner IDs, and unchanged interactive command replay.
 - Test empty arrays, statement smuggling inside one `sql` field, mixed read/write mode inference, index mapping, cumulative limits, and rollback without partial results.

@@ -101,7 +101,7 @@ paths:
       description: Requires JWT access `execute`.
       parameters:
         - $ref: '#/components/parameters/Role'
-        - $ref: '#/components/parameters/RequiredIdempotencyKey'
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -251,13 +251,15 @@ components:
       name: Idempotency-Key
       in: header
       required: false
-      description: Required when any statement is a mutation.
-      schema: { type: string, minLength: 1, maxLength: 128 }
-    RequiredIdempotencyKey:
-      name: Idempotency-Key
-      in: header
-      required: true
-      schema: { type: string, minLength: 1, maxLength: 128 }
+      description: >-
+        Optional replay key for atomic mutations and interactive transaction start.
+        Atomic mutations with a key require policysql_idempotency in the selected database;
+        lookup and response storage remain in the mutation transaction. Without a key,
+        this table is never accessed and each request is a new execution. Interactive
+        start without a key creates a new transaction; subsequent commands retain their
+        sequence-based retry rules. Empty or malformed keys are rejected. Read-only
+        atomic execution does not use idempotency storage.
+      schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._:-]{16,128}$' }
     TransactionId:
       name: transactionId
       in: path

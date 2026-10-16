@@ -142,10 +142,15 @@ sent in callback payloads. Remote timeout remains necessary after owner eviction
 Idempotency identity includes `scope` and `databaseId`; the payload fingerprint includes
 all binding fields. Generation/snapshot changes conflict on an existing key instead of
 silently creating another operation. Credentials are not included in these identities.
-Retry records are stored in the selected database within the mutation transaction.
+For keyed atomic mutations, retry records are stored in `policysql_idempotency` in the
+selected database within the mutation transaction. `Idempotency-Key` is optional: without
+it, both direct and commit-check DO execution skip every access to this table, so it need
+not exist. Unkeyed requests are independent executions without request-level deduplication.
+Interactive starts also accept an optional key; their state and sequenced retries use DO
+storage and never require this DB table.
 
 Never repoint an existing database identity at another physical database. Provision a
-new identity, validate its actual schema and `policysql_idempotency` table, retire the
+new identity, validate its actual schema (and `policysql_idempotency` if using keyed atomic mutations), retire the
 old route, and reconcile ambiguous writes before submitting replacements to the new DB.
 Cross-database exactly-once migration and automatic fallback are not provided.
 

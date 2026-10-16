@@ -135,14 +135,17 @@ Catalogはroleとpolicyに依存します。clientがCatalogや生成型をcache
     "executionTimeoutMs": 3000
   },
   "idempotency": {
-    "retentionSeconds": 86400,
-    "maxKeyBytes": 128,
-    "keyPattern": "^[A-Za-z0-9._~-]+$"
+    "mutationsRequired": false,
+    "interactiveStartRequired": false,
+    "persistent": true,
+    "binding": ["issuer", "subject", "role", "session", "endpoint", "payload"]
   }
 }
 ```
 
 code generatorやquery builderは、固定された想定ではなくCapabilitiesを参照して利用機能を決定できます。ただし、Capabilitiesに掲載された機能でも、resource policyが許可するとは限りません。
+
+`idempotency.mutationsRequired`と`interactiveStartRequired`はともに`false`です。`persistent: true`はキーを指定した要求の再送処理を表します。キーなしの更新は冪等性テーブルを使用せず、要求間の重複排除を保証しません。キーの形式とDBテーブルの要件は[Atomic Execute](../api/execute#transaction-mode)を参照してください。
 
 `maxAstDepth`、`maxExpressionNodes`、`maxJoins`などはcompile前後に検査する構造上限です。`executionTimeoutMs`、`maxRows`、`maxResultBytes`はruntimeにも強制します。SQLite/Tursoが正確なscan row数やcostを事前提供しない場合、その値を保証するfieldは掲載せず、timeoutと結果上限でfail closedにします。
 

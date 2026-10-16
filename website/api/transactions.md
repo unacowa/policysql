@@ -25,7 +25,7 @@ database connectionをrequest間で保持するため、有効期限は短く、
 POST /v1/transactions HTTP/1.1
 Authorization: Bearer <JWT>
 PolicySQL-Role: author
-Idempotency-Key: 0198f8f1-...
+Idempotency-Key: 0198f8f1-0f64-7000-8000-000000000001
 Content-Type: application/json
 ```
 
@@ -150,13 +150,18 @@ validation中は`validating`状態です。この間はcommit-check validatorの
 
 ## Idempotencyと再送
 
-Atomic Executeでmutationを含むrequestと、対話型transaction開始には`Idempotency-Key`が必要です。keyは検証済みissuer、subject、role、endpointへscopeされ、canonical request hashとterminal responseをCapabilitiesの保存期間中保持します。
+Atomic Executeでmutationを含むrequestと、対話型transaction開始の`Idempotency-Key`は任意です。指定したkeyは検証済みissuer、subject、role、session、endpoint、DB識別子へ束縛し、canonical request hashにはDB bindingも含めます。保存済みの結果がある場合、同一要求へその結果を返します。
 
-- 同じkey、同じpayload、実行中: `POLICYSQL_REQUEST_IN_PROGRESS`
 - 同じkey、同じpayload、完了済み: 保存済みstatusとbody
-- 同じkey、異なるpayload: `POLICYSQL_IDEMPOTENCY_KEY_REUSED`
+- 同じkey、異なるpayloadまたは経路世代: HTTP 409（通常atomicは`POLICYSQL_IDEMPOTENCY_CONFLICT`、DOは`POLICYSQL_TRANSACTION_CONFLICT`）
+- keyなしのAtomic Execute: 要求ごとに実行し、`policysql_idempotency`を参照・追記しない
+- keyなしの対話型transaction開始: 毎回新しいtransaction ID／ownerを作る
 
-timeout後に新しいkeyやsequenceへ進まず、同じrequestを再送して結果を確定します。
+対話型transactionはDOに状態を保存し、キーの有無にかかわらず利用DBの冪等性テーブルは不要です。開始後のstatement・commit・rollbackは、同じtransaction IDとsequenceによる既存の再送規則を維持します。
+
+開始時に返された`transactionId`で、statement・commit・rollbackをすべて同じ担当DOへ振り分けます。commit checkのcallbackも、そのDOが保持する同じDBトランザクションへ届きます。「キーなしでは毎回別ID」は開始要求ごとの意味であり、開始後のSQLやcallbackごとに担当DOが変わることはありません。
+
+キーを使用した場合、timeout後に新しいkeyやsequenceへ進まず、同じrequestを再送して結果を確定します。キーなしの開始要求を再送しても以前のtransactionは取得できず、別のtransactionになります。キーなしのAtomic Executeの再送には重複排除の保証がありません。
 
 ## 選び分け
 

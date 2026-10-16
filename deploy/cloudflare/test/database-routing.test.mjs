@@ -26,7 +26,7 @@ const encode = (value) => value === null ? { type: "null" } : typeof value === "
 
 // Exercise real SQL, rollback, and transaction visibility through the real HTTP transport.
 // Only the remote HTTP server and Cloudflare storage/routing are simulated.
-const harness = async (t, { hooks = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding } = {}) => {
+const harness = async (t, { hooks = true, idempotencyTable = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding } = {}) => {
   const directory = mkdtempSync(join(tmpdir(), "policysql-routing-"));
   const runtime = PolicySqlRuntime.newWithPhysicalSchema(
     example("catalog.yaml"), hooks ? example("policy.yaml") : example("policy.yaml").split("commit_checks:")[0],
@@ -39,6 +39,7 @@ const harness = async (t, { hooks = true, customizeProvider = (provider) => prov
     const path = join(directory, `${tenant}.sqlite`);
     const database = new DatabaseSync(path);
     database.exec(example("schema.sql"));
+    if (idempotencyTable) database.exec(example("idempotency.sql"));
     database.prepare("INSERT INTO projects VALUES (?, ?, ?)").run("seed", `tenant_${tenant}`, `database_${tenant}`);
     database.prepare("INSERT INTO projects VALUES (?, ?, ?)").run("hidden", "another_tenant", "hidden");
     databases.set(tenant, { path, database });
@@ -160,7 +161,7 @@ const harness = async (t, { hooks = true, customizeProvider = (provider) => prov
   const request = async (tenant, path, body, key = "same-idempotency-key", customToken = tokens[tenant], extraHeaders = {}) => {
     const input = new Request(`https://worker.test${path}`, {
       method: body === undefined ? "GET" : "POST",
-      headers: { authorization: `Bearer ${customToken}`, "content-type": "application/json", "idempotency-key": key, ...extraHeaders },
+      headers: { authorization: `Bearer ${customToken}`, "content-type": "application/json", ...(key === null ? {} : { "idempotency-key": key }), ...extraHeaders },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const response = path.startsWith("/v1/commit-checks/")
@@ -308,6 +309,109 @@ test("ordinary atomic writes isolate identical keys, replay once, and roll back 
   assert.equal(h.rows("a").some((row) => row.id === "rollback"), false);
   assert.equal(h.rows("b").some((row) => row.id === "rollback"), false);
   for (const tenant of ["a", "b"]) assert.equal(h.databases.get(tenant).database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, 1);
+});
+
+for (const hooks of [false, true]) {
+  for (const idempotencyTable of [false, true]) {
+    test(`unkeyed writes never access idempotency storage and run independently (DO=${hooks}, table=${idempotencyTable})`, async (t) => {
+      const h = await harness(t, { hooks, idempotencyTable });
+      if (idempotencyTable) h.databases.get("a").database.exec("INSERT INTO policysql_idempotency VALUES ('untouched', 'fingerprint', '{}')");
+      const update = envelope({ sql: "UPDATE projects SET name = :name WHERE id = :id RETURNING id, name", params: { id: "seed", name: "changed" } });
+      const first = await h.request("a", "/v1/transactions:execute", update, null);
+      const second = await h.request("a", "/v1/transactions:execute", update, null);
+      assert.equal(first.status, 200, JSON.stringify(first));
+      assert.equal(second.status, 200, JSON.stringify(second));
+      assert.notEqual(first.body.transactionId, second.body.transactionId);
+      assert.deepEqual(second.body.results[0].rows, [{ id: "seed", name: "changed" }]);
+      // Separate databases allow real concurrent writers in the SQLite test server.
+      const parallel = await Promise.all(["a", "b"].map((tenant) => h.request(tenant, "/v1/transactions:execute", envelope(insert("unkeyed")), null)));
+      assert.deepEqual(parallel.map((result) => result.status), [200, 200]);
+      await h.flush();
+      assert.equal(h.events.filter(({ sql }) => sql.startsWith("UPDATE")).length, 2);
+      assert.equal(h.events.some(({ sql }) => /policysql_idempotency/i.test(sql)), false);
+      if (hooks) {
+        assert.equal(h.owners.size, 4);
+        assert.equal(h.hooksSeen.length, 4);
+        assert.equal(new Set(h.hooksSeen.map(({ hook }) => hook.query.url)).size, 4);
+        for (const { result, status } of h.hooksSeen) assert.equal(status, 200, JSON.stringify(result));
+        assert.ok(h.hooksSeen.slice(2).every(({ result }) => result.rows.some((row) => row.id === "unkeyed")));
+      }
+      if (idempotencyTable) assert.deepEqual(
+        h.databases.get("a").database.prepare("SELECT * FROM policysql_idempotency").all().map((row) => ({ ...row })),
+        [{ key_hash: "untouched", fingerprint: "fingerprint", response_json: "{}" }],
+      );
+    });
+  }
+
+  test(`keyed writes still fail before mutation when the table is missing (DO=${hooks})`, async (t) => {
+    const h = await harness(t, { hooks, idempotencyTable: false });
+    const result = await h.request("a", "/v1/transactions:execute", envelope(insert("must_not_run")));
+    assert.equal(result.status, 503);
+    assert.equal(result.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+    assert.equal(h.events.some(({ sql }) => sql.startsWith("INSERT INTO projects")), false);
+    assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
+    assert.equal(h.hooksSeen.length, 0);
+  });
+
+  test(`unkeyed requests roll back on late SQL errors (DO=${hooks})`, async (t) => {
+    const h = await harness(t, { hooks, idempotencyTable: false });
+    const result = await h.request("a", "/v1/transactions:execute", envelope(insert("rollback"), insert("seed")), null);
+    assert.equal(result.status, 503);
+    assert.equal(h.rows("a").some((row) => row.id === "rollback"), false);
+    assert.equal(h.events.some(({ sql }) => /policysql_idempotency/i.test(sql)), false);
+    assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
+  });
+}
+
+test("unkeyed commit-check rejection rolls back the update", async (t) => {
+  const h = await harness(t, { idempotencyTable: false });
+  h.setValidator(async () => false);
+  const result = await h.request("a", "/v1/transactions:execute", envelope(insert("denied")), null);
+  assert.equal(result.status, 409);
+  assert.equal(result.body.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
+  assert.equal(h.rows("a").some((row) => row.id === "denied"), false);
+  assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
+  assert.equal(h.events.some(({ sql }) => /policysql_idempotency/i.test(sql)), false);
+});
+
+test("interactive starts without keys are distinct and retain command retries without a table", async (t) => {
+  const h = await harness(t, { idempotencyTable: false });
+  // Two simultaneous read transactions on the same database must have separate owners.
+  const starts = await Promise.all([1, 2].map(() => h.request("a", "/v1/transactions", { mode: "read" }, null)));
+  assert.deepEqual(starts.map((result) => result.status), [201, 201], JSON.stringify(starts));
+  assert.notEqual(starts[0].body.transactionId, starts[1].body.transactionId);
+  for (const start of starts) {
+    const path = `/v1/transactions/${start.body.transactionId}`;
+    const command = { sequence: 1, ...read };
+    const first = await h.request("a", `${path}/statements`, command, null);
+    assert.equal(first.status, 200);
+    assert.deepEqual((await h.request("a", `${path}/statements`, command, null)).body, first.body);
+    assert.equal((await h.request("a", `${path}/rollback`, { sequence: 2 }, null)).status, 200);
+  }
+  const write = await h.request("a", "/v1/transactions", { mode: "write" }, null);
+  assert.equal(write.status, 201);
+  const path = `/v1/transactions/${write.body.transactionId}`;
+  assert.equal((await h.request("a", `${path}/statements`, { sequence: 1, ...insert("interactive_unkeyed") }, null)).status, 200);
+  const committed = await h.request("a", `${path}/commit`, { sequence: 2 }, null);
+  assert.equal(committed.status, 200);
+  assert.deepEqual((await h.request("a", `${path}/commit`, { sequence: 2 }, null)).body, committed.body);
+  await h.flush();
+  assert.equal(h.hooksSeen.length, 1);
+  assert.ok(h.rows("a").some((row) => row.id === "interactive_unkeyed"));
+  assert.equal(h.events.some(({ sql }) => /policysql_idempotency/i.test(sql)), false);
+});
+
+test("explicit invalid keys remain errors before database execution", async (t) => {
+  const h = await harness(t);
+  for (const key of ["", "short", "a".repeat(129), "request-key-0001,request-key-0002", "invalid key with spaces"]) {
+    for (const [path, body] of [["/v1/transactions:execute", envelope(insert("invalid"))], ["/v1/transactions", { mode: "read" }]]) {
+      const result = await h.request("a", path, body, key);
+      assert.equal(result.status, 400);
+      assert.equal(result.body.error.code, "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED");
+    }
+  }
+  assert.equal(h.events.length, 0);
+  assert.equal(h.owners.size, 0);
 });
 
 test("DO atomic callbacks see uncommitted rows on the initiating database and replay without another hook", async (t) => {
