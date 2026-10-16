@@ -93,11 +93,18 @@ class Connection {
     });
   }
   terminal(kind) {
-    if (!this.transaction || this.#released) return Promise.reject(unavailable());
+    // Shutdown blocks new commits, but Kysely's rollback-on-error must still reach
+    // the transaction's saved outcome, including after dispose() has completed.
+    if (!this.transaction || (this.#released && kind === "commit")) return Promise.reject(unavailable());
     // Delegate conflicting terminal attempts to the transaction so an unknown commit
     // propagates its original outcome error rather than a misleading rollback result.
     this.#ending ??= kind;
-    return this.#enqueue(() => this.transaction[kind]());
+    return this.#enqueue(() => {
+      // destroy() may already have rolled back this transaction. Acknowledge that
+      // result without another request or masking the callback's original error.
+      if (kind === "rollback" && this.transaction.status === "rolled_back") return;
+      return this.transaction[kind]();
+    });
   }
   async *streamQuery() { throw new TypeError("PolicySQL streaming is not supported"); }
   async dispose() {
@@ -142,7 +149,11 @@ export class PolicySqlDriver {
     }
   }
   async commitTransaction(connection) { if (this.#destroyed) throw unavailable(); this.#assert(connection); await connection.terminal("commit"); }
-  async rollbackTransaction(connection) { if (this.#destroyed) throw unavailable(); this.#assert(connection); await connection.terminal("rollback"); }
+  async rollbackTransaction(connection) {
+    // Cleanup remains valid during shutdown; the transaction owns its outcome.
+    this.#assert(connection);
+    await connection.terminal("rollback");
+  }
   async releaseConnection(connection) {
     this.#assert(connection);
     // Cleanup must not mask a query/commit error. The transaction already reports any

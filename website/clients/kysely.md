@@ -206,6 +206,8 @@ try {
 
 利用終了時は `await db.destroy()` で資源を解放します。controlled transaction の終了操作は利用者が管理してください。期限や結果不明のため閉じられない remote transaction は server の期限処理に従います。
 
+`destroy()` は新しい処理の受付を停止します。送信済みの commit と重なった場合は、既定の時間・回数の範囲でその結果を確認し、transaction の Promise に成功または元のエラーを返します。結果不明なら `POLICYSQL_OUTCOME_UNKNOWN` と `phase`・`transactionId`・`sequence` を保持し、rollback 要求は送りません。`destroy()` の完了は commit 成功や rollback 完了の保証ではないため、transaction の Promise も必ず確認してください。
+
 ## 旧 API からの移行
 
 Proxy による旧 API は削除しました。

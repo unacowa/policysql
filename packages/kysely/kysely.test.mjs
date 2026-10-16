@@ -205,6 +205,73 @@ test("unknown callback commit is not converted to rollback or callback replay", 
   assert.equal(h.calls.some(c => c.path.endsWith("/rollback")), false);
 });
 
+for (const outcome of ["confirmed", "recovered", "unknown"]) test(`destroy during callback commit preserves its ${outcome} outcome`, async (t) => {
+  const entered = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  let attempts = 0;
+  const h = setup(t, { fetchImpl: gateway => async (url, init) => {
+    const response = await gateway.fetchImpl(url, init);
+    if (new URL(url).pathname.endsWith("/commit")) {
+      attempts++;
+      entered.resolve();
+      await resume.promise;
+      if (outcome === "unknown" || (outcome === "recovered" && attempts === 1)) throw new Error("lost commit");
+    }
+    return response;
+  } });
+  let callbacks = 0;
+  const operation = h.db.transaction().execute(async trx => {
+    callbacks++;
+    await mutation(trx).execute();
+    return "saved";
+  });
+  const checked = outcome === "unknown"
+    ? assert.rejects(operation, error => {
+      assert.equal(error.code, "POLICYSQL_OUTCOME_UNKNOWN");
+      assert.equal(error.phase, "commit");
+      assert.equal(error.transactionId, [...h.transactions.keys()][0]);
+      assert.equal(error.sequence, 2);
+      return true;
+    })
+    : operation.then(result => assert.equal(result, "saved"));
+  await entered.promise;
+  let destroyed = false;
+  const shutdown = h.db.destroy().then(() => { destroyed = true; });
+  try {
+    const calls = h.calls.length;
+    await assert.rejects(mutation(h.db).execute());
+    assert.equal(h.calls.length, calls);
+    assert.equal(destroyed, false);
+  } finally { resume.resolve(); }
+  await Promise.all([checked, shutdown]);
+  assert.equal(callbacks, 1);
+  assert.equal([...h.transactions.values()][0].status, "committed");
+  assert.equal(attempts, outcome === "confirmed" ? 1 : 2);
+  const commits = h.calls.filter(c => c.path.endsWith("/commit"));
+  assert.ok(commits.every(c => c.path === commits[0].path && c.text === commits[0].text));
+  assert.equal(h.calls.filter(c => c.path.endsWith("/statements")).length, 1);
+  assert.equal(h.calls.some(c => c.path.endsWith("/rollback")), false);
+});
+
+test("callback error survives a rollback already completed by destroy", async (t) => {
+  const h = setup(t);
+  const entered = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const expected = new Error("application decision during shutdown");
+  const checked = assert.rejects(h.db.transaction().execute(async trx => {
+    await mutation(trx).execute();
+    entered.resolve();
+    await resume.promise;
+    throw expected;
+  }), error => error === expected);
+  await entered.promise;
+  try { await h.db.destroy(); }
+  finally { resume.resolve(); }
+  await checked;
+  assert.equal([...h.transactions.values()][0].status, "rolled_back");
+  assert.deepEqual(h.calls.map(c => c.path.split("/").at(-1)), ["transactions", "statements", "rollback"]);
+});
+
 test("controlled unknown commit can be confirmed by calling commit again", async (t) => {
   let drop = true;
   const h = setup(t, { fetchImpl: gateway => async (url, init) => {
@@ -224,9 +291,15 @@ test("controlled unknown commit can be confirmed by calling commit again", async
 
 test("destroy rolls back an abandoned active controlled transaction", async (t) => {
   const h = setup(t);
-  await h.db.startTransaction().execute();
+  const trx = await h.db.startTransaction().execute();
   await h.db.destroy();
   assert.equal(h.calls.at(-1).path.split("/").at(-1), "rollback");
+  const calls = h.calls.length;
+  await assert.rejects(trx.commit().execute(), { code: "POLICYSQL_TRANSACTION_UNAVAILABLE" });
+  await assert.rejects(mutation(trx).execute(), { code: "POLICYSQL_TRANSACTION_UNAVAILABLE" });
+  await trx.rollback().execute();
+  assert.equal(trx.isRolledBack, true);
+  assert.equal(h.calls.length, calls);
 });
 
 test("invalid configuration and options are rejected without I/O", async (t) => {

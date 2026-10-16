@@ -154,6 +154,49 @@ test("lost statement and commit responses replay actual DO commands without repe
   assert.deepEqual(requests.map(r => r.body.sequence), [undefined, 1, 1, 2, 2]);
 });
 
+for (const outcome of ["unknown", "rejected"]) test(`destroy preserves an actual DO commit's ${outcome} outcome`, async (t) => {
+  const h = await harness(t, { hooks: outcome === "rejected" });
+  if (outcome === "rejected") h.setValidator(async () => false);
+  const entered = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const { db, requests } = await makeClient(t, h, { wrapFetch: send => async (url, init) => {
+    const response = await send(url, init);
+    if (new URL(url).pathname.endsWith("/commit")) {
+      entered.resolve();
+      await resume.promise;
+      if (outcome === "unknown") throw new Error("lost commit");
+    }
+    return response;
+  } });
+  let callbacks = 0;
+  const checked = assert.rejects(db.transaction().execute(async trx => {
+    callbacks++;
+    await update(trx).execute();
+  }), error => {
+    if (outcome === "unknown") {
+      assert.equal(error.code, "POLICYSQL_OUTCOME_UNKNOWN");
+      assert.equal(error.phase, "commit");
+      assert.equal(error.transactionId, requests[1].path.split("/")[3]);
+      assert.equal(error.sequence, 2);
+    } else {
+      assert.equal(error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
+      assert.equal(error.status, 409);
+    }
+    return true;
+  });
+  await entered.promise;
+  const shutdown = db.destroy();
+  resume.resolve();
+  await Promise.all([checked, shutdown]);
+  await h.flush();
+  assert.equal(callbacks, 1);
+  assert.equal(h.rows("a")[0].name, outcome === "unknown" ? "Updated" : "database_a");
+  assert.equal(h.events.filter(e => /^UPDATE\b/i.test(e.sql)).length, 1);
+  assert.equal(h.owners.size, 1);
+  assert.deepEqual(requests.map(r => r.body.sequence), outcome === "unknown" ? [undefined, 1, 2, 2] : [undefined, 1, 2]);
+  assert.equal(requests.some(r => r.path.endsWith("/rollback")), false);
+});
+
 test("interactive statement limit and revoked DB binding prevent commit", async (t) => {
   const h = await harness(t, { hooks: false });
   const { db } = await makeClient(t, h);

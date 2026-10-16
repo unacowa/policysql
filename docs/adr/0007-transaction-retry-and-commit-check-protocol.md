@@ -49,3 +49,9 @@ command sequence and serialized payload for retries and never replays the callba
 An unresolved command blocks contradictory commands. In particular a lost commit response
 is not proof of rollback: repeat that same commit to confirm it, and require a committed
 response status. Kysely's rollback-on-error path must not reverse an unresolved commit.
+
+Driver shutdown rejects new work but preserves the outcome of an in-flight command.
+Kysely's rollback-on-error cleanup still consults the existing transaction after shutdown:
+an uncertain or failed command retains its original error, while an already confirmed
+rollback needs no further request. Shutdown completion is resource cleanup, not proof of
+commit or rollback; the application must also observe its transaction promise.
