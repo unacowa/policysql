@@ -94,10 +94,14 @@ per-query keys, expectations, and metadata observers.
 
 ```js
 import { createExampleClient, prepareProjectRename } from './client.mjs'
+import { createHttpTransport } from '@unacowa/policysql/transport/http'
 
-const db = createExampleClient({
+const transport = createHttpTransport({
   endpoint: 'https://gateway.example.com',
   token: runtimeJwt,
+})
+const db = createExampleClient({
+  transport,
   autoIdempotencyKey: false, // default: omit keys unless explicitly supplied
 })
 
@@ -124,8 +128,9 @@ Standard interactive transactions need no idempotency table, including with
 and sequence for retries. `renameExistingProject()` in `client.mjs` shows a callback
 transaction whose update depends on a preceding SELECT. Controlled transactions use
 `db.startTransaction().execute()` and explicit `trx.commit().execute()` or rollback.
-Call `await db.destroy()` when the client is no longer needed. See the
-[Kysely guide](../../website/clients/kysely.md) for retries, limits, metadata, and migration.
+Call `await db.destroy()` when the client is no longer needed. The application owner
+disposes the shared transport with `await transport.dispose()` after all clients finish. See the
+[Kysely guide](../../website/clients/kysely.md) for retries, limits, and metadata.
 
 ## Lifecycle and verification
 
@@ -157,4 +162,4 @@ and interactive commit checks, callback post-state visibility, rollback and retr
 cross-DB capability rejection, route revocation, credential rotation, connection loss,
 DO eviction, and cost observation. This example has not itself been live-certified.
 
-See [the API and migration contract](../../docs/database-routing.md).
+See [the database binding API](../../docs/database-routing.md).

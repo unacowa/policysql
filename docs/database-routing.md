@@ -164,13 +164,11 @@ A rejection in the Worker can leave an existing DO transaction until its alarm/r
 The wrapper must validate physical schema compatibility before activating a route.
 A matching snapshot string alone is not proof. DDL remains outside the public endpoint.
 
-## Breaking changes and evidence
+## Integration and verification
 
-Legacy implicit fixed-env connections and transportFactory/costTransportFactory overrides
-have been removed. Fixed-env connection construction now lives explicitly in
-`deploy/cloudflare/wrapper/`, outside the published library entrypoint. Existing wrappers
-must provide a provider and a binding. This also changes legacy retry identities; drain
-unresolved retries before migrating an endpoint. Old owner state without a binding fails closed.
+Fixed-env connection construction lives in `deploy/cloudflare/wrapper/`, outside the
+published library entrypoint. Wrappers must provide a provider and a binding.
+Owner state without a binding fails closed.
 
 See [the complete example](../examples/database-routing/README.md). Local tests use real
 JWT verification for the SQL session, Rust/Wasm, HTTP transport, and two independent SQLite
