@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import ts from "typescript";
 import { generate } from "./index.js";
-import { PolicySqlClient } from "../client/index.js";
-import { mockGateway } from "../client/test-fixture.mjs";
+import { createHttpTransport } from "../transport/http.js";
+import { mockGateway, makeClient, testToken } from "../client/test-fixture.mjs";
 
 const versions = { schemaVersion: "schema_1", policyVersion: "policy_1" };
 const fixture = async (t) => {
@@ -28,7 +28,8 @@ const fixture = async (t) => {
   };
   return {
     calls, output,
-    config: { endpoint: "https://gateway.example.com", role: "author", input, output, token: "token", fetchImpl },
+    fetchImpl,
+    config: { role: "author", input, output, transport: createHttpTransport({ endpoint: "https://gateway.example.com", token: testToken, fetchImpl }) },
     source: () => readFile(join(output, "index.ts"), "utf8"),
   };
 };
@@ -52,12 +53,12 @@ test("generated query requires matching client versions and actually sends those
   const { outputText } = ts.transpileModule(await h.source(), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } });
   const { getPosts } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
   const gateway = mockGateway();
-  const config = { endpoint: h.config.endpoint, token: "token", fetchImpl: gateway.fetchImpl };
+  const config = { endpoint: "https://gateway.example.com", token: "token", fetchImpl: gateway.fetchImpl };
   for (const version of [{}, { ...versions, policyVersion: "old" }]) {
-    await assert.rejects(getPosts.execute(new PolicySqlClient({ ...config, ...version }), { status: "draft" }), /POLICYSQL_STALE_OPERATION/);
+    await assert.rejects(getPosts.execute(makeClient({ ...config, ...version }), { status: "draft" }), /POLICYSQL_STALE_OPERATION/);
   }
   assert.equal(gateway.calls.length, 0);
-  const rows = await getPosts.execute(new PolicySqlClient({ ...config, ...versions }), { status: "draft" });
+  const rows = await getPosts.execute(makeClient({ ...config, ...versions }), { status: "draft" });
   assert.equal(rows[0].id, "post_1");
   assert.deepEqual(gateway.calls[0].body.expected, versions);
   assert.deepEqual(gateway.calls[0].body.statements[0].params, { status: "draft" });
@@ -68,11 +69,11 @@ test("catalog/capability mismatch or stale Explain preserves existing generated 
   await generate(h.config);
   const previous = await h.source();
   for (const failedPath of ["/v1/capabilities", "/v1/transactions:explain"]) {
-    await assert.rejects(generate({ ...h.config, fetchImpl: async (url, init) => {
-      if (new URL(url).pathname !== failedPath) return h.config.fetchImpl(url, init);
+    await assert.rejects(generate({ ...h.config, transport: createHttpTransport({ endpoint: "https://gateway.example.com", token: testToken, fetchImpl: async (url, init) => {
+      if (new URL(url).pathname !== failedPath) return h.fetchImpl(url, init);
       if (failedPath.endsWith("capabilities")) return Response.json({ ...versions, policyVersion: "changed" });
       return Response.json({ error: { code: "POLICYSQL_STALE_OPERATION" } }, { status: 409 });
-    } }), /POLICYSQL_STALE_OPERATION/);
+    } }) }), error => error.code === "POLICYSQL_STALE_OPERATION" || error.message === "POLICYSQL_STALE_OPERATION");
     assert.equal(await h.source(), previous);
   }
 });

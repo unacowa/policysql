@@ -1,12 +1,12 @@
+import type { PolicySqlTransport } from '../transport/index.js'
+
 export type SnapshotOptions =
   | { schemaVersion?: undefined; policyVersion?: undefined }
   | { schemaVersion: string; policyVersion: string }
 export type PolicySqlClientOptions = {
-  endpoint: string
-  token: string
+  transport: PolicySqlTransport
   /** Omit to use the verified JWT's default_role. */
   role?: string
-  fetchImpl?: typeof fetch
 } & SnapshotOptions
 export interface PolicyExpectation { affectedRows?: number; rowCount?: number }
 export interface PolicyExecuteOptions {
@@ -28,6 +28,9 @@ export class PolicySqlError extends Error {
   constructor(message: string, code: string, status?: number)
   readonly code: string
   readonly status?: number
+  readonly delivery?: 'not-sent' | 'possibly-sent'
+  readonly requestId?: string
+  readonly path?: string | null
 }
 export class PolicySqlOutcomeUnknownError extends PolicySqlError {
   constructor(context: {
@@ -38,6 +41,7 @@ export class PolicySqlOutcomeUnknownError extends PolicySqlError {
   readonly transactionId?: string
   readonly phase: 'execute' | 'begin' | 'statement' | 'commit' | 'rollback'
   readonly sequence?: number
+  readonly recoveryFailure?: { code: string; status?: number }
 }
 export interface PolicySqlTransaction {
   readonly id: string
@@ -50,21 +54,20 @@ export interface PolicySqlTransaction {
   execute<Row = Record<string, unknown>>(
     sql: string, params?: Record<string, unknown>, options?: Pick<PolicyExecuteOptions, 'expect' | 'signal'>,
   ): Promise<PolicyExecuteResult<Row>>
-  commit(): Promise<void>
-  rollback(): Promise<void>
-  retryPending(): Promise<PolicyExecuteResult | undefined>
+  commit(options?: { signal?: AbortSignal }): Promise<void>
+  rollback(options?: { signal?: AbortSignal }): Promise<void>
+  retryPending(options?: { signal?: AbortSignal }): Promise<PolicyExecuteResult | undefined>
   dispose(): Promise<void>
 }
 export class PolicySqlClient {
   constructor(options: PolicySqlClientOptions)
-  readonly endpoint: string
   readonly role: string | undefined
   readonly schemaVersion: string | undefined
   readonly policyVersion: string | undefined
   execute<Row = Record<string, unknown>>(
     sql: string, params?: Record<string, unknown>, options?: PolicyExecuteOptions,
   ): Promise<PolicyExecuteResult<Row>>
-  beginTransaction(options?: { mode?: 'read' | 'write' }): Promise<PolicySqlTransaction>
+  beginTransaction(options?: { mode?: 'read' | 'write'; signal?: AbortSignal }): Promise<PolicySqlTransaction>
 }
 export interface GeneratedPolicyQuery<Params, Row> {
   readonly sql: string

@@ -1,3 +1,5 @@
+import { validReply, safeErrorDetails } from '../transport/index.js';
+
 export class PolicySqlError extends Error {
   constructor(message, code, status) {
     super(message);
@@ -67,5 +69,46 @@ export const validateResult = (result) => {
   return result;
 };
 export const retryable = (error) => error?.code === "POLICYSQL_TRANSPORT_ERROR" ||
+  error?.code === "POLICYSQL_TRANSPORT_DISCONNECTED" || error?.code === "POLICYSQL_TRANSPORT_PROTOCOL_ERROR" ||
   error?.code === "POLICYSQL_INVALID_RESPONSE" || error?.status >= 500;
 export const unknown = (tx, phase, sequence) => new PolicySqlOutcomeUnknownError({ transactionId: tx, phase, sequence });
+
+
+export const transportError = (code = 'POLICYSQL_TRANSPORT_ERROR', delivery = 'possibly-sent') => {
+  const error = new PolicySqlError('PolicySQL transport failed.', code);
+  error.delivery = delivery;
+  return error;
+};
+export const uncertain = error => error?.delivery === 'possibly-sent' ||
+  (error?.delivery !== 'not-sent' && (retryable(error) || error?.code === 'POLICYSQL_OUTCOME_UNKNOWN'));
+
+export async function sendOperation(operation, signal) {
+  let reply;
+  try { reply = await operation.send({ signal }); }
+  catch { throw transportError(); }
+  try {
+    reply = copyJson(reply);
+    if (!validReply(reply)) throw 0;
+  } catch { throw transportError('POLICYSQL_TRANSPORT_PROTOCOL_ERROR'); }
+  if (reply.type === 'failure') throw transportError(reply.code, reply.delivery);
+  if (reply.status < 200 || reply.status >= 300) {
+    const diagnostic = safeErrorDetails(reply.body?.error);
+    const error = new PolicySqlError('PolicySQL request failed.', diagnostic.code, reply.status);
+    Object.assign(error, diagnostic);
+    throw error;
+  }
+  if (!object(reply.body)) throw protocolError();
+  return reply.body;
+}
+
+let nextCommandId = 0;
+export const command = (kind, body, transactionId, idempotencyKey) => Object.freeze({
+  commandId: `command_${++nextCommandId}`,
+  target: Object.freeze({ kind, ...(transactionId === undefined ? {} : { transactionId }) }),
+  ...(body === undefined ? {} : { body }),
+  ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+});
+export const signalOptions = (options = {}) => {
+  if (!object(options) || Object.keys(options).some(key => key !== 'signal')) throw new TypeError('invalid command options');
+  return options.signal;
+};

@@ -127,15 +127,14 @@ parameter化されたJSON pathを値なしでExplainする場合、generatorはC
 
 ## 生成済みクエリのバージョン条件
 
-通常の `PolicySqlClient` は endpoint と token だけで作れます。生成済みクエリは
+通常の `PolicySqlClient` は必須の transport を渡して作ります。生成済みクエリは
 生成時の schema / policy version を保持するため、実行する client にその両方を明示します。
 一致しない client（version 未指定を含む）は送信前に `POLICYSQL_STALE_OPERATION` になります。
 実際の server snapshot との一致は gateway が検証します。
 
 ```ts
 const client = new PolicySqlClient({
-  endpoint,
-  token,
+  transport: createHttpTransport({ endpoint, token }),
   role: 'author',
   schemaVersion: getPublishedPosts.schemaVersion,
   policyVersion: getPublishedPosts.policyVersion,
@@ -144,3 +143,5 @@ const posts = await getPublishedPosts.execute(client, { status: 'published', lim
 ```
 
 ロールを選択する header は `PolicySQL-Role` です。generator の role 指定は引き続き必須です。
+
+プログラムから generator を使う場合は `generate({ transport, role, input, output })` を呼びます。CLI は指定された endpoint と `POLICYSQL_CODEGEN_TOKEN` から HTTP transport を構築します。Catalog／Capabilities／Explain は一つの scope を共有し、同じ認証 context と role で取得します。

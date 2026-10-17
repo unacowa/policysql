@@ -77,6 +77,7 @@ export default defineConfig({
         text: 'Clients',
         items: [
           { text: 'Kysely client', link: '/clients/kysely' },
+          { text: 'Transport', link: '/clients/transport' },
           { text: 'TypeScript型生成', link: '/clients/type-generation' },
           { text: 'Client開発ガイド', link: '/clients/driver-development' }
         ]

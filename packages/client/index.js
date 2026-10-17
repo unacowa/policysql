@@ -1,141 +1,88 @@
-import { PolicySqlTransaction } from "./transaction.js";
+import { PolicySqlTransaction } from './transaction.js';
+import { releaseTransportResource } from '../transport/cleanup.js';
+import { onlyKeys, validateRole } from '../transport/index.js';
 import {
-  PolicySqlError, PolicySqlOutcomeUnknownError, object, protocolError,
-  required, validateKey, statement, validateResult, retryable, unknown,
-} from "./protocol.js";
+  PolicySqlError, PolicySqlOutcomeUnknownError, object, protocolError, required, validateKey,
+  statement, validateResult, retryable, uncertain, unknown, command, sendOperation, transportError,
+} from './protocol.js';
 export { PolicySqlError, PolicySqlOutcomeUnknownError };
 
 export class PolicySqlClient {
-  #endpoint;
-  #headers;
+  #transport;
+  #role;
   #expected;
-  #fetch;
-
-  constructor({ endpoint, token, role, schemaVersion, policyVersion, fetchImpl = globalThis.fetch?.bind(globalThis) }) {
-    const url = new URL(required(endpoint, "endpoint"));
-    if ((url.protocol !== "https:" && !(url.protocol === "http:" && url.hostname === "localhost")) || url.username || url.password) {
-      throw new TypeError("endpoint must use HTTPS (or HTTP on localhost) without URL credentials");
-    }
-    required(token, "token");
-    if (role !== undefined && (typeof role !== "string" || !/^[a-z][a-z0-9_]*$/.test(role))) {
-      throw new TypeError("role must be a valid role identifier");
-    }
-    if ((schemaVersion === undefined) !== (policyVersion === undefined)) {
-      throw new TypeError("schemaVersion and policyVersion must be supplied together");
-    }
-    if (schemaVersion !== undefined) {
-      required(schemaVersion, "schemaVersion");
-      required(policyVersion, "policyVersion");
-      this.#expected = Object.freeze({ schemaVersion, policyVersion });
-    }
-    if (typeof fetchImpl !== "function") throw new TypeError("fetchImpl is required");
-    this.#endpoint = url.href;
-    this.#headers = Object.freeze({
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      ...(role === undefined ? {} : { "policysql-role": role }),
-    });
-    // Validate header values before any request is sent.
-    new Headers(this.#headers);
-    this.#fetch = fetchImpl;
+  constructor(options) {
+    if (!onlyKeys(options, ['transport', 'role', 'schemaVersion', 'policyVersion'])) throw new TypeError('invalid client options; supply a transport');
+    const { transport, role, schemaVersion, policyVersion } = options;
+    if (!object(transport) || typeof transport.createScope !== 'function' || typeof transport.dispose !== 'function' ||
+      !object(transport.descriptor) || typeof transport.descriptor.endpointId !== 'string' || !transport.descriptor.endpointId) throw new TypeError('transport is required');
+    this.#role = validateRole(role);
+    if ((schemaVersion === undefined) !== (policyVersion === undefined)) throw new TypeError('schemaVersion and policyVersion must be supplied together');
+    if (schemaVersion !== undefined) this.#expected = Object.freeze({ schemaVersion: required(schemaVersion, 'schemaVersion'), policyVersion: required(policyVersion, 'policyVersion') });
+    this.#transport = transport;
     Object.freeze(this);
   }
-
-  get endpoint() { return this.#endpoint; }
-  get role() { return this.#headers["policysql-role"]; }
+  get role() { return this.#role; }
   get schemaVersion() { return this.#expected?.schemaVersion; }
   get policyVersion() { return this.#expected?.policyVersion; }
-
-  // Each command captures its serialized body before the first attempt. Neither a retry
-  // nor changes to application objects can change its authenticated context or payload.
-  async #request(path, body, { idempotencyKey, deadline = Date.now() + 5_000, signal } = {}) {
-    signal?.throwIfAborted();
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) throw new PolicySqlError("PolicySQL request timed out.", "POLICYSQL_TRANSPORT_ERROR");
-    const controller = new AbortController();
-    let timer;
-    let onAbort;
-    const aborted = new Promise((_, reject) => {
-      const stop = () => {
-        controller.abort();
-        reject(new PolicySqlError("PolicySQL request interrupted.", "POLICYSQL_TRANSPORT_ERROR"));
-      };
-      timer = setTimeout(stop, remaining);
-      onAbort = stop;
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
-    const send = async () => {
-      let response;
-      try {
-        response = await this.#fetch(new URL(path, this.#endpoint), {
-          method: "POST", redirect: "error", signal: controller.signal,
-          headers: { ...this.#headers, ...(idempotencyKey === undefined ? {} : { "idempotency-key": idempotencyKey }) },
-          body,
-        });
-      } catch {
-        throw new PolicySqlError("PolicySQL transport failed.", "POLICYSQL_TRANSPORT_ERROR");
-      }
-      let data;
-      try { data = await response.json(); } catch { throw protocolError(); }
-      if (!response.ok) {
-        const code = typeof data?.error?.code === "string" && /^POLICYSQL_[A-Z_]+$/.test(data.error.code)
-          ? data.error.code : "POLICYSQL_REQUEST_FAILED";
-        throw new PolicySqlError("PolicySQL request failed.", code, response.status);
-      }
-      if (!object(data)) throw protocolError();
-      return data;
-    };
-    try { return await Promise.race([send(), aborted]); }
-    finally {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-    }
-  }
-
-  async execute(sql, params = {}, options = {}) {
-    if (!object(options) || Object.keys(options).some((key) => !["idempotencyKey", "expect", "signal"].includes(key))) {
-      throw new TypeError("invalid execute options");
-    }
-    const idempotencyKey = validateKey(options.idempotencyKey);
-    const body = JSON.stringify({
-      ...(this.#expected === undefined ? {} : { expected: this.#expected }),
-      statements: [statement(sql, params, options.expect)],
-    });
-    let response;
+  #scope() {
     try {
-      response = await this.#request("/v1/transactions:execute", body, { idempotencyKey, signal: options.signal });
-      if (response.status !== "committed" || !Array.isArray(response.results) || response.results.length !== 1 || !object(response.meta)) {
-        throw protocolError();
-      }
-      validateResult(response.results[0]);
-    } catch (error) {
-      // No automatic atomic replay. In particular, an unkeyed write must never be retried.
-      if (retryable(error)) throw unknown(undefined, "execute");
-      throw error;
-    }
-    return { ...response.results[0], envelopeMeta: response.meta, ...(response.debug ? { debug: response.debug } : {}) };
+      const scope = this.#transport.createScope({ role: this.#role });
+      if (!scope || typeof scope.createOperation !== 'function' || typeof scope.beginShutdown !== 'function' || typeof scope.dispose !== 'function') throw 0;
+      return scope;
+    } catch { throw transportError('POLICYSQL_TRANSPORT_ERROR', 'not-sent'); }
   }
-
+  async execute(sql, params = {}, options = {}) {
+    if (!onlyKeys(options, ['idempotencyKey', 'expect', 'signal'])) throw new TypeError('invalid execute options');
+    const key = validateKey(options.idempotencyKey);
+    const body = JSON.stringify({ ...(this.#expected === undefined ? {} : { expected: this.#expected }), statements: [statement(sql, params, options.expect)] });
+    const scope = this.#scope();
+    let operation;
+    try {
+      try { operation = scope.createOperation(command('execute', body, undefined, key), { purpose: 'execute' }); }
+      catch { throw transportError('POLICYSQL_TRANSPORT_ERROR', 'not-sent'); }
+      const response = await sendOperation(operation, options.signal);
+      if (response.status !== 'committed' || !Array.isArray(response.results) || response.results.length !== 1 || !object(response.meta)) throw protocolError();
+      validateResult(response.results[0]);
+      return { ...response.results[0], envelopeMeta: response.meta, ...(response.debug ? { debug: response.debug } : {}) };
+    } catch (error) {
+      if (uncertain(error)) throw unknown(undefined, 'execute');
+      throw error;
+    } finally {
+      await releaseTransportResource(operation);
+      await releaseTransportResource(scope);
+    }
+  }
   async beginTransaction(options = {}) {
-    if (!object(options) || Object.keys(options).some((key) => key !== "mode")) throw new TypeError("invalid transaction start options");
-    const { mode = "write" } = options;
-    if (!["read", "write"].includes(mode)) throw new TypeError("invalid transaction mode");
+    if (!onlyKeys(options, ['mode', 'signal'])) throw new TypeError('invalid transaction start options');
+    const { mode = 'write', signal } = options;
+    if (!['read', 'write'].includes(mode)) throw new TypeError('invalid transaction mode');
     const body = JSON.stringify({ mode, ...(this.#expected === undefined ? {} : { expected: this.#expected }) });
-    const deadline = Date.now() + 4_000;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const response = await this.#request("/v1/transactions", body, { deadline });
-        if (!/^tx_[a-f0-9]{32}$/.test(response.transactionId) || response.status !== "active" ||
-          response.nextSequence !== 1 || typeof response.expiresAt !== "string" ||
-          !Number.isFinite(Date.parse(response.expiresAt)) || Date.parse(response.expiresAt) <= Date.now() || !object(response.meta)) {
-          throw protocolError();
+    const scope = this.#scope();
+    let operation;
+    let transferred = false;
+    let originalUnknown;
+    try {
+      try { operation = scope.createOperation(command('begin', body), { purpose: 'execute' }); }
+      catch { throw transportError('POLICYSQL_TRANSPORT_ERROR', 'not-sent'); }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const response = await sendOperation(operation, signal);
+          if (!/^tx_[a-f0-9]{32}$/.test(response.transactionId) || response.status !== 'active' || response.nextSequence !== 1 ||
+            typeof response.expiresAt !== 'string' || !Number.isFinite(Date.parse(response.expiresAt)) ||
+            Date.parse(response.expiresAt) <= Date.now() || !object(response.meta)) throw protocolError();
+          if (signal?.aborted) throw transportError('POLICYSQL_REQUEST_CANCELLED', 'possibly-sent');
+          const transaction = new PolicySqlTransaction(response, mode, scope);
+          transferred = true;
+          return transaction;
+        } catch (error) {
+          if (uncertain(error)) originalUnknown ??= unknown(undefined, 'begin');
+          if (attempt === 1 || !retryable(error) || signal?.aborted) throw originalUnknown ?? error;
         }
-        return new PolicySqlTransaction(response, mode, (path, payload, options) => this.#request(path, payload, options));
-      } catch (error) {
-        if (!retryable(error)) throw error;
-        // No application SQL has run: a fresh, unkeyed begin is safe. The old owner expires.
-        if (attempt === 1 || Date.now() >= deadline) throw unknown(undefined, "begin");
       }
+    } finally {
+      await releaseTransportResource(operation);
+      if (!transferred) await releaseTransportResource(scope);
     }
   }
 }
