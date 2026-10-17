@@ -1,3 +1,12 @@
+import { PolicySqlClient } from './index.js';
+import { createHttpTransport } from '../transport/http.js';
+
+export const testToken = `eyJhbGciOiJSUzI1NiJ9.${Buffer.from(JSON.stringify({ exp: 4_000_000_000 })).toString('base64url')}.signature`;
+export const makeClient = ({ role, schemaVersion, policyVersion, ...options }) => new PolicySqlClient({
+  transport: createHttpTransport({ ...options, token: options.token === 'token' ? testToken : options.token }),
+  role, schemaVersion, policyVersion,
+});
+
 // Protocol-level fixture. Gateway/Wasm/SQLite conformance is tested separately.
 export const mockGateway = ({ rows = [{ id: "post_1", title: "Original", display_name: "Original", status: "draft" }], affectedRows = 1 } = {}) => {
   const calls = [];

@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Kysely, CamelCasePlugin, InsertResult, UpdateResult, DeleteResult, sql } from "kysely";
 import { PolicySqlDialect, policyOptions } from "./index.js";
-import { PolicySqlClient } from "../client/index.js";
-import { mockGateway } from "../client/test-fixture.mjs";
+import { createHttpTransport } from "../transport/http.js";
+import { mockGateway, makeClient, testToken } from "../client/test-fixture.mjs";
 import { createExampleClient, prepareProjectRename, renameExistingProject } from "../../examples/database-routing/client.mjs";
 
 const setup = (t, { plugins, autoIdempotencyKey, fetchImpl, ...responseOptions } = {}) => {
   const gateway = mockGateway(responseOptions);
-  const client = new PolicySqlClient({ endpoint: "https://gateway.test", token: "token", fetchImpl: fetchImpl?.(gateway) ?? gateway.fetchImpl });
+  const client = makeClient({ endpoint: "https://gateway.test", token: "token", fetchImpl: fetchImpl?.(gateway) ?? gateway.fetchImpl });
   const dialect = new PolicySqlDialect({ client, autoIdempotencyKey });
   const db = new Kysely({ dialect, plugins });
   t.after(() => db.destroy());
@@ -311,7 +311,7 @@ test("invalid configuration and options are rejected without I/O", async (t) => 
 
 test("sample uses standard APIs and retains the key across atomic resends", async (t) => {
   const h = mockGateway();
-  const db = createExampleClient({ endpoint: "https://gateway.test", token: "token", fetchImpl: h.fetchImpl });
+  const db = createExampleClient({ transport: createHttpTransport({ endpoint: "https://gateway.test", token: testToken, fetchImpl: h.fetchImpl }) });
   t.after(() => db.destroy());
   const rename = prepareProjectRename(db, { id: "post_1", name: "Updated" });
   await rename.send();
@@ -322,7 +322,7 @@ test("sample uses standard APIs and retains the key across atomic resends", asyn
   assert.ok(h.calls.slice(2).every(c => !c.headers.has("idempotency-key")));
 });
 
-test("destroy during begin closes the newly allocated transaction and never runs a callback", async (t) => {
+test("destroy during a sent begin preserves uncertainty and never runs a callback", async (t) => {
   const entered = Promise.withResolvers();
   const resume = Promise.withResolvers();
   const h = setup(t, { fetchImpl: gateway => async (url, init) => {
@@ -331,14 +331,15 @@ test("destroy during begin closes the newly allocated transaction and never runs
     return response;
   } });
   let callbacks = 0;
-  const started = assert.rejects(h.db.transaction().execute(async () => { callbacks++; }), { code: "POLICYSQL_TRANSACTION_UNAVAILABLE" });
+  const started = assert.rejects(h.db.transaction().execute(async () => { callbacks++; }), { code: "POLICYSQL_OUTCOME_UNKNOWN", phase: "begin" });
   await entered.promise;
   const destroyed = h.db.destroy();
   resume.resolve();
   await Promise.all([started, destroyed]);
   assert.equal(callbacks, 0);
-  assert.equal([...h.transactions.values()][0].status, "rolled_back");
-  assert.deepEqual(h.calls.map(c => c.path.split("/").at(-1)), ["transactions", "rollback"]);
+  assert.equal([...h.transactions.values()][0].status, "active");
+  assert.equal([...h.transactions.values()][0].sequence, 1);
+  assert.deepEqual(h.calls.map(c => c.path.split("/").at(-1)), ["transactions"]);
 });
 
 test("failed controlled begin does not poison subsequent connections or destroy", async (t) => {

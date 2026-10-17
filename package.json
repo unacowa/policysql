@@ -5,6 +5,18 @@
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "exports": {
+    "./transport": {
+      "types": "./packages/transport/index.d.ts",
+      "import": "./packages/transport/index.js"
+    },
+    "./transport/http": {
+      "types": "./packages/transport/http.d.ts",
+      "import": "./packages/transport/http.js"
+    },
+    "./transport/auth-agent": {
+      "types": "./packages/transport/auth-agent.d.ts",
+      "import": "./packages/transport/auth-agent.js"
+    },
     "./client": {
       "types": "./packages/client/index.d.ts",
       "import": "./packages/client/index.js"
@@ -19,6 +31,7 @@
     "deploy/cloudflare/pkg/",
     "deploy/cloudflare/src/",
     "packages/client/",
+    "packages/transport/",
     "packages/kysely/",
     "LICENSE-APACHE",
     "LICENSE-MIT",

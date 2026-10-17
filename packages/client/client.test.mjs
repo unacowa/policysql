@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PolicySqlClient, PolicySqlOutcomeUnknownError } from "./index.js";
-import { mockGateway } from "./test-fixture.mjs";
+import { mockGateway, makeClient, testToken } from "./test-fixture.mjs";
 
 const config = { endpoint: "https://gateway.example.com", token: "token" };
 const select = "SELECT id FROM posts";
 const setup = (options = {}) => {
   const h = mockGateway();
-  return { ...h, client: new PolicySqlClient({ ...config, fetchImpl: h.fetchImpl, ...options }) };
+  return { ...h, client: makeClient({ ...config, fetchImpl: h.fetchImpl, ...options }) };
 };
 
 test("minimal client omits role/version and makes only the requested HTTP call", async () => {
@@ -56,18 +56,18 @@ test("invalid keys, expectations, and JSON parameters fail before sending", asyn
   assert.equal(h.calls.length, 0);
 });
 
-test("minimal client binds global fetch to its platform receiver", async () => {
+test("explicit HTTP transport binds global fetch to its platform receiver", async () => {
   const previous = globalThis.fetch;
   let receiver;
   globalThis.fetch = function (url, init) { receiver = this; return mockGateway().fetchImpl(url, init); };
-  try { await new PolicySqlClient(config).execute(select); assert.equal(receiver, globalThis); }
+  try { await makeClient(config).execute(select); assert.equal(receiver, globalThis); }
   finally { globalThis.fetch = previous; }
 });
 
 test("unkeyed atomic network and malformed responses are unknown, never automatically replayed", async () => {
   for (const response of [undefined, { status: "failed", results: [], meta: {} }, { status: "committed", results: [{ rows: [], meta: {}, affectedRows: -1 }], meta: {} }]) {
     let calls = 0;
-    const client = new PolicySqlClient({ ...config, fetchImpl: async () => {
+    const client = makeClient({ ...config, fetchImpl: async () => {
       calls++;
       if (response === undefined) throw new Error("network credentials must not leak");
       return Response.json(response);
@@ -108,7 +108,7 @@ test("lost begin response creates a fresh transaction before any statement", asy
 for (const terminal of ["commit", "rollback"]) test(`statement and ${terminal} retries keep identical bytes and sequence`, async () => {
   const gateway = mockGateway();
   const lost = new Set();
-  const client = new PolicySqlClient({ ...config, fetchImpl: async (url, init) => {
+  const client = makeClient({ ...config, fetchImpl: async (url, init) => {
     const response = await gateway.fetchImpl(url, init);
     const path = new URL(url).pathname;
     if ((path.endsWith("/statements") || path.endsWith(`/${terminal}`)) && !lost.has(path)) { lost.add(path); throw new Error("response lost"); }
@@ -125,7 +125,7 @@ for (const terminal of ["commit", "rollback"]) test(`statement and ${terminal} r
 test("unknown statement blocks later commands but low-level exact replay can reconcile", async () => {
   const gateway = mockGateway();
   let drop = true;
-  const client = new PolicySqlClient({ ...config, fetchImpl: async (url, init) => {
+  const client = makeClient({ ...config, fetchImpl: async (url, init) => {
     const response = await gateway.fetchImpl(url, init);
     if (new URL(url).pathname.endsWith("/statements") && drop) throw new Error("lost");
     return response;
@@ -142,7 +142,7 @@ test("unknown statement blocks later commands but low-level exact replay can rec
 test("unknown commit cannot be reversed by rollback, and identical commit can be confirmed", async () => {
   const gateway = mockGateway();
   let drop = true;
-  const client = new PolicySqlClient({ ...config, fetchImpl: async (url, init) => {
+  const client = makeClient({ ...config, fetchImpl: async (url, init) => {
     const response = await gateway.fetchImpl(url, init);
     if (new URL(url).pathname.endsWith("/commit") && drop) throw new Error("lost");
     return response;
@@ -160,7 +160,7 @@ test("unknown commit cannot be reversed by rollback, and identical commit can be
 
 test("HTTP 200 failed commit is unknown rather than success or rolled_back", async () => {
   const gateway = mockGateway();
-  const client = new PolicySqlClient({ ...config, fetchImpl: async (url, init) => {
+  const client = makeClient({ ...config, fetchImpl: async (url, init) => {
     const response = await gateway.fetchImpl(url, init);
     if (new URL(url).pathname.endsWith("/commit")) return Response.json({ ...(await response.json()), status: "failed" });
     return response;
@@ -198,7 +198,7 @@ test("begin retries are finite and malformed begin never yields a session", asyn
     body => ({ ...body, expiresAt: "2000-01-01T00:00:00Z" }),
   ]) {
     const gateway = mockGateway();
-    const client = new PolicySqlClient({ ...config, fetchImpl: async (url, init) => {
+    const client = makeClient({ ...config, fetchImpl: async (url, init) => {
       const body = await (await gateway.fetchImpl(url, init)).json();
       return Response.json(change(body));
     } });
@@ -223,7 +223,7 @@ test("expired sessions close locally and cannot start new work", async (t) => {
 test("a later authorization failure does not replace an uncertain commit or allow rollback", async () => {
   const gateway = mockGateway();
   let attempts = 0;
-  const client = new PolicySqlClient({ ...config, fetchImpl: async (url, init) => {
+  const client = makeClient({ ...config, fetchImpl: async (url, init) => {
     if (new URL(url).pathname.endsWith("/commit")) {
       attempts++;
       if (attempts > 1) return Response.json({ error: { code: "POLICYSQL_FORBIDDEN" } }, { status: 403 });
@@ -242,7 +242,7 @@ test("a later authorization failure does not replace an uncertain commit or allo
 
 test("a malformed statement sequence cannot advance the client or permit commit", async () => {
   const gateway = mockGateway();
-  const client = new PolicySqlClient({ ...config, fetchImpl: async (url, init) => {
+  const client = makeClient({ ...config, fetchImpl: async (url, init) => {
     const response = await gateway.fetchImpl(url, init);
     if (!new URL(url).pathname.endsWith("/statements")) return response;
     return Response.json({ ...(await response.json()), nextSequence: 99 });
@@ -259,13 +259,14 @@ test("begin timeout bounds even an unresponsive fetch implementation", async (t)
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
   let calls = 0;
   let signal;
-  const client = new PolicySqlClient({ ...config, fetchImpl: async (_url, init) => {
+  const client = makeClient({ ...config, fetchImpl: async (_url, init) => {
     calls++;
     signal = init.signal;
     return new Promise(() => {});
   } });
   const rejected = assert.rejects(client.beginTransaction(), { code: "POLICYSQL_OUTCOME_UNKNOWN", phase: "begin" });
-  t.mock.timers.tick(4_001);
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(15_001);
   await rejected;
   assert.equal(signal.aborted, true);
   assert.equal(calls, 1);

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Kysely, CamelCasePlugin } from "kysely";
 import { PolicySqlClient } from "../../../packages/client/index.js";
+import { createHttpTransport } from "../../../packages/transport/http.js";
 import { PolicySqlDialect, policyOptions } from "../../../packages/kysely/index.js";
 import { harness } from "./helpers/routing.mjs";
 
@@ -11,7 +12,9 @@ const makeClient = async (t, h, { tenant = "a", token, autoIdempotencyKey, plugi
     requests.push({ path: new URL(url).pathname, body: JSON.parse(init.body), headers: new Headers(init.headers) });
     return h.app.fetch(new Request(url, init), h.env, h.ctx, h.binding(tenant));
   });
-  const client = new PolicySqlClient({ endpoint: "https://worker.test", token: token ?? await h.token(tenant), fetchImpl, ...options });
+  const transport = createHttpTransport({ endpoint: "https://worker.test", token: token ?? await h.token(tenant), fetchImpl });
+  t.after(() => transport.dispose());
+  const client = new PolicySqlClient({ transport, ...options });
   const db = new Kysely({ dialect: new PolicySqlDialect({ client, autoIdempotencyKey }), plugins });
   t.after(() => db.destroy());
   return { client, db, requests };
@@ -19,6 +22,60 @@ const makeClient = async (t, h, { tenant = "a", token, autoIdempotencyKey, plugi
 const read = db => db.selectFrom("projects").select(["id", "name"]).orderBy("id");
 const update = (db, name = "Updated") => db.updateTable("projects").set({ name }).where("id", "=", "seed");
 const versions = { schemaVersion: "schema_routing_1", policyVersion: "policy_routing_1" };
+
+test("transport cleanup failures cannot replace a confirmed SQLite commit", async t => {
+  const h = await harness(t, { hooks: false });
+  const http = createHttpTransport({ endpoint: "https://worker.test", token: await h.token("a"),
+    fetchImpl: (url, init) => h.app.fetch(new Request(url, init), h.env, h.ctx, h.binding("a")),
+  });
+  t.after(() => http.dispose());
+  const brokenRelease = async resource => { await resource.dispose(); throw new Error("private cleanup detail"); };
+  const transport = { ...http, createScope(options) {
+    const scope = http.createScope(options);
+    return { ...scope, dispose: () => brokenRelease(scope), createOperation(command, options) {
+      const operation = scope.createOperation(command, options);
+      return { ...operation, dispose: () => brokenRelease(operation) };
+    } };
+  } };
+  const db = new Kysely({ dialect: new PolicySqlDialect({ client: new PolicySqlClient({ transport }) }) });
+  t.after(() => db.destroy());
+  await db.transaction().execute(trx => update(trx, "Committed despite cleanup").execute());
+  assert.equal(h.rows("a")[0].name, "Committed despite cleanup");
+  assert.equal(h.events.filter(event => /^UPDATE\b/i.test(event.sql)).length, 1);
+});
+
+test("pending DO commit is recovered with a refreshed JWT in the same context after live expiry", async t => {
+  const h = await harness(t, { hooks: false });
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  let acquisitions = 0;
+  let drop = true;
+  const credentials = [];
+  const http = createHttpTransport({ endpoint: "https://worker.test", tokenProvider: {
+    currentContextKey: () => "same-session",
+    async getToken({ contextKey, minValidityMs }) {
+      acquisitions++;
+      const token = await h.token("a");
+      credentials.push(token);
+      return { token, contextKey, expiresAt: Date.now() + minValidityMs + 1_000 };
+    },
+  }, fetchImpl: async (url, init) => {
+    const response = await h.app.fetch(new Request(url, init), h.env, h.ctx, h.binding("a"));
+    if (new URL(url).pathname.endsWith("/commit") && drop) throw new Error("lost response");
+    return response;
+  } });
+  t.after(() => http.dispose());
+  const tx = await new PolicySqlClient({ transport: http }).beginTransaction();
+  await tx.execute("UPDATE projects SET name = :name WHERE id = :id", { name: "Committed once", id: "seed" });
+  await assert.rejects(tx.commit(), { code: "POLICYSQL_OUTCOME_UNKNOWN", phase: "commit" });
+  assert.equal(h.rows("a")[0].name, "Committed once");
+  t.mock.timers.tick(8_000);
+  drop = false;
+  await tx.commit();
+  assert.equal(tx.status, "committed");
+  assert.equal(acquisitions, 2);
+  assert.notEqual(credentials[0], credentials[1]);
+  assert.equal(h.events.filter(event => /^UPDATE\b/i.test(event.sql)).length, 1);
+});
 
 test("minimal client and default/explicit roles are enforced by JWT + Wasm + SQLite", async (t) => {
   const h = await harness(t, { hooks: false, customizePolicy: policy => policy.replace("      member:", `      reader:

@@ -9,6 +9,7 @@ class Connection {
   #ending;
   #onClosed;
   #transactionDeadline;
+  #beginAbort;
   transaction;
 
   constructor(client, config, compiled, onClosed) {
@@ -27,9 +28,12 @@ class Connection {
       if (settings.isolationLevel !== undefined) throw new TypeError("explicit isolation levels are not supported");
       if (settings.accessMode !== undefined && !["read only", "read write"].includes(settings.accessMode)) throw new TypeError("unsupported access mode");
       if (this.transaction || this.#released) throw unavailable();
-      this.transaction = await this.#client.beginTransaction({ mode: settings.accessMode === "read only" ? "read" : "write" });
-      this.#transactionDeadline = Math.min(Date.parse(this.transaction.expiresAt), Date.now() + 4_000);
-      void this.transaction.closed.then(this.#onClosed);
+      this.#beginAbort = new AbortController();
+      try {
+        this.transaction = await this.#client.beginTransaction({ mode: settings.accessMode === "read only" ? "read" : "write", signal: this.#beginAbort.signal });
+      } finally { this.#beginAbort = undefined; }
+      this.#transactionDeadline = Date.parse(this.transaction.expiresAt);
+      // Local expiry is not resource release: keep in-flight commands owned until disposal.
       // destroy() may have started while the HTTP begin was in flight.
       if (this.#released) {
         await this.transaction.dispose();
@@ -109,9 +113,13 @@ class Connection {
   async *streamQuery() { throw new TypeError("PolicySQL streaming is not supported"); }
   async dispose() {
     this.#released = true;
+    this.#beginAbort?.abort();
+    // Stop unsent transaction work now, before waiting for the connection queue.
+    const closing = this.transaction?.dispose();
+    void closing?.catch(() => undefined);
     try {
       await this.#queue;
-      await this.transaction?.dispose();
+      await (closing ?? this.transaction?.dispose());
     } finally { this.#onClosed(); }
   }
 }

@@ -1,8 +1,12 @@
 import { Kysely, CamelCasePlugin, type InsertResult, type UpdateResult, type DeleteResult } from 'kysely'
 import { PolicySqlClient, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
 import { PolicySqlDialect, policyOptions } from '@unacowa/policysql/kysely'
+import { createHttpTransport, type TokenProvider } from '@unacowa/policysql/transport/http'
+import { createAuthAgentTransport, serveAuthAgentTransport } from '@unacowa/policysql/transport/auth-agent'
+import type { PolicySqlTransport, TransportReply } from '@unacowa/policysql/transport'
 
-const minimal: PolicySqlClientOptions = { endpoint: 'https://gateway.test', token: 'token' }
+const transport: PolicySqlTransport = createHttpTransport({ endpoint: 'https://gateway.test', token: 'token' })
+const minimal: PolicySqlClientOptions = { transport }
 new PolicySqlClient(minimal)
 new PolicySqlClient({ ...minimal, role: 'author' })
 new PolicySqlClient({ ...minimal, schemaVersion: 's1', policyVersion: 'p1' })
@@ -12,10 +16,23 @@ new PolicySqlClient({ ...minimal, schemaVersion: 's1' })
 new PolicySqlClient({ ...minimal, policyVersion: 'p1' })
 // @ts-expect-error null is not omission
 new PolicySqlClient({ ...minimal, role: null })
-// @ts-expect-error endpoint is required
+// @ts-expect-error transport is required
 new PolicySqlClient({ token: 'token' })
-// @ts-expect-error token is required
+// @ts-expect-error legacy HTTP client options are not supported
 new PolicySqlClient({ endpoint: 'https://gateway.test' })
+// @ts-expect-error credentials do not belong to the client
+new PolicySqlClient({ transport, token: 'token' })
+// @ts-expect-error credential source is required
+createHttpTransport({ endpoint: 'https://gateway.test' })
+declare const provider: TokenProvider
+createHttpTransport({ endpoint: 'https://gateway.test', tokenProvider: provider })
+// @ts-expect-error credential sources are mutually exclusive
+createHttpTransport({ endpoint: 'https://gateway.test', token: 'token', tokenProvider: provider })
+declare const port: MessagePort
+const remote: Promise<PolicySqlTransport> = createAuthAgentTransport(port)
+serveAuthAgentTransport(port, transport)
+const reply: TransportReply = { type: 'failure', code: 'POLICYSQL_REQUEST_CANCELLED', delivery: 'not-sent' }
+void [remote, reply]
 
 interface Database { posts: { id: string; title: string; status: 'draft' | 'published' } }
 const client = new PolicySqlClient(minimal)

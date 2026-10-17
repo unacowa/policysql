@@ -2,7 +2,7 @@ import { Kysely } from "kysely";
 import { PolicySqlClient } from "@unacowa/policysql/client";
 import { PolicySqlDialect, policyOptions } from "@unacowa/policysql/kysely";
 
-// endpoint and token are sufficient. role and the paired version precondition are optional.
+// Pass an explicitly constructed transport. role and paired versions are optional.
 export const createExampleClient = ({ autoIdempotencyKey = false, ...clientOptions }) => new Kysely({
   dialect: new PolicySqlDialect({ client: new PolicySqlClient(clientOptions), autoIdempotencyKey }),
 });
