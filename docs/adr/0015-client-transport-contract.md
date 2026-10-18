@@ -10,9 +10,14 @@ communication deadlines and abort controllers belong to transports. Role and pai
 snapshot preconditions are optional client inputs. All client communication uses the
 injected transport.
 
-A scope pins context across a transaction. An operation owns the finite budget for
-one command's automatic attempts. Explicit pending recovery creates another operation
-without replacing the saved command or its uncertain history. Statement recovery is
+A scope groups local communication resources and a selected role. It does not pin a
+login or authentication context. The credential provider is called for every send;
+credential caching, refresh sharing and account-switch behavior belong to the application.
+The server verifies the authenticated owner and DB binding of an existing transaction.
+
+Each send has its own timeout, including automatic retries. There is no shared budget
+across attempts. Explicit pending recovery retains the saved command and its uncertain
+history. Statement recovery is
 limited by the server's expiresAt. A previously sent terminal command may be confirmed
 after that live deadline using the server's retained response. The client never replays
 the application callback or moves pending work to another transaction.
@@ -34,7 +39,12 @@ Authentication services, worker placement and bootstrap are application concerns
 ## Consequences
 
 - Client constructors require an explicit transport.
-- Automatic retries share a deadline. Manual recovery receives a new finite budget.
+- Automatic attempts remain bounded in count. Every attempt receives a new timeout.
+- HTTP and MessagePort timeouts are configured independently. The bridge forwards the
+  current attempt's deadline for cancellation; it never retains a retry-series deadline.
+- The public transport contract has no private context, timeout or deadline hooks.
+- Keyed atomic retries require the original authentication and DB; the same key under
+  another identity denotes a separate operation rather than a recovery.
 - A server live deadline is not evidence that a remote commit failed or rolled back.
 - Custom transports must implement finite completion; the client does not compensate
   for a nonconforming transport with an independent outer communication timeout.

@@ -24,12 +24,18 @@ new PolicySqlClient({ endpoint: 'https://gateway.test' })
 new PolicySqlClient({ transport, token: 'token' })
 // @ts-expect-error credential source is required
 createHttpTransport({ endpoint: 'https://gateway.test' })
-declare const provider: TokenProvider
+const provider: TokenProvider = {
+  async getToken({ minValidityMs, signal }) {
+    signal.throwIfAborted()
+    return { token: 'jwt-from-application', expiresAt: Date.now() + minValidityMs }
+  },
+}
 createHttpTransport({ endpoint: 'https://gateway.test', tokenProvider: provider })
 // @ts-expect-error credential sources are mutually exclusive
 createHttpTransport({ endpoint: 'https://gateway.test', token: 'token', tokenProvider: provider })
 declare const port: MessagePort
 const remote: Promise<PolicySqlTransport> = createAuthAgentTransport(port)
+createAuthAgentTransport(port, { timeoutMs: 1_000 })
 serveAuthAgentTransport(port, transport)
 const reply: TransportReply = { type: 'failure', code: 'POLICYSQL_REQUEST_CANCELLED', delivery: 'not-sent' }
 void [remote, reply]

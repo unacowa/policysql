@@ -49,13 +49,13 @@ const client = new PolicySqlClient({
 
 ## 通信と JWT を分離する
 
-HTTP transport の `timeoutMs` は、認証待ち・fetch・応答読取り・同じ command の自動再送を合わせた有限の予算です。server の transaction 寿命を延ばす設定ではありません。`fetchImpl` も transport 側で指定します。
+HTTP transport の `timeoutMs` は、1 回の送信における認証待ち・fetch・応答読取りの上限です。自動再送にも毎回この上限を適用します。server の transaction 寿命を延ばす設定ではありません。`fetchImpl` も transport 側で指定します。
 
 ```ts
 const transport = createHttpTransport({ endpoint, token, timeoutMs: 15_000 })
 ```
 
-固定 JWT の代わりに `tokenProvider` を渡すと、必要な残存時間を持つ JWT の取得・更新を transport 内で行えます。JWT の署名と認可は server が検証します。provider の取得失敗や context 変更で、client が認証をやり直したり別の利用者として継続したりすることはありません。401 後の暗黙再送も行いません。
+固定 JWT の代わりに `tokenProvider` を渡すと、送信ごとに必要な残存時間を持つ JWT を取得できます。JWT の署名と認可は server が検証します。ログイン切替時の client／port の扱いは利用者が決めます。ライブラリは認証 context を固定せず、JWT のキャッシュや取得処理の共有も行いません。provider の取得失敗での自動再送や、401 後の暗黙再送は行いません。
 
 UI でクエリを作り、Dedicated Worker で JWT の取得・付与と HTTP を行う構成にも対応します。[transport の契約と Worker の接続例](./transport)を参照してください。
 
@@ -138,7 +138,7 @@ await trx.commit().execute()
 
 対話型では、利用 DB に `policysql_idempotency` テーブルは不要です。開始キーを指定する補助 API はなく、開始時のキー自動生成も行いません。transaction 内のクエリに `idempotencyKey` を付けると送信前エラーになります。`expect` は利用できます。
 
-開始応答を受け取れず SQL が未実行の場合、開始要求のみを最大 2 回、transport の同じ通信予算内で試行します。HTTP transport の既定予算は 15 秒で、JWT の準備時間も含みます。取り残された空の transaction は server の期限処理で閉じます。開始後は同じ transaction ID と sequence によって command を再送します。
+開始応答を受け取れず SQL が未実行の場合、開始要求のみを最大 2 回試行します。HTTP transport の既定 timeout は 1 回につき 15 秒で、JWT の準備時間も含みます。取り残された空の transaction は server の期限処理で閉じます。開始後は同じ transaction ID と sequence によって command を再送します。
 
 ## 同じ atomic 更新を再送する
 
@@ -215,13 +215,13 @@ try {
 }
 ```
 
-対話型の command 自動再送は一つの呼び出しにつき最大 2 回です。同じ operation の予算を共有し、再送時に予算を初期化しません。statement は server の `expiresAt` 以内で試行します。送信済みの commit／rollback は、transaction の期限後も同じ command で保存応答を確認できます。commit の結果が不明な場合に、別 transaction で callback を実行し直したり、反対の rollback を送ったりしません。controlled transaction では同じ `trx.commit().execute()` で pending commit を再確認できます。
+対話型の command 自動再送は一つの呼び出しにつき最大 2 回です。各試行には独立した timeout を適用します。statement は server の `expiresAt` 以内で試行します。送信済みの commit／rollback は、transaction の期限後も同じ command で保存応答を確認できます。commit の結果が不明な場合に、別 transaction で callback を実行し直したり、反対の rollback を送ったりしません。controlled transaction では同じ `trx.commit().execute()` で pending commit を再確認できます。
 
 利用終了時は `await db.destroy()` で、その Driver が所有する処理を終了します。共有 transport 全体は終了しないため、アプリケーションの所有者が最後に `await transport.dispose()` を呼びます。controlled transaction の終了操作は利用者が管理してください。期限や結果不明のため閉じられない remote transaction は server の期限処理に従います。
 
 `destroy()` は新しい処理の受付を停止します。送信済みの commit と重なった場合は、既定の時間・回数の範囲でその結果を確認し、transaction の Promise に成功または元のエラーを返します。結果不明なら `POLICYSQL_OUTCOME_UNKNOWN` と `phase`・`transactionId`・`sequence` を保持し、rollback 要求は送りません。`destroy()` の完了は commit 成功や rollback 完了の保証ではないため、transaction の Promise も必ず確認してください。
 
-低レベル client の `transaction.retryPending()` は、保存された statement／commit／rollback を再確認します。呼び出しごとに新しい有限予算を作りますが、transaction ID・command ID・sequence・payload・認証 context と過去の結果不明は維持します。statement の期限後は送信せず、元の結果不明を返します。通常の Kysely 利用にこの呼び出しは必要ありません。
+低レベル client の `transaction.retryPending()` は、保存された statement／commit／rollback を再確認します。transaction ID・command ID・sequence・payload と過去の結果不明は維持します。再確認には元と同じ認証・DB が必要で、その一致は server が検証します。statement の期限後は送信せず、元の結果不明を返します。通常の Kysely 利用にこの呼び出しは必要ありません。
 
 client 内部の transport operation／scope の解放失敗は、検証済みの成功・確定したエラー・元の結果不明を上書きしません。DB の commit／rollback 本体や利用者の observer の例外は別途処理します。
 

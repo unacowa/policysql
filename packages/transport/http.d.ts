@@ -1,11 +1,10 @@
 import type { PolicySqlTransport } from './index.js'
 export interface TokenProvider {
-  currentContextKey(): string
-  getToken(options: { contextKey: string; minValidityMs: number; signal: AbortSignal }): Promise<{
+  /** Called for each send. Credential caching and account switches belong to the provider. */
+  getToken(options: { minValidityMs: number; signal: AbortSignal }): Promise<{
     token: string
     /** Milliseconds since the Unix epoch. */
     expiresAt: number
-    contextKey: string
   }>
 }
 export type HttpTransportOptions = {

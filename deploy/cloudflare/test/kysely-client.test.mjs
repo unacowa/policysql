@@ -51,12 +51,11 @@ test("pending DO commit is recovered with a refreshed JWT in the same context af
   let drop = true;
   const credentials = [];
   const http = createHttpTransport({ endpoint: "https://worker.test", tokenProvider: {
-    currentContextKey: () => "same-session",
-    async getToken({ contextKey, minValidityMs }) {
+    async getToken({ minValidityMs }) {
       acquisitions++;
       const token = await h.token("a");
       credentials.push(token);
-      return { token, contextKey, expiresAt: Date.now() + minValidityMs + 1_000 };
+      return { token, expiresAt: Date.now() + minValidityMs + 1_000 };
     },
   }, fetchImpl: async (url, init) => {
     const response = await h.app.fetch(new Request(url, init), h.env, h.ctx, h.binding("a"));
@@ -72,9 +71,63 @@ test("pending DO commit is recovered with a refreshed JWT in the same context af
   drop = false;
   await tx.commit();
   assert.equal(tx.status, "committed");
-  assert.equal(acquisitions, 2);
-  assert.notEqual(credentials[0], credentials[1]);
+  assert.equal(acquisitions, 5);
+  assert.notEqual(credentials[0], credentials.at(-1));
   assert.equal(h.events.filter(event => /^UPDATE\b/i.test(event.sql)).length, 1);
+});
+
+test("the server rejects a statement with changed authentication without transport context pinning", async t => {
+  const h = await harness(t, { hooks: false });
+  let token = await h.token("a");
+  const http = createHttpTransport({ endpoint: "https://worker.test", tokenProvider: {
+    async getToken() { return { token, expiresAt: Date.now() + 60_000 }; },
+  }, fetchImpl: (url, init) => h.app.fetch(new Request(url, init), h.env, h.ctx, h.binding("a")) });
+  t.after(() => http.dispose());
+  const tx = await new PolicySqlClient({ transport: http }).beginTransaction();
+  token = await h.token("b");
+  await assert.rejects(tx.execute("UPDATE projects SET name = :name WHERE id = :id", { name: "Wrong session", id: "seed" }), {
+    code: "POLICYSQL_TRANSACTION_UNAVAILABLE", status: 409,
+  });
+  assert.equal(h.events.filter(event => /^UPDATE\b/i.test(event.sql)).length, 0);
+  await tx.dispose();
+});
+
+test("changed authentication cannot erase an unknown commit and the original identity can recover it", async t => {
+  const h = await harness(t, { hooks: false });
+  const originalToken = await h.token("a");
+  const otherToken = await h.token("b");
+  let token = originalToken;
+  let drop = true;
+  const paths = [];
+  const http = createHttpTransport({ endpoint: "https://worker.test", tokenProvider: {
+    async getToken() { return { token, expiresAt: Date.now() + 60_000 }; },
+  }, fetchImpl: async (url, init) => {
+    const path = new URL(url).pathname;
+    paths.push(path);
+    const response = await h.app.fetch(new Request(url, init), h.env, h.ctx, h.binding("a"));
+    if (path.endsWith("/commit") && drop) {
+      drop = false;
+      token = otherToken;
+      throw new Error("lost response");
+    }
+    return response;
+  } });
+  t.after(() => http.dispose());
+  const tx = await new PolicySqlClient({ transport: http }).beginTransaction();
+  await tx.execute("UPDATE projects SET name = :name WHERE id = :id", { name: "Committed once", id: "seed" });
+  let original;
+  await assert.rejects(tx.commit(), error => { original = error; return error.code === "POLICYSQL_OUTCOME_UNKNOWN"; });
+  assert.equal(original.recoveryFailure.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  assert.equal(original.recoveryFailure.status, 409);
+  await assert.rejects(tx.commit(), error => error === original);
+  await assert.rejects(tx.rollback(), error => error === original);
+  assert.equal(h.rows("a")[0].name, "Committed once");
+  token = originalToken;
+  await tx.commit();
+  assert.equal(tx.status, "committed");
+  assert.equal(h.events.filter(event => /^UPDATE\b/i.test(event.sql)).length, 1);
+  assert.equal(paths.some(path => path.endsWith("/rollback")), false);
+  await tx.dispose();
 });
 
 test("minimal client and default/explicit roles are enforced by JWT + Wasm + SQLite", async (t) => {

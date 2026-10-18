@@ -1,10 +1,8 @@
 import { failure, validReply } from './index.js';
-import { limitDeadline } from './internal.js';
 
-// One automatic attempt series owns one deadline. Explicit recovery creates a new
-// operation for the same immutable command; the client retains its outcome history.
-export function createOperation(command, options, { timeoutMs, attempt, onDispose = () => {}, deadline, acceptNotSentConfirmation = false }) {
-  let expires = deadline;
+// Each send has its own timeout. The handle retains only the immutable command,
+// delivery history needed for terminal confirmation, and resource ownership.
+export function createOperation(command, options, { timeoutMs, attempt, onDispose = () => {}, acceptNotSentConfirmation = false }) {
   let disposed = false;
   let stopped = false;
   let everSent = options.purpose === 'confirm-terminal';
@@ -12,15 +10,11 @@ export function createOperation(command, options, { timeoutMs, attempt, onDispos
   const serverDeadline = options.serverExpiresAt === undefined ? Infinity : Date.parse(options.serverExpiresAt);
   const mustRespectServerDeadline = () => command.target.kind === 'statement' || !everSent;
   return Object.freeze({
-    [limitDeadline](value) {
-      if (!Number.isFinite(value)) throw new TypeError('invalid operation deadline');
-      expires = Math.min(expires ?? Infinity, value);
-    },
     async send({ signal } = {}) {
       if (active) return failure('POLICYSQL_TRANSPORT_PROTOCOL_ERROR');
       if (disposed || stopped) return failure('POLICYSQL_TRANSPORT_CLOSED');
       if (signal?.aborted) return failure('POLICYSQL_REQUEST_CANCELLED');
-      expires ??= Date.now() + timeoutMs;
+      const expires = Date.now() + timeoutMs;
       const remaining = () => Math.max(0, Math.min(expires, mustRespectServerDeadline() ? serverDeadline : Infinity) - Date.now());
       if (remaining() <= 0) return failure('POLICYSQL_TRANSPORT_TIMEOUT');
       const controller = new AbortController();

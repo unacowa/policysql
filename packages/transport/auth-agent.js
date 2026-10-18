@@ -1,7 +1,6 @@
 import { copyCommand, copyOperationOptions, failure, identifier, onlyKeys, positiveDuration, record, validReply, validateRole, sanitizeReply } from './index.js';
 import { createOperation } from './operation.js';
 import { releaseTransportResource } from './cleanup.js';
-import { contextKey, timeout, limitDeadline } from './internal.js';
 
 const VERSION = 1;
 const INITIALIZATION_TIMEOUT = 15_000;
@@ -14,7 +13,9 @@ const attach = (port, receive) => {
 };
 const post = (port, message) => { port.postMessage({ version: VERSION, ...message }); };
 
-export async function createAuthAgentTransport(port) {
+export async function createAuthAgentTransport(port, options = {}) {
+  if (!onlyKeys(options, ['timeoutMs'])) throw new TypeError('invalid message transport options');
+  const timeoutMs = positiveDuration(options.timeoutMs ?? 15_000, 'timeoutMs');
   let ready;
   let closed = false;
   let serial = 0;
@@ -25,10 +26,9 @@ export async function createAuthAgentTransport(port) {
     const message = event.data;
     if (!record(message) || message.version !== VERSION) return;
     if (message.type === 'ready' && !ready) {
-      if (!identifier(message.contextKey) || !record(message.descriptor) || typeof message.descriptor.endpointId !== 'string' ||
-        !message.descriptor.endpointId || message.descriptor.endpointId.length > 2048 ||
-        !Number.isFinite(message.timeoutMs) || message.timeoutMs <= 0 || message.timeoutMs > 2_147_483_647) return;
-      ready = { descriptor: Object.freeze({ endpointId: message.descriptor.endpointId }), contextKey: message.contextKey, timeoutMs: message.timeoutMs };
+      if (!record(message.descriptor) || typeof message.descriptor.endpointId !== 'string' ||
+        !message.descriptor.endpointId || message.descriptor.endpointId.length > 2048) return;
+      ready = { descriptor: Object.freeze({ endpointId: message.descriptor.endpointId }) };
       hello.resolve(ready);
     } else if (message.type === 'reply' && identifier(message.attemptId)) {
       pending.get(message.attemptId)?.resolve(validReply(message.reply) ? message.reply : failure('POLICYSQL_TRANSPORT_PROTOCOL_ERROR', 'possibly-sent'));
@@ -67,7 +67,7 @@ export async function createAuthAgentTransport(port) {
           const operationId = 'operation_' + (++serial);
           let operation;
           operation = createOperation(command, options, {
-            timeoutMs: ready.timeoutMs,
+            timeoutMs,
             acceptNotSentConfirmation: true,
             onDispose() { operations.delete(operation); sendControl({ type: 'release-operation', scopeId, operationId }); },
             async attempt({ signal, markSent, deadline }) {
@@ -83,7 +83,7 @@ export async function createAuthAgentTransport(port) {
                 signal.addEventListener('abort', onAbort, { once: true });
                 if (signal.aborted) return failure('POLICYSQL_REQUEST_CANCELLED');
                 if (!markSent()) return failure('POLICYSQL_TRANSPORT_TIMEOUT');
-                post(port, { type: 'send', scopeId, operationId, attemptId, contextKey: ready.contextKey, role, command, options, deadline });
+                post(port, { type: 'send', scopeId, operationId, attemptId, role, command, options, deadline });
                 return await entry.promise;
               } finally {
                 signal.removeEventListener('abort', onAbort);
@@ -121,10 +121,6 @@ export async function createAuthAgentTransport(port) {
 
 export function serveAuthAgentTransport(port, transport) {
   if (!transport || typeof transport.createScope !== 'function') throw new TypeError('transport is required');
-  const readContext = () => transport[contextKey]?.() ?? 'fixed';
-  const pinnedContext = readContext();
-  if (!identifier(pinnedContext)) throw new TypeError('invalid transport context');
-  const timeoutMs = positiveDuration(transport[timeout] ?? INITIALIZATION_TIMEOUT, 'timeoutMs');
   const scopes = new Map();
   const attempts = new Map();
   let closed = false;
@@ -155,7 +151,7 @@ export function serveAuthAgentTransport(port, transport) {
     if (closed || !record(message) || message.version !== VERSION) return;
     try {
       if (message.type === 'hello') {
-        post(port, { type: 'ready', descriptor: transport.descriptor, contextKey: pinnedContext, timeoutMs });
+        post(port, { type: 'ready', descriptor: transport.descriptor });
         return;
       }
       if (message.type === 'close') { await dispose(); return; }
@@ -173,13 +169,13 @@ export function serveAuthAgentTransport(port, transport) {
         await releaseTransportResource(entry?.operation);
         return;
       }
-      if (message.type !== 'send' || !onlyKeys(message, ['version', 'type', 'scopeId', 'operationId', 'attemptId', 'contextKey', 'role', 'command', 'options', 'deadline']) ||
+      if (message.type !== 'send' || !onlyKeys(message, ['version', 'type', 'scopeId', 'operationId', 'attemptId', 'role', 'command', 'options', 'deadline']) ||
         !identifier(message.operationId) || !identifier(message.attemptId)) return;
-      if (message.contextKey !== pinnedContext || readContext() !== pinnedContext) { reply(message.attemptId, failure('POLICYSQL_AUTH_CONTEXT_CHANGED')); return; }
       const command = copyCommand(message.command);
       const options = copyOperationOptions(command, message.options);
       const role = validateRole(message.role);
       if (!Number.isFinite(message.deadline) || message.deadline <= Date.now()) { reply(message.attemptId, failure('POLICYSQL_TRANSPORT_TIMEOUT')); return; }
+      if (message.deadline - Date.now() > 2_147_483_647) throw 0;
       let scope = scopes.get(message.scopeId);
       if (!scope) {
         if (scopes.size >= 256) throw 0;
@@ -192,18 +188,16 @@ export function serveAuthAgentTransport(port, transport) {
       if (!entry) {
         if (scope.operations.size >= 256) throw 0;
         const operation = scope.scope.createOperation(command, options);
-        const deadline = Math.min(message.deadline, Date.now() + timeoutMs);
-        operation[limitDeadline]?.(deadline);
-        entry = { operation, fingerprint, deadline };
+        entry = { operation, fingerprint };
         scope.operations.set(message.operationId, entry);
       }
       if (entry.fingerprint !== fingerprint) throw 0;
       const controller = new AbortController();
       const request = { controller };
       attempts.set(message.attemptId, request);
-      // The same absolute deadline also cancels custom transports. It never renews
-      // the underlying operation's automatic retry budget.
-      const timer = setTimeout(() => controller.abort(), Math.max(0, entry.deadline - Date.now()));
+      // This attempt's caller deadline cancels worker work, even if a cancel message
+      // is lost. A subsequent send has a new deadline and a new HTTP timeout.
+      const timer = setTimeout(() => controller.abort(), Math.max(0, message.deadline - Date.now()));
       let value;
       try {
         value = await entry.operation.send({ signal: controller.signal });

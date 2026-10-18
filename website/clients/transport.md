@@ -25,21 +25,22 @@ JWT を更新する場合は、固定 `token` の代わりに利用者の `token
 import type { TokenProvider } from '@unacowa/policysql/transport/http'
 
 const tokenProvider: TokenProvider = {
-  currentContextKey: () => sessionGeneration,
-  async getToken({ contextKey, minValidityMs, signal }) {
+  async getToken({ minValidityMs, signal }) {
     // 利用者の認証処理。必要な残存時間の JWT を取得する。
-    return obtainCredential({ contextKey, minValidityMs, signal })
-    // 戻り値: { token, expiresAt: Unix epoch milliseconds, contextKey }
+    return obtainCredential({ minValidityMs, signal })
+    // 戻り値: { token, expiresAt: Unix epoch milliseconds }
   },
 }
 const transport = createHttpTransport({ endpoint, tokenProvider })
 ```
 
-`contextKey` は同じ認証 context の更新では維持し、logout・ユーザー／tenant／session の切替では変更する非秘密の世代 ID です。使用可能文字は英数字と `_.:-`、長さは 1〜128 です。server 内部の DB binding や snapshot は server が検証します。
+provider は送信のたびに呼ばれ、その時点で返した JWT を使います。ライブラリは JWT をキャッシュせず、並行する取得処理も共有しません。キャッシュ・取得処理の共有・ログイン切替時の要求停止は利用者の認証処理で管理します。client／port をログイン状態に固定する機能はありません。開始済み transaction の認証・DB binding・snapshot の同一性は server が検証します。
 
 begin の前には、transaction の最大時間・残り通信予算・時計差の余裕を満たす JWT を準備します。`transactionMaxDurationMs` の既定値は現在の server profile に合わせて 4,000 ms、`clockToleranceMs` は 5,000 ms です。これは準備用の値であり、開始後は server の `expiresAt` を使います。JWT の decode は期限確認のためで、署名検証や認可を代行しません。
 
-同じ context の更新待ちは共有します。一要求のキャンセルで別要求の更新を取り消しません。provider の失敗は安全な認証エラーとなり、JWT・例外の message／stack／cause は client に渡しません。
+一要求のキャンセルは、その取得処理に渡した signal に通知します。別要求の signal は中断しません。provider の失敗は安全な認証エラーとなり、JWT・例外の message／stack／cause は client に渡しません。
+
+HTTP の `timeoutMs` は 1 回の送信ごとの上限で、JWT 取得・fetch・応答読取りを含みます。既定値は 15 秒です。自動再送にも毎回同じ上限を適用し、再送間で予算を共有しません。server の transaction 期限は延長しません。
 
 ## Dedicated Worker
 
@@ -79,15 +80,17 @@ self.addEventListener('message', event => {
 
 `application-auth.js`、Worker の作成と破棄、port の相手確認は利用者が実装します。別 origin の window を介して port を渡す場合、その bootstrap で origin/source を確認します。ライブラリは認証 UI・認証 API・Worker 配置を決定しません。
 
-bridge は初期 handshake を行い、接続先 descriptor と認証 context の世代を固定します。接続先変更や別 context への自動切替を行いません。JWT を取得する RPC や、任意 URL・認証 header を送る RPC はありません。
+bridge は初期 handshake で接続先 descriptor を受け取ります。認証情報は Worker 側の provider が送信ごとに決定します。JWT を取得する RPC や、任意 URL・認証 header を送る RPC はありません。
 
-`createAuthAgentTransport` の初期化待ちは最大 15 秒です。その後の operation は Worker 側の通信予算を使い、port 待ち・認証・HTTP・再送に同じ期限を適用します。切断を検出できない場合も期限で終了します。送信後のキャンセルや切断は未実行の証明にはなりません。
+`createAuthAgentTransport` の初期化待ちは最大 15 秒です。送信ごとの待機上限は `createAuthAgentTransport(port, { timeoutMs })` で設定でき、既定値は 15 秒です。HTTP 側の `timeoutMs` とは独立した設定で、先に到達する上限で終了します。今回の送信の期限とキャンセルは Worker に伝わり、次の試行には新しい期限を設定します。切断を検出できない場合も待機は期限で終了します。送信後のキャンセルや切断は未実行の証明にはなりません。
 
 ## 再送・再確認
 
-同一の自動試行系列は同じ operation を使います。client の自動試行は最大 2 回で、HTTP transport は独自のネットワーク再送や 401 後の暗黙再送を行いません。atomic execute は自動再送しません。
+同一の自動試行系列は同じ command を使い、各送信は独立した timeout を持ちます。client の自動試行は最大 2 回で、HTTP transport は独自のネットワーク再送や 401 後の暗黙再送を行いません。atomic execute は自動再送しません。
 
-`retryPending()` や pending commit の再呼び出しは、新しい有限 operation を作ります。保存した command ID・transaction ID・sequence・payload・context・元の結果不明は引き継ぎます。statement は server の期限内だけ再確認し、期限後は送信せず元の結果不明を返します。送信済み terminal command は期限後も保存応答を確認できます。
+`retryPending()` や pending commit の再呼び出しでも、保存した command ID・transaction ID・sequence・payload・元の結果不明を引き継ぎます。statement は server の期限内だけ再確認し、期限後は送信せず元の結果不明を返します。送信済み terminal command は期限後も保存応答を確認できます。
+
+再確認には元の要求と同じ認証・DB が必要です。ユーザーを切り替えた場合、開始済み transaction の操作は server が拒否します。atomic の idempotency key は認証情報ごとに区別されるため、別ユーザーで同じキーを送っても以前の更新の再確認にはなりません。
 
 callback 全体を再実行せず、新しい transaction へ更新を移して再送しません。
 
@@ -101,11 +104,11 @@ client 内部の operation／scope 解放エラーは、成功結果や元の実
 
 公開型は `@unacowa/policysql/transport` にあります。
 
-- `createScope({ role? })` は固定 context のローカル handle を作ります。
+- `createScope({ role? })` は role と通信資源をまとめるローカル handle を作ります。認証 context は固定しません。
 - `scope.createOperation(command, options)` は不変 command の試行系列を作ります。
 - `operation.send({ signal? })` は `{ type: 'response', status, body }` または `{ type: 'failure', code, delivery }` を返します。
 - `delivery` は今回の試行の `not-sent`／`possibly-sent` です。前回の未確認結果を消しません。
 - `scope.beginShutdown()` は通常の新規操作と未送信操作を停止します。送信済み command の確認と安全な cleanup rollback は区別します。
 - `dispose()` は通信資源の解放です。SQL rollback を独自に送信しません。
 
-独自 transport は有限時間で完了し、期限・signal・context 固定を守る必要があります。client は通信待ち用の外側のタイマーを追加しません。応答しない独自 transport まで client 単体で終了させる保証はありません。
+独自 transport は各送信を有限時間で完了し、server の期限と signal を守る必要があります。client は通信待ち用の外側のタイマーを追加しません。応答しない独自 transport まで client 単体で終了させる保証はありません。

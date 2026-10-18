@@ -1,8 +1,8 @@
 import { object, protocolError, required, statement, validateResult, retryable, uncertain, unavailable, unknown, command, sendOperation, transportError, signalOptions } from './protocol.js';
 import { releaseTransportResource } from '../transport/cleanup.js';
 
-// Protocol state survives operation disposal. Explicit recovery gets a new finite
-// operation but retains the original command and every unresolved outcome.
+// Protocol state survives operation disposal. Every attempt has its own timeout;
+// recovery retains the original command and every unresolved outcome.
 export class PolicySqlTransaction {
   #scope;
   #queue = Promise.resolve();

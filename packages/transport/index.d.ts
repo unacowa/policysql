@@ -15,7 +15,6 @@ export interface OperationOptions {
 export type TransportFailureCode =
   | 'POLICYSQL_AUTH_REQUIRED'
   | 'POLICYSQL_AUTH_PREPARATION_FAILED'
-  | 'POLICYSQL_AUTH_CONTEXT_CHANGED'
   | 'POLICYSQL_TRANSPORT_TIMEOUT'
   | 'POLICYSQL_REQUEST_CANCELLED'
   | 'POLICYSQL_TRANSPORT_DISCONNECTED'
@@ -26,10 +25,12 @@ export type TransportReply =
   | { type: 'response'; status: number; body: unknown }
   | { type: 'failure'; code: TransportFailureCode; delivery: 'not-sent' | 'possibly-sent' }
 export interface TransportOperation {
+  /** Each call has an independent timeout, including automatic retries. */
   send(options?: { signal?: AbortSignal }): Promise<TransportReply>
   dispose(): Promise<void>
 }
 export interface TransportScope {
+  /** Groups local resources; does not pin a login or authentication context. */
   createOperation(command: TransportCommand, options: OperationOptions): TransportOperation
   beginShutdown(): void
   dispose(): Promise<void>

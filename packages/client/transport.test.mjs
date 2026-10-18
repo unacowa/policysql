@@ -39,7 +39,7 @@ const instrument = (transport, { cleanupThrows = false } = {}) => {
   };
 };
 
-test('a second automatic attempt uses only the remaining budget', async t => {
+test('a second automatic attempt gets a fresh timeout instead of sharing the first budget', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const first = Promise.withResolvers();
   const second = Promise.withResolvers();
@@ -64,6 +64,9 @@ test('a second automatic attempt uses only the remaining budget', async t => {
   failFirst.resolve();
   await second.promise;
   t.mock.timers.tick(401);
+  await flush();
+  assert.equal(secondSignal.aborted, false);
+  t.mock.timers.tick(600);
   await failed;
   assert.equal(secondSignal.aborted, true);
   assert.equal(count, 2);
@@ -78,7 +81,7 @@ test('transport is required and legacy options never select an implicit HTTP pat
   assert.throws(() => new PolicySqlClient({ transport, token: testToken }), TypeError);
 });
 
-test('explicit statement recovery gets a new finite operation with the identical command', async t => {
+test('explicit statement recovery preserves the identical command', async t => {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const gateway = mockGateway();
   let drop = true;

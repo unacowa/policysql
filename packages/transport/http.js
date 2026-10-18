@@ -1,7 +1,6 @@
-import { copyCommand, copyOperationOptions, failure, identifier, onlyKeys, positiveDuration, record, validateRole, sanitizeReply } from './index.js';
+import { copyCommand, copyOperationOptions, failure, onlyKeys, positiveDuration, record, validateRole, sanitizeReply } from './index.js';
 import { createOperation } from './operation.js';
 import { releaseTransportResource } from './cleanup.js';
-import { contextKey, timeout } from './internal.js';
 
 const routes = Object.freeze({
   execute: '/v1/transactions:execute', begin: '/v1/transactions', explain: '/v1/transactions:explain',
@@ -51,7 +50,7 @@ export function createHttpTransport(config) {
   const fixedToken = config.token;
   if ((fixedToken === undefined) === (provider === undefined) ||
     (fixedToken !== undefined && (typeof fixedToken !== 'string' || !fixedToken)) ||
-    (provider !== undefined && (!record(provider) || typeof provider.currentContextKey !== 'function' || typeof provider.getToken !== 'function'))) {
+    (provider !== undefined && (!record(provider) || typeof provider.getToken !== 'function'))) {
     throw new TypeError('supply token or tokenProvider');
   }
   const timeoutMs = positiveDuration(config.timeoutMs ?? 15_000, 'timeoutMs');
@@ -59,89 +58,27 @@ export function createHttpTransport(config) {
   const clockToleranceMs = config.clockToleranceMs ?? 5_000;
   if (!Number.isFinite(clockToleranceMs) || clockToleranceMs < 0 || clockToleranceMs > 2_147_483_647) throw new TypeError('invalid clockToleranceMs');
   let closed = false;
-  let cache;
-  const flights = new Map();
   const scopes = new Set();
-  const context = () => {
-    const key = provider ? provider.currentContextKey() : 'fixed';
-    if (!identifier(key)) throw authError('POLICYSQL_AUTH_PREPARATION_FAILED');
-    return key;
-  };
-  const checkContext = key => {
-    if (closed) throw authError('POLICYSQL_TRANSPORT_CLOSED');
-    if (context() !== key) throw authError('POLICYSQL_AUTH_CONTEXT_CHANGED');
-  };
 
-  const credential = async (key, minValidityMs, signal) => {
-    checkContext(key);
+  const credential = async (minValidityMs, signal) => {
     if (!provider) {
       if (tokenExpiry(fixedToken) - Date.now() < minValidityMs) throw authError('POLICYSQL_AUTH_REQUIRED');
       return fixedToken;
     }
-    if (cache?.contextKey === key && cache.expiresAt - Date.now() >= minValidityMs) return cache.token;
-    let flight = flights.get(key);
-    if (!flight) {
-      // An atomic request may share its refresh with a concurrent begin. Ask once
-      // for enough lifetime for either, rather than making the second waiter fail.
-      const requestedValidityMs = Math.max(minValidityMs, transactionMaxDurationMs + timeoutMs + clockToleranceMs);
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      flight = { controller, waiters: 0 };
-      let onRefreshAbort;
-      const interrupted = new Promise((_, reject) => {
-        onRefreshAbort = () => reject(authError('POLICYSQL_AUTH_PREPARATION_FAILED'));
-        controller.signal.addEventListener('abort', onRefreshAbort, { once: true });
-      });
-      flight.promise = Promise.race([
-        interrupted,
-        Promise.resolve().then(() => provider.getToken({ contextKey: key, minValidityMs: requestedValidityMs, signal: controller.signal })).then(value => {
-          if (controller.signal.aborted) throw authError('POLICYSQL_AUTH_PREPARATION_FAILED');
-          checkContext(key);
-          if (!record(value) || value.contextKey !== key) throw authError('POLICYSQL_AUTH_CONTEXT_CHANGED');
-          if (!Number.isFinite(value.expiresAt)) throw authError('POLICYSQL_AUTH_PREPARATION_FAILED');
-          const result = { token: value.token, expiresAt: Math.min(tokenExpiry(value.token), value.expiresAt), contextKey: key };
-          if (result.expiresAt - Date.now() < minValidityMs) throw authError('POLICYSQL_AUTH_PREPARATION_FAILED');
-          cache = result;
-          return result;
-        }),
-      ]).finally(() => {
-        clearTimeout(timer);
-        controller.signal.removeEventListener('abort', onRefreshAbort);
-        if (flights.get(key) === flight) flights.delete(key);
-      });
-      flights.set(key, flight);
-    }
-    flight.waiters++;
-    let onAbort;
-    try {
-      if (signal.aborted) throw authError('POLICYSQL_REQUEST_CANCELLED');
-      const aborted = new Promise((_, reject) => {
-        onAbort = () => reject(authError('POLICYSQL_REQUEST_CANCELLED'));
-        signal.addEventListener('abort', onAbort, { once: true });
-      });
-      const value = await Promise.race([flight.promise, aborted]);
-      checkContext(key);
-      if (value.expiresAt - Date.now() < minValidityMs) throw authError('POLICYSQL_AUTH_PREPARATION_FAILED');
-      return value.token;
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-      if (--flight.waiters === 0 && flights.get(key) === flight) {
-        flights.delete(key);
-        flight.controller.abort();
-      }
-    }
+    // The provider owns login changes and any credential caching. Read it on every
+    // send so this transport never silently keeps an earlier account's credential.
+    const value = await provider.getToken({ minValidityMs, signal });
+    if (signal.aborted) throw authError('POLICYSQL_REQUEST_CANCELLED');
+    if (!record(value) || !Number.isFinite(value.expiresAt) ||
+      Math.min(tokenExpiry(value.token), value.expiresAt) - Date.now() < minValidityMs) throw authError('POLICYSQL_AUTH_PREPARATION_FAILED');
+    return value.token;
   };
 
   return Object.freeze({
-    [contextKey]: context,
-    [timeout]: timeoutMs,
     descriptor: Object.freeze({ endpointId: endpoint.href }),
     createScope(options = {}) {
       if (!onlyKeys(options, ['role'])) throw new TypeError('invalid scope options');
       const role = validateRole(options.role);
-      let key;
-      let preparationError;
-      try { key = context(); } catch { preparationError = 'POLICYSQL_AUTH_PREPARATION_FAILED'; }
       let state = closed ? 'disposed' : 'open';
       const operations = new Set();
       const scope = Object.freeze({
@@ -154,12 +91,10 @@ export function createHttpTransport(config) {
             onDispose: () => operations.delete(operation),
             async attempt({ signal, remainingMs, markSent }) {
               if (closed || state === 'disposed' || (state === 'draining' && options.purpose === 'execute' && !operations.has(operation))) return failure('POLICYSQL_TRANSPORT_CLOSED');
-              if (preparationError) return failure(preparationError);
               let dispatched = false;
               try {
                 const minValidityMs = clockToleranceMs + remainingMs() + (command.target.kind === 'begin' ? transactionMaxDurationMs : 0);
-                const token = await credential(key, minValidityMs, signal);
-                checkContext(key);
+                const token = await credential(minValidityMs, signal);
                 if (signal.aborted) return failure('POLICYSQL_REQUEST_CANCELLED');
                 if (closed || state === 'disposed') return failure('POLICYSQL_TRANSPORT_CLOSED');
                 const { kind, transactionId } = command.target;
@@ -181,7 +116,7 @@ export function createHttpTransport(config) {
                 catch { return failure('POLICYSQL_TRANSPORT_PROTOCOL_ERROR', 'possibly-sent'); }
                 return sanitizeReply({ type: 'response', status: response.status, body });
               } catch (error) {
-                const allowed = ['POLICYSQL_AUTH_REQUIRED', 'POLICYSQL_AUTH_PREPARATION_FAILED', 'POLICYSQL_AUTH_CONTEXT_CHANGED', 'POLICYSQL_REQUEST_CANCELLED', 'POLICYSQL_TRANSPORT_CLOSED'];
+                const allowed = ['POLICYSQL_AUTH_REQUIRED', 'POLICYSQL_AUTH_PREPARATION_FAILED', 'POLICYSQL_REQUEST_CANCELLED', 'POLICYSQL_TRANSPORT_CLOSED'];
                 return failure(allowed.includes(error?.code) ? error.code : dispatched ? 'POLICYSQL_TRANSPORT_ERROR' : 'POLICYSQL_AUTH_PREPARATION_FAILED');
               }
             },
@@ -208,9 +143,6 @@ export function createHttpTransport(config) {
     async dispose() {
       if (closed) return;
       closed = true;
-      cache = undefined;
-      for (const flight of flights.values()) flight.controller.abort();
-      flights.clear();
       await Promise.all([...scopes].map(releaseTransportResource));
     },
   });
