@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Kysely, CamelCasePlugin } from "kysely";
-import { PolicySqlClient } from "../../../packages/client/index.js";
+import { PolicySqlClient, createHttpTransport } from "../../../packages/client/index.js";
 import { PolicySqlDialect, policyOptions } from "../../../packages/kysely/index.js";
 import { harness } from "./helpers/routing.mjs";
 
@@ -11,7 +11,13 @@ const makeClient = async (t, h, { tenant = "a", token, autoIdempotencyKey, plugi
     requests.push({ path: new URL(url).pathname, body: JSON.parse(init.body), headers: new Headers(init.headers) });
     return h.app.fetch(new Request(url, init), h.env, h.ctx, h.binding(tenant));
   });
-  const client = new PolicySqlClient({ endpoint: "https://worker.test", token: token ?? await h.token(tenant), fetchImpl, ...options });
+  const credential = token ?? await h.token(tenant);
+  const transport = createHttpTransport({ endpoint: "https://worker.test", fetchImpl: (url, init) => {
+    const headers = new Headers(init.headers);
+    headers.set("authorization", `Bearer ${credential}`);
+    return fetchImpl(url, { ...init, headers });
+  } });
+  const client = new PolicySqlClient({ transport, ...options });
   const db = new Kysely({ dialect: new PolicySqlDialect({ client, autoIdempotencyKey }), plugins });
   t.after(() => db.destroy());
   return { client, db, requests };
@@ -120,7 +126,7 @@ test("callback error and validator denial roll back actual writes", async (t) =>
   assert.equal(h.rows("a")[0].name, "database_a");
 });
 
-test("lost begin response is retried before SQL and the unused owner expires", async (t) => {
+test("lost begin response is not retried and a caller may explicitly start again", async (t) => {
   const h = await harness(t, { hooks: false });
   let dropped = false;
   const { db, requests } = await makeClient(t, h, { wrapFetch: send => async (url, init) => {
@@ -129,6 +135,9 @@ test("lost begin response is retried before SQL and the unused owner expires", a
     return response;
   } });
   let callbacks = 0;
+  await assert.rejects(db.transaction().setAccessMode("read only").execute(async () => { callbacks++; }), { phase: "begin", code: "POLICYSQL_OUTCOME_UNKNOWN" });
+  assert.equal(callbacks, 0);
+  assert.equal(h.owners.size, 1);
   await db.transaction().setAccessMode("read only").execute(async trx => { callbacks++; await read(trx).execute(); });
   assert.equal(callbacks, 1);
   assert.equal(h.owners.size, 2);
@@ -139,16 +148,22 @@ test("lost begin response is retried before SQL and the unused owner expires", a
   assert.ok(requests.every(r => !r.headers.has("idempotency-key")));
 });
 
-test("lost statement and commit responses replay actual DO commands without repeating SQL", async (t) => {
+test("explicit confirmation of lost responses replays DO commands without repeating SQL", async (t) => {
   const h = await harness(t, { hooks: false });
   const lost = new Set();
-  const { db, requests } = await makeClient(t, h, { wrapFetch: send => async (url, init) => {
+  const { client, requests } = await makeClient(t, h, { wrapFetch: send => async (url, init) => {
     const response = await send(url, init);
     const path = new URL(url).pathname;
     if (/\/(statements|commit)$/.test(path) && !lost.has(path)) { lost.add(path); throw new Error("response lost"); }
     return response;
   } });
-  await db.transaction().execute(trx => update(trx).execute());
+  const tx = await client.beginTransaction();
+  await assert.rejects(tx.execute("UPDATE projects SET name = :name WHERE id = :id", { name: "Updated", id: "seed" }), { phase: "statement" });
+  assert.equal(requests.length, 2);
+  await tx.retryPending();
+  await assert.rejects(tx.commit(), { phase: "commit" });
+  assert.equal(requests.length, 4);
+  await tx.commit();
   assert.equal(h.rows("a")[0].name, "Updated");
   assert.equal(h.events.filter(e => /^UPDATE\b/i.test(e.sql)).length, 1);
   assert.deepEqual(requests.map(r => r.body.sequence), [undefined, 1, 1, 2, 2]);
@@ -193,7 +208,7 @@ for (const outcome of ["unknown", "rejected"]) test(`destroy preserves an actual
   assert.equal(h.rows("a")[0].name, outcome === "unknown" ? "Updated" : "database_a");
   assert.equal(h.events.filter(e => /^UPDATE\b/i.test(e.sql)).length, 1);
   assert.equal(h.owners.size, 1);
-  assert.deepEqual(requests.map(r => r.body.sequence), outcome === "unknown" ? [undefined, 1, 2, 2] : [undefined, 1, 2]);
+  assert.deepEqual(requests.map(r => r.body.sequence), [undefined, 1, 2]);
   assert.equal(requests.some(r => r.path.endsWith("/rollback")), false);
 });
 

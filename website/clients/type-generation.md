@@ -19,14 +19,33 @@ description: PolicySQLへonline compileを行い、SQLごとの入力型と結�
 ```
 
 ```bash
-policysql generate \
-  --endpoint https://gateway.example.com \
-  --role author \
-  --input ./queries \
-  --output ./src/generated/policysql
+policysql generate --config ./policysql.config.mjs
 ```
 
-CLIはbuild専用JWTを`POLICYSQL_CODEGEN_TOKEN`から読み取ります。command argument、生成file、logへtokenを残しません。
+設定モジュールはアプリケーションが管理し、generator の options を default export します。
+
+```js
+// policysql.config.mjs
+import { createHttpTransport } from '@unacowa/policysql/client'
+
+const endpoint = 'https://gateway.example.com'
+export default {
+  endpoint, // 生成メタデータ。通信先は下の Transport で設定する
+  role: 'author',
+  input: './queries',
+  output: './src/generated/policysql',
+  transport: createHttpTransport({
+    endpoint,
+    fetchImpl: (url, init) => {
+      const headers = new Headers(init.headers)
+      headers.set('authorization', `Bearer ${process.env.BUILD_TOKEN}`)
+      return fetch(url, { ...init, headers })
+    },
+  }),
+}
+```
+
+認証方式・環境変数名・資格情報の更新はアプリケーションが決めます。CLI に専用 token option はありません。プログラムからは `@unacowa/policysql/generator` の `generate(options)` を使えます。Catalog／Capabilities／Explain の全通信は、注入した関数 Transport を通ります。自動再送や独自 timeout はなく、任意の `signal` を渡せます。
 
 ## Build credential
 
@@ -104,7 +123,11 @@ export interface ConstantRow {
 
 ## Snapshotと再生成
 
-生成物には使用した`schemaVersion`、`policyVersion`、query hashを埋め込みます。型は生成時に指定した role に対応します。runtime requestは両versionを`expected`として送ります。不一致なら自動的に新しい型へ読み替えず、`POLICYSQL_STALE_OPERATION`で失敗します。
+生成物には固定した SQL・role・`schemaVersion`・`policyVersion`・query hash を埋め込み、runtime でも書換えを防ぎます。query hash は前後の空白を除いた送信 SQL の SHA-256 です。型は生成時に指定した role に対応します。runtime requestは両versionを`expected`として送ります。不一致なら自動的に新しい型へ読み替えず、`POLICYSQL_STALE_OPERATION`で失敗します。
+
+`metadata.json` に endpoint・role・両 version・SQL hash と Catalog／Capabilities／Explain の型情報を保存します。現在の Gateway の runtime snapshot ID・profile・ABI と、公開される compiler／registry 情報をそのまま記録します。個別の compiler／registry version が未公開の場合は推測・補完せず、公開情報以上の互換性を保証しません。
+
+接続先・DB と成果物の配置・再利用条件は利用者が管理します。Client は Transport の内部から endpoint・資格情報・DB を推測しません。role／version 一致だけでは別 endpoint／DB の同一性は証明できません。
 
 生成結果はsource repositoryまたはCI artifactへ保存できます。`tsc`とapplication runtimeは型生成のためにPolicySQLへ接続しません。online接続が必要なのは明示的な`policysql generate`だけです。
 
@@ -114,7 +137,7 @@ export interface ConstantRow {
 - roleがresource、column、operationを利用できない
 - 結果名が空または重複する
 - schema/policy snapshotが変わった
-- function registryまたはCapabilitiesが生成CLIと互換でない
+- 未対応の JSON representation、破損した descriptor、Catalog／Capabilities の不整合
 - Explainへの認証、timeout、network accessが失敗した
 
 失敗時は既存生成fileを部分更新しません。CIでは生成差分が残っていないことを検証します。
@@ -123,19 +146,18 @@ export interface ConstantRow {
 
 runtimeで構築され、build時にSQL textを確定できないqueryは静的生成対象外です。Kysely自身が推論できる型を利用するか、`unknown`としてruntime result descriptorで検証します。利用者の型assertionはPolicySQLの認可やruntime validationを置き換えません。
 
-parameter化されたJSON pathを値なしでExplainする場合、generatorはCatalog JSON Schema上の全到達型から作られたunionを生成します。path値を固定してExplainした生成物は、その値とquery hashを生成artifactへ含めます。
+parameter 化された JSON path を値なしで Explain する場合、generator は返された型と JSON representation を使います。JSON 値は `unknown` とし、Execute の descriptor が狭まっても生成時の予測と完全一致することを要求しません。
 
 ## 生成済みクエリのバージョン条件
 
-通常の `PolicySqlClient` は endpoint と token だけで作れます。生成済みクエリは
-生成時の schema / policy version を保持するため、実行する client にその両方を明示します。
-一致しない client（version 未指定を含む）は送信前に `POLICYSQL_STALE_OPERATION` になります。
+通常の `PolicySqlClient` は Transport の注入だけで作れます。生成済みクエリには
+生成時の role と schema / policy version が必要です。実行する Client に全て明示します。
+不一致・省略は送信前に `POLICYSQL_STALE_OPERATION` になります。
 実際の server snapshot との一致は gateway が検証します。
 
 ```ts
 const client = new PolicySqlClient({
-  endpoint,
-  token,
+  transport,
   role: 'author',
   schemaVersion: getPublishedPosts.schemaVersion,
   policyVersion: getPublishedPosts.policyVersion,

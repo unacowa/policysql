@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Kysely, CamelCasePlugin, InsertResult, UpdateResult, DeleteResult, sql } from "kysely";
 import { PolicySqlDialect, policyOptions } from "./index.js";
-import { PolicySqlClient } from "../client/index.js";
-import { mockGateway } from "../client/test-fixture.mjs";
+import { PolicySqlClient, createHttpTransport } from "../client/index.js";
+import { mockGateway, errorBody } from "../client/test-fixture.mjs";
 import { createExampleClient, prepareProjectRename, renameExistingProject } from "../../examples/database-routing/client.mjs";
 
 const setup = (t, { plugins, autoIdempotencyKey, fetchImpl, ...responseOptions } = {}) => {
   const gateway = mockGateway(responseOptions);
-  const client = new PolicySqlClient({ endpoint: "https://gateway.test", token: "token", fetchImpl: fetchImpl?.(gateway) ?? gateway.fetchImpl });
+  const client = new PolicySqlClient({ transport: createHttpTransport({ endpoint: "https://gateway.test", fetchImpl: fetchImpl?.(gateway) ?? gateway.fetchImpl }) });
   const dialect = new PolicySqlDialect({ client, autoIdempotencyKey });
   const db = new Kysely({ dialect, plugins });
   t.after(() => db.destroy());
@@ -205,7 +205,7 @@ test("unknown callback commit is not converted to rollback or callback replay", 
   assert.equal(h.calls.some(c => c.path.endsWith("/rollback")), false);
 });
 
-for (const outcome of ["confirmed", "recovered", "unknown"]) test(`destroy during callback commit preserves its ${outcome} outcome`, async (t) => {
+for (const outcome of ["confirmed", "unknown"]) test(`destroy during callback commit preserves its ${outcome} outcome`, async (t) => {
   const entered = Promise.withResolvers();
   const resume = Promise.withResolvers();
   let attempts = 0;
@@ -215,7 +215,7 @@ for (const outcome of ["confirmed", "recovered", "unknown"]) test(`destroy durin
       attempts++;
       entered.resolve();
       await resume.promise;
-      if (outcome === "unknown" || (outcome === "recovered" && attempts === 1)) throw new Error("lost commit");
+      if (outcome === "unknown") throw new Error("lost commit");
     }
     return response;
   } });
@@ -246,7 +246,7 @@ for (const outcome of ["confirmed", "recovered", "unknown"]) test(`destroy durin
   await Promise.all([checked, shutdown]);
   assert.equal(callbacks, 1);
   assert.equal([...h.transactions.values()][0].status, "committed");
-  assert.equal(attempts, outcome === "confirmed" ? 1 : 2);
+  assert.equal(attempts, 1);
   const commits = h.calls.filter(c => c.path.endsWith("/commit"));
   assert.ok(commits.every(c => c.path === commits[0].path && c.text === commits[0].text));
   assert.equal(h.calls.filter(c => c.path.endsWith("/statements")).length, 1);
@@ -311,7 +311,7 @@ test("invalid configuration and options are rejected without I/O", async (t) => 
 
 test("sample uses standard APIs and retains the key across atomic resends", async (t) => {
   const h = mockGateway();
-  const db = createExampleClient({ endpoint: "https://gateway.test", token: "token", fetchImpl: h.fetchImpl });
+  const db = createExampleClient({ transport: createHttpTransport({ endpoint: "https://gateway.test", fetchImpl: h.fetchImpl }) });
   t.after(() => db.destroy());
   const rename = prepareProjectRename(db, { id: "post_1", name: "Updated" });
   await rename.send();
@@ -344,7 +344,7 @@ test("destroy during begin closes the newly allocated transaction and never runs
 test("failed controlled begin does not poison subsequent connections or destroy", async (t) => {
   let fail = true;
   const h = setup(t, { fetchImpl: gateway => async (url, init) => {
-    if (fail) return Response.json({ error: { code: "POLICYSQL_STALE_OPERATION" } }, { status: 409 });
+    if (fail) return Response.json(errorBody("POLICYSQL_STALE_OPERATION"), { status: 409 });
     return gateway.fetchImpl(url, init);
   } });
   await assert.rejects(h.db.startTransaction().execute(), { code: "POLICYSQL_STALE_OPERATION" });
@@ -379,18 +379,58 @@ test("missing mutation count is not silently converted to zero", async (t) => {
   assert.equal(h.calls.length, 1);
 });
 
-test("an observer awaiting the same transaction is bounded instead of holding the connection forever", async (t) => {
+test("observer promises are awaited without a library timeout", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
   const h = setup(t);
   const entered = Promise.withResolvers();
-  const trx = await h.db.startTransaction().execute();
-  const rejected = assert.rejects(mutation(trx).withPlugin(policyOptions({ onResponse: async () => {
+  const resume = Promise.withResolvers();
+  let completed = false;
+  const operation = mutation(h.db).withPlugin(policyOptions({ onResponse: async () => {
     entered.resolve();
-    await trx.selectFrom("posts").select("id").execute();
-  } })).execute(), { code: "POLICYSQL_OBSERVER_TIMEOUT" });
+    await resume.promise;
+  } })).execute().then(result => { completed = true; return result; });
   await entered.promise;
-  t.mock.timers.tick(4_001);
-  await rejected;
-  await h.db.destroy();
-  assert.deepEqual(h.calls.map(c => c.body.sequence), [undefined, 1]);
+  t.mock.timers.tick(100_000);
+  await Promise.resolve();
+  assert.equal(completed, false);
+  resume.resolve();
+  await operation;
+  assert.equal(h.calls.length, 1);
+});
+
+test("destroy cancels its own delayed work while a shared Transport remains usable", async (t) => {
+  const gateway = mockGateway();
+  const entered = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const cancelled = Promise.withResolvers();
+  let hold = true;
+  const transport = createHttpTransport({ endpoint: "https://gateway.test", fetchImpl: async (url, init) => {
+    if (hold) { init.signal.addEventListener("abort", () => cancelled.resolve(), { once: true }); entered.resolve(); await resume.promise; }
+    init.signal?.throwIfAborted();
+    return gateway.fetchImpl(url, init);
+  } });
+  const make = () => new Kysely({ dialect: new PolicySqlDialect({ client: new PolicySqlClient({ transport }) }) });
+  const first = make();
+  const second = make();
+  t.after(() => second.destroy());
+  const checked = assert.rejects(mutation(first).execute(), error => error.phase === "execute" && error.cause.name === "AbortError");
+  await entered.promise;
+  const closed = first.destroy();
+  await cancelled.promise;
+  hold = false;
+  resume.resolve();
+  await Promise.all([checked, closed]);
+  assert.equal(gateway.calls.length, 0);
+  await mutation(second).execute();
+  assert.equal(gateway.calls.length, 1);
+});
+
+test("rollback response loss replaces a callback failure with the rollback outcome", async t => {
+  const h = setup(t, { fetchImpl: gateway => async (url, init) => {
+    const result = await gateway.fetchImpl(url, init);
+    if (new URL(url).pathname.endsWith("/rollback")) throw new Error("rollback response lost");
+    return result;
+  } });
+  await assert.rejects(h.db.transaction().execute(async () => { throw new Error("callback failure"); }), { phase: "rollback", code: "POLICYSQL_OUTCOME_UNKNOWN" });
+  assert.equal(h.calls.filter(c => c.path.endsWith("/rollback")).length, 1);
 });

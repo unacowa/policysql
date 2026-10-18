@@ -40,9 +40,10 @@ unkeyed request into a keyed retry or require `policysql_idempotency`.
 
 ### Kysely client contract (Spec #6)
 
-The Kysely Dialect does not expose or generate interactive start keys. It may retry an
-unkeyed start before returning a transaction or running its callback. Each attempt may
-create a new owner; unused empty transactions expire. This does not remove the HTTP
+The Kysely Dialect does not expose or generate interactive start keys. As amended by
+ADR 0015, the Client sends each operation once and never automatically retries begin or
+any subsequent command. An explicitly repeated unkeyed begin may create a new owner;
+unused empty transactions expire. This does not remove the HTTP
 API's optional start-key support. Once started, the driver uses the same transaction ID,
 command sequence and serialized payload for retries and never replays the callback.
 

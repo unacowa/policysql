@@ -11,7 +11,7 @@ PolicySQL の Dialect を設定すると、Kysely 標準のクエリとトラン
 
 ```ts
 import { Kysely } from 'kysely'
-import { PolicySqlClient } from '@unacowa/policysql/client'
+import { PolicySqlClient, createHttpTransport } from '@unacowa/policysql/client'
 import { PolicySqlDialect, policyOptions } from '@unacowa/policysql/kysely'
 
 interface Database {
@@ -22,20 +22,33 @@ interface Database {
   }
 }
 
-const client = new PolicySqlClient({ endpoint, token })
+const transport = createHttpTransport({
+  endpoint,
+  fetchImpl: async (url, init) => {
+    const token = await getAccessToken() // アプリケーション側で取得・更新する
+    init?.signal?.throwIfAborted() // 非同期準備中の中断を遅延送信につなげない
+    const headers = new Headers(init?.headers)
+    headers.set('authorization', `Bearer ${token}`)
+    return fetch(url, { ...init, headers })
+  },
+})
+const client = new PolicySqlClient({ transport })
 const db = new Kysely<Database>({
   dialect: new PolicySqlDialect({ client }),
 })
 ```
 
-`endpoint` と `token` はアプリケーションの設定から渡します。DB の接続情報は gateway 側の wrapper が管理します。クライアントに Turso の認証情報を渡しません。
+認証方式と資格情報の取得・更新はアプリケーションが管理します。HTTP helper は認証ヘッダーを自動付与しません。DB の接続情報は gateway 側の wrapper が管理します。
+
+`PolicySqlTransport` は `(request, { signal }?) => Promise<{ status, body }>` の関数です。公開 request の `kind`、固定済み JSON 文字列 `body`、任意の `role`、実行キーまたは transaction ID を受け取ります。独自 Transport や単純な委譲 wrapper も使えます。各呼び出しで最大1回送信し、本文を保持して、キャンセルを尊重してください。
+
+`createHttpTransport` は固定 route、HTTPS（開発用 localhost は HTTP 可）、redirect 拒否、`credentials: 'omit'`、要求1 MiB／応答2 MiBの制限を提供します。正常に読めた4xx／5xxも `{ status, body }` として返し、fetch・本文読取り・JSON parse の例外はそのまま伝えます。`fetchImpl` 省略時は標準 fetch を使います。
 
 `role` を省略すると、gateway が検証した JWT の `default_role` を使います。別の許可済みロールを選ぶ場合や、想定する schema / policy と一致するときだけ実行したい場合は、追加のオプションを指定します。
 
 ```ts
 const client = new PolicySqlClient({
-  endpoint,
-  token,
+  transport,
   role: 'author',
   schemaVersion: 'schema_17',
   policyVersion: 'policy_42',
@@ -43,6 +56,10 @@ const client = new PolicySqlClient({
 ```
 
 `role` とバージョン条件は独立して省略できます。`schemaVersion` と `policyVersion` は **両方指定するか、両方省略**します。片方だけの指定、空文字、`null`、不正な型は送信前にエラーになります。
+
+Client の role・schemaVersion・policyVersion・Transport 参照は構築時に固定され、元の options の変更やプロパティ代入では変更できません。別の構成には別の Client を作ります。HTTP helper の endpoint・fetchImpl 参照も固定です。独自関数の内部でも利用中の論理的な接続先・DB を切り替えないでください。資格情報の更新は可能ですが、同一 command の再確認には元の認証・DB context が必要です。
+
+通信タイマーはありません。直接の Client 呼び出しでは `signal: AbortSignal.timeout(1000)` などを指定できます。`execute`、`beginTransaction`、transaction の `execute`／`commit`／`rollback`／`retryPending` が signal を受け取ります。Kysely からの通信期限は注入した fetchImpl／Transport で設定し、渡されたキャンセル signal と合成してください。signal を無視する実装の終了時間は保証しません。
 
 バージョン条件を省略すると、現在の schema / policy で検証・認可・実行します。指定して不一致だった場合は `POLICYSQL_STALE_OPERATION` で拒否し、条件を外して再送しません。Catalog の自動取得は行いません。
 
@@ -125,7 +142,9 @@ await trx.commit().execute()
 
 対話型では、利用 DB に `policysql_idempotency` テーブルは不要です。開始キーを指定する補助 API はなく、開始時のキー自動生成も行いません。transaction 内のクエリに `idempotencyKey` を付けると送信前エラーになります。`expect` は利用できます。
 
-開始応答を受け取れず SQL が未実行の場合、開始要求のみを最大 2 回、合計 4 秒以内で試行します。取り残された空の transaction は server の期限処理で閉じます。開始後は同じ transaction ID と sequence によって command を再送します。
+begin を含め自動再送はありません。開始応答を受け取れなければ結果不明を返し、callback を開始しません。利用者が新しい begin を呼ぶと別の transaction が作られ得ます。取り残された空の transaction は server の期限処理に従います。
+
+Client の `expiresAt` は server の期限情報です。Client はローカル時刻で要求を拒否したり、rollback 済みと判定したりしません。Server が実際の期限と状態を管理します。
 
 ## 同じ atomic 更新を再送する
 
@@ -183,11 +202,13 @@ const posts = await db.selectFrom('posts')
 
 metadata は結果変換前の rows に対応します。列名変更や行の並べ替え後の結果へ、元の redaction index / 列名をそのまま適用しないでください。observer が例外を投げても、commit 済みの atomic 更新は取り消されません。
 
-`onResponse` の待機上限は対話型では transaction の残り時間、atomic では応答受信から 5 秒です。超過時は `POLICYSQL_OBSERVER_TIMEOUT` または transaction 期限切れのエラーになります。同じ transaction の次の SQL は `onResponse` 内で待たず、外側のクエリを `await` した後に実行してください。Kysely は observer が返るまでその connection を使用中として扱います。
+`onResponse` が返す Promise は通常どおり完了まで待ちます。独自 timeout はなく、callback／結果 plugin の例外をそのまま伝えます。同じ transaction の次の SQL は `onResponse` 内で待たず、外側のクエリを `await` した後に実行してください。Kysely は observer が返るまでその connection を使用中として扱います。
 
 ## エラーと終了処理
 
-`PolicySqlError` の `code` と、HTTP エラーの場合の `status` を確認できます。通信断や不正応答で実行結果を確定できない場合は `PolicySqlOutcomeUnknownError` を返します。
+`PolicySqlError` は `code`、`status` と検証した公開応答 `response` を保持します。サーバーの message・path・requestId を独自の固定文言に置き換えません。Transport 呼び出し後の通信断・不正応答などで実行結果を確定できない場合は `PolicySqlOutcomeUnknownError` を返し、元例外を `cause` に保持します。既知の code／status と構造を検証できた拒否は通常の公開エラーとして伝えます。未知のエラーや汎用5xxは未実行の証明にしません。
+
+Transport 呼び出し前の中断では元の `AbortSignal.reason` を返します。利用者 callback／注入関数の例外にはアプリケーションの情報が含まれ得ます。ログ出力や外部への公開方針はアプリケーションが管理します。
 
 ```ts
 import { PolicySqlOutcomeUnknownError } from '@unacowa/policysql/client'
@@ -202,26 +223,11 @@ try {
 }
 ```
 
-対話型の command 再送は同じ command ごとに最大 2 回です。statement は transaction の期限以内で試行し、終端 command の記録を確認する場合だけ最大 2 秒の確認時間を確保します。commit の結果が不明な場合に、別 transaction で callback を実行し直したり、反対の rollback を送ったりしません。controlled transaction では同じ `trx.commit().execute()` で pending commit を再確認できます。
+対話型も各呼び出しは1回だけ送信します。明示的な再確認には低レベル transaction の `retryPending()`、または pending と同じ `commit()`／`rollback()` を使います。同じ transaction ID・sequence・role・本文を保持します。後続の認証拒否やキャンセルで元の結果不明を解除せず、元の `cause` と最新の確認失敗 `lastError` を保持します。commit の結果が不明な場合に、別 transaction で callback を実行し直したり、反対の rollback を送ったりしません。controlled transaction では同じ `trx.commit().execute()` で pending commit を再確認できます。
 
 利用終了時は `await db.destroy()` で資源を解放します。controlled transaction の終了操作は利用者が管理してください。期限や結果不明のため閉じられない remote transaction は server の期限処理に従います。
 
-`destroy()` は新しい処理の受付を停止します。送信済みの commit と重なった場合は、既定の時間・回数の範囲でその結果を確認し、transaction の Promise に成功または元のエラーを返します。結果不明なら `POLICYSQL_OUTCOME_UNKNOWN` と `phase`・`transactionId`・`sequence` を保持し、rollback 要求は送りません。`destroy()` の完了は commit 成功や rollback 完了の保証ではないため、transaction の Promise も必ず確認してください。
-
-## 旧 API からの移行
-
-Proxy による旧 API は削除しました。
-
-| 旧 API | 移行先 |
-| --- | --- |
-| `createPolicyKysely` / `bindPolicyKysely` | `new Kysely({ dialect: new PolicySqlDialect({ client }) })` |
-| `policyQuery` / `policySelect` / `policyMutation` | 標準 builder。必要な設定は `.withPlugin(policyOptions(...))` |
-| `executeWithPolicyMeta` | `.execute()` と `policyOptions({ onResponse })` |
-| `compilePolicyQuery` | この Dialect の builder の `.compile()` |
-| `onQuery` / `onResult` / `onError` | Kysely の logging / plugin、`onResponse`、通常の例外処理 |
-| `PolicyKyselyOptions` / `PolicyQueryExecution` などの旧 wrapper 型 | `PolicySqlDialectOptions` / `PolicyOptions` と Kysely 標準の builder・結果型 |
-
-RETURNING なしの更新結果も Kysely 標準へ変わります。行が必要なら RETURNING を付けてください。既存の別 Dialect の Kysely instance に client を後付け bind する方式は廃止しました。
+`destroy()` は新しい処理の受付を停止し、その Driver の進行中の処理へキャンセルを通知します。共有 Transport や外部資源は終了しません。安全に終了できる transaction は rollback し、内部の後始末で検証済みの結果や元の実行エラーを上書きしません。明示的な rollback や callback 失敗後の rollback 自体が失敗した場合は、そのエラーを伝えます。送信済み commit と重なっても、検証できた応答は成功として返します。結果不明なら `POLICYSQL_OUTCOME_UNKNOWN` と `phase`・`transactionId`・`sequence` を保持し、rollback 要求は送りません。`destroy()` の完了は commit 成功や rollback 完了の保証ではないため、transaction の Promise も必ず確認してください。
 
 ## 対応範囲
 

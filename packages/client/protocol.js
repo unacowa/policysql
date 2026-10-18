@@ -1,15 +1,16 @@
 export class PolicySqlError extends Error {
-  constructor(message, code, status) {
-    super(message);
+  constructor(message, code, status, options) {
+    super(message, options);
     this.name = "PolicySqlError";
     this.code = code;
     if (status !== undefined) this.status = status;
+    if (options?.response !== undefined) this.response = options.response;
   }
 }
 
 export class PolicySqlOutcomeUnknownError extends PolicySqlError {
-  constructor({ transactionId, phase, sequence }) {
-    super("The outcome of the PolicySQL request is unknown.", "POLICYSQL_OUTCOME_UNKNOWN");
+  constructor({ transactionId, phase, sequence }, options) {
+    super("The outcome of the PolicySQL request is unknown.", "POLICYSQL_OUTCOME_UNKNOWN", undefined, options);
     this.name = "PolicySqlOutcomeUnknownError";
     this.phase = phase;
     if (transactionId !== undefined) this.transactionId = transactionId;
@@ -18,7 +19,7 @@ export class PolicySqlOutcomeUnknownError extends PolicySqlError {
 }
 
 export const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-export const protocolError = () => new PolicySqlError("Invalid PolicySQL response.", "POLICYSQL_INVALID_RESPONSE");
+export const protocolError = (options) => new PolicySqlError("Invalid PolicySQL response.", "POLICYSQL_INVALID_RESPONSE", undefined, options);
 export const unavailable = () => new PolicySqlError("The transaction is no longer active.", "POLICYSQL_TRANSACTION_UNAVAILABLE");
 export const required = (value, name) => {
   if (typeof value !== "string" || value.length === 0) throw new TypeError(`${name} is required`);
@@ -66,6 +67,83 @@ export const validateResult = (result) => {
   }
   return result;
 };
-export const retryable = (error) => error?.code === "POLICYSQL_TRANSPORT_ERROR" ||
-  error?.code === "POLICYSQL_INVALID_RESPONSE" || error?.status >= 500;
-export const unknown = (tx, phase, sequence) => new PolicySqlOutcomeUnknownError({ transactionId: tx, phase, sequence });
+export const validateRole = (role) => {
+  if (role !== undefined && (typeof role !== "string" || !/^[a-z][a-z0-9_]*$/.test(role))) {
+    throw new TypeError("role must be a valid role identifier");
+  }
+  return role;
+};
+
+export const validateOptions = (options, keys) => {
+  if (!object(options) || Object.keys(options).some((key) => !keys.includes(key))) throw new TypeError("invalid options");
+};
+
+// Preserve public information without filling in missing fields to manufacture
+// evidence about execution from an invalid response.
+export const readResponse = (response) => {
+  if (!object(response) || !Number.isInteger(response.status) || response.status < 100 || response.status > 599) throw protocolError();
+  let body;
+  try { body = copyJson(response.body); } catch (cause) { throw protocolError({ cause }); }
+  const snapshot = { status: response.status, body };
+  if (!object(body)) throw protocolError({ response: snapshot });
+  if (response.status >= 200 && response.status < 300) return snapshot;
+  const error = body.error;
+  if (!object(error) || typeof error.code !== "string" || !/^POLICYSQL_[A-Z0-9_]+$/.test(error.code) ||
+    typeof error.message !== "string" || !(error.path === null || typeof error.path === "string") ||
+    typeof error.requestId !== "string") throw protocolError({ response: snapshot });
+  return { ...snapshot, error: new PolicySqlError(error.message, error.code, response.status, { response: snapshot }) };
+};
+
+// Only documented code/status pairs establish rejection. Status alone, unknown
+// errors and exceptions thrown by a Transport cannot establish execution outcome.
+const rejections = new Map([
+  [401, ["UNAUTHENTICATED", "AUTHENTICATION_FAILED"]],
+  [403, ["FORBIDDEN_ACCESS", "ACCESS_DENIED", "MISSING_POLICY", "FORBIDDEN_OPERATION", "FORBIDDEN_COLUMN",
+    "FORBIDDEN_COLUMN_CONTEXT", "STATEMENT_REJECTED", "TRANSACTION_MODE_VIOLATION"]],
+  [400, ["INVALID_REQUEST", "INVALID_SQL", "MULTIPLE_STATEMENTS", "UNSUPPORTED_SQL", "DUPLICATE_RESULT_COLUMN",
+    "INVALID_PARAMETER", "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER", "PRESET_COLUMN"]],
+  [409, ["STALE_OPERATION", "IDEMPOTENCY_CONFLICT", "TRANSACTION_CONFLICT", "TRANSACTION_UNAVAILABLE", "COMMIT_CHECK_REJECTED"]],
+  [412, ["SNAPSHOT_MISMATCH"]],
+  [413, ["LIMIT_EXCEEDED"]],
+  [422, ["EXPECTATION_FAILED", "SCHEMA_MISMATCH"]],
+  [429, ["TRANSACTION_LIMIT_EXCEEDED", "USAGE_BUDGET_EXCEEDED"]],
+]);
+
+const sqlRejections = new Set([
+  "MISSING_POLICY", "FORBIDDEN_OPERATION", "FORBIDDEN_COLUMN", "FORBIDDEN_COLUMN_CONTEXT", "STATEMENT_REJECTED",
+  "INVALID_SQL", "MULTIPLE_STATEMENTS", "UNSUPPORTED_SQL", "DUPLICATE_RESULT_COLUMN", "INVALID_PARAMETER",
+  "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER", "PRESET_COLUMN", "EXPECTATION_FAILED", "SCHEMA_MISMATCH", "USAGE_BUDGET_EXCEEDED",
+]);
+const rejectsCommand = ({ error, status }, kind) => {
+  const code = error.code.slice("POLICYSQL_".length);
+  if (!rejections.get(status)?.includes(code)) return false;
+  if (sqlRejections.has(code)) return kind === "execute" || kind === "statement";
+  if (code === "IDEMPOTENCY_CONFLICT") return kind === "execute";
+  if (code === "COMMIT_CHECK_REJECTED") return kind === "execute" || kind === "commit";
+  if (code === "TRANSACTION_MODE_VIOLATION") return kind === "statement";
+  // Atomic commit checks also run through a transaction owner.
+  if (code.startsWith("TRANSACTION_")) return ["execute", "statement", "commit", "rollback"].includes(kind);
+  return true;
+};
+
+export const sendCommand = async (transport, request, context, validate, signal) => {
+  signal?.throwIfAborted();
+  const uncertain = (cause) => new PolicySqlOutcomeUnknownError(context, { cause });
+  let response;
+  try { response = readResponse(await transport(request, { signal })); }
+  catch (cause) { throw uncertain(cause); }
+  if (response.error) {
+    if (rejectsCommand(response, request.kind)) throw response.error;
+    throw uncertain(response.error);
+  }
+  try {
+    if (response.status !== (request.kind === "begin" ? 201 : 200)) throw protocolError({ response });
+    validate(response.body);
+  } catch (cause) {
+    if (cause instanceof PolicySqlError && cause.response === undefined) {
+      cause.response = { status: response.status, body: response.body };
+    }
+    throw uncertain(cause);
+  }
+  return response.body;
+};

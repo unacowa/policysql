@@ -13,13 +13,18 @@
       "types": "./packages/kysely/index.d.ts",
       "import": "./packages/kysely/index.js"
     },
-    "./cloudflare": "./deploy/cloudflare/src/package.ts"
+    "./cloudflare": "./deploy/cloudflare/src/package.ts",
+    "./generator": {
+      "types": "./packages/generator/index.d.ts",
+      "import": "./packages/generator/index.js"
+    }
   },
   "files": [
     "deploy/cloudflare/pkg/",
     "deploy/cloudflare/src/",
     "packages/client/",
     "packages/kysely/",
+    "packages/generator/",
     "LICENSE-APACHE",
     "LICENSE-MIT",
     "README.md"
@@ -54,5 +59,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/unacowa/policysql.git"
+  },
+  "bin": {
+    "policysql": "./packages/generator/cli.js"
   }
 }

@@ -32,7 +32,7 @@
 
 The implementation follows [Spec #6](https://github.com/unacowa/policysql/issues/6).
 Kysely 0.29.5 uses the standard Dialect, SQLite compiler, Driver and Connection interfaces.
-The public client requires only endpoint/token; optional role selection and paired version
+The public client requires an application-supplied function Transport; optional role selection and paired version
 preconditions remain gateway-validated. The old Proxy wrappers are removed; see the
 [migration table](../../website/clients/kysely.md#旧-api-からの移行).
 
@@ -41,7 +41,7 @@ preconditions remain gateway-validated. The old Proxy wrappers are removed; see 
 | AC-01–04: minimal configuration, role selection, versions, invalid input | `packages/client/client.test.mjs`, `packages/type-tests/public-api.ts`, and the JWT/Wasm/SQLite role and snapshot cases in `deploy/cloudflare/test/kysely-client.test.mjs` |
 | AC-05–08: standard results/plugins, isolated options and metadata, expect | `packages/kysely/kysely.test.mjs` exercises real Kysely, shared query IDs, compile-only calls, invalid plugin order and mutation counts; integration tests verify rollback on expect mismatch and raw redaction indices before result transforms |
 | AC-09–12: optional atomic keys and interactive transactions | Client/Kysely key tests plus real SQLite deduplication, missing-table errors, callback/controlled commit/rollback, commit checks and validator post-state visibility in the integration tests |
-| AC-13–17: retries, ambiguity, unsupported features, limits, cleanup | Lost begin/statement/commit/rollback responses, failed/malformed responses, controlled commit confirmation, destroy during begin/commit, cleanup after a completed rollback, expiry, no-response timeout; integration tests cover commit response loss and validator rejection during destroy, owner loss, binding revocation, snapshot changes, statement/result limits and unchanged committed state |
+| AC-13–17: retries, ambiguity, unsupported features, limits, cleanup | Single-attempt begin/statement/commit/rollback, explicit exact-command confirmation, failed/malformed responses, original exception retention, destroy during begin/commit, cleanup after a completed rollback, server-owned expiry and application-owned timeout; integration tests cover commit response loss and validator rejection during destroy, owner loss, binding revocation, snapshot changes, statement/result limits and unchanged committed state |
 | AC-18: generator and migration | `packages/generator/generator.test.mjs` verifies role headers, version-pinned generated execution and preservation of output on stale generation; the migration table lists removed APIs and wrapper types |
 | AC-19: public API, examples and docs | Strict public-package type tests, `examples/database-routing/client.mjs` executed by the Kysely tests, docs/spec validation and package contents/import checks |
 

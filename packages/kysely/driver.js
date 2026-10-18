@@ -1,4 +1,4 @@
-import { PolicySqlError, copyJson, validateResult, unavailable } from "../client/protocol.js";
+import { copyJson, validateResult, unavailable } from "../client/protocol.js";
 
 class Connection {
   #client;
@@ -8,7 +8,7 @@ class Connection {
   #released = false;
   #ending;
   #onClosed;
-  #transactionDeadline;
+  #cancellation = new AbortController();
   transaction;
 
   constructor(client, config, compiled, onClosed) {
@@ -27,8 +27,7 @@ class Connection {
       if (settings.isolationLevel !== undefined) throw new TypeError("explicit isolation levels are not supported");
       if (settings.accessMode !== undefined && !["read only", "read write"].includes(settings.accessMode)) throw new TypeError("unsupported access mode");
       if (this.transaction || this.#released) throw unavailable();
-      this.transaction = await this.#client.beginTransaction({ mode: settings.accessMode === "read only" ? "read" : "write" });
-      this.#transactionDeadline = Math.min(Date.parse(this.transaction.expiresAt), Date.now() + 4_000);
+      this.transaction = await this.#client.beginTransaction({ mode: settings.accessMode === "read only" ? "read" : "write", signal: this.#cancellation.signal });
       void this.transaction.closed.then(this.#onClosed);
       // destroy() may have started while the HTTP begin was in flight.
       if (this.#released) {
@@ -42,6 +41,7 @@ class Connection {
     if (this.#released || this.#ending) return Promise.reject(unavailable());
     const context = this.#compiled.get(query);
     if (!context) return Promise.reject(new TypeError("query must be compiled by this PolicySqlDialect"));
+    signal = signal ? AbortSignal.any([signal, this.#cancellation.signal]) : this.#cancellation.signal;
     return this.#enqueue(async () => {
       if (this.#released) throw unavailable();
       signal?.throwIfAborted();
@@ -73,22 +73,8 @@ class Connection {
         response: options.onResponse ? copyJson(response) : undefined,
       };
     }).then(async ({ result, response }) => {
-      // Application observers must not hold our command queue. Kysely itself retains
-      // its connection while consuming the result, so bound an async observer too.
-      if (context.options.onResponse) {
-        const deadline = this.#transactionDeadline ?? Date.now() + 5_000;
-        let timer;
-        try {
-          await Promise.race([
-            Promise.resolve().then(() => context.options.onResponse(response)),
-            new Promise((_, reject) => {
-              timer = setTimeout(() => reject(new PolicySqlError(
-                "PolicySQL response observer timed out.", "POLICYSQL_OBSERVER_TIMEOUT",
-              )), Math.max(0, deadline - Date.now()));
-            }),
-          ]);
-        } finally { clearTimeout(timer); }
-      }
+      // Observers run outside the protocol queue and follow ordinary Promise semantics.
+      await context.options.onResponse?.(response);
       return result;
     });
   }
@@ -103,12 +89,13 @@ class Connection {
       // destroy() may already have rolled back this transaction. Acknowledge that
       // result without another request or masking the callback's original error.
       if (kind === "rollback" && this.transaction.status === "rolled_back") return;
-      return this.transaction[kind]();
+      return this.transaction[kind](kind === "commit" ? { signal: this.#cancellation.signal } : {});
     });
   }
   async *streamQuery() { throw new TypeError("PolicySQL streaming is not supported"); }
   async dispose() {
     this.#released = true;
+    this.#cancellation.abort();
     try {
       await this.#queue;
       await this.transaction?.dispose();
