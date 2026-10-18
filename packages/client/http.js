@@ -1,7 +1,5 @@
 import { required, validateKey, validateOptions, validateRole } from "./protocol.js";
 
-const requestLimit = 1024 * 1024;
-const responseLimit = 2 * 1024 * 1024;
 const routes = Object.freeze({
   execute: ["POST", "/v1/transactions:execute"],
   explain: ["POST", "/v1/transactions:explain"],
@@ -9,34 +7,6 @@ const routes = Object.freeze({
   catalog: ["GET", "/v1/catalog"],
   capabilities: ["GET", "/v1/capabilities"],
 });
-
-// Bound response allocation while preserving fetch, stream and JSON exceptions.
-const readJson = async (response) => {
-  if (Number(response.headers.get("content-length")) > responseLimit) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new RangeError("PolicySQL response exceeds 2 MiB");
-  }
-  if (!response.body) return JSON.parse("");
-  const reader = response.body.getReader();
-  const chunks = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > responseLimit) throw new RangeError("PolicySQL response exceeds 2 MiB");
-      chunks.push(value);
-    }
-  } catch (error) {
-    await reader.cancel().catch(() => undefined);
-    throw error;
-  } finally { reader.releaseLock(); }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return JSON.parse(new TextDecoder().decode(bytes));
-};
 
 export const createHttpTransport = (options) => {
   validateOptions(options, ["endpoint", "fetchImpl"]);
@@ -63,7 +33,6 @@ export const createHttpTransport = (options) => {
     const role = validateRole(request.role);
     const key = validateKey(request.idempotencyKey);
     const body = method === "POST" ? required(request.body, "body") : undefined;
-    if (body !== undefined && new TextEncoder().encode(body).byteLength > requestLimit) throw new RangeError("PolicySQL request exceeds 1 MiB");
     const headers = new Headers({
       ...(body === undefined ? {} : { "content-type": "application/json" }),
       ...(role === undefined ? {} : { "policysql-role": role }),
@@ -72,6 +41,6 @@ export const createHttpTransport = (options) => {
     const response = await fetchImpl(new URL(path, endpoint), {
       method, headers, body, signal, redirect: "error", credentials: "omit",
     });
-    return { status: response.status, body: await readJson(response) };
+    return { status: response.status, body: await response.json() };
   };
 };

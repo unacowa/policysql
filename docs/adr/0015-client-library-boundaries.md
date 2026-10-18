@@ -13,9 +13,10 @@ instances. Applications keep the logical destination/DB fixed inside injected fu
 The Transport receives a kind, a serialized JSON body where applicable, role and protocol
 identifiers. It performs at most one attempt and returns status and JSON body. The HTTP
 helper maps fixed routes, enforces HTTPS (localhost HTTP is allowed), rejects redirects,
-omits automatic cookies and bounds requests/responses at 1/2 MiB. Authentication and
-credential refresh belong to application fetch/Transport implementations. Asynchronous
-preparation must check cancellation again before sending.
+omits automatic cookies and parses responses with standard `response.json()`. Authentication,
+credential refresh and additional communication size limits belong to application
+fetch/Transport implementations. Asynchronous preparation must check cancellation again
+before sending.
 
 There are no Client, HTTP helper or observer timers, no shared attempt budgets and no
 automatic retries, including begin. Application signals and transport implementations own

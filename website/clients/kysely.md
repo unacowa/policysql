@@ -42,7 +42,7 @@ const db = new Kysely<Database>({
 
 `PolicySqlTransport` は `(request, { signal }?) => Promise<{ status, body }>` の関数です。公開 request の `kind`、固定済み JSON 文字列 `body`、任意の `role`、実行キーまたは transaction ID を受け取ります。独自 Transport や単純な委譲 wrapper も使えます。各呼び出しで最大1回送信し、本文を保持して、キャンセルを尊重してください。
 
-`createHttpTransport` は固定 route、HTTPS（開発用 localhost は HTTP 可）、redirect 拒否、`credentials: 'omit'`、要求1 MiB／応答2 MiBの制限を提供します。正常に読めた4xx／5xxも `{ status, body }` として返し、fetch・本文読取り・JSON parse の例外はそのまま伝えます。`fetchImpl` 省略時は標準 fetch を使います。
+`createHttpTransport` は固定 route、HTTPS（開発用 localhost は HTTP 可）、redirect 拒否、`credentials: 'omit'` を提供し、応答を標準の `response.json()` で読み取ります。追加の通信サイズ制限は利用者の Transport で実装します。正常に読めた4xx／5xxも `{ status, body }` として返し、fetch・本文読取り・JSON parse の例外はそのまま伝えます。`fetchImpl` 省略時は標準 fetch を使います。
 
 `role` を省略すると、gateway が検証した JWT の `default_role` を使います。別の許可済みロールを選ぶ場合や、想定する schema / policy と一致するときだけ実行したい場合は、追加のオプションを指定します。
 

@@ -70,26 +70,25 @@ test("HTTP propagates original fetch, body stream and JSON parse exceptions", as
   await assert.rejects(invalid({ kind: "catalog" }), SyntaxError);
 });
 
-test("HTTP rejects unsupported routing and oversized bodies without sending", async () => {
+test("HTTP rejects unsupported routing and malformed requests without sending", async () => {
   let count = 0;
   const transport = createHttpTransport({ endpoint, fetchImpl: async () => { count++; return Response.json({}); } });
   for (const request of [{ kind: "unknown" }, { kind: "toString" }, { kind: "catalog", url: "https://other.test" },
     { kind: "begin", body: "{}", idempotencyKey: "fixed-operation-key" },
     { kind: "statement", transactionId: "../bad", body: "{}" }, { kind: "execute", body: {} },
     { kind: "execute", body: "{}", role: "admin\n" }]) await assert.rejects(transport(request), TypeError);
-  await assert.rejects(transport({ kind: "execute", body: "x".repeat(1024 * 1024 + 1) }), RangeError);
   assert.equal(count, 0);
 });
 
-test("HTTP bounds responses both with and without content-length", async () => {
-  for (const headers of [{}, { "content-length": String(2 * 1024 * 1024 + 1) }]) {
-    let cancelled = false;
-    const transport = createHttpTransport({ endpoint, fetchImpl: async () => new Response(new ReadableStream({
-      start(controller) { controller.enqueue(new Uint8Array(2 * 1024 * 1024 + 1)); },
-      cancel() { cancelled = true; },
-    }), { headers }) });
-    await assert.rejects(transport({ kind: "catalog" }), RangeError);
-    assert.equal(cancelled, true);
+test("HTTP passes large requests and responses without imposing size limits", async () => {
+  const payload = { data: "x".repeat(2 * 1024 * 1024) };
+  const body = JSON.stringify(payload);
+  for (const headers of [{}, { "content-length": String(body.length) }]) {
+    const transport = createHttpTransport({ endpoint, fetchImpl: async (_url, init) => {
+      assert.equal(init.body, body);
+      return new Response(body, { headers });
+    } });
+    assert.deepEqual(await transport({ kind: "execute", body }), { status: 200, body: payload });
   }
 });
 
