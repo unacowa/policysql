@@ -138,7 +138,7 @@ await trx.commit().execute()
 // 破棄する場合は commit の代わりに await trx.rollback().execute()
 ```
 
-既定は write transaction です。read-only transaction で更新はできません。現在の server 上限は **4 秒、8 statements、累積結果 64,000 bytes** です。アプリケーションの待機と commit checks の時間も含みます。
+既定は write transaction です。read-only transaction の更新は Server が実行前に拒否し、`POLICYSQL_TRANSACTION_MODE_VIOLATION` を返して transaction を終了します。現在の server 上限は **4 秒、8 statements、累積結果 64,000 bytes** です。アプリケーションの待機と commit checks の時間も含みます。
 
 対話型では、利用 DB に `policysql_idempotency` テーブルは不要です。開始キーを指定する補助 API はなく、開始時のキー自動生成も行いません。transaction 内のクエリに `idempotencyKey` を付けると送信前エラーになります。`expect` は利用できます。
 
@@ -200,6 +200,8 @@ const posts = await db.selectFrom('posts')
 
 通常の AST コピー・変換による順序不正と、設定の重複・破損は送信前に検出します。ただし、後続の自作 plugin が AST 全体を独立した別の tree に置き換えて設定を消す場合、標準 Dialect から完全には検出できません。自作の query plugin も必ず `policyOptions` より前に設定してください。
 
+`CompiledQuery` は `query` を保持した浅いコピーでも設定を維持します。パラメーターはClientへの要求送信時に固定されるため、同じ操作の再送に使うキーと値はアプリケーションで保持してください。
+
 metadata は結果変換前の rows に対応します。列名変更や行の並べ替え後の結果へ、元の redaction index / 列名をそのまま適用しないでください。observer が例外を投げても、commit 済みの atomic 更新は取り消されません。
 
 `onResponse` が返す Promise は通常どおり完了まで待ちます。独自 timeout はなく、callback／結果 plugin の例外をそのまま伝えます。同じ transaction の次の SQL は `onResponse` 内で待たず、外側のクエリを `await` した後に実行してください。Kysely は observer が返るまでその connection を使用中として扱います。
@@ -227,7 +229,7 @@ try {
 
 利用終了時は `await db.destroy()` で資源を解放します。controlled transaction の終了操作は利用者が管理してください。期限や結果不明のため閉じられない remote transaction は server の期限処理に従います。
 
-`destroy()` は新しい処理の受付を停止し、その Driver の進行中の処理へキャンセルを通知します。共有 Transport や外部資源は終了しません。安全に終了できる transaction は rollback し、内部の後始末で検証済みの結果や元の実行エラーを上書きしません。明示的な rollback や callback 失敗後の rollback 自体が失敗した場合は、そのエラーを伝えます。送信済み commit と重なっても、検証できた応答は成功として返します。結果不明なら `POLICYSQL_OUTCOME_UNKNOWN` と `phase`・`transactionId`・`sequence` を保持し、rollback 要求は送りません。`destroy()` の完了は commit 成功や rollback 完了の保証ではないため、transaction の Promise も必ず確認してください。
+`destroy()` は新しい処理の受付を停止し、その Driver の進行中の処理へキャンセルを通知します。共有 Transport や外部資源は終了しません。安全に終了できる transaction は rollback します。全接続の後始末を待ち、新たに行ったrollback等が失敗した場合は元のエラー、複数失敗した場合は各エラーを保持する `AggregateError` を返します。クエリの内部解放では検証済みの結果や元の実行エラーを上書きしません。明示的な rollback や callback 失敗後の rollback 自体が失敗した場合は、そのエラーを伝えます。送信済み commit と重なっても、検証できた応答は成功として返します。結果不明なら `POLICYSQL_OUTCOME_UNKNOWN` と `phase`・`transactionId`・`sequence` を保持し、rollback 要求は送りません。`destroy()` の完了は commit 成功や rollback 完了の保証ではないため、transaction の Promise も必ず確認してください。
 
 ## 対応範囲
 

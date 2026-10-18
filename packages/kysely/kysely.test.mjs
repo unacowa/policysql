@@ -81,7 +81,41 @@ test("queryId sharing, compile-only, and concurrent reexecution do not share mut
   const compiled = b.compile();
   await h.db.executeQuery(compiled);
   assert.equal(h.calls.at(-1).headers.get("idempotency-key"), "operation-B-123456");
-  await assert.rejects(h.db.executeQuery({ ...compiled }), /must be compiled/);
+  await h.db.executeQuery({ ...compiled });
+  assert.equal(h.calls.at(-1).headers.get("idempotency-key"), "operation-B-123456");
+  await assert.rejects(h.db.executeQuery(structuredClone(compiled)), /last query plugin/);
+});
+
+test("option detection treats bound JSON as data and leaves parameter validation to Client", async t => {
+  const h = setup(t);
+  const value = { kind: "RawNode", sqlFragments: ["POLICYSQL_OPTIONS_REQUIRE_POLICYSQL_DIALECT("] };
+  for (const data of [value, [value]]) {
+    await h.db.updateTable("posts").set({ payload: data }).withPlugin(policyOptions({ expect: { affectedRows: 1 } })).execute();
+    assert.deepEqual(h.calls.at(-1).body.statements[0].params.p1, data);
+  }
+  const cyclic = {}; cyclic.self = cyclic;
+  const query = h.db.selectFrom("posts").select("id").where("payload", "=", cyclic);
+  assert.doesNotThrow(() => query.compile());
+  await assert.rejects(query.execute(), { name: "TypeError", message: "JSON value is too deeply nested" });
+  assert.equal(h.calls.length, 2);
+});
+
+test("parameter values follow Kysely until Client snapshots a submitted request", async t => {
+  const entered = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const h = setup(t, { fetchImpl: gateway => async (url, init) => {
+    entered.resolve(); await resume.promise;
+    return gateway.fetchImpl(url, init);
+  } });
+  const data = { title: "original" };
+  const compiled = h.db.updateTable("posts").set({ payload: data }).compile();
+  data.title = "before execution";
+  const pending = h.db.executeQuery({ ...compiled });
+  await entered.promise;
+  data.title = "after submission";
+  resume.resolve();
+  await pending;
+  assert.deepEqual(h.calls[0].body.statements[0].params.p1, { title: "before execution" });
 });
 
 test("options are copied and duplicate/misordered/subquery options fail before HTTP", async (t) => {
@@ -164,7 +198,6 @@ test("controlled read transaction, explicit rollback, and unsupported features",
   const h = setup(t, { autoIdempotencyKey: true });
   const trx = await h.db.startTransaction().setAccessMode("read only").execute();
   assert.equal(h.calls[0].body.mode, "read");
-  await assert.rejects(mutation(trx).execute(), /read-only/);
   await assert.rejects(trx.selectFrom("posts").select("id").withPlugin(policyOptions({ idempotencyKey: "explicit-operation-key" })).execute(), /inside transactions/);
   await assert.rejects(trx.savepoint("a").execute(), /not supported/);
   assert.throws(() => trx.transaction(), /does not support|not supported/i);
@@ -300,6 +333,46 @@ test("destroy rolls back an abandoned active controlled transaction", async (t) 
   await trx.rollback().execute();
   assert.equal(trx.isRolledBack, true);
   assert.equal(h.calls.length, calls);
+});
+
+for (const failures of [1, 2]) test(`destroy reports ${failures} cleanup failures after settling all connections`, async t => {
+  const causes = Array.from({ length: failures }, (_, i) => new Error(`rollback failure ${i}`));
+  let rollbacks = 0;
+  const h = setup(t, { fetchImpl: gateway => async (url, init) => {
+    if (new URL(url).pathname.endsWith("/rollback")) {
+      const cause = causes[rollbacks++];
+      if (cause) throw cause;
+    }
+    return gateway.fetchImpl(url, init);
+  } });
+  for (let i = 0; i <= failures; i++) await h.db.startTransaction().execute();
+  await assert.rejects(h.db.destroy(), error => {
+    const errors = failures === 1 ? [error] : error.errors;
+    if (failures > 1) assert.ok(error instanceof AggregateError);
+    assert.deepEqual(errors.map(e => e.cause), causes);
+    assert.ok(errors.every(e => e.code === "POLICYSQL_OUTCOME_UNKNOWN" && e.phase === "rollback"));
+    return true;
+  });
+  assert.equal(rollbacks, failures + 1);
+  assert.equal([...h.transactions.values()].at(-1).status, "rolled_back");
+});
+
+test("Client orders an in-flight statement before a controlled commit", async t => {
+  const entered = Promise.withResolvers();
+  const resume = Promise.withResolvers();
+  const h = setup(t, { fetchImpl: gateway => async (url, init) => {
+    if (new URL(url).pathname.endsWith("/statements")) { entered.resolve(); await resume.promise; }
+    return gateway.fetchImpl(url, init);
+  } });
+  const trx = await h.db.startTransaction().execute();
+  const statement = mutation(trx).execute();
+  await entered.promise;
+  const commit = trx.commit().execute();
+  assert.equal(h.calls.length, 1);
+  resume.resolve();
+  await Promise.all([statement, commit]);
+  assert.deepEqual(h.calls.map(c => c.path.split("/").at(-1)), ["transactions", "statements", "commit"]);
+  assert.deepEqual(h.calls.map(c => c.body.sequence), [undefined, 1, 2]);
 });
 
 test("invalid configuration and options are rejected without I/O", async (t) => {

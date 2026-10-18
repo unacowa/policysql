@@ -40,11 +40,17 @@ is not a claim that the remote database rolled back. Unknown commits cannot be r
 by rollback or callback reexecution. An ambiguous begin has no usable transaction handle;
 a fresh begin is an explicit new operation and cannot confirm the earlier outcome.
 
-Kysely retains its query, transaction and plugin APIs. onResponse follows ordinary Promise
-semantics and propagates callback errors. Driver destruction stops new work and cancels
+Kysely retains its query, transaction and plugin APIs. CompiledQuery copies retain options
+through their public query AST; bound JSON values are not traversed as AST. Client owns
+parameter snapshots, response validation and transaction command ordering/state; the Driver
+only tracks in-flight communication for shutdown. Server enforces read-only transactions.
+onResponse receives a separate response copy and follows ordinary Promise semantics.
+Driver destruction stops new work and cancels
 only that Driver's work, without closing shared Transports. A validated result survives a
 shutdown race. Internal cleanup does not replace execution errors; explicit rollback and
-rollback after a callback failure retain their own failures. Disposal completion is not
+rollback after a callback failure retain their own failures. destroy waits for every
+connection and propagates newly initiated cleanup failures, using AggregateError for
+multiple failures. Disposal completion is not
 proof of a database outcome. An implementation that ignores signals can keep shutdown
 pending; the library does not add a timer to override its contract.
 

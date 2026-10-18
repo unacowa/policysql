@@ -115,6 +115,21 @@ test("callback and controlled transactions share owner/DB, support checks, and n
   assert.equal(h.events.some(e => e.sql.includes("policysql_idempotency")), false);
 });
 
+test("read-only mutations retain the Server rejection without executing SQL", async t => {
+  const h = await harness(t, { hooks: false });
+  const { db, requests } = await makeClient(t, h);
+  await assert.rejects(db.transaction().setAccessMode("read only").execute(trx => update(trx).execute()), error => {
+    assert.equal(error.code, "POLICYSQL_TRANSACTION_MODE_VIOLATION");
+    assert.equal(error.status, 403);
+    assert.equal(error.message, error.response.body.error.message);
+    assert.equal(error.response.body.error.code, error.code);
+    return true;
+  });
+  assert.deepEqual(requests.map(r => r.path.split("/").at(-1)), ["transactions", "statements"]);
+  assert.equal(h.rows("a")[0].name, "database_a");
+  assert.equal(h.events.filter(e => /^UPDATE\b/i.test(e.sql)).length, 0);
+});
+
 test("callback error and validator denial roll back actual writes", async (t) => {
   const h = await harness(t, { idempotencyTable: false });
   const { db } = await makeClient(t, h);

@@ -59,8 +59,7 @@ cloned/lost tokens, duplicates and nested options. It requires `policyOptions` l
 complete replacement by a later custom plugin is unsupported and documented. Enforcing
 plugin registration itself would need a separate construction API and a Spec decision.
 
-Metadata observers run outside the driver's command queue, with a bounded wait (the
-remaining transaction deadline or five seconds after an atomic response). Kysely still
+Metadata observers follow normal Promise completion without a library timeout. Kysely
 holds its connection until the observer returns: awaiting another statement on that same
-transaction inside the observer is unsupported and times out. Run dependent SQL after
-awaiting the outer query. Observer failures never replay committed atomic updates.
+transaction inside the observer is unsupported and can wait indefinitely. Run dependent
+SQL after awaiting the outer query. Observer failures never replay committed atomic updates.

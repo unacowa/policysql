@@ -71,6 +71,8 @@ export const extractOptions = (node) => {
   // Per-query settings on a subquery are ambiguous; only the executed root can own them.
   const visit = (value) => {
     if (!value || typeof value !== "object") return;
+    // Bound values are application data, including objects resembling AST nodes.
+    if (value.kind === "ValueNode" || value.kind === "PrimitiveValueListNode") return;
     if (tokens.has(value[ownership]) || contextOf(value) || isMarker(value)) throw new TypeError("policyOptions must be attached to the executed root query");
     for (const item of Object.values(value)) {
       if (Array.isArray(item)) item.forEach(visit);
