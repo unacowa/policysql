@@ -93,11 +93,18 @@ payload. It creates a standard `Kysely` instance with `PolicySqlDialect`. Ordina
 per-query keys, expectations, and metadata observers.
 
 ```js
+import { createHttpTransport } from '@unacowa/policysql/client';
 import { createExampleClient, prepareProjectRename } from './client.mjs'
 
 const db = createExampleClient({
-  endpoint: 'https://gateway.example.com',
-  token: runtimeJwt,
+  transport: createHttpTransport({
+    endpoint: 'https://gateway.example.com',
+    fetchImpl: (url, init) => {
+      const headers = new Headers(init.headers);
+      headers.set('authorization', `Bearer ${runtimeJwt}`);
+      return fetch(url, { ...init, headers });
+    },
+  }),
   autoIdempotencyKey: false, // default: omit keys unless explicitly supplied
 })
 
@@ -125,7 +132,7 @@ and sequence for retries. `renameExistingProject()` in `client.mjs` shows a call
 transaction whose update depends on a preceding SELECT. Controlled transactions use
 `db.startTransaction().execute()` and explicit `trx.commit().execute()` or rollback.
 Call `await db.destroy()` when the client is no longer needed. See the
-[Kysely guide](../../website/clients/kysely.md) for retries, limits, metadata, and migration.
+[Kysely guide](../../website/clients/kysely.md) for explicit confirmation, limits, and metadata.
 
 ## Lifecycle and verification
 

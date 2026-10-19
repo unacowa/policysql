@@ -1,32 +1,27 @@
-import { object, protocolError, required, statement, validateResult, retryable, unavailable, unknown } from "./protocol.js";
+import { PolicySqlOutcomeUnknownError, object, protocolError, statement, validateResult, validateOptions, unavailable, sendCommand } from "./protocol.js";
 
-// One instance owns one remote transaction. Sequence allocation and all terminal commands
-// share this queue; an uncertain command remains immutable until it is reconciled.
+// The queue owns sequence allocation. An uncertain command stays fixed until the
+// caller explicitly confirms that same command; no callback or command is replayed automatically.
 export class PolicySqlTransaction {
-  #request;
+  #transport;
+  #role;
   #queue = Promise.resolve();
   #pending;
   #failure;
   #state = "active";
   #closing;
   #sequence = 1;
-  #timer;
   #settle;
   #disposed = false;
-  #deadline;
+  #disposing;
 
-  constructor(response, mode, request) {
-    this.id = required(response.transactionId, "transactionId");
+  constructor(response, mode, transport, role) {
+    this.id = response.transactionId;
     this.mode = mode;
     this.expiresAt = response.expiresAt;
-    this.#deadline = Math.min(Date.parse(response.expiresAt), Date.now() + 4_000);
-    this.#request = request;
+    this.#transport = transport;
+    this.#role = role;
     this.closed = new Promise((resolve) => { this.#settle = resolve; });
-    this.#timer = setTimeout(() => {
-      if (this.#state === "active") this.#state = "expired";
-      this.#settle();
-    }, Math.max(0, this.#deadline - Date.now()));
-    this.#timer.unref?.();
     Object.freeze(this);
   }
   get status() { return this.#state; }
@@ -37,113 +32,123 @@ export class PolicySqlTransaction {
     this.#queue = result.catch(() => undefined);
     return result;
   }
-  #finished(state) {
-    this.#state = state;
-    clearTimeout(this.#timer);
-    this.#settle();
-  }
   #assertActive() {
     if (this.#failure) throw this.#failure;
-    if (this.#disposed || this.#state !== "active" || Date.now() >= this.#deadline) throw unavailable();
+    if (this.#disposed || this.#state !== "active") throw unavailable();
   }
 
   execute(sql, params = {}, options = {}) {
-    if (!object(options) || Object.keys(options).some((key) => !["expect", "signal"].includes(key))) {
-      return Promise.reject(new TypeError("transaction statements accept expect and signal, not idempotencyKey"));
-    }
-    if (this.#closing || this.#disposed) return Promise.reject(this.#failure ?? unavailable());
-    // Copy parameters before waiting in a queue, rather than observing later caller mutations.
-    const item = statement(sql, params, options.expect);
+    validateOptions(options, ["expect", "signal"]);
+    const { expect, signal } = options;
+    if (this.#closing || this.#disposed || this.#disposing) return Promise.reject(this.#failure ?? unavailable());
+    const item = statement(sql, params, expect);
     return this.#enqueue(async () => {
       this.#assertActive();
-      const response = await this.#command("statements", { sequence: this.#sequence, ...item }, options.signal);
+      const response = await this.#command("statement", { sequence: this.#sequence, ...item }, signal);
       return { ...response.result, envelopeMeta: response.meta };
     });
   }
 
-  commit() { return this.#terminal("commit"); }
-  rollback() { return this.#terminal("rollback"); }
+  commit(options = {}) { return this.#terminal("commit", options); }
+  rollback(options = {}) { return this.#terminal("rollback", options); }
 
-  #terminal(kind) {
-    if (this.#disposed) return Promise.reject(this.#failure ?? unavailable());
+  #terminal(kind, options) {
+    validateOptions(options, ["signal"]);
+    const { signal } = options;
+    if (this.#disposed || this.#disposing) return Promise.reject(this.#failure ?? unavailable());
     if (this.#closing && this.#closing !== kind) return Promise.reject(this.#failure ?? unavailable());
     this.#closing = kind;
     return this.#enqueue(async () => {
-      const done = kind === "commit" ? "committed" : "rolled_back";
-      if (this.#state === done) return;
-      if (this.#pending) {
-        if (this.#pending.kind !== kind) throw this.#failure ?? unavailable();
-        await this.#sendPending();
-        return;
+      try {
+        if (this.#state === (kind === "commit" ? "committed" : "rolled_back")) return;
+        if (this.#pending) {
+          if (this.#pending.kind !== kind) throw this.#failure ?? unavailable();
+          await this.#sendPending(signal);
+          return;
+        }
+        this.#assertActive();
+        await this.#command(kind, { sequence: this.#sequence }, signal);
+      } catch (error) {
+        // A rejected, unsent terminal operation must not close admission after
+        // the caller subsequently confirms an earlier statement.
+        if (this.#pending?.kind !== kind) this.#closing = undefined;
+        throw error;
       }
-      this.#assertActive();
-      await this.#command(kind, { sequence: this.#sequence });
     });
   }
 
-  async #command(kind, payload, signal) {
+  #command(kind, payload, signal) {
     if (this.#pending) throw this.#failure ?? unavailable();
     signal?.throwIfAborted();
-    this.#pending = { kind, sequence: this.#sequence, body: JSON.stringify(payload) };
+    this.#pending = Object.freeze({
+      kind, transactionId: this.id, body: JSON.stringify(payload),
+      ...(this.#role === undefined ? {} : { role: this.#role }),
+    });
     return this.#sendPending(signal);
   }
 
   async #sendPending(signal) {
     const pending = this.#pending;
-    // Terminal replay is also useful after the live transaction deadline, while its
-    // completed command is retained. Never use this extension to send new statements.
-    const deadline = pending.kind === "statements" ? this.#deadline : Math.max(this.#deadline, Date.now() + 2_000);
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const response = await this.#request(`/v1/transactions/${this.id}/${pending.kind}`, pending.body, { deadline, signal });
+    try {
+      const response = await sendCommand(this.#transport, pending, {
+        transactionId: this.id, phase: pending.kind, sequence: this.#sequence,
+      }, (response) => {
         if (response.transactionId !== this.id || !object(response.meta)) throw protocolError();
-        if (pending.kind === "statements") {
-          if (response.status !== "active" || response.nextSequence !== pending.sequence + 1 ||
-            response.result?.sequence !== pending.sequence) throw protocolError();
+        if (pending.kind === "statement") {
+          if (response.status !== "active" || response.nextSequence !== this.#sequence + 1 ||
+            response.result?.sequence !== this.#sequence) throw protocolError();
           validateResult(response.result);
-          this.#state = "active";
-        } else {
-          if (response.status !== (pending.kind === "commit" ? "committed" : "rolled_back")) throw protocolError();
-          this.#finished(response.status);
-        }
-        this.#sequence = pending.sequence + 1;
-        this.#pending = undefined;
-        this.#failure = undefined;
-        return response;
-      } catch (error) {
-        // A previous attempt may already have committed. A later auth/owner error does
-        // not prove rollback; keep the same unknown result instead of contradicting it.
-        if (!retryable(error) && !this.#failure) {
-          this.#pending = undefined;
-          this.#failure = error;
-          this.#finished("failed");
-          throw error;
-        }
-        this.#failure ??= unknown(this.id, pending.kind === "statements" ? "statement" : pending.kind, pending.sequence);
-        this.#state = "unknown";
-        if (attempt === 1 || Date.now() >= deadline || signal?.aborted) throw this.#failure;
+        } else if (response.status !== (pending.kind === "commit" ? "committed" : "rolled_back")) throw protocolError();
+      }, signal);
+      this.#state = response.status;
+      this.#sequence++;
+      this.#pending = undefined;
+      this.#failure = undefined;
+      if (pending.kind !== "statement") this.#settle();
+      return response;
+    } catch (error) {
+      // Later rejection/cancellation cannot settle an earlier ambiguous attempt.
+      if (this.#failure) {
+        // Applications may freeze caught errors; diagnostic updates must not mask them.
+        try { this.#failure.lastError = error; } catch { /* Keep the original error. */ }
+        throw this.#failure;
       }
+      if (error instanceof PolicySqlOutcomeUnknownError) {
+        this.#failure = error;
+        this.#state = "unknown";
+      } else {
+        this.#pending = undefined;
+        this.#failure = error;
+        this.#state = "failed";
+        this.#settle();
+      }
+      throw error;
     }
   }
 
-  // Low-level recovery of the exact outstanding command; it never runs user callbacks.
-  retryPending() {
+  retryPending(options = {}) {
+    validateOptions(options, ["signal"]);
+    const { signal } = options;
+    if (this.#disposed || this.#disposing) return Promise.reject(this.#failure ?? unavailable());
     return this.#enqueue(async () => {
       if (!this.#pending || this.#disposed) throw this.#failure ?? unavailable();
-      const response = await this.#sendPending();
+      const response = await this.#sendPending(signal);
       return response.result ? { ...response.result, envelopeMeta: response.meta } : undefined;
     });
   }
 
-  async dispose() {
-    if (this.#disposed) return;
-    try {
-      if (this.#state === "active" && !this.#pending && !this.#closing) await this.rollback();
-      else await this.#queue;
-    } finally {
-      this.#disposed = true;
-      clearTimeout(this.#timer);
-      this.#settle();
-    }
+  dispose() {
+    if (this.#disposing) return this.#disposing;
+    this.#disposing = this.#enqueue(async () => {
+      try {
+        if (this.#state === "active" && !this.#pending && !this.#closing) {
+          await this.#command("rollback", { sequence: this.#sequence });
+        }
+      } finally {
+        this.#disposed = true;
+        this.#settle();
+      }
+    });
+    return this.#disposing;
   }
 }

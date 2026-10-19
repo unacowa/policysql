@@ -1,8 +1,8 @@
 import { Kysely, CamelCasePlugin, type InsertResult, type UpdateResult, type DeleteResult } from 'kysely'
-import { PolicySqlClient, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
+import { PolicySqlClient, createHttpTransport, type PolicySqlTransport, type HttpTransportOptions, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
 import { PolicySqlDialect, policyOptions } from '@unacowa/policysql/kysely'
 
-const minimal: PolicySqlClientOptions = { endpoint: 'https://gateway.test', token: 'token' }
+const minimal: PolicySqlClientOptions = { transport: createHttpTransport({ endpoint: 'https://gateway.test' }) }
 new PolicySqlClient(minimal)
 new PolicySqlClient({ ...minimal, role: 'author' })
 new PolicySqlClient({ ...minimal, schemaVersion: 's1', policyVersion: 'p1' })
@@ -12,9 +12,9 @@ new PolicySqlClient({ ...minimal, schemaVersion: 's1' })
 new PolicySqlClient({ ...minimal, policyVersion: 'p1' })
 // @ts-expect-error null is not omission
 new PolicySqlClient({ ...minimal, role: null })
-// @ts-expect-error endpoint is required
+// @ts-expect-error transport is required
 new PolicySqlClient({ token: 'token' })
-// @ts-expect-error token is required
+// @ts-expect-error legacy endpoint options are unsupported
 new PolicySqlClient({ endpoint: 'https://gateway.test' })
 
 interface Database { posts: { id: string; title: string; status: 'draft' | 'published' } }
@@ -62,3 +62,32 @@ new PolicySqlOutcomeUnknownError({ phase: 'commit', transactionId: 'tx_123', seq
 new PolicySqlError('Failed', { cause: new Error() })
 // @ts-expect-error phase must be a protocol operation
 new PolicySqlOutcomeUnknownError({ phase: 'other' })
+
+const transport: PolicySqlTransport = async (_request, _options) => ({ status: 200, body: {} })
+new PolicySqlClient({ transport })
+// @ts-expect-error transport must be a function
+new PolicySqlClient({ transport: {} })
+// @ts-expect-error request body is serialized JSON
+transport({ kind: 'execute', body: {} })
+// @ts-expect-error transaction commands require transactionId
+transport({ kind: 'commit', body: '{}' })
+// @ts-expect-error role is immutable
+client.role = 'admin'
+// @ts-expect-error schema version is immutable
+client.schemaVersion = 'changed'
+// @ts-expect-error policy version is immutable
+client.policyVersion = 'changed'
+// @ts-expect-error options are readonly
+minimal.transport = transport
+const httpOptions: HttpTransportOptions = { endpoint: 'https://gateway.test', fetchImpl: fetch }
+// @ts-expect-error endpoint is fixed
+httpOptions.endpoint = 'https://other.test'
+// @ts-expect-error fetch reference is fixed
+httpOptions.fetchImpl = fetch
+client.beginTransaction({ signal: AbortSignal.timeout(1000) })
+
+import { generate, type GenerateOptions } from '@unacowa/policysql/generator'
+const generation: GenerateOptions = { endpoint: 'https://gateway.test', role: 'author', input: './queries', output: './generated', transport }
+void generate(generation)
+// @ts-expect-error generator also requires a function Transport
+generate({ endpoint: 'https://gateway.test', role: 'author', input: './queries', output: './generated' })

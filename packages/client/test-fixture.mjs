@@ -1,3 +1,4 @@
+export const errorBody = (code, message = code) => ({ error: { code, message, path: null, requestId: "req_test" } });
 // Protocol-level fixture. Gateway/Wasm/SQLite conformance is tested separately.
 export const mockGateway = ({ rows = [{ id: "post_1", title: "Original", display_name: "Original", status: "draft" }], affectedRows = 1 } = {}) => {
   const calls = [];
@@ -22,10 +23,10 @@ export const mockGateway = ({ rows = [{ id: "post_1", title: "Original", display
     }
     const [, , , id, kind] = path.split("/");
     const tx = transactions.get(id);
-    if (!tx) return Response.json({ error: { code: "POLICYSQL_TRANSACTION_UNAVAILABLE" } }, { status: 409 });
+    if (!tx) return Response.json(errorBody("POLICYSQL_TRANSACTION_UNAVAILABLE"), { status: 409 });
     const digest = `${kind}:${init.body}`;
     if (tx.last?.digest === digest && body.sequence === tx.sequence - 1) return Response.json(tx.last.response);
-    if (body.sequence !== tx.sequence || tx.status !== "active") return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT" } }, { status: 409 });
+    if (body.sequence !== tx.sequence || tx.status !== "active") return Response.json(errorBody("POLICYSQL_TRANSACTION_CONFLICT"), { status: 409 });
     const response = kind === "statements"
       ? { transactionId: id, status: "active", nextSequence: tx.sequence + 1, result: { sequence: tx.sequence, ...result(body.sql) }, meta: {} }
       : { transactionId: id, status: kind === "commit" ? "committed" : "rolled_back", meta: {} };
