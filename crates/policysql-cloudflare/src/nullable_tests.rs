@@ -21,7 +21,7 @@ fn runtime() -> super::PolicySqlRuntime {
     .unwrap_or_else(|_| unreachable!("valid runtime"))
 }
 
-const AUTH: &str = r#"{"subject":"u","role":"member","roles":["member"],"access":["execute","explain"],"session":{"tenant_id":"tenant_a"}}"#;
+const AUTH: &str = r#"{"principal":"test:user","subject":"u","role":"member","roles":["member"],"access":["execute","explain"],"session":{"tenant_id":"tenant_a"}}"#;
 
 fn compile(runtime: &super::PolicySqlRuntime, sql: &str, params: &Value, endpoint: &str) -> Value {
     serde_json::from_str(&runtime.compile_json(

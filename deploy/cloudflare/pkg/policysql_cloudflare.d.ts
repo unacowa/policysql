@@ -5,6 +5,18 @@ export class PolicySqlRuntime {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Validates a wrapper-supplied trusted session, selects the role named by the
+     * `PolicySQL-Role` header (or `defaultRole` when absent), and checks the endpoint's
+     * required access. This is the only place these rules exist.
+     *
+     * Returns `{"auth": {...}}` with the canonical result that `compile_json` and
+     * `catalog_json` accept, `{"error": {"code": "POLICYSQL_FORBIDDEN_ACCESS", ...}}`
+     * for a client-caused denial, or `{"error": {"code": "POLICYSQL_INTERNAL", ...},
+     * "fault": "<part>"}` when the session itself violates the contract. `fault` names
+     * the malformed part and never contains a session value.
+     */
+    authorize_session_json(session_json: string, requested_role: string | null | undefined, required_access: string): string;
+    /**
      * Returns the activated, role-visible logical Catalog.
      */
     catalog_json(verified_auth_json: string): string;
@@ -51,6 +63,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_policysqlruntime_free: (a: number, b: number) => void;
     readonly policysqlruntime_abi_version: (a: number) => number;
+    readonly policysqlruntime_authorize_session_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly policysqlruntime_catalog_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_commit_checks_enabled: (a: number) => number;
     readonly policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];

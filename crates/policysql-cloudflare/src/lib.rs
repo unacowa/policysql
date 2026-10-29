@@ -3,8 +3,8 @@
 use policysql_catalog::{Catalog, ResourceDescriptor};
 use policysql_core::{
     ClientParameterName, ColumnName, ConstraintScalar, JsonSchemaType, JsonValueSchema,
-    LogicalType, LogicalValue, ResourceId, ResourceName, RoleName, SnapshotId, StorageClass,
-    TrustedSession, ValueConstraints, ValueDescriptor, ValueRepresentation,
+    LogicalType, LogicalValue, ResourceId, ResourceName, SnapshotId, StorageClass,
+    ValueConstraints, ValueDescriptor, ValueRepresentation,
 };
 use policysql_execution::ExecutionLimits;
 use policysql_gateway::{
@@ -19,12 +19,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::prelude::*;
 
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 const MAX_SQL_BYTES: usize = 65_536;
 const MAX_ACTIVE_EXECUTIONS: usize = 64;
+
+mod session;
 
 #[cfg(test)]
 mod bytes_tests;
@@ -95,17 +97,6 @@ struct RuntimeLimits {
     max_result_bytes: u64,
     timeout_ms: u64,
     max_statements: usize,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct VerifiedAuth {
-    subject: String,
-    role: String,
-    roles: Vec<String>,
-    access: Vec<String>,
-    #[serde(default)]
-    session: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -348,6 +339,17 @@ struct ErrorEnvelope {
 }
 
 #[derive(Debug, Serialize)]
+struct AuthorizedEnvelope {
+    auth: session::AuthorizedSession,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionFaultEnvelope {
+    error: ErrorBody,
+    fault: session::SessionFault,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ErrorBody {
     code: &'static str,
@@ -544,6 +546,53 @@ impl PolicySqlRuntime {
         self.plans.borrow_mut().remove(&handle).is_some()
     }
 
+    /// Validates a wrapper-supplied trusted session, selects the role named by the
+    /// `PolicySQL-Role` header (or `defaultRole` when absent), and checks the endpoint's
+    /// required access. This is the only place these rules exist.
+    ///
+    /// Returns `{"auth": {...}}` with the canonical result that `compile_json` and
+    /// `catalog_json` accept, `{"error": {"code": "POLICYSQL_FORBIDDEN_ACCESS", ...}}`
+    /// for a client-caused denial, or `{"error": {"code": "POLICYSQL_INTERNAL", ...},
+    /// "fault": "<part>"}` when the session itself violates the contract. `fault` names
+    /// the malformed part and never contains a session value.
+    #[must_use]
+    #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
+    pub fn authorize_session_json(
+        &self,
+        session_json: &str,
+        requested_role: Option<String>,
+        required_access: &str,
+    ) -> String {
+        let Some(required) = session::parse_access(required_access) else {
+            return serialize_or_internal(&ErrorEnvelope {
+                error: error_body(RuntimeError::Internal),
+            });
+        };
+        let outcome = if session_json.len() > MAX_REQUEST_BYTES {
+            Err(session::SessionError::Malformed(
+                session::SessionFault::Shape,
+            ))
+        } else {
+            serde_json::from_str::<session::SessionInput>(session_json)
+                .map_err(|_| session::SessionError::Malformed(session::SessionFault::Shape))
+                .and_then(|input| {
+                    session::authorize_session(input, requested_role.as_deref(), required)
+                })
+        };
+        match outcome {
+            Ok((auth, _)) => serialize_or_internal(&AuthorizedEnvelope { auth }),
+            Err(session::SessionError::Malformed(fault)) => {
+                serialize_or_internal(&SessionFaultEnvelope {
+                    error: error_body(RuntimeError::Session),
+                    fault,
+                })
+            }
+            Err(session::SessionError::Forbidden) => serialize_or_internal(&ErrorEnvelope {
+                error: error_body(RuntimeError::Access),
+            }),
+        }
+    }
+
     /// Returns the activated, role-visible logical Catalog.
     #[must_use]
     pub fn catalog_json(&self, verified_auth_json: &str) -> String {
@@ -659,9 +708,7 @@ impl PolicySqlRuntime {
         if verified_auth_json.len() > MAX_REQUEST_BYTES {
             return Err(RuntimeError::Envelope);
         }
-        let raw_auth: VerifiedAuth =
-            serde_json::from_str(verified_auth_json).map_err(|_| RuntimeError::Authentication)?;
-        let auth = activate_auth(raw_auth, EndpointPermission::Catalog)?;
+        let auth = activate_auth(verified_auth_json, EndpointPermission::Catalog)?;
         let role = auth.session().role();
         let resources =
             self.catalog
@@ -757,10 +804,8 @@ impl PolicySqlRuntime {
         if verified_auth_json.len().saturating_add(request_json.len()) > MAX_REQUEST_BYTES {
             return Err(RuntimeError::Envelope);
         }
-        let raw_auth: VerifiedAuth =
-            serde_json::from_str(verified_auth_json).map_err(|_| RuntimeError::Authentication)?;
         let endpoint = endpoint_permission(permission)?;
-        let auth = activate_auth(raw_auth, endpoint)?;
+        let auth = activate_auth(verified_auth_json, endpoint)?;
         let raw_request: AtomicRequest =
             serde_json::from_str(request_json).map_err(|_| RuntimeError::Envelope)?;
         if raw_request.expected.as_ref().is_some_and(|expected| {
@@ -1105,7 +1150,8 @@ fn basic_expression(expression: &BoundExpr) -> bool {
 
 #[derive(Clone, Copy, Debug)]
 enum RuntimeError {
-    Authentication,
+    /// A trusted session that violates the contract: a wrapper or engine fault.
+    Session,
     Access,
     Snapshot,
     Envelope,
@@ -1694,40 +1740,26 @@ fn representation(
 }
 
 fn endpoint_permission(value: &str) -> Result<EndpointPermission, RuntimeError> {
-    match value {
-        "execute" => Ok(EndpointPermission::Execute),
-        "explain" => Ok(EndpointPermission::Explain),
-        "catalog" => Ok(EndpointPermission::Catalog),
-        "debug" => Ok(EndpointPermission::Debug),
-        _ => Err(RuntimeError::Access),
-    }
+    session::parse_access(value).ok_or(RuntimeError::Access)
 }
 
+/// Activates the canonical result of `authorize_session_json` through the same rules.
 fn activate_auth(
-    raw: VerifiedAuth,
+    authorized_json: &str,
     requested: EndpointPermission,
 ) -> Result<AuthContext, RuntimeError> {
-    if raw.roles.is_empty()
-        || !raw.roles.iter().any(|role| role == &raw.role)
-        || raw.roles.iter().collect::<BTreeSet<_>>().len() != raw.roles.len()
-    {
-        return Err(RuntimeError::Authentication);
+    let canonical: session::AuthorizedSession =
+        serde_json::from_str(authorized_json).map_err(|_| RuntimeError::Session)?;
+    session::activate_authorized(canonical, requested).map_err(RuntimeError::from)
+}
+
+impl From<session::SessionError> for RuntimeError {
+    fn from(error: session::SessionError) -> Self {
+        match error {
+            session::SessionError::Malformed(_) => Self::Session,
+            session::SessionError::Forbidden => Self::Access,
+        }
     }
-    let permissions = raw
-        .access
-        .into_iter()
-        .map(|access| endpoint_permission(&access))
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if !permissions.contains(&requested) {
-        return Err(RuntimeError::Access);
-    }
-    let session = TrustedSession::new(
-        RoleName::new(raw.role).map_err(|_| RuntimeError::Authentication)?,
-        raw.subject,
-        raw.session,
-    )
-    .map_err(|_| RuntimeError::Authentication)?;
-    Ok(AuthContext::new(session, permissions))
 }
 
 fn statement_request(
@@ -2171,11 +2203,6 @@ fn runtime_gateway_error(error: GatewayError) -> RuntimeError {
 
 fn error_body(runtime_error: RuntimeError) -> ErrorBody {
     match runtime_error {
-        RuntimeError::Authentication => error(
-            "POLICYSQL_UNAUTHENTICATED",
-            "Authentication is required.",
-            None,
-        ),
         RuntimeError::Access => error(
             "POLICYSQL_FORBIDDEN_ACCESS",
             "The authenticated session cannot use this endpoint.",
@@ -2198,7 +2225,7 @@ fn error_body(runtime_error: RuntimeError) -> ErrorBody {
         ),
         RuntimeError::Rejected(kind) => rejection_body(kind, None),
         RuntimeError::RejectedAt(kind, index) => rejection_body(kind, Some(index)),
-        RuntimeError::Internal => error(
+        RuntimeError::Session | RuntimeError::Internal => error(
             "POLICYSQL_INTERNAL",
             "The request could not be completed.",
             None,
@@ -2457,7 +2484,7 @@ resources:
             r#"{"max_rows":100,"max_result_bytes":10000,"timeout_ms":1000,"max_statements":2}"#,
         )
         .unwrap_or_else(|_| unreachable!("valid runtime"));
-        let auth = r#"{"subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#;
+        let auth = r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#;
         let accepted = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE status = :status","params":{"status":"active"}}]}"#,
@@ -2519,7 +2546,7 @@ resources:
     #[test]
     fn compiles_only_authenticated_policy_protected_sql() {
         let output = runtime().compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"expected":{"schemaVersion":"schema_test","policyVersion":"policy_test"},"statements":[{"sql":"SELECT id, name FROM projects WHERE status = :status","params":{"status":"active"}}]}"#,
             "explain",
         );
@@ -2540,7 +2567,7 @@ resources:
     #[test]
     fn constant_select_is_typed_without_catalog_resource_access() {
         let output = runtime().compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT 1 AS value","params":{}}]}"#,
             "explain",
         );
@@ -2578,7 +2605,7 @@ resources:
         .unwrap_or_else(|_| unreachable!("valid runtime"));
         assert!(runtime.commit_checks_enabled());
         let output = runtime.compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"INSERT INTO projects (id, name, status) VALUES (:id, :name, :status)","params":{"id":"p1","name":"one","status":"active"}}]}"#,
             "execute",
         );
@@ -2593,7 +2620,7 @@ resources:
     #[test]
     fn explain_infers_missing_runtime_parameter_values_from_bound_usage() {
         let output = runtime().compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE status = :status LIMIT :limit","params":{}}]}"#,
             "explain",
         );
@@ -2605,24 +2632,77 @@ resources:
     }
 
     #[test]
+    fn authorize_session_abi_returns_canonical_auth_forbidden_or_fault() {
+        let runtime = runtime();
+        let session = r#"{"principal":"https://issuer.test:user_1","subject":"user_1","roles":["member"],"defaultRole":"member","access":["execute"],"session":{"tenant_id":"tenant_1"}}"#;
+        let parse = |text: String| -> serde_json::Value {
+            serde_json::from_str(&text).unwrap_or_else(|error| unreachable!("JSON: {error}"))
+        };
+
+        let accepted = parse(runtime.authorize_session_json(session, None, "execute"));
+        assert_eq!(accepted["auth"]["role"], "member");
+        assert_eq!(accepted["auth"]["principal"], "https://issuer.test:user_1");
+        let canonical = accepted["auth"].to_string();
+        let compiled = runtime.compile_json(
+            &canonical,
+            r#"{"statements":[{"sql":"SELECT id FROM projects","params":{}}]}"#,
+            "execute",
+        );
+        assert!(!compiled.contains("\"error\""), "{compiled}");
+
+        for (role, access) in [(Some("admin".to_owned()), "execute"), (None, "explain")] {
+            let denied = parse(runtime.authorize_session_json(session, role, access));
+            assert_eq!(denied["error"]["code"], "POLICYSQL_FORBIDDEN_ACCESS");
+            assert!(denied.get("fault").is_none());
+        }
+
+        let reserved = session.replace("tenant_id", "subject_id");
+        let oversized = format!(
+            r#"{{"principal":"p","subject":"s","roles":["member"],"defaultRole":"member","access":["execute"],"session":{{"tenant_id":"{}"}}}}"#,
+            "x".repeat(super::MAX_REQUEST_BYTES)
+        );
+        for (input, fault) in [
+            ("not json", "shape"),
+            (reserved.as_str(), "session"),
+            (oversized.as_str(), "shape"),
+        ] {
+            let output = runtime.authorize_session_json(input, Some("admin".to_owned()), "execute");
+            assert!(!output.contains("subject_id"), "{output}");
+            let rejected = parse(output);
+            assert_eq!(rejected["error"]["code"], "POLICYSQL_INTERNAL");
+            assert_eq!(rejected["fault"], fault);
+        }
+        let unknown = parse(runtime.authorize_session_json(session, None, "admin"));
+        assert_eq!(unknown["error"]["code"], "POLICYSQL_INTERNAL");
+
+        // compile/catalog accept only the canonical result; a raw wrapper session or a
+        // malformed canonical value is an internal fault, never 401.
+        for auth in [session, "{}", reserved.as_str()] {
+            let output = runtime.catalog_json(auth);
+            assert!(output.contains("POLICYSQL_INTERNAL"), "{output}");
+            assert!(!output.contains("UNAUTHENTICATED"), "{output}");
+        }
+    }
+
+    #[test]
     fn rejects_access_and_snapshot_mismatch_without_exposing_detail() {
         let request = r#"{"statements":[{"sql":"SELECT id FROM projects","params":{}}]}"#;
         let debug = runtime().compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["execute","debug"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute","debug"],"session":{"tenant_id":"tenant_1"}}"#,
             request,
             "execute",
         );
         assert!(!debug.contains("POLICYSQL_FORBIDDEN_ACCESS"), "{debug}");
 
         let denied = runtime().compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["catalog"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["catalog"],"session":{"tenant_id":"tenant_1"}}"#,
             request,
             "explain",
         );
         assert!(denied.contains("POLICYSQL_FORBIDDEN_ACCESS"));
 
         let stale = runtime().compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"expected":{"schemaVersion":"stale","policyVersion":"policy_test"},"statements":[{"sql":"SELECT id FROM projects","params":{}}]}"#,
             "explain",
         );
@@ -2632,7 +2712,7 @@ resources:
     #[test]
     fn classifies_public_sql_errors_without_exposing_catalog_detail() {
         let runtime = runtime();
-        let auth = r#"{"subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#;
+        let auth = r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#;
         for (sql, params, code) in [
             ("SELECT", "{}", "POLICYSQL_INVALID_SQL"),
             (
@@ -2684,7 +2764,7 @@ resources:
     fn execute_handle_validates_remote_columns_rows_and_limits() {
         let runtime = runtime();
         let compiled = runtime.compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT id, name FROM projects","params":{}}]}"#,
             "execute",
         );
@@ -2713,7 +2793,7 @@ resources:
     fn execute_expectation_mismatch_has_its_public_error_code() {
         let runtime = runtime();
         let compiled = runtime.compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE id = :id","params":{"id":"p1"},"expect":{"rowCount":0}}]}"#,
             "execute",
         );
@@ -2734,7 +2814,7 @@ resources:
     #[test]
     fn catalog_reports_only_policy_enabled_column_usage() {
         let output = runtime().catalog_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["catalog"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["catalog"],"session":{"tenant_id":"tenant_1"}}"#,
         );
         let catalog: serde_json::Value = serde_json::from_str(&output)
             .unwrap_or_else(|error| unreachable!("valid catalog JSON: {error}"));
@@ -2751,7 +2831,7 @@ resources:
     #[test]
     fn deployment_surface_keeps_parser_structural_join_limits() {
         let output = runtime().compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT a.id FROM projects AS a JOIN projects AS b ON a.id = b.id","params":{}}]}"#,
             "execute",
         );
@@ -2802,7 +2882,7 @@ resources:
             r#"{"max_rows":100,"max_result_bytes":10000,"timeout_ms":1000,"max_statements":4}"#,
         )
         .unwrap_or_else(|_| unreachable!("valid JSON runtime"));
-        let auth = r#"{"subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#;
+        let auth = r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#;
         let accepted = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE metadata = :metadata","params":{"metadata":{"tags":["safe"]}}}]}"#,
@@ -2815,7 +2895,7 @@ resources:
             r#"{"tags":["safe"]}"#
         );
         let explained = runtime.compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE metadata = :metadata","params":{}}]}"#,
             "explain",
         );
@@ -2873,7 +2953,7 @@ resources:
             r#"{"max_rows":10,"max_result_bytes":10000,"timeout_ms":1000,"max_statements":2}"#,
         )
         .unwrap_or_else(|_| unreachable!("valid runtime"));
-        let auth = r#"{"subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#;
+        let auth = r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#;
         let execute = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT json_extract(metadata, :path) AS value FROM projects","params":{"path":"$.score"}}]}"#,
@@ -2939,7 +3019,7 @@ resources:
             r#"{"max_rows":10,"max_result_bytes":10000,"timeout_ms":1000,"max_statements":2}"#,
         )
         .unwrap_or_else(|_| unreachable!("valid runtime"));
-        let auth = r#"{"subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#;
+        let auth = r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#;
         let output = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, :path) AS j WHERE p.id = :id","params":{"path":"$","id":"p1"}}]}"#,
@@ -2978,7 +3058,7 @@ resources:
     fn mutation_result_check_is_validated_before_handle_release() {
         let runtime = runtime();
         let output = runtime.compile_json(
-            r#"{"subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"INSERT INTO projects (id, name, status) VALUES (:id, :name, :status) RETURNING id, name, status","params":{"id":"new_1","name":"New","status":"active"}}]}"#,
             "execute",
         );

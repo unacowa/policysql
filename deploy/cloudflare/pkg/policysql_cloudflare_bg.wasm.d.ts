@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_policysqlruntime_free: (a: number, b: number) => void;
 export const policysqlruntime_abi_version: (a: number) => number;
+export const policysqlruntime_authorize_session_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const policysqlruntime_catalog_json: (a: number, b: number, c: number) => [number, number];
 export const policysqlruntime_commit_checks_enabled: (a: number) => number;
 export const policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];

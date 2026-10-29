@@ -68,7 +68,7 @@ fn null_bytes_parameters_follow_the_nullable_assignment_proof() {
         r#"{"max_rows":100,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":8}"#,
     )
     .unwrap_or_else(|_| unreachable!("valid runtime"));
-    let auth = r#"{"subject":"u","role":"member","roles":["member"],"access":["execute","explain"],"session":{"tenant_id":"tenant_a"}}"#;
+    let auth = r#"{"principal":"test:user","subject":"u","role":"member","roles":["member"],"access":["execute","explain"],"session":{"tenant_id":"tenant_a"}}"#;
     let compile = |sql: &str, params: Value, endpoint: &str| -> Value {
         serde_json::from_str(&runtime.compile_json(
             auth,
@@ -260,7 +260,7 @@ fn oversized_physical_blob_is_a_limit_error_at_the_result_abi() {
         r#"{"max_rows":100,"max_result_bytes":1000000,"timeout_ms":1000,"max_statements":8}"#,
     )
     .unwrap_or_else(|_| unreachable!("valid runtime"));
-    let auth = r#"{"subject":"u","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_a"}}"#;
+    let auth = r#"{"principal":"test:user","subject":"u","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_a"}}"#;
     let oversized =
         policysql_core::bytes::encode(&vec![0; policysql_core::bytes::MAX_BYTES_PER_VALUE + 1]);
     for (base64, code) in [
@@ -308,7 +308,7 @@ fn oversized_raw_result_of_in_limit_blobs_is_a_limit_error() {
         r#"{"max_rows":100,"max_result_bytes":1000000,"timeout_ms":1000,"max_statements":8}"#,
     )
     .unwrap_or_else(|_| unreachable!("valid runtime"));
-    let auth = r#"{"subject":"u","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_a"}}"#;
+    let auth = r#"{"principal":"test:user","subject":"u","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_a"}}"#;
     let blob = json!({
         "type": "blob",
         "base64": policysql_core::bytes::encode(&vec![0; policysql_core::bytes::MAX_BYTES_PER_VALUE]),
