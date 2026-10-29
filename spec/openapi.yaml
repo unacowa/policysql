@@ -5,10 +5,14 @@ info:
   description: >-
     Hosting-independent public and commit-check callback contracts for PolicySQL.
     Bytes parameters and result cells use canonical padded standard base64 strings
-    (empty bytes are an empty string; SQL NULL in a nullable result cell is JSON null,
-    while JSON null is rejected for a bytes parameter). The compiler
-    determines the expected type. Arrays and database-driver objects are not bytes
-    encodings. Ordinary string and JSON values retain their own meanings.
+    (empty bytes are an empty string; SQL NULL in a nullable result cell is JSON null).
+    The compiler determines the expected type. Arrays and database-driver objects are
+    not bytes encodings. Ordinary string and JSON values retain their own meanings.
+    For a named parameter of any type, bytes included, JSON null binds SQL NULL only
+    when every use of that parameter is a direct INSERT VALUES / UPDATE SET assignment
+    to a Catalog column declared nullable; Explain reports exactly this as the
+    parameter descriptor's `nullable`. Any other JSON null parameter is rejected
+    with POLICYSQL_INVALID_PARAMETER.
 servers:
   - url: https://gateway.example.com
 security:
@@ -299,6 +303,9 @@ components:
     JsonValue: {}
     Parameters:
       type: object
+      description: >-
+        Named client parameters. JSON null is accepted (as SQL NULL) only for a
+        parameter whose Explain descriptor reports `nullable: true`.
       additionalProperties:
         $ref: '#/components/schemas/JsonValue'
     SnapshotExpectation:
@@ -359,7 +366,12 @@ components:
         type: { $ref: '#/components/schemas/Identifier' }
         representation: { enum: [string, number, boolean, object, array] }
         format: { $ref: '#/components/schemas/Identifier' }
-        nullable: { type: boolean }
+        nullable:
+          type: boolean
+          description: >-
+            Statement-wide compiler proof, independent of any supplied sample: true
+            only when every use is a direct INSERT/UPDATE assignment to a nullable
+            Catalog column. Execute accepts JSON null for exactly these parameters.
         constraints: { type: object }
     CompileResultDescriptor:
       type: object

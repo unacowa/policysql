@@ -12,8 +12,10 @@
 //! `INSERT VALUES` / `UPDATE SET` assignment to a catalog column declared
 //! `nullable: true`. Any other position (comparisons, `IN`, `LIKE`/`GLOB`,
 //! functions, `IS NULL`, `CASE`, projections, ordering, `LIMIT`/`OFFSET`,
-//! subqueries, ...) makes it non-nullable. The proof is exposed as data only;
-//! request acceptance still rejects NULL for every client parameter.
+//! subqueries, ...) makes it non-nullable. Request acceptance uses exactly this
+//! proof: `validate_client_parameters` binds a supplied NULL as SQL NULL only
+//! for a `nullable` parameter and rejects it everywhere else, and Explain
+//! metadata reports the same flag, so both always agree for every type.
 
 use crate::CompileError;
 use policysql_catalog::Catalog;
@@ -117,8 +119,10 @@ pub fn analyze_client_parameters(
 /// Validates supplied client values against the analysis: exact name set,
 /// logical type, and every constraining column contract.
 ///
-/// JSON/SQL NULL never matches a logical type here, so NULL stays rejected for
-/// every client parameter regardless of the nullability proof.
+/// NULL never matches a logical type. It is accepted only when the parameter's
+/// nullability proof holds; every constraining column is then a nullable
+/// assignment target, so the column contracts accept NULL as well. A NULL for
+/// any other parameter fails with the same type-mismatch error as before.
 pub(crate) fn validate_client_parameters(
     analysis: &ClientParameterAnalysis,
     catalog: &Catalog,
@@ -134,7 +138,8 @@ pub(crate) fn validate_client_parameters(
         let value = values
             .get(name)
             .ok_or(CompileError::ClientParameterMismatch)?;
-        if !logical_value_matches(value, contract.logical_type) {
+        let proven_null = matches!(value, LogicalValue::Null) && contract.nullable;
+        if !proven_null && !logical_value_matches(value, contract.logical_type) {
             return Err(CompileError::ClientParameterTypeMismatch);
         }
         for column in &contract.columns {

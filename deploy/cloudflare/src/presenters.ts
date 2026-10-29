@@ -10,26 +10,35 @@ export const parsedRuntimeCall = (text: string) => {
   return result;
 };
 
-const valueDescriptor = (name: string, value: unknown, compiledType?: string) => {
+const TEMPORAL_FORMATS = new Map([["date", "iso-date"], ["datetime", "sqlite-datetime"], ["instant", "rfc3339"]]);
+
+// `nullable` is the compiler's statement-wide proof (#20): true only when every
+// use of the parameter is a direct INSERT/UPDATE assignment to a nullable column.
+// It never depends on the supplied sample value, and execute accepts JSON null
+// for exactly these parameters, for every type including bytes.
+const valueDescriptor = (name: string, value: unknown, compiledType: string | undefined, nullable: boolean) => {
   if (compiledType === "bytes") {
-    // JSON null is rejected for bytes parameters, so they are never nullable.
-    return { name, type: "bytes", representation: "string", format: "base64", nullable: false };
+    return { name, type: "bytes", representation: "string", format: "base64", nullable };
+  }
+  // Temporal types have exactly one Catalog format each (see `validate_format`).
+  const temporalFormat = TEMPORAL_FORMATS.get(compiledType ?? "");
+  if (temporalFormat) {
+    return { name, type: compiledType, representation: "string", format: temporalFormat, nullable };
   }
   if (["string", "boolean", "integer", "int64", "number", "json"].includes(compiledType ?? "")) {
     const representation = compiledType === "json"
       ? "object"
       : (["integer", "int64", "number"].includes(compiledType!) ? "number" : compiledType);
-    return { name, type: compiledType, representation, nullable: false };
+    return { name, type: compiledType, representation, nullable };
   }
-  if (value === null) return { name, type: "string", representation: "string", nullable: true };
-  if (typeof value === "boolean") return { name, type: "boolean", representation: "boolean", nullable: false };
+  if (typeof value === "boolean") return { name, type: "boolean", representation: "boolean", nullable };
   if (typeof value === "number") return {
     name,
     type: Number.isInteger(value) ? "int64" : "number",
     representation: "number",
-    nullable: false,
+    nullable,
   };
-  return { name, type: "string", representation: "string", nullable: false };
+  return { name, type: "string", representation: "string", nullable };
 };
 
 const resultColumn = (column: any) => ({
@@ -49,7 +58,7 @@ export const explainResponse = (compiled: any, auth: AuthContext, id: string) =>
     index,
     operation: statement.operation,
     parameters: Object.entries(statement.clientParameters).map(([name, value]) =>
-      valueDescriptor(name, value, statement.clientParameterTypes[name])),
+      valueDescriptor(name, value, statement.clientParameterTypes[name], statement.clientParameterNullable?.[name] === true)),
     result: { columns: statement.result.map(resultColumn) },
     resources: statement.explain.publicResources.map((resource: any) => ({
       ...resource,

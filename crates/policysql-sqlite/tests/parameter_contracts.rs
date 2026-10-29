@@ -1,8 +1,8 @@
 //! Single-pass client parameter analysis (issue #21).
 //!
-//! These tests pin the conservative nullability proof and prove that the
-//! consolidated pass leaves request acceptance (exact name set, logical type,
-//! column contracts, and NULL rejection) unchanged.
+//! These tests pin the conservative nullability proof, prove that request
+//! acceptance (exact name set, logical type, column contracts) is unchanged,
+//! and that NULL is accepted exactly where the proof holds (issue #20).
 
 use policysql_catalog::{Catalog, ResourceDescriptor};
 use policysql_core::{
@@ -467,24 +467,53 @@ fn text(value: &str) -> LogicalValue {
 }
 
 #[test]
-fn null_stays_rejected_even_where_the_proof_allows_it() {
-    // Accepting NULL for proven-nullable assignments is issue #20; until then
-    // the consolidated pass must reject it exactly as before.
+fn null_is_accepted_exactly_where_the_proof_allows_it() {
+    // Acceptance must never diverge from the proof Explain reports (#20).
+    let catalog = catalog();
     for sql in [
         "UPDATE projects SET state=:v",
         "UPDATE projects SET state=:v, note=:v",
         "INSERT INTO projects (id, name, state) VALUES ('p1', 'abc', :v)",
+        "INSERT INTO projects (id, name, state, note) VALUES ('p1', 'abc', :v, :v), ('p2', 'abd', :v, :v)",
         "UPDATE projects SET state=:v WHERE state=:v",
+        "UPDATE projects SET state=:v WHERE state LIKE :v",
+        "UPDATE projects SET state=:v WHERE note IN (:v)",
+        "UPDATE projects SET state=:v WHERE lower(:v) = note",
+        "UPDATE projects SET state=:v, name=:v",
+        "UPDATE projects SET name=:v",
+        "INSERT INTO projects (id, name) VALUES ('p1', :v)",
         "SELECT id FROM projects WHERE state=:v",
+        "SELECT id FROM projects WHERE state IN (:v)",
+        "SELECT id FROM projects WHERE lower(:v) = state",
+        "DELETE FROM projects WHERE state=:v",
     ] {
-        assert!(
-            matches!(
-                compile(sql, &[("v", LogicalValue::Null)]),
-                Err(CompileError::ClientParameterTypeMismatch)
+        let proven = nullable_of(&bind(sql, &catalog), &catalog)["v"];
+        let result = compile(sql, &[("v", LogicalValue::Null)]);
+        assert_eq!(result.is_ok(), proven, "{sql}: {result:?}");
+        match result {
+            Ok(plan) => assert_eq!(
+                plan.client_parameters().get(&name("v")),
+                Some(&LogicalValue::Null),
+                "{sql}"
             ),
-            "{sql}"
-        );
+            Err(error) => assert!(
+                matches!(error, CompileError::ClientParameterTypeMismatch),
+                "{sql}: same error as any other type mismatch"
+            ),
+        }
     }
+    // A nullable parameter still type-checks non-NULL values.
+    assert!(matches!(
+        compile("UPDATE projects SET amount=:v", &[("v", text("1"))]),
+        Err(CompileError::ClientParameterTypeMismatch)
+    ));
+    assert!(
+        compile(
+            "UPDATE projects SET amount=:v",
+            &[("v", LogicalValue::Null)]
+        )
+        .is_ok()
+    );
 }
 
 #[test]

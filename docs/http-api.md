@@ -10,8 +10,8 @@ profile and published Capabilities.
 
 For `bytes / string / base64`, parameters and result cells use base64 JSON strings on
 every conforming host. Empty bytes use `""`; SQL NULL in a nullable result cell uses
-JSON `null`. JSON `null` for a bytes parameter is rejected with
-`POLICYSQL_INVALID_PARAMETER` (400), as for other logical types. Only a compiler-proven bytes parameter is decoded as bytes. Ordinary
+JSON `null`. JSON `null` for a bytes parameter follows the NULL parameter rule below,
+as for other logical types. Only a compiler-proven bytes parameter is decoded as bytes. Ordinary
 string and JSON parameters retain their own meanings. Server adapters preserve the
 physical result type through validation before encoding a public result; internal WASM
 values and database protocol objects are not public parameter or result formats.
@@ -23,6 +23,18 @@ it with well-formed input returns `POLICYSQL_LIMIT_EXCEEDED` (413) before execut
 stored physical BLOB over this limit also returns 413 with either database transport
 and rolls back the transaction. Request and encoded result limits also apply. See [ADR 0016](adr/0016-bytes-wire-contract.md) and the
 [conformance ledger](user-document-conformance.md) for scope and evidence.
+
+A named parameter of any logical type may be JSON `null`, which binds SQL NULL, only
+when every use of that parameter in the statement is the whole value of a direct
+`INSERT ... VALUES` or `UPDATE ... SET` assignment to a Catalog column with
+`nullable: true`. Reuse in a non-nullable assignment, comparison, `IN`, `LIKE`,
+function, `CASE`, `ORDER BY`, `LIMIT` or `OFFSET` denies NULL. Any other JSON `null`
+parameter returns `POLICYSQL_INVALID_PARAMETER` (400) before database egress. For a
+json column, `null` means SQL NULL, not the JSON text `null`. Column permissions,
+presets, tenant filters, `RETURNING` permission and TRUE-only post-state checks
+still apply to the row that receives NULL. SQL `NULL` literals remain unsupported;
+query stored NULLs with `column IS NULL`. See
+[ADR 0017](adr/0017-nullable-assignments.md).
 
 ## Atomic execute
 
@@ -176,7 +188,7 @@ Multiple statements are the standard envelope; one statement is represented by a
 POST /v1/transactions:explain
 ```
 
-Explain accepts the same atomic request envelope. It compiles every item without opening a database transaction and returns client parameter descriptors, final result-column descriptors, and explanations in statement order. `params: {}` allows build-time inference without runtime values. The response metadata includes the inferred `transactionMode`. Production deployments may redact protected SQL and policy identifiers, but not the authorized type descriptors.
+Explain accepts the same atomic request envelope. It compiles every item without opening a database transaction and returns client parameter descriptors, final result-column descriptors, and explanations in statement order. `params: {}` allows build-time inference without runtime values. Each parameter descriptor's `nullable` is the compiler's statement-wide NULL proof and matches exactly what Execute accepts, for every type; it never depends on a supplied sample. Supplied samples are validated like Execute values: a `null` sample for a non-nullable parameter returns `POLICYSQL_INVALID_PARAMETER` rather than being ignored. The response metadata includes the inferred `transactionMode`. Production deployments may redact protected SQL and policy identifiers, but not the authorized type descriptors.
 
 ## Interactive transactions
 

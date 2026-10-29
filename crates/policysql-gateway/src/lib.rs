@@ -10,8 +10,9 @@ use policysql_ir::BoundStatement;
 use policysql_parser::{BindError, SqliteFrontend};
 use policysql_policy::{Explain, PolicyBundle, PolicyError};
 use policysql_sqlite::{
-    CompileError, SqliteProfile, compile_verified_delete, compile_verified_insert,
-    compile_verified_select, compile_verified_update,
+    ClientParameterContract, CompileError, SqliteProfile, analyze_client_parameters,
+    compile_verified_delete, compile_verified_insert, compile_verified_select,
+    compile_verified_update,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -71,6 +72,10 @@ pub struct StatementRequest {
 pub struct CompiledStatement {
     pub plan: VerifiedExecutionPlan<SqliteProfile>,
     pub explain: Explain,
+    /// Client parameter contracts of the exact protected statement whose
+    /// supplied values were accepted, including the NULL proof. Explain
+    /// metadata must be derived from this, never re-inferred from values.
+    pub client_parameters: BTreeMap<ClientParameterName, ClientParameterContract>,
 }
 
 #[derive(Clone, Debug)]
@@ -228,9 +233,19 @@ impl Gateway {
                 kind: compile_rejection(&error),
                 index,
             })?;
+            // Same pass and statement that `compile_verified_*` validated against.
+            let client_parameters =
+                analyze_client_parameters(&output.plan.statement, &self.catalog)
+                    .contracts()
+                    .map_err(|_| GatewayError::Rejected {
+                        kind: RejectionKind::InvalidParameter,
+                        index,
+                    })?
+                    .clone();
             statements.push(CompiledStatement {
                 plan,
                 explain: output.explain,
+                client_parameters,
             });
         }
         Ok(CompiledEnvelope { statements })

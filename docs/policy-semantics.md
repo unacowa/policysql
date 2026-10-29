@@ -75,6 +75,14 @@ Semantics:
 - every changed row must evaluate the check to TRUE; FALSE and UNKNOWN fail, while zero changed rows pass vacuously;
 - unsupported atomic check behavior means reject, not best-effort execution.
 
+A caller may write SQL NULL to a listed `nullable: true` column by passing JSON
+`null` for a named parameter used only as direct assignment values to such columns
+(see [ADR 0017](adr/0017-nullable-assignments.md)). Nullability never widens
+`columns`: preset, server-owned and unlisted columns stay forbidden. The check is
+evaluated on the row as written, so a NULL that makes a comparison UNKNOWN (for
+example `neq`, `not_in` or `not: { eq: ... }` on that column) fails the check; use
+`is_null` when NULL must be allowed or required.
+
 For a bytes column, INSERT and UPDATE presets may use a fixed canonical base64
 literal, for example `seed: { literal: "AAEC/w==" }`. Policy activation validates
 the encoding and decoded size; the emitter binds the value as a server-owned BLOB

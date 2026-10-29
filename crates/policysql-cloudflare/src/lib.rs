@@ -28,9 +28,11 @@ const MAX_ACTIVE_EXECUTIONS: usize = 64;
 
 #[cfg(test)]
 mod bytes_tests;
+#[cfg(test)]
+mod nullable_tests;
 
-/// Compiler-resolved logical types of client parameters, by name.
-type ParameterTypes = BTreeMap<ClientParameterName, LogicalType>;
+/// Compiler-resolved client parameter contracts (type and NULL proof), by name.
+type ParameterTypes = BTreeMap<ClientParameterName, policysql_sqlite::ClientParameterContract>;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -198,6 +200,7 @@ struct CompiledStatementDto {
     cost_explain_sql: String,
     client_parameters: BTreeMap<String, serde_json::Value>,
     client_parameter_types: BTreeMap<String, &'static str>,
+    client_parameter_nullable: BTreeMap<String, bool>,
     server_parameters: BTreeMap<String, serde_json::Value>,
     result: Vec<ResultColumnDto>,
     limits: LimitsDto,
@@ -767,7 +770,7 @@ impl PolicySqlRuntime {
             return Err(RuntimeError::Snapshot);
         }
         validate_deployment_surface(&raw_request.statements, &self.catalog)?;
-        let (requests, parameter_types): (Vec<_>, Vec<_>) = raw_request
+        let requests = raw_request
             .statements
             .into_iter()
             .enumerate()
@@ -775,9 +778,7 @@ impl PolicySqlRuntime {
                 statement_request(statement, endpoint, &self.catalog)
                     .map_err(|error| error.at_statement(index))
             })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .unzip();
+            .collect::<Result<Vec<_>, _>>()?;
         let compiled = self
             .gateway
             .compile_envelope(&auth, endpoint, Some(&self.snapshot), &requests)
@@ -793,8 +794,7 @@ impl PolicySqlRuntime {
         let statements = compiled
             .statements
             .iter()
-            .zip(&parameter_types)
-            .map(|(statement, types)| compiled_statement(statement, &self.catalog, types))
+            .map(|statement| compiled_statement(statement, &self.catalog))
             .collect::<Result<Vec<_>, _>>()?;
         let commit_checks = self
             .policies
@@ -1734,7 +1734,7 @@ fn statement_request(
     raw: RequestStatement,
     endpoint: EndpointPermission,
     catalog: &Catalog,
-) -> Result<(StatementRequest, ParameterTypes), RuntimeError> {
+) -> Result<StatementRequest, RuntimeError> {
     if raw.sql.is_empty() || raw.sql.len() > MAX_SQL_BYTES {
         return Err(RuntimeError::Envelope);
     }
@@ -1752,30 +1752,38 @@ fn statement_request(
         .map(|(name, value)| {
             let name = ClientParameterName::new(name)
                 .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidParameter))?;
-            let value = logical_value(value, parameter_types.get(&name).copied())?;
+            let value = logical_value(
+                value,
+                parameter_types
+                    .get(&name)
+                    .map(policysql_sqlite::ClientParameterContract::logical_type),
+            )?;
             Ok((name, value))
         })
         .collect::<Result<BTreeMap<_, _>, RuntimeError>>()?;
     if endpoint == EndpointPermission::Explain {
-        for (name, logical_type) in &parameter_types {
+        for (name, contract) in &parameter_types {
             parameters
                 .entry(name.clone())
-                .or_insert_with(|| placeholder_value(*logical_type));
+                .or_insert_with(|| placeholder_value(contract));
         }
     }
-    Ok((
-        StatementRequest {
-            sql: raw.sql,
-            parameters,
-            expected_affected_rows: expectation.affected_rows,
-            expected_row_count: expectation.row_count,
-        },
-        parameter_types,
-    ))
+    Ok(StatementRequest {
+        sql: raw.sql,
+        parameters,
+        expected_affected_rows: expectation.affected_rows,
+        expected_row_count: expectation.row_count,
+    })
 }
 
-fn placeholder_value(logical_type: LogicalType) -> LogicalValue {
-    match logical_type {
+/// Explain fills omitted parameters for type discovery. A proven-nullable
+/// parameter uses SQL NULL, which every one of its column contracts accepts;
+/// others use a non-NULL value of the compiled type.
+fn placeholder_value(contract: &policysql_sqlite::ClientParameterContract) -> LogicalValue {
+    if contract.nullable() {
+        return LogicalValue::Null;
+    }
+    match contract.logical_type() {
         LogicalType::String | LogicalType::Date | LogicalType::DateTime | LogicalType::Instant => {
             LogicalValue::String(String::new())
         }
@@ -1794,12 +1802,7 @@ fn statement_parameter_types(
     // The shared compiler pass is the only client-parameter walker.
     policysql_sqlite::analyze_client_parameters(statement, catalog)
         .contracts()
-        .map(|contracts| {
-            contracts
-                .iter()
-                .map(|(name, contract)| (name.clone(), contract.logical_type()))
-                .collect()
-        })
+        .cloned()
         .map_err(|_| RuntimeError::Rejected(RejectionKind::AmbiguousParameterType))
 }
 
@@ -1808,9 +1811,10 @@ fn logical_value(
     expected: Option<LogicalType>,
 ) -> Result<LogicalValue, RuntimeError> {
     if expected == Some(LogicalType::Bytes) {
-        // JSON null is not a bytes parameter value; nullable assignment is out of
-        // scope for the bytes wire contract and fails closed like other types.
+        // JSON null decodes to SQL NULL for every type, bytes included; the shared
+        // compiler accepts it only for a proven nullable assignment (#20).
         return match value {
+            serde_json::Value::Null => Ok(LogicalValue::Null),
             serde_json::Value::String(value) => policysql_core::bytes::decode(&value)
                 .map(LogicalValue::Bytes)
                 .map_err(|error| {
@@ -1936,7 +1940,6 @@ fn logical_result_value_scalar(
 fn compiled_statement(
     statement: &policysql_gateway::CompiledStatement,
     catalog: &Catalog,
-    parameter_types: &ParameterTypes,
 ) -> Result<CompiledStatementDto, RuntimeError> {
     let plan = &statement.plan;
     let limits = plan.limits();
@@ -1952,11 +1955,22 @@ fn compiled_statement(
         cost_explain_sql: policysql_sqlite::explain_query_plan_sql(plan.protected_sql())
             .map_err(|_| RuntimeError::Internal)?,
         client_parameters: encode_parameters(plan.client_parameters()),
-        client_parameter_types: parameter_types
+        // Both maps come from the contracts the gateway validated the supplied
+        // values against, so Explain advertises NULL exactly where execute accepts it.
+        client_parameter_types: statement
+            .client_parameters
             .iter()
-            .map(|(name, logical_type)| {
-                (name.as_str().to_owned(), logical_type_name(*logical_type))
+            .map(|(name, contract)| {
+                (
+                    name.as_str().to_owned(),
+                    logical_type_name(contract.logical_type()),
+                )
             })
+            .collect(),
+        client_parameter_nullable: statement
+            .client_parameters
+            .iter()
+            .map(|(name, contract)| (name.as_str().to_owned(), contract.nullable()))
             .collect(),
         server_parameters: encode_parameters(plan.server_parameters()),
         result: plan
