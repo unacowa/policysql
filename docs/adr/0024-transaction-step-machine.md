@@ -73,14 +73,15 @@ remains in the engine or an adapter.
 | Validation id, transaction id, start fingerprint derivation | `engine.ts` 329, 418-422; `transaction-owner.ts` 569 | core (entropy from host facts) |
 | Begin body (`mode`, `expected`) and stale `expected` | `engine.ts` 400-416 | core |
 | Atomic response shape (`commitChecks`, original request id, debug trace) | `engine.ts` 334-353, 373-391 | core |
-| Direct path: lookup, more than one row is 500, conflict is `IDEMPOTENCY_CONFLICT`, loose stored-record check, replay, transaction id `atomic_<requestId>`, insert, commit | `turso.ts` 383-489 | core |
+| Direct path: lookup, more than one row is 500, conflict is `IDEMPOTENCY_CONFLICT`, loose stored-record check, replay, transaction id `atomic_<requestId>`, insert, commit | `turso.ts` 189-338 (lookup and replay 222-272, terminal 296-305, insert 306-318, commit 319) | core |
 | Owner path: same lookup, conflict is `TRANSACTION_CONFLICT`, strict stored-record check, transaction id `atomic_<validation hex>`, write-only, deadline 4 s, begin timeout = strictest statement timeout | `transaction-owner.ts` 39-59, 546-646 | core (one rule for both paths) |
-| Cumulative rows, bytes, and elapsed time | `turso.ts` 215-238 | core |
-| Mutation `affectedRows` (RETURNING row count vs `rowsAffected`), public result columns, redaction list | `turso.ts` 240-313 | core |
-| Execution trace content | `turso.ts` 174-200 | core (`Execute` carries it); the sink call stays |
-| Driver failure class (`QueryTimeoutError` is a timeout) | `turso.ts` 494-495 | stays (adapter classification); the class-to-code rule goes to core |
-| Client and server parameter namespaces must not collide | `driver-values.ts` 18-23 | core (BLOB decoding stays as the database codec) |
-| Driver value and row codecs (`rawDriverValue`, `rowValues`) | `driver-values.ts` 25-59 | stays (codec; core validates every value again) |
+| Cumulative rows, bytes, and elapsed time | `turso.ts` 54-78 | core |
+| Mutation `affectedRows` (RETURNING row count vs `rowsAffected`), public result columns, redaction list | `turso.ts` 79-87, 88-99, 100-153 | core |
+| Execution trace content | `turso.ts` 13-40 | core (`Execute` carries it); the sink call stays |
+| Driver failure class (`QueryTimeoutError` is a timeout) | `turso.ts` 7-11, 334 | stays (adapter classification); the class-to-code rule goes to core |
+| Client and server parameter namespaces must not collide | `driver-values.ts` 19-24 | core (BLOB decoding stays as the database codec) |
+| Driver value and row codecs (`rawDriverValue`, `rowValues`) | `driver-values.ts` 26-60 |
+| Binding shape, `version`, part syntax, snapshot equality (`POLICYSQL_DATABASE_BINDING_REJECTED`, `POLICYSQL_STALE_OPERATION`) for every operation | `database.ts` 94-105 | core: the `request` step validates the binding before it emits `CheckBinding`, and owners validate the forwarded binding again; the provider call (`checkDatabaseBinding` 109-115, `bounded` 76-92) stays | stays (codec; core validates every value again) |
 
 **Cost** (`cost.ts`). The issue calls it cost admission, but no request is admitted or
 rejected by it: `observeCostEnvelope` runs after the response and only logs. The evaluation
@@ -99,7 +100,7 @@ the cost connection timeouts `1_000` (`cost.ts` 103-104). `presenters.ts` advert
 override changes what is advertised but not what is enforced. All of them become fields of the
 runtime limits that `PolicySqlRuntime` is constructed with (`RuntimeLimits` in
 `crates/policysql-wasm/src/lib.rs`), and the capabilities response reads them from the runtime.
-The provider timeout in `database.ts` 255 is an adapter bound, not a specification limit, and
+The provider timeout of 1,000 ms in `bounded` (`database.ts` 76-92) is an adapter bound, not a specification limit, and
 stays.
 
 ### Inconsistencies the move must resolve
@@ -115,18 +116,35 @@ differential harness.
 2. **Duplicate idempotency rows and stored-record validation.** The direct path returns 500 and
    checks the stored record loosely; the owner path returns 409 and checks strictly. Core
    returns 500 and checks strictly on both.
-3. **Commit outcome after a lost owner.** The owner calls `transaction.commit()` and persists the
-   terminal record afterwards (`transaction-owner.ts` 410-422). If the owner is lost between
-   the two, the successor finds `active`, and a repeated commit gets 409
+3. **Any failure between COMMIT and the terminal record.** `terminal()` sends COMMIT through
+   `close()` (`transaction-owner.ts` 198), writes only `status` in `close()` (207-208), and
+   writes `last` and `nextSequence` later (416-422). There are two windows. If the owner is lost
+   between 198 and 208, the successor finds `active` and writes `failed`. If it is lost between
+   208 and 416, the record says `committed` (or `rolled_back`) while `last.digest` is still the
+   previous statement's. The same happens without owner loss when the `put` after COMMIT fails:
+   the first reply is 500 (uncertain to the client), but a repeated commit reaches `active()`
+   with no connection (224). In every case the repeated commit gets 409
    `POLICYSQL_TRANSACTION_UNAVAILABLE`, which the client treats as a definite rejection of a
-   commit that may have committed. Core persists a `committing` record before the `Commit`
-   effect, and a successor that finds `committing` answers with an outcome-unknown reply.
+   commit that may have committed. Old code can also write `failed` (the catch at 200-204, the
+   successor's fail-closed at 227-230) or `expired` (inconsistency 6) after COMMIT was sent, so
+   no old record's status proves that COMMIT was not sent. Core persists a `committing` record
+   before the `Commit` effect, and a successor that finds `committing` answers with
+   `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`; old records are handled under
+   [ABI impact](#abi-impact-and-rollout).
 4. **Commit error.** `close("committed")` turns any commit error into the value
    `{ status: "failed" }` (200). A transport error during commit does not prove that nothing
    committed. Core distinguishes a definite failure from an unknown outcome (see
    [Effect contract](#effect-execution-contract)).
 5. **Expiry during a validator.** The expiry rolls back at once, but the commit replies only when
    the validator call ends. Core replies to the waiting commit when it expires the transaction.
+6. **Expiry during an in-flight COMMIT.** `onTimer` (437-440) is not serialized with the client
+   lane, and the Turso HTTP transaction keeps `open` true while COMMIT is in flight
+   (`turso-http.ts` 221-233). An expiry while `transaction.commit()` is pending therefore sends
+   ROLLBACK on the same baton through `close("expired")`, and the timer's `close` and the
+   commit's `close` then persist `expired` or `failed` and `committed` in either order. Core does
+   not expire a `committing` transaction (see [Events](#events-and-host-facts)): the commit
+   outcome alone decides. The harness lists this difference, and a transcript fixture of the
+   race is checked in with pull request 4.
 
 ## Decision
 
@@ -166,6 +184,19 @@ commit, and failure rules, with placement deciding only whether `Persist` and `S
 emitted. The direct placement still allows read-mode envelopes; the owner placement requires
 write mode, as today.
 
+**Atomic on the owner: the database decides retries.** For `kind: atomic` the durable phase only
+serializes work on the owner (it lets the timer expire a stuck execution and keeps a second
+execution from starting while one is open). It is never used to answer a request. Every atomic
+request, including a keyed retry that reaches an owner whose durable state is `active`,
+`committing`, `failed`, or unreadable, starts a fresh execution: compile, open, and, when keyed,
+the `policysql_idempotency` lookup. The row in `policysql_idempotency` is the only record of the
+outcome: a row with the same fingerprint is replayed, a row with another fingerprint is
+`POLICYSQL_IDEMPOTENCY_CONFLICT`, and no row means the earlier attempt did not commit (the row is
+written in the same database transaction as the mutation), so the request executes. This is
+what `executeAtomic` does today (`transaction-owner.ts` 546-552 ignores the previous status).
+The `committing` and `commit_unknown` phases below apply to `kind: interactive` only. An unkeyed
+atomic request gets a fresh owner and cannot be retried.
+
 ### State
 
 State has two parts. **Durable** is what a successor owner must see; the engine writes it to
@@ -182,6 +213,7 @@ struct Durable {
     kind: Kind,                     // interactive | atomic
     phase: Phase,                   // active | validating | committing
                                     // | committed | rolled_back | failed | expired | commit_unknown
+                                    // | discarded (see Fail-closed rules)
     identity: Identity,             // auth fingerprint, replay identity, start fingerprint, mode
     binding: DatabaseBinding,       // pinned (ADR 0014)
     snapshot: SnapshotId,
@@ -216,7 +248,8 @@ struct Volatile {
   cannot raise the privileges of a later command.
 - **Replay identity.** `identity.replay` is a hash of `principal`, subject, role, session, and
   the binding without its `snapshot`. An exact retry of a completed command is answered from
-  `last` when the replay identity and digest match, before any snapshot or liveness check, so a
+  `last` of a current-version record when the replay identity and digest match, before any
+  snapshot or liveness check, so a
   lost commit response can still be confirmed after a deployment changed the snapshot. Every
   command that does work still requires the full fingerprint and the current snapshot.
 - **Bounds.** Durable JSON is at most 96 KiB, so it fits a Durable Object value (128 KiB) with
@@ -226,9 +259,9 @@ struct Volatile {
   state exceed its bound. Core never emits a state over its bound: the transition fails
   closed instead.
 - **Versioning.** `v` is checked exactly. A later change that alters the durable shape bumps
-  `TX_STATE_VERSION`; while PolicySQL is in beta, core reads only the current version plus,
-  for one release after this ADR's switch-over, the legacy shape described under
-  [ABI impact](#abi-impact-and-rollout).
+  `TX_STATE_VERSION`. While PolicySQL is in beta, core reads only the current version; any
+  other record, including every record written by `TransactionOwnerCore`, is discarded by the
+  rule under [Fail-closed rules](#fail-closed-rules).
 
 ### Events and host facts
 
@@ -269,8 +302,13 @@ An adapter that cannot classify an error reports `unknown`. Core never sees an e
 
 Core uses `entropy` for the unkeyed transaction and validation ids (16 bytes) and the capability
 token (32 bytes); a step that needs both takes disjoint slices. Expiry is checked against
-`now_ms` on every event, as the TypeScript code checks `Date.now()` today, and `TimerFired` is
-the same check when no client event arrives.
+`now_ms` on every client, callback, and timer event, as the TypeScript code checks `Date.now()`
+today, and `TimerFired` is the same check when no client event arrives. Two cases are exempt:
+nothing expires a transaction in phase `committing`, and the outcome of a `Commit` effect
+(`Committed`, `CommitFailed`) and the `Persist` of the terminal record that follows it are never
+judged against the deadline. COMMIT has been sent by then, so only its outcome can decide; a
+`Committed` that arrives after `expires_at_ms` is reported as committed. The database deadline
+passed to `Open` still bounds how long COMMIT can take.
 
 ### Effects
 
@@ -312,11 +350,23 @@ the connection at a time.
 
 ### Fail-closed rules
 
-- **Invalid durable state** (does not parse, unknown `v`, out of bounds, `owner` differs from
-  the routing name, internally inconsistent, such as `committed` with an expiry): core emits
-  `Log(tx_state_rejected { reason })`, rolls back a connection if volatile state says one is
-  open, replies `POLICYSQL_INTERNAL` on the lane, and writes a tombstone durable state
-  (`phase: failed`, no `last`), so later commands get `POLICYSQL_TRANSACTION_UNAVAILABLE`.
+- **Unreadable durable state** (does not parse, no `v` or another `v`, out of bounds, `owner`
+  differs from the routing name, internally inconsistent, such as `committed` with an expiry).
+  This includes every record written by `TransactionOwnerCore` before the switch-over. Core
+  emits `Log(tx_state_discarded { reason })`, rolls back a connection if volatile state says one
+  is open, and replaces the record with a tombstone (`phase: discarded`, the owner name, nothing
+  else). The tombstone and the record it replaces are answered alike:
+  - a `commit` command, whatever its sequence, digest, or the old record's status, gets
+    `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. Nothing in an old record proves that COMMIT was not sent
+    (inconsistencies 3 and 6), so no commit retry is ever answered with a definite rejection;
+  - every other interactive command (begin retry, statement, rollback) and every callback query
+    gets `POLICYSQL_TRANSACTION_UNAVAILABLE`; nothing executes;
+  - an atomic request ignores the record and runs as described under
+    [Atomic on the owner](#one-machine-three-kinds), so a keyed retry still resolves through the
+    `policysql_idempotency` lookup.
+
+  The cost is that a commit retry against a transaction that really rolled back also gets
+  outcome-unknown; the client then resolves it by its own means.
 - **Invalid volatile state** is an engine fault: the same as above, and the engine discards it.
 - **Invalid host facts** (`step_json` cannot read them) return `{"error": POLICYSQL_INTERNAL}`
   and no state; the engine replies 500 and sends `Abandon` with the previous state.
@@ -361,8 +411,12 @@ never affects a reply.
 Core validates durable state for shape, version, bounds, owner name, and internal consistency,
 and does not authenticate it with a MAC.
 
-The store is platform-trusted: ADR 0022 makes it private to one owner, and the Durable Objects
-adapter backs it with storage that only the object can reach. Whoever can write it can also
+The store is platform-trusted. `OwnerStore` is already a wrapper-supplied port (ADR 0022), so
+this is a property every adapter must have now, and no conformance test can observe it. This ADR
+therefore adds it to the `TransactionOwner` port obligations in ADR 0022, and pull request 4 adds
+it to the port's documentation in `src/transaction-owner-port.ts`: **an owner's store is
+readable and writable only by the live owner of that name, through the adapter.** The Durable
+Objects adapter keeps it with storage that only the object can reach. Whoever can write it can also
 replace the Worker, the WASM module, or the secrets, so a MAC keyed by a deployment secret does
 not raise the bar against the platform. What the store can do by accident (a rollout writing an
 older shape, a bug in a custom adapter, a value put under the wrong name) is caught by `v`,
@@ -377,8 +431,11 @@ The design also limits what a modified value could achieve:
 - triggered checks are recomputed from the policy;
 - a successor never trusts `active` without a live connection.
 
-The residual exposure is a forged `last` reply returned on an exact retry, which only someone
-who controls the platform can write. A MAC would cost a key in `PolicySqlConfig`, key ids and
+The residual exposure is a forged `last`, which only someone who can write the store can plant.
+It is returned on an exact retry without re-validation, so it can (1) answer a repeated
+statement with arbitrary rows that never passed the policy or result validation, and (2) answer
+a repeated commit of a transaction that rolled back with `committed`. It cannot execute SQL,
+widen a later command's session, skip a commit check, or commit anything. A MAC would cost a key in `PolicySqlConfig`, key ids and
 dual acceptance for rotation, and verification on every step. If PolicySQL later supports a
 store adapter that is not private to the owner, a new state version adds an HMAC over the
 durable JSON with a key id, and that adapter's conformance requires it.
@@ -424,15 +481,17 @@ What each failure leads to (all decided by core, listed here because ADR 0007 de
 | --- | --- |
 | `OpenFailed`, `ExecuteFailed`, `BindingCheckFailed`, or binding not allowed | roll back if open, phase `failed`, reply with the class's code (`DATABASE_TIMEOUT`, `DATABASE_UNAVAILABLE`, `DATABASE_BINDING_REJECTED`, as today) |
 | `PersistFailed` before `Commit` | roll back, phase `failed`, reply `POLICYSQL_INTERNAL`; no commit is sent |
-| `PersistFailed` of the terminal record after `Committed` | reply committed (true); a retry finds `committing` and gets the outcome-unknown reply, never a rejection |
+| `PersistFailed` of the terminal record after `Committed` | reply committed (true); a retry finds `committing` and gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, never a rejection |
 | `CommitFailed { class: not_committed }` | phase `failed`, reply as today (`status: "failed"`) |
-| `CommitFailed` of any other class | phase `commit_unknown`; the reply and every exact retry of that commit get an outcome-unknown error the client does not treat as a rejection |
+| `CommitFailed` of any other class | phase `commit_unknown`; the reply and every exact retry of that commit get `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` |
 | `ValidatorFailed`, deny, malformed decision | roll back, `POLICYSQL_COMMIT_CHECK_REJECTED` |
 | `TimerFired` while `validating` | phase `expired`, reply `POLICYSQL_COMMIT_CHECK_REJECTED` to the waiting commit now, roll back (deferred via `rollback_requested` if a callback query holds the connection); the late validator outcome is ignored |
-| `TimerFired` while `committing` | nothing; the commit is already sent and its outcome decides |
-| Successor finds `active` | phase `failed`, `POLICYSQL_TRANSACTION_UNAVAILABLE` (true: commit is never sent without `committing` persisted first) |
-| Successor finds `validating` | stays `validating` until the timer expires it (ADR 0022); commands get `POLICYSQL_TRANSACTION_UNAVAILABLE` |
-| Successor finds `committing` | phase `commit_unknown` |
+| `TimerFired` while `committing`, or `Committed` after the deadline | nothing expires; the commit is already sent and its outcome decides |
+| Interactive successor finds `active` | phase `failed`, `POLICYSQL_TRANSACTION_UNAVAILABLE` (true: commit is never sent without `committing` persisted first) |
+| Interactive successor finds `validating` | stays `validating` until the timer expires it (ADR 0022); commands get `POLICYSQL_TRANSACTION_UNAVAILABLE` |
+| Interactive successor finds `committing` | phase `commit_unknown`; a commit gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, other commands `POLICYSQL_TRANSACTION_UNAVAILABLE` |
+| Atomic owner finds any earlier phase | ignored; the request starts from the idempotency lookup |
+| Unreadable or old-format record | discarded as under [Fail-closed rules](#fail-closed-rules) |
 | `RollbackFailed` | phase stays terminal as decided; the database deadline ends the server transaction, and no commit is sent |
 
 So: a commit outcome is reported as committed only after `Committed`, as rejected only when no
@@ -440,33 +499,64 @@ So: a commit outcome is reported as committed only after `Committed`, as rejecte
 retry of every completed command replays `last`; owner loss fails closed; and expiry ends a
 commit that waits on a validator.
 
+### `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`
+
+A new public code, HTTP 503, message "The commit outcome is unknown." It means that COMMIT may
+have been sent and PolicySQL cannot tell whether it applied. Core returns it for a commit in
+phase `commit_unknown`, for a commit that an interactive successor finds `committing`, and for a
+commit against a discarded record. It is never returned for `execute`: an atomic request
+resolves through the idempotency row or, unkeyed, is reported with the error of the failure as
+today.
+
+- The client library must treat it as outcome-unknown, never as a rejection:
+  `packages/client/protocol.js` does not list it in `REJECTIONS`, so `sendCommand` raises
+  `PolicySqlOutcomeUnknownError`, and Kysely's rollback-on-error path must not send a rollback
+  that contradicts the unresolved commit (ADR 0007). Client tests assert both.
+- It is added in the first implementation pull request that can return it (pull request 0 if
+  that is taken, otherwise pull request 7): to the library table in `website/api/errors.md`, to
+  `src/http/status.ts`, to the HTTP conformance suite (`src/http/conformance.ts`), and to the
+  client tests (`packages/client`, `packages/kysely`). The ADR 0023 table test then requires
+  that the code is returned somewhere and appears in exactly one table.
+
 ### ABI impact and rollout
 
-- **ABI 5.** `ABI_VERSION` goes from 4 to 5 when `step_json` and the extended `RuntimeLimits`
-  (`transaction_ms`, `max_transaction_statements`, `max_transaction_result_bytes`,
-  `max_callback_rows`, `begin_timeout_ms`, `cost_timeout_ms`) ship. The snapshot string contains
-  the ABI version, so the switch-over deployment changes the snapshot, exactly as any policy or
-  schema version change does today.
-- **In-flight transactions** do not survive: a deployment restarts owners, so their connections
-  are already gone, and the snapshot changes. They fail closed as today.
-- **Keyed atomic retries across the deployment** get `POLICYSQL_IDEMPOTENCY_CONFLICT`, because
-  the fingerprint includes the binding's snapshot (ADR 0014). This is today's behavior for every
-  snapshot change and is unchanged by this ADR.
-- **Hash compatibility.** `keyHash`, the fingerprints, and the command digest must stay byte for
-  byte what `idempotency.ts` computes, or a retry after the switch would see a different key
-  (and execute again) or a different fingerprint (and get a false conflict). Core implements
-  `stableJson` as JavaScript does: keys sorted by UTF-16 code units, strings escaped as
-  `JSON.stringify` escapes them, and numbers parsed as IEEE doubles and printed by the
-  ECMAScript `Number::toString` algorithm. The first migration pull request proves equality with
-  a corpus and a randomized differential test before anything depends on it.
-- **Legacy durable records** (no `v`, written by `TransactionOwnerCore`) are read for one
-  release, read-only: a terminal record answers an exact retry of its terminal command when the
-  digest matches and the request's identity equals the identity recomputed from the stored
-  `auth` and binding without the snapshot; a non-terminal record answers a commit with the
-  outcome-unknown error (it may be the gap in inconsistency 3) and every other command with
-  `POLICYSQL_TRANSACTION_UNAVAILABLE`. The reader is deleted in the cleanup pull request. A
-  one-time incompatibility beyond that is acceptable in beta (ADR 0019); the legacy reader exists
-  only so that a lost commit response is never answered with a rejection during the rollout.
+- **ABI 5.** `ABI_VERSION` goes from 4 to 5 in the first pull request that changes the ABI
+  surface: pull request 3 adds fields to `RuntimeLimits` (`transaction_ms`,
+  `max_transaction_statements`, `max_transaction_result_bytes`, `max_callback_rows`,
+  `begin_timeout_ms`, `cost_timeout_ms`), and pull request 4 adds `step_json`; each later pull
+  request that changes the ABI bumps it again. The snapshot is
+  `{profile}:{schema}:{policy}:abi-{ABI_VERSION}` (`crates/policysql-wasm/src/lib.rs` 382), so it
+  changes on the deployments of those pull requests, not necessarily on the switch-over
+  deployments (pull requests 7 and 8).
+- **In-flight transactions** do not survive any deployment: owners restart, so their
+  connections are gone, and they fail closed as today.
+- **Keyed atomic retries across a snapshot change** get `POLICYSQL_IDEMPOTENCY_CONFLICT`,
+  because the fingerprint includes the binding's snapshot (ADR 0014). This is today's behavior
+  for every snapshot change and is unchanged by this ADR.
+- **Where byte-equal hashing is load-bearing.** `keyHash` must equal what `idempotency.ts`
+  computes on every deployment that changes who computes it (pull requests 2, 7, and 8). It does
+  not include the snapshot, so a different `keyHash` finds no row and executes a committed keyed
+  request again. The fingerprints and the command digest must be equal on those deployments
+  whenever the snapshot is unchanged (always for pull request 2, and for pull requests 7 and 8
+  unless they bump the ABI): a different fingerprint turns a committed keyed retry into a false
+  `POLICYSQL_IDEMPOTENCY_CONFLICT`, which the client takes as a definite rejection. Core
+  canonicalizes from the body text with its own tokenizer, not through `serde_json` values or a
+  JavaScript string: object keys sorted by UTF-16 code units, string values decoded to UTF-16
+  code units and escaped exactly as `JSON.stringify` escapes them, and numbers parsed as IEEE
+  doubles and printed by the ECMAScript `Number::toString` algorithm. The text crosses the
+  wasm-bindgen boundary as well-formed UTF-8 (ADR 0023), so an escaped lone surrogate in it
+  (`"\ud800"` as six ASCII characters) arrives intact, whereas a decoded JavaScript string with
+  a lone surrogate would be replaced by U+FFFD. Pull request 2 states the corpus and the gate.
+- **Old-format records are discarded, not read.** From the switch-over (pull request 7), every
+  record written by `TransactionOwnerCore` is unreadable: a commit retry gets
+  `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, other interactive commands
+  `POLICYSQL_TRANSACTION_UNAVAILABLE`, and a keyed atomic retry resolves through the idempotency
+  lookup (see [Fail-closed rules](#fail-closed-rules)). This is a **one-time incompatibility**,
+  accepted while PolicySQL is in beta (ADR 0019): exact retries of commands completed before the
+  switch-over are no longer replayed (a statement or rollback retry is unavailable; a commit
+  retry is outcome-unknown, even when the transaction rolled back), and no compatibility layer
+  or migration guide is provided. ADR 0007 still holds across it, because no commit retry is
+  answered with a definite rejection.
 - The Durable Objects class name and storage key stay; the value's shape is discriminated by `v`.
   The internal owner wire (ADR 0022, ADR 0023) keeps its paths; the forwarded inputs become the
   `Forwarded` event's JSON.
@@ -477,12 +567,36 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
 (both owner adapters), `npm run docs:build`, and the real-environment smoke
 (`deploy/cloudflare/scripts/provision-dev.mjs`) green, and is mergeable on its own.
 
+0. **Optional, ahead of stage 4: fix the ADR 0007 violation on `main` in TypeScript.** Taken
+   only if the maintainer chooses to fix inconsistency 3 before the machine lands. `terminal()`
+   persists `status: "committing"` before `transaction.commit()`. A successor, or the same owner
+   after a failed `put`, answers a commit with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` when the record
+   is `committing`, or is `committed`, `rolled_back`, `failed`, or `expired` with a `last` that
+   is not that commit's digest. The code is added as described above. Regression tests reproduce
+   both windows and the failed `put`. If this pull request is skipped, the switch-over in pull
+   request 7 is the fix.
 1. **This ADR.** Design only.
 2. **Canonical JSON, hashing, and identities in core.** `policysql-transaction` with
    `stable_json`, SHA-256 (the `sha2` crate), key syntax, `keyHash`, fingerprints, digest;
-   exported as `identity_json`. A TypeScript differential test compares it with
-   `idempotency.ts` on a corpus and on random JSON (numbers, escapes, astral keys). The engine
-   switches to it; `idempotency.ts` keeps only the call. No behavior change.
+   exported as `identity_json`. The engine switches to it; `idempotency.ts` keeps only the call.
+   No behavior change.
+   - **Corpus** (each case also as an object key, a nested value, and an array element):
+     integers above 2^53 (`9007199254740993`, which JavaScript rounds), `-0` (printed `0`),
+     overflow (`1e400` parses to Infinity, which `JSON.stringify` prints as `null`), number
+     spellings (`1.0` → `1`, `1E5` → `100000`, `1e21` → `1e+21`, `1e-7` → `1e-7`, `0.1`,
+     `5e-324`), escapes (control characters, U+2028, `\/`, `\"`), escaped lone surrogates
+     (`"\ud800"`), astral keys sorted against BMP keys above U+E000, and deep nesting. As a
+     negative case, an identity value that is `undefined` (which `stableJson` prints as
+     `undefined`): core rejects it before hashing, and the test asserts that every identity
+     field reaching the hash is a string.
+   - **Randomized test**: generated JSON texts compared between `stableJson` + `sha256` and
+     `identity_json`, in `npm run verify`.
+   - **Risk and gate.** If the hashes differ while the snapshot is unchanged, a committed keyed
+     retry gets a false `POLICYSQL_IDEMPOTENCY_CONFLICT` (a definite rejection) or, with a
+     different `keyHash`, executes again. Until pull request 9 the engine computes both and
+     compares them before any database work; a mismatch logs `identity_mismatch` (no values) and
+     fails the request with `POLICYSQL_INTERNAL` (500, which the client treats as uncertain). A
+     mismatch is therefore an availability fault, never a wrong retry decision.
 3. **Limits into runtime configuration.** Extend `RuntimeLimits` and `createRuntimeFactory`;
    `transaction-owner.ts`, `commit-checks.ts`, `cost.ts`, and `presenters.ts` read the runtime.
    Defaults equal today's constants. Advertised and enforced values become one source.
@@ -493,7 +607,9 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
    scenario through both `TransactionOwnerCore` and `StepOwnerCore` with the same fake clock,
    database, and store, and assert equal replies, database calls (SQL and arguments), terminal
    records, and log events, except the differences listed in this ADR, each named in an
-   allowlist with its reason.
+   allowlist with its reason. Transcript fixtures cover both windows of inconsistency 3, the
+   failed terminal `put`, and the expiry race of inconsistency 6. The owner-private store
+   obligation is added to the port documentation.
 5. **Commit checks and callbacks in the machine.** Capability, validator payload and verdict,
    callback queries, expiry during validation; extend the harness and the property tests.
 6. **Atomic execution in the machine.** Direct and owner placements, idempotency lookup, replay,
@@ -501,16 +617,17 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
    covers `turso.test.mjs`, `execute-egress.test.mjs`, `idempotency.test.mjs`, and
    `cost.test.mjs` scenarios.
 7. **Switch interactive transactions.** `TransactionOwnerCore` becomes the effect executor for
-   `interactive`; `engine.ts` begin and commands run the `request` kind; legacy-record reader.
-   The TypeScript decision path remains only as the harness's reference. Smoke.
+   `interactive`; `engine.ts` begin and commands run the `request` kind; old-format records are
+   discarded; `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` is added unless pull request 0 added it. The
+   TypeScript decision path remains only as the harness's reference. Smoke.
 8. **Switch atomic execution.** `engine.ts` execute and the owner's atomic input run the
    machine. Smoke.
 9. **Delete.** The TypeScript decision code: the decision parts of `transaction-owner.ts`,
    `commit-checks.ts` (except what the hook adapter needs), `idempotency.ts`, the decision parts
    of `turso.ts` (`executeSealedEnvelope`, `executeSealedOnTransaction`,
    `enforceCumulativeLimits`, result shaping), `cost.ts` `evaluate` and
-   `estimateSealedOnTransaction`, `driverArgs`' namespace check; the differential harness (the
-   transcripts replace it); the legacy reader after one release. In Rust:
+   `estimateSealedOnTransaction`, `driverArgs`' namespace check; the TypeScript side of the
+   identity gate; the differential harness (the transcripts replace it). In Rust:
    `execute_checked_transaction`, `TransactionFactory`, `TransactionSession`, `CommitCheck`,
    `CheckDecision`, `ReadOnlyCallback`, `CallbackError`, `TransactionError`, and
    `Gateway::execute_transactional`; the `policysql-turso` tests that use them move to the
@@ -523,11 +640,14 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
 
 - **Properties of `step`** (with `proptest` as a dev dependency), over random event sequences
   generated from a model of the engine and adversarial inputs:
-  - at most one `Commit` per transaction, ever; none after a terminal phase, after expiry,
+  - at most one `Commit` per interactive transaction, ever, and per atomic owner execution (one
+    database transaction; a keyed retry is a new execution whose duplicate the idempotency row
+    prevents); none after a terminal phase, after expiry,
     without a preceding `Persisted` for `committing`, without every triggered check allowed in
     the current volatile state, or without a `BindingChecked { allowed: true }` after the last
     validator;
-  - a reply says committed only after `Committed`;
+  - a reply says committed only after `Committed`, and after `Committed` no reply says expired,
+    failed, or rolled back;
   - a reply is a definite rejection of a commit only if no `Commit` was emitted or the outcome
     was `not_committed`;
   - duplicated, reordered, and stale outcome events never produce `Commit`, and never panic;
@@ -535,8 +655,9 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
     emitted;
   - a second commit with the same digest replays, with a different payload conflicts;
   - tampered durable state (byte mutations of valid states, field mutations, other owners'
-    states, legacy states) is either rejected by the fail-closed rule or behaves as some valid
-    state; it never yields a `Commit` that the untampered state would not;
+    states, old-format records) is either discarded by the fail-closed rule or behaves as some
+    valid state; it never yields a `Commit` that the untampered state would not, and a commit
+    against a discarded record always gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`;
   - every reachable state is within its bounds; at most one awaited effect per lane and one on
     the connection; every handle is released on every path;
   - `step` is deterministic: the same inputs give the same output bytes.
@@ -577,17 +698,28 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
   determines; the engine waits, persists, keeps timers, and translates. ADR 0011's statement is
   true.
 - The owner store holds no session values, plans, or check lists.
-- ADR 0007 is kept in two places where it is not today: a lost owner during commit and a commit
-  transport error are reported as unknown rather than as a rejection or `failed`.
+- ADR 0007 is kept in places where it is not today: a failure between COMMIT and the terminal
+  record, an expiry during COMMIT, and a commit transport error are reported as
+  `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` rather than as a rejection or `failed`.
+- One-time beta incompatibility at the switch-over: records written before it are discarded.
 - Clients see `POLICYSQL_IDEMPOTENCY_CONFLICT` from both atomic paths, and a commit that expires
   on its validator is answered at expiry.
-- Costs: a new crate and ABI method, `sha2` and `proptest`, a WASM call per effect outcome, and
-  durable writes at `committing` in addition to the terminal write.
+- Costs: a new crate and ABI method, a new public code, `sha2`, `proptest`, and a scheduled
+  `cargo fuzz` job (all approved for this stage), a WASM call per effect outcome, and durable
+  writes at `committing` in addition to the terminal write.
 
 ## Open questions
 
-- The public form of the outcome-unknown reply: an existing code that the client treats as
-  uncertain (503 `POLICYSQL_DATABASE_UNAVAILABLE`) or a new 503 code
-  `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` in `website/api/errors.md`.
-- Whether `publicConfig.limits` keeps overriding advertised limits once they come from the
-  runtime, or is removed.
+- **`publicConfig.limits`** (undecided). Today `presenters.ts` (81) merges `publicConfig.limits`
+  over `LIMITS` for the capabilities response only. An override therefore changes the advertised
+  values (`maxStatements`, `maxRows`, `maxResultBytes`, and through them
+  `maxCallbackQueriesPerCheck` and `maxCallbackRowsPerCheck`), while the runtime enforces the
+  values it was constructed with. Once pull request 3 makes the runtime the single source,
+  either the override is removed (capabilities always report what is enforced), or it stays and
+  is checked to be no larger than the enforced value. Pull request 3 implements whichever is
+  decided; until then it keeps today's behavior.
+
+Decided during review: the new code `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`; a replay identity
+without the snapshot; the `sha2`, `proptest`, and `cargo fuzz` dependencies; and discarding
+old-format records instead of reading them. Whether to take pull request 0 is the maintainer's
+choice.

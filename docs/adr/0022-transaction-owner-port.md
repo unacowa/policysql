@@ -43,6 +43,10 @@ Contract every adapter keeps (the conformance suite checks it):
   the loss happened while a commit waited on its validator, stays `validating` until the timer
   expires it.
 - Inputs and replies cross a data boundary; the owner validates every input as untrusted.
+- The store is private to its owner: only the live owner of a name reads or writes that name's
+  store, through the adapter. No conformance test can observe this, so it is stated as an
+  obligation; [ADR 0024](0024-transaction-step-machine.md) relies on it instead of
+  authenticating the stored state.
 
 Serialization stays in the core: client commands run one at a time in the order they reach
 the owner, callback queries likewise on a second lane (they arrive while a commit on the first
