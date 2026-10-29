@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::prelude::*;
 
-const ABI_VERSION: u32 = 3;
+const ABI_VERSION: u32 = 4;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -149,9 +149,7 @@ struct CommitCheckDto {
     id: String,
     triggered_by: Vec<String>,
     role: Option<String>,
-    url_env: String,
     timeout_ms: u64,
-    hmac_secret_env: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -854,9 +852,7 @@ impl PolicySqlRuntime {
                     .map(|resource| resource.name.as_str().to_owned())
                     .collect(),
                 role: check.role.as_ref().map(|role| role.as_str().to_owned()),
-                url_env: check.url_env.clone(),
                 timeout_ms: check.timeout_ms,
-                hmac_secret_env: check.hmac_secret_env.clone(),
             })
             .collect();
         let retain = (endpoint == EndpointPermission::Execute).then(|| compiled.clone());
@@ -2593,7 +2589,7 @@ resources:
     #[test]
     fn compile_exports_activated_commit_check_and_mutation_resource() {
         let policy = format!(
-            "{POLICY}\ncommit_checks:\n  project_consistency:\n    triggered_by: [projects]\n    role: member\n    hook:\n      url_env: PROJECT_CHECK_URL\n      timeout_ms: 1000\n      hmac_secret_env: PROJECT_CHECK_SECRET\n"
+            "{POLICY}\ncommit_checks:\n  project_consistency:\n    triggered_by: [projects]\n    role: member\n    hook:\n      timeout_ms: 1000\n"
         );
         let runtime = PolicySqlRuntime::new(
             CATALOG,
@@ -2614,7 +2610,10 @@ resources:
         assert_eq!(compiled["statements"][0]["resource"], "projects");
         assert_eq!(compiled["commitChecks"][0]["id"], "project_consistency");
         assert_eq!(compiled["commitChecks"][0]["triggeredBy"][0], "projects");
-        assert_eq!(compiled["commitChecks"][0]["urlEnv"], "PROJECT_CHECK_URL");
+        assert_eq!(compiled["commitChecks"][0]["timeoutMs"], 1000);
+        // Validator URL and secret are wrapper configuration keyed by check id (ADR 0021).
+        assert!(compiled["commitChecks"][0].get("urlEnv").is_none());
+        assert!(compiled["commitChecks"][0].get("hmacSecretEnv").is_none());
     }
 
     #[test]
