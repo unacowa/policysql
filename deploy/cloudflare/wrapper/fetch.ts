@@ -31,9 +31,12 @@ export const createWrapperFetch = (
       if ("response" in outcome) return outcome.response;
       session = outcome.session;
     }
-    return app.fetch(request, env, context, { database: binding(env), session });
+    // The library reads no platform header; this wrapper passes Cloudflare's ray id.
+    return app.fetch(request, env, context, { database: binding(env), session, requestId });
   }, CLIENT_RATE_LIMIT);
-  const callback = withRateLimit((request, env, context) => app.fetchCallback(request, env, context), CALLBACK_RATE_LIMIT);
+  const callback = withRateLimit((request, env, context) => app.fetchCallback(request, env, context, {
+    requestId: request.headers.get("cf-ray") ?? crypto.randomUUID(),
+  }), CALLBACK_RATE_LIMIT);
   return (request, env, context) => new URL(request.url).pathname.startsWith(COMMIT_CHECK_CALLBACK)
     ? callback(request, env, context)
     : client(request, env, context);

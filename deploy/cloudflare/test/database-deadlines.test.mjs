@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { checkDatabaseBinding, databaseTransportFactory } from "../src/database.ts";
 import { testBinding } from "./helpers/database.mjs";
-import { HttpError } from "../src/errors.ts";
+import { EngineError } from "../src/errors.ts";
 
 for (const stage of ["check", "connect"]) {
   test(`pending provider ${stage} uses the remaining transaction budget`, async (t) => {
@@ -21,7 +21,7 @@ for (const stage of ["check", "connect"]) {
       [stage]: () => { calls++; return new Promise((resolve) => { finish = resolve; }); },
     };
     const transport = databaseTransportFactory(provider, testBinding(), 1_024, Date.now() + 80);
-    await assert.rejects(transport("deadline"), (error) => error.status === 504 && error.code === "POLICYSQL_DATABASE_TIMEOUT");
+    await assert.rejects(transport("deadline"), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
     assert.equal(calls, 1);
     assert.ok(waits.length > 0 && waits.every((wait) => wait > 0 && wait <= 80));
     // Resolving a timed-out provider must not resume acquisition or open a transaction.
@@ -39,7 +39,7 @@ test("an expired parent deadline rejects before invoking the provider", async ()
 
 test("provider-thrown deadline errors cannot expose provider error text", async () => {
   const provider = {
-    check() { throw new HttpError(504, "POLICYSQL_DATABASE_TIMEOUT", "private-credential-detail"); },
+    check() { throw new EngineError("POLICYSQL_DATABASE_TIMEOUT", "private-credential-detail"); },
     connect() { assert.fail("must not connect"); },
   };
   await assert.rejects(checkDatabaseBinding(provider, testBinding(), "test-snapshot", Date.now() + 1000), (error) => {

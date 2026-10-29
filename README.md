@@ -102,8 +102,15 @@ try {
   if (error instanceof JwtAuthenticationError) return createErrorResponse(401, error.code, error.message);
   throw error;
 }
-return worker.app.fetch(request, env, context, { database, session });
+return worker.app.fetch(request, env, context, { database, session, requestId: request.headers.get("cf-ray") ?? undefined });
 ```
+
+The engine exposes operations, not HTTP: `createEngine(...)` (or `worker.engine(env)`) returns
+`execute`, `explain`, `begin`, `statement`, `commit`, `rollback`, `catalog`, `capabilities`,
+and `callbackQuery`, each returning a value or `{ code, message, path }`. `worker.app` is the
+library's HTTP adapter over the same engine, the only place with the code-to-status table. See
+[ADR 0023](docs/adr/0023-operations-api-and-http-adapter.md) and the
+[in-process example](examples/in-process/README.md).
 
 The library never sees a credential and never returns 401; it validates the trusted session
 (`principal`, `subject`, `roles`, `defaultRole`, `access`, `session`) in Rust and applies

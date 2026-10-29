@@ -7,8 +7,21 @@ import { runtimeBytesLimit } from "./binary.ts";
 import { createWorkerEntrypoints } from "./worker.ts";
 import type { PolicySqlDeployment } from "./worker.ts";
 
+// The engine's operations (ADR 0019 stage 3, ADR 0023) and the HTTP inbound adapter.
+// `createEngine` is the entry for non-HTTP callers; `createApp` is the engine with the
+// canonical HTTP mapping; `createHttpAdapter` puts that mapping over a given engine.
 export { createApp } from "./app.ts";
 export type { PolicySqlApp } from "./app.ts";
+export { checkRequestContext, createEngine } from "./engine.ts";
+export type {
+  BeginInput, BodyText, CallbackContext, CallbackQueryInput, ExecuteInput, ExplainInput, OperationFailure,
+  OperationResult, PolicySqlEngine, SnapshotInput, SnapshotResult, TransactionCommandInput,
+} from "./engine.ts";
+export { EngineError } from "./errors.ts";
+export type { OperationError } from "./errors.ts";
+export { createHttpAdapter } from "./http/adapter.ts";
+export type { PolicySqlHttpApp } from "./http/adapter.ts";
+export { ERROR_STATUS, statusFor } from "./http/status.ts";
 export { TransactionOwnerCore } from "./transaction-owner.ts";
 export type { PolicySqlDeployment, PolicySqlWorkerApp } from "./worker.ts";
 export type { TransactionOwnerDependencies } from "./transaction-owner.ts";
@@ -25,8 +38,8 @@ export {
 export { ConfigError, validateConfig } from "./engine-config.ts";
 export type { CommitCheckEndpoint, CostCatalog, PolicySqlConfig } from "./engine-config.ts";
 export { TursoHttpTransport } from "./turso-http.ts";
-export { createErrorResponse } from "./errors.ts";
-export type { ErrorResponseOptions } from "./errors.ts";
+export { createErrorResponse } from "./http/responses.ts";
+export type { ErrorResponseOptions } from "./http/responses.ts";
 // Optional identity adapter for wrappers. The engine never imports it (ADR 0019).
 export { createJwtSessionVerifier, JwtAuthenticationError } from "./adapters/jwt.ts";
 export type { JwtSessionVerifierOptions } from "./adapters/jwt.ts";
@@ -36,7 +49,6 @@ export type {
 } from "./database.ts";
 export type {
   AppDependencies,
-  AppEnv,
   AuthContext,
   RequestContext,
   TrustedSession,

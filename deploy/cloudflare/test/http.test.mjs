@@ -1,25 +1,76 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readJsonBody } from "../src/http.ts";
+import { MAX_BODY_BYTES, parseBodyText } from "../src/request-body.ts";
+import { readBodyText } from "../src/http/body.ts";
 
-const request = (body) => new Request("https://worker.test", {
+const request = (body, headers = { "content-type": "application/json" }) => new Request("https://worker.test", {
   method: "POST",
-  headers: { "content-type": "application/json" },
+  headers,
   body,
 });
+const code = (expected) => (error) => error.code === expected;
 
+// Transport-independent checks: the engine applies them to every transport's text.
 test("rejects duplicate keys including escaped equivalent keys", async () => {
-  await assert.rejects(
-    readJsonBody(request('{"params":{"id":1,"id":2}}')),
-    (error) => error.code === "POLICYSQL_INVALID_REQUEST",
-  );
-  await assert.rejects(
-    readJsonBody(request('{"params":{"id":1,"\\u0069d":2}}')),
-    (error) => error.code === "POLICYSQL_INVALID_REQUEST",
-  );
+  await assert.rejects(parseBodyText('{"params":{"id":1,"id":2}}'), code("POLICYSQL_INVALID_REQUEST"));
+  await assert.rejects(parseBodyText('{"params":{"id":1,"\\u0069d":2}}'), code("POLICYSQL_INVALID_REQUEST"));
 });
 
 test("accepts nested arrays and objects without duplicate keys", async () => {
-  const result = await readJsonBody(request('{"a":[1,true,null,{"b":"x"}]}'));
+  const result = await parseBodyText('{"a":[1,true,null,{"b":"x"}]}');
   assert.equal(result.value.a[3].b, "x");
+});
+
+test("a lone surrogate has no UTF-8 form and is rejected; a surrogate pair is accepted", async () => {
+  await assert.rejects(parseBodyText('{"a":"\ud800"}'), (error) =>
+    error.code === "POLICYSQL_INVALID_REQUEST" && error.message === "Request body is not valid UTF-8.");
+  await assert.rejects(parseBodyText('{"a":"\udc00x"}'), code("POLICYSQL_INVALID_REQUEST"));
+  assert.equal((await parseBodyText('{"a":"😀"}')).value.a, "\u{1f600}");
+});
+
+test("the body limit counts UTF-8 bytes, not UTF-16 units", async () => {
+  const fits = `{"a":"${"x".repeat(MAX_BODY_BYTES - 8)}"}`;
+  assert.equal((await parseBodyText(fits)).text.length, MAX_BODY_BYTES);
+  // Under the limit in UTF-16 units, over it in UTF-8 bytes.
+  const wide = `{"a":"${"é".repeat(MAX_BODY_BYTES / 2)}"}`;
+  assert.ok(wide.length < MAX_BODY_BYTES);
+  await assert.rejects(parseBodyText(wide), code("POLICYSQL_REQUEST_TOO_LARGE"));
+});
+
+test("a deferred body is read only when the operation reaches it, and its error is the operation's", async () => {
+  let reads = 0;
+  assert.equal((await parseBodyText(async () => { reads++; return "{}"; })).text, "{}");
+  assert.equal(reads, 1);
+  await assert.rejects(parseBodyText(async () => { throw Object.assign(new Error("x"), { code: "POLICYSQL_REQUEST_TOO_LARGE" }); }),
+    code("POLICYSQL_REQUEST_TOO_LARGE"));
+  await assert.rejects(parseBodyText(undefined), code("POLICYSQL_INVALID_REQUEST"));
+});
+
+// HTTP framing: the adapter decodes bytes strictly and bounds the stream.
+test("HTTP body framing: media type, declared and streamed size, strict UTF-8", async () => {
+  await assert.rejects(readBodyText(request("{}", { "content-type": "text/plain" })), code("POLICYSQL_UNSUPPORTED_MEDIA_TYPE"));
+  await assert.rejects(readBodyText(request("{}", { "content-type": "application/json", "content-length": String(MAX_BODY_BYTES + 1) })),
+    code("POLICYSQL_REQUEST_TOO_LARGE"));
+  await assert.rejects(readBodyText(request("x".repeat(MAX_BODY_BYTES + 1))), code("POLICYSQL_REQUEST_TOO_LARGE"));
+  await assert.rejects(readBodyText(request(new Uint8Array([0x7b, 0xff, 0x7d]))), (error) =>
+    error.code === "POLICYSQL_INVALID_REQUEST" && error.message === "Request body is not valid UTF-8.");
+  assert.equal(await readBodyText(request('{"a":"é"}', { "content-type": "Application/JSON; charset=utf-8" })), '{"a":"é"}');
+});
+
+test("one leading byte order mark is accepted the same way over HTTP and directly, and counts toward the limit", async () => {
+  const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+  const bytes = (text) => new Uint8Array([...bom, ...new TextEncoder().encode(text)]);
+  // HTTP keeps the BOM in the text; the engine removes exactly one, for every transport.
+  const overHttp = await readBodyText(request(bytes("{}")));
+  assert.equal(overHttp, "﻿{}");
+  assert.deepEqual((await parseBodyText(overHttp)).value, {});
+  assert.equal((await parseBodyText("﻿{}")).text, "{}");
+  await assert.rejects(parseBodyText("﻿﻿{}"), code("POLICYSQL_INVALID_REQUEST"));
+  await assert.rejects(parseBodyText(await readBodyText(request(new Uint8Array([...bom, ...bytes("{}")])))), code("POLICYSQL_INVALID_REQUEST"));
+  // The BOM's 3 bytes count on both sides: limit - 2 bytes of JSON plus a BOM is over.
+  const json = `"${"x".repeat(MAX_BODY_BYTES - 4)}"`;
+  assert.equal(new TextEncoder().encode(json).byteLength, MAX_BODY_BYTES - 2);
+  await assert.rejects(parseBodyText(`﻿${json}`), code("POLICYSQL_REQUEST_TOO_LARGE"));
+  await assert.rejects(readBodyText(request(bytes(json))), code("POLICYSQL_REQUEST_TOO_LARGE"));
+  assert.equal((await parseBodyText(json)).text, json);
 });

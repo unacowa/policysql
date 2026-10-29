@@ -1,4 +1,4 @@
-import { HttpError, binaryLimitExceeded } from "./errors.ts";
+import { EngineError, binaryLimitExceeded } from "./errors.ts";
 import { remainingDatabaseTime } from "./database.ts";
 import type { DatabaseTransportOptions } from "./database.ts";
 import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.ts";
@@ -7,7 +7,7 @@ import type { OutboundFetch } from "./redirects.ts";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
 const databaseFailure = () =>
-  new HttpError(503, "POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
+  new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
 
 // `maxBytes` comes from the runtime through DatabaseTransportOptions. Without it the
 // transport validates BLOB encoding only, inside the bounded HTTP response, and
@@ -23,7 +23,7 @@ const encodeValue = (value, maxBytes: number) => {
   if (value instanceof Uint8Array) {
     return { type: "blob", base64: encodeBlob(value, maxBytes) };
   }
-  throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+  throw new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
 };
 
 // Hrana may omit padding in database BLOB responses. Keep that protocol rule
@@ -142,7 +142,7 @@ export class TursoHttpTransport {
       signal: AbortSignal.timeout(timeoutMs),
     }, this.fetchImpl).catch((error) => {
       if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-        throw new HttpError(504, "POLICYSQL_DATABASE_TIMEOUT", "The database operation timed out.");
+        throw new EngineError("POLICYSQL_DATABASE_TIMEOUT", "The database operation timed out.");
       }
       throw databaseFailure();
     });

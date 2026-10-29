@@ -1,8 +1,8 @@
-import { HttpError, binaryLimitExceeded } from "./errors.ts";
+import { EngineError, binaryLimitExceeded } from "./errors.ts";
 import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.ts";
 
-const internal = () => new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
-const mismatch = () => new HttpError(422, "POLICYSQL_SCHEMA_MISMATCH", "The database result does not match the compiled logical contract.");
+const internal = () => new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
+const mismatch = () => new EngineError("POLICYSQL_SCHEMA_MISMATCH", "The database result does not match the compiled logical contract.");
 
 // `maxBytes` is always the loaded runtime's `max_bytes_per_value`. The adapter holds
 // no copy, so a different Rust limit cannot turn valid WASM output into a 500.

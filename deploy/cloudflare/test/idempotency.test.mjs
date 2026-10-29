@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { testBinding } from "./helpers/database.mjs";
 import { authFingerprint, mutationIdempotency } from "../src/idempotency.ts";
 
-const keyed = () => new Request("https://worker.test", { headers: { "idempotency-key": "request-key-0001" } });
+const keyed = () => "request-key-0001";
 
 test("binds the idempotency digest to principal, session and canonical payload", async () => {
   const auth = { principal: "https://issuer.test:user_1", subject: "user_1", role: "member", session: { tenant_id: "tenant_a" } };

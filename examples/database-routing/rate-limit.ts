@@ -91,17 +91,21 @@ export const createRateLimitedFetch = <Env extends RateLimitEnv>(
   authenticate: Authenticate<Env>,
 ): FetchHandler<Env> => {
   const client = withRateLimit<Env>(async (request, env, context) => {
+    // The library reads no platform header; this wrapper uses Cloudflare's ray id as the
+    // request id for its own errors and for the library's.
+    const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
     let session;
     if (new URL(request.url).pathname !== "/healthz") {
-      const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
       const outcome = await authenticateRequest(authenticate, request, env, requestId, errorResponse);
       if ("response" in outcome) return outcome.response;
       session = outcome.session;
     }
-    return app.fetch(request, env, context, { database: binding(env), session });
+    return app.fetch(request, env, context, { database: binding(env), session, requestId });
   }, CLIENT_RATE_LIMIT, errorResponse);
   const callback = withRateLimit<Env>(
-    (request, env, context) => app.fetchCallback(request, env, context), CALLBACK_RATE_LIMIT, errorResponse,
+    (request, env, context) => app.fetchCallback(request, env, context, {
+      requestId: request.headers.get("cf-ray") ?? crypto.randomUUID(),
+    }), CALLBACK_RATE_LIMIT, errorResponse,
   );
   return (request, env, context) => new URL(request.url).pathname.startsWith("/v1/commit-checks/")
     ? callback(request, env, context)

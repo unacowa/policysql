@@ -22,7 +22,9 @@ Two sides, both plain interfaces:
 - **Routing.** `TransactionOwnerPort.route(name)` returns a `TransactionOwnerHandle` for the
   owner of `name` (`tx_` + 32 hex, from the transaction or validation id). The handle is typed:
   `begin`, `atomic`, `command(kind)`, and `callbackQuery`, each taking JSON data and a request
-  id and returning `{ status, body }`, which the route sends to the client unchanged.
+  id and returning `{ status, body }`, which the route sends to the client unchanged. (Since
+  [ADR 0023](0023-operations-api-and-http-adapter.md) the reply is `{ ok, value }` or
+  `{ ok, error }`, without a status.)
 - **Owner-side facilities.** An adapter creates one `TransactionOwnerCore(facilities,
   dependencies)` per live owner. `facilities` are `store` (`get` / `put`, durable, values
   copied), `timer` (`schedule(atMs)`, one per owner, a later call replaces the earlier; on

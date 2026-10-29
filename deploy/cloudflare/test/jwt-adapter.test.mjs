@@ -5,7 +5,7 @@ import { harness } from "./helpers/routing.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { createErrorResponse } from "../src/errors.ts";
+import { createErrorResponse } from "../src/http/responses.ts";
 import { createJwtSessionVerifier, JwtAuthenticationError } from "../src/adapters/jwt.ts";
 import { createWrapperFetch } from "../wrapper/fetch.ts";
 import { createRateLimitedFetch } from "../../../examples/database-routing/rate-limit.ts";

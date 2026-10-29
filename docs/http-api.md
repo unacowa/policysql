@@ -8,6 +8,25 @@ same endpoints, JSON representations and transaction protocol with any conformin
 SQL dialect, supported features and limits remain governed by the endpoint's backend
 profile and published Capabilities.
 
+## The HTTP mapping
+
+This protocol is one mapping of the engine's operations (`execute`, `explain`, `begin`,
+`statement`, `commit`, `rollback`, `catalog`, `capabilities`, and the validator's
+`callbackQuery`); a non-HTTP caller invokes the same operations directly
+([ADR 0023](adr/0023-operations-api-and-http-adapter.md)). The library's HTTP adapter is the
+canonical implementation. A deployment that maps HTTP itself must pass the conformance suite
+exported as `@unacowa/policysql/cloudflare/http-conformance` (`runHttpConformance`).
+
+Every JSON response has `Cache-Control: no-store` (Catalog and Capabilities:
+`private, max-age=0, must-revalidate` with an `ETag`), `Content-Type: application/json;
+charset=utf-8`, and `X-Content-Type-Options: nosniff`. The `requestId` in bodies is the
+wrapper's correlation id or one the adapter generates; the library reads no platform header
+for it.
+
+A request body may start with one UTF-8 byte order mark, which is removed; its 3 bytes count
+toward the 1 MiB limit, and a second one makes the body invalid JSON. The same rule applies
+to every transport, because the engine applies it to the decoded text.
+
 ## Authentication
 
 Authentication is deployment-defined. The deployment's wrapper authenticates every client
@@ -236,6 +255,12 @@ Each interactive statement request is scalar and sequenced because it depends on
   }
 }
 ```
+
+Each code has exactly one HTTP status. The table of codes and statuses in
+[`website/api/errors.md`](../website/api/errors.md) is canonical; the HTTP adapter
+(`deploy/cloudflare/src/http/status.ts`) implements exactly that table, and a test checks that
+every code the library can return is in it
+([ADR 0023](adr/0023-operations-api-and-http-adapter.md)). A code outside the table is served as 500.
 
 Errors do not reveal hidden columns, policies, credentials, protected SQL, or raw remote database errors.
 The optional development trace is returned only after successful execution and never changes this

@@ -303,3 +303,17 @@ test("a frozen unknown error survives failed explicit confirmation", async () =>
   await assert.rejects(tx.commit(), error => error === original);
   await tx.dispose();
 });
+
+test("rejection pairs follow the public status table: 403 PRESET_COLUMN is definite, never-emitted codes are not", async () => {
+  const preset = errorBody("POLICYSQL_PRESET_COLUMN");
+  const h = setup({}, () => async () => ({ status: 403, body: preset }));
+  await assert.rejects(h.client.execute(select), error =>
+    !(error instanceof PolicySqlOutcomeUnknownError) && error.code === "POLICYSQL_PRESET_COLUMN" && error.status === 403);
+  // The former 400 pairing, and codes no server returns, cannot establish an outcome.
+  for (const [status, code] of [[400, "POLICYSQL_PRESET_COLUMN"], [403, "POLICYSQL_ACCESS_DENIED"],
+    [403, "POLICYSQL_STATEMENT_REJECTED"], [412, "POLICYSQL_SNAPSHOT_MISMATCH"]]) {
+    const body = errorBody(code);
+    const u = setup({}, () => async () => ({ status, body }));
+    await assert.rejects(u.client.execute(select), error => error instanceof PolicySqlOutcomeUnknownError, code);
+  }
+});

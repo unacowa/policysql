@@ -103,8 +103,8 @@ test("missing DB binding in an internal owner command fails before a connection 
     transactionId: `tx_${"a".repeat(32)}`, authFingerprint: "b".repeat(64), startFingerprint: "c".repeat(64),
     mode: "read", auth: {}, snapshot: h.runtime.snapshot,
   }, "req");
-  assert.equal(reply.status, 500);
-  assert.equal(reply.body.error.code, "POLICYSQL_DATABASE_REQUIRED");
+  assert.equal(reply.ok, false);
+  assert.equal(reply.error.code, "POLICYSQL_DATABASE_REQUIRED");
   assert.equal(h.counts().connects, 0);
 });
 
@@ -387,7 +387,8 @@ test("Worker/DO provider configuration mismatch fails before connecting", async 
     transactionId: message.transactionId, authFingerprint: message.authFingerprint, startFingerprint: message.startFingerprint,
     mode: "read", auth: message.auth, databaseBinding: message.databaseBinding, snapshot: message.snapshot,
   }, "req");
-  assert.equal(reply.status, 403);
+  assert.equal(reply.ok, false);
+  assert.equal(reply.error.code, "POLICYSQL_DATABASE_BINDING_REJECTED");
 });
 
 for (const hooks of [false, true]) {
@@ -500,7 +501,7 @@ test("a slow commit authorization cannot extend the transaction deadline", async
 test("database identity scopes retries while generation/snapshot changes conflict instead of making a fresh key", async () => {
   const binding = { version: 1, scope: "test:tenant_a", databaseId: "db_a", generation: "1", snapshot: "snapshot_1" };
   const auth = { principal: "issuer:u", subject: "u", role: "member", session: { tenant_id: "a" } };
-  const request = new Request("https://worker.test", { headers: { "idempotency-key": "same-idempotency-key" } });
+  const request = "same-idempotency-key";
   const digest = (value) => requestIdempotency(request, auth, envelope(read), "execute", value);
   const first = await digest(binding);
   for (const changed of [{ ...binding, generation: "2" }, { ...binding, snapshot: "snapshot_2" }]) {

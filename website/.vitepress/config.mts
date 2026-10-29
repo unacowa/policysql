@@ -86,6 +86,7 @@ export default defineConfig({
         items: [
           { text: 'ポリシー管理', link: '/admin/policies' },
           { text: 'ラッパーからDBを渡す', link: '/admin/database-routing' },
+          { text: 'HTTPを使わない入口', link: '/admin/operations-api' },
           { text: 'CatalogとCapabilities', link: '/reference/catalog-and-capabilities' }
         ]
       },

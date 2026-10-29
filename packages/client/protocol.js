@@ -96,27 +96,28 @@ export const readResponse = (response) => {
 
 // Only documented code/status pairs establish rejection. Status alone, unknown
 // errors and exceptions thrown by a Transport cannot establish execution outcome.
-const rejections = new Map([
+// Every pair is the one in the public status table (website/api/errors.md); a server test
+// checks that.
+export const REJECTIONS = new Map([
   [401, ["UNAUTHENTICATED", "AUTHENTICATION_FAILED"]],
-  [403, ["FORBIDDEN_ACCESS", "ACCESS_DENIED", "MISSING_POLICY", "FORBIDDEN_OPERATION", "FORBIDDEN_COLUMN",
-    "FORBIDDEN_COLUMN_CONTEXT", "STATEMENT_REJECTED", "TRANSACTION_MODE_VIOLATION"]],
+  [403, ["FORBIDDEN_ACCESS", "MISSING_POLICY", "FORBIDDEN_OPERATION", "FORBIDDEN_COLUMN",
+    "FORBIDDEN_COLUMN_CONTEXT", "PRESET_COLUMN", "TRANSACTION_MODE_VIOLATION"]],
   [400, ["INVALID_REQUEST", "INVALID_SQL", "MULTIPLE_STATEMENTS", "UNSUPPORTED_SQL", "DUPLICATE_RESULT_COLUMN",
-    "INVALID_PARAMETER", "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER", "PRESET_COLUMN"]],
+    "INVALID_PARAMETER", "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER"]],
   [409, ["STALE_OPERATION", "IDEMPOTENCY_CONFLICT", "TRANSACTION_CONFLICT", "TRANSACTION_UNAVAILABLE", "COMMIT_CHECK_REJECTED"]],
-  [412, ["SNAPSHOT_MISMATCH"]],
   [413, ["LIMIT_EXCEEDED"]],
   [422, ["EXPECTATION_FAILED", "SCHEMA_MISMATCH"]],
   [429, ["TRANSACTION_LIMIT_EXCEEDED", "USAGE_BUDGET_EXCEEDED"]],
 ]);
 
 const sqlRejections = new Set([
-  "MISSING_POLICY", "FORBIDDEN_OPERATION", "FORBIDDEN_COLUMN", "FORBIDDEN_COLUMN_CONTEXT", "STATEMENT_REJECTED",
+  "MISSING_POLICY", "FORBIDDEN_OPERATION", "FORBIDDEN_COLUMN", "FORBIDDEN_COLUMN_CONTEXT",
   "INVALID_SQL", "MULTIPLE_STATEMENTS", "UNSUPPORTED_SQL", "DUPLICATE_RESULT_COLUMN", "INVALID_PARAMETER",
   "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER", "PRESET_COLUMN", "EXPECTATION_FAILED", "SCHEMA_MISMATCH", "USAGE_BUDGET_EXCEEDED",
 ]);
 const rejectsCommand = ({ error, status }, kind) => {
   const code = error.code.slice("POLICYSQL_".length);
-  if (!rejections.get(status)?.includes(code)) return false;
+  if (!REJECTIONS.get(status)?.includes(code)) return false;
   if (sqlRejections.has(code)) return kind === "execute" || kind === "statement";
   if (code === "IDEMPOTENCY_CONFLICT") return kind === "execute";
   if (code === "COMMIT_CHECK_REJECTED") return kind === "execute" || kind === "commit";

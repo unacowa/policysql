@@ -1,4 +1,4 @@
-import { HttpError, wasmError } from "./errors.ts";
+import { internalError, wasmError } from "./errors.ts";
 import type { AuthContext } from "./types.ts";
 
 export type RequiredAccess = "catalog" | "explain" | "execute";
@@ -7,21 +7,7 @@ type SessionRuntime = {
   authorize_session_json(sessionJson: string, requestedRole: string | undefined, requiredAccess: string): string;
 };
 
-const internal = () => new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
-
-/**
- * Reads the optional `PolicySQL-Role` header. Only the HTTP framing is checked here: a
- * repeated header (joined with a comma) is ambiguous. Whether the role is allowed is
- * decided by core.
- */
-export const requestedRole = (headers: Headers): string | undefined => {
-  const value = headers.get("policysql-role");
-  if (value === null) return undefined;
-  if (value.includes(",")) {
-    throw new HttpError(400, "POLICYSQL_INVALID_REQUEST", "PolicySQL-Role must be a single value.");
-  }
-  return value;
-};
+const internal = internalError;
 
 /**
  * Passes the wrapper's trusted session to core, which validates its shape, selects the

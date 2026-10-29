@@ -1,4 +1,4 @@
-import { HttpError } from "./errors.ts";
+import { EngineError } from "./errors.ts";
 import { stableJson } from "./idempotency.ts";
 import { bytesLimit } from "./binary.ts";
 
@@ -51,12 +51,12 @@ export interface DatabaseProvider {
   connect(binding: DatabaseBinding, requestId: string): DatabaseTransport | Promise<DatabaseTransport>;
 }
 
-export const databaseRequired = () => new HttpError(500, "POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
+export const databaseRequired = () => new EngineError("POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
 
-const denied = () => new HttpError(403, "POLICYSQL_DATABASE_BINDING_REJECTED", "The database binding is not permitted.");
-const unavailable = () => new HttpError(503, "POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
-const stale = () => new HttpError(409, "POLICYSQL_STALE_OPERATION", "The operation was compiled for a different active snapshot.");
-const timedOut = () => new HttpError(504, "POLICYSQL_DATABASE_TIMEOUT", "The database operation timed out.");
+const denied = () => new EngineError("POLICYSQL_DATABASE_BINDING_REJECTED", "The database binding is not permitted.");
+const unavailable = () => new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
+const stale = () => new EngineError("POLICYSQL_STALE_OPERATION", "The operation was compiled for a different active snapshot.");
+const timedOut = () => new EngineError("POLICYSQL_DATABASE_TIMEOUT", "The database operation timed out.");
 
 export const remainingDatabaseTime = (deadlineMs?: number) => {
   if (deadlineMs === undefined) return Number.POSITIVE_INFINITY;

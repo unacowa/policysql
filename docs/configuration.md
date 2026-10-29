@@ -20,8 +20,14 @@ Any other key is rejected, so a misspelled or legacy setting cannot silently fal
 ## Where it goes
 
 ```ts
-// Lower level: build the app and give each transaction owner its facilities yourself.
+// Engine operations without HTTP (ADR 0023): in-process calls or a service binding.
+const engine = createEngine({ getRuntime, database, config, transactionOwners });
+const result = await engine.execute({ bodyText, idempotencyKey, role }, { database: binding, session, requestId });
+
+// The engine with the canonical HTTP mapping; `app.engine` is the same engine.
 const app = createApp({ getRuntime, database, config, transactionOwners });
+// Or put the HTTP mapping over an engine you built: createHttpAdapter(engine).
+const owner = new TransactionOwnerCore(facilities, { getRuntime, database, config });
 const owner = new TransactionOwnerCore(facilities, { getRuntime, database, config });
 
 // Workers: env arrives per request and in the Durable Object constructor, so the
@@ -35,25 +41,28 @@ const worker = createPolicySqlWorker({
   }),
 });
 export const TransactionOwner = durableObjectTransactionOwnerClass(worker.ownerDependencies);
+// A service binding or other non-HTTP entry point on Workers: the same engine as worker.app.
+const engineForEnv = worker.engine(env);
 ```
 
 The transaction owner port is not configuration but a port next to `database`
 ([ADR 0022](adr/0022-transaction-owner-port.md)); `deployment(env)` returns it because on
 Workers it is built from a binding. `TRANSACTION_OWNER` is the reference wrapper's binding
 name, not the library's: the library reads no property of `env`. `createApp`'s
-`app.fetch(request, { database, session }, background?)` takes no `env`;
+`app.fetch(request, { database, session, requestId? }, background?)` takes no `env`;
 `createPolicySqlWorker().app.fetch(request, env, executionContext, context)` passes `env` only
 to `deployment(env)`. `DatabaseProvider.check(binding)` and `connect(binding, requestId)`
 receive no `env`.
 
 ## Validation and failures
 
-- Validated once, at construction (`createApp`, `TransactionOwnerCore`), or with
+- Validated once, at construction (`createEngine`, `createApp`, `TransactionOwnerCore`), or with
   `createPolicySqlWorker` at most once per `env` object, on the first request that carries
   it (a different `env` object is built and validated again), before any runtime, database,
   Durable Object, or validator call. `deployment(env)` should be a pure function of the
   bindings so the Worker and each Durable Object get the same configuration.
-- `createApp` and `TransactionOwnerCore` throw `ConfigError` (a `TypeError`).
+- `createEngine`, `createApp`, and `TransactionOwnerCore` throw `ConfigError` (a `TypeError`).
+  `worker.engine(env)` throws it too, since there is no HTTP response to report it in.
   `createPolicySqlWorker` answers every request with 500 `POLICYSQL_INTERNAL` and logs
   `deployment_config_rejected` with the setting name, or with only the error class when the
   wrapper's own `deployment(env)` threw.

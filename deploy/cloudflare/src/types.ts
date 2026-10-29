@@ -16,7 +16,7 @@ export type TrustedSession = {
   session: Record<string, string>;
 };
 
-/** Per-request input to `app.fetch`, supplied by the wrapper. */
+/** Per-request input to every client operation and to `app.fetch`, supplied by the wrapper. */
 export type RequestContext = {
   database: import("./database.ts").DatabaseBinding;
   /**
@@ -25,7 +25,11 @@ export type RequestContext = {
    * authentication (`/healthz`) do not read it.
    */
   session?: TrustedSession;
-  /** Correlation ID for logs and error bodies. Defaults to `cf-ray` or a fresh UUID. */
+  /**
+   * Correlation ID for logs, results, and error bodies (printable ASCII, 1-128). The library
+   * reads no platform header for it; without it a fresh UUID is used. A Workers wrapper may
+   * pass `cf-ray`.
+   */
   requestId?: string;
 };
 
@@ -64,27 +68,6 @@ export type ExecutionTrace = {
 
 export type ExecutionTraceSink = (trace: ExecutionTrace) => void | Promise<void>;
 
-export type AppVariables = {
-  requestId: string;
-  runtime: PolicySqlRuntime;
-  auth: AuthContext;
-};
-
-export type AppEnv = {
-  // Hono bindings built by `app.fetch` itself; never the platform `env` object.
-  Bindings: {
-    databaseBinding?: import("./database.ts").DatabaseBinding;
-    /** The wrapper's per-request background tasks (ADR 0022), if it supplied any. */
-    background?: import("./transaction-owner-port.ts").BackgroundTasks;
-    /** The wrapper's trusted session, unvalidated until the authorization middleware runs. */
-    session?: unknown;
-    requestId?: string;
-    /** Set only by `fetchCallback`; the commit-check route is not served through `fetch`. */
-    callback?: true;
-  };
-  Variables: AppVariables;
-};
-
 export type AppDependencies = {
   getRuntime: () => PolicySqlRuntime;
   database: import("./database.ts").DatabaseProvider;
@@ -106,7 +89,7 @@ export type AppDependencies = {
   };
 };
 
-/** `AppDependencies` after `createApp` validated them; routes see only this form. */
+/** `AppDependencies` after `createEngine` validated them; operations see only this form. */
 export type EngineDependencies = Omit<AppDependencies, "config"> & {
   config: import("./engine-config.ts").ValidatedConfig;
 };

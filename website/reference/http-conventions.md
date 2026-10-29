@@ -9,7 +9,7 @@ description: PolicySQL APIのversion、header、JSON、snapshot、cache、HTTP s
 
 public endpointはmajor versionをpathに含めます。この文書のcontractは`/v1`です。field追加など既存clientが無視できる変更はv1内で行い、field削除、型変更、既存意味の変更は新しいmajor pathを使用します。
 
-requestとresponseのmedia typeは`application/json`です。request bodyはUTF-8 JSON objectで、duplicate key、未知field、末尾data、不正Unicode、設定上限を超えるbodyを拒否します。
+requestとresponseのmedia typeは`application/json`です。request bodyはUTF-8 JSON objectで、duplicate key、未知field、末尾data、不正Unicode、設定上限を超えるbodyを拒否します。先頭のUTF-8 BOM（`EF BB BF`）は1つだけ受け付けて取り除きます。BOMの3 byteも上限に数えます。2つ目のBOMは不正なJSONとして拒否します。HTTPを使わない入口でも同じ規則です。
 
 ## 共通header
 
@@ -23,7 +23,7 @@ requestとresponseのmedia typeは`application/json`です。request bodyはUTF-
 | `ETag` | response | CatalogまたはCapabilities representationのcache validator |
 | `Retry-After` | response | ラッパーが返す`429`で、再送まで待つ秒数。ライブラリはどのresponseにも付けない |
 
-同名security headerが複数あるrequest、comma結合されたroleやbearer token、改行を含む値は拒否します。request IDはserverが生成し、client指定値を監査上の識別子として信用しません。
+同名security headerが複数あるrequest、comma結合されたroleやbearer token、改行を含む値は拒否します。request IDはラッパーが渡す値か、なければHTTP adapterが生成する値です。ライブラリはplatformのheader（`cf-ray`など）を読みません。client指定値を監査上の識別子として信用しません。
 
 ## JSON parameter
 
@@ -96,6 +96,8 @@ transaction開始後はsnapshotが固定され、statementごとの`expected`は
 | `504` | compile、database、hookのtimeout |
 
 request rateの制限はラッパーの責務です。ライブラリは`POLICYSQL_RATE_LIMITED`を返さず、limiterのbindingも必要としません。ラッパーは`app.fetch`より前に制限し、`createErrorResponse`で同じerror形式の429を返します。参考実装の429には`Retry-After: 60`が付きます。詳細は[エラー](../api/errors#ラッパーが返すエラー)を参照してください。
+
+各codeのstatusは1つだけで、対応表は[エラー](../api/errors#error-codeとhttp-status)が正本です。HTTP adapterはこの表だけを持ちます。
 
 認可対象の存在を秘匿する必要がある場合、`403`と`404`を同じ公開errorへ正規化できます。clientはHTTP statusだけでなく安定したerror `code`を使用します。
 

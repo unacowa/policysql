@@ -10,7 +10,7 @@ import { createWorkerEntrypoints } from "../../src/worker.ts";
 import { createMemoryTransactionOwners } from "./memory-owner.mjs";
 import { createSimulatedDurableObjects } from "./durable-object-owner.mjs";
 import { TursoHttpTransport } from "../../src/turso-http.ts";
-import { createErrorResponse } from "../../src/errors.ts";
+import { createErrorResponse } from "../../src/http/responses.ts";
 import { createJwtSessionVerifier } from "../../src/adapters/jwt.ts";
 import { createDatabaseRegistry } from "../../../../examples/database-routing/provider.ts";
 import { authenticateRequest, createJwtAuthentication } from "../../../../examples/database-routing/auth.ts";
@@ -242,6 +242,8 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     loseOwner: (name) => owners.lose(name),
     fireTimer: (name) => owners.fireTimer(name),
     delayNextOwnerBody: (ms) => owners.delayNextBody(ms),
+    /** Durable Objects only: every raw reply the object sent over its wire. */
+    ownerWire: () => owners.wire,
     rotateCredential(tenant, value) {
       env[`TENANT_${tenant.toUpperCase()}_TOKEN`] = value;
       acceptedTokens.get(tenant).add(value);

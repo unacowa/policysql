@@ -7,7 +7,7 @@ import test from "node:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createErrorResponse } from "../src/errors.ts";
+import { createErrorResponse } from "../src/http/responses.ts";
 import { createJwtSessionVerifier } from "../src/adapters/jwt.ts";
 import { createJwtAuthentication } from "../../../examples/database-routing/auth.ts";
 import { createWrapperFetch } from "../wrapper/fetch.ts";
