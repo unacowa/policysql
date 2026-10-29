@@ -98,6 +98,29 @@ test("the library ignores a limiter binding left in env", async (t) => {
   assert.equal(legacy.keys.length, 0);
 });
 
+test("the commit-check route is served only by fetchCallback, never by fetch", async (t) => {
+  const h = await harness(t);
+  const owners = countingOwners(h.env);
+  const env = { ...h.env, TRANSACTION_OWNER: owners.TRANSACTION_OWNER };
+  const id = "0".repeat(32);
+  const post = (path) => new Request(`https://worker.test${path}`, {
+    method: "POST", headers: { authorization: "Bearer cap", "content-type": "application/json" },
+    body: JSON.stringify({ sequence: 1, ...read }),
+  });
+  for (const path of [`/v1/commit-checks/cval_${id}/query`, `/v1/commit%2Dchecks/cval_${id}/query`, `/v%31/commit-checks/cval_${id}/query`]) {
+    const viaFetch = await h.app.fetch(post(path), env, h.ctx, h.binding("a"));
+    assert.equal(viaFetch.status, 404, path);
+    assert.equal((await viaFetch.json()).error.code, "POLICYSQL_NOT_FOUND");
+  }
+  for (const path of [`/v1/commit%2Dchecks/cval_${id}/query`, `/v%31/commit-checks/cval_${id}/query`]) {
+    assert.equal((await h.app.fetchCallback(post(path), env, h.ctx)).status, 404, path);
+  }
+  assert.equal(owners.counts.lookups, 0);
+  // The canonical path through fetchCallback still reaches the owner.
+  await h.app.fetchCallback(post(`/v1/commit-checks/cval_${id}/query`), env, h.ctx);
+  assert.ok(owners.counts.lookups > 0);
+});
+
 test("createErrorResponse builds the public error shape for wrapper-emitted errors", async () => {
   const response = createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", {
     requestId: "req_1", headers: { "retry-after": "60", "content-type": "text/html", "cache-control": "public" },
@@ -271,6 +294,32 @@ for (const wrapper of wrappers) {
     const result = await call(fetch, env, h, "/v1/transactions:execute", envelope(read));
     assert.equal(result.status, 200, JSON.stringify(result.body));
     assert.equal(callback.keys.length, 20, "client traffic does not spend the callback bucket");
+  });
+
+  test(`${wrapper.name}: encoded callback paths are client requests and never reach the callback handler`, async (t) => {
+    const client = limiter(true);
+    const callback = limiter(true);
+    const { h, env, fetch, owners } = await setup(t, { client, callback });
+    const id = "0".repeat(32);
+    // Encoded before the callback prefix: the wrapper sees a client path, so the client
+    // bucket counts it, and app.fetch, which does not serve callbacks, returns 404.
+    const clientVariants = [
+      `/v1/commit%2Dchecks/cval_${id}/query`, `/v1/commit%2dchecks/cval_${id}/query`,
+      `/v%31/commit-checks/cval_${id}/query`, `/%761/commit-checks/cval_${id}/query`,
+      `/V1/Commit-Checks/cval_${id}/query`,
+    ];
+    // Encoded after the prefix: the callback bucket counts it, and fetchCallback's exact
+    // route check rejects it before reading the body.
+    const callbackVariants = [`/v1/commit-checks/%63val_${id}/query`, `/v1/commit-checks/cval_${id}/%71uery`];
+    for (const path of [...clientVariants, ...callbackVariants]) {
+      const result = await call(fetch, env, h, path, { sequence: 1, ...read });
+      assert.equal(result.status, 404, `${path}: ${JSON.stringify(result.body)}`);
+      assert.equal(result.body.error.code, "POLICYSQL_NOT_FOUND");
+    }
+    assert.equal(owners.lookups, 0, "no Durable Object lookup or callback body handling");
+    assert.equal(client.keys.length, clientVariants.length);
+    assert.deepEqual(new Set(client.keys), new Set([wrapper.clientKey]));
+    assert.equal(callback.keys.length, callbackVariants.length);
   });
 
   test(`${wrapper.name}: a legitimate callback under its limit succeeds while the client bucket is exhausted`, async (t) => {

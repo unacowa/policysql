@@ -140,7 +140,9 @@ The DO namespace is private trusted infrastructure, not a public forwarding endp
 
 For callback requests, the wrapper uses the separate `app.fetchCallback(request, env,
 context)` method. It accepts only POST `/v1/commit-checks/cval_<id>/query`; other routes
-return 404. The owner checks the opaque capability and its saved binding. No new DB is
+return 404. Conversely, `app.fetch` never serves the callback route, including
+percent-encoded paths that decode to it; they return 404 before the body is read
+([ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)). The owner checks the opaque capability and its saved binding. No new DB is
 chosen or connected, and this entrypoint cannot execute ordinary requests without a DB.
 Changing to a validator role never reselects the database.
 

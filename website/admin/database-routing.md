@@ -73,7 +73,7 @@ providerの各呼出しは、1秒とtransactionの残り時間の短い方に制
 
 PolicySQLはbindingを検証・コピーして固定します。DOには識別情報を渡し、DO側のproviderで同じDBの資格情報を解決します。コスト観測も同じDBを使用します。
 
-validatorのcallbackだけは、ラッパーで`app.fetchCallback(request, env, context)`へ渡します。この入口はcallback専用URLしか受け付けず、ownerが保持するbindingと同じtransaction接続を使います。callback capabilityが必要で、新しいDBを選択・接続する経路はありません。
+validatorのcallbackだけは、ラッパーで`app.fetchCallback(request, env, context)`へ渡します。この入口はcallback専用URLしか受け付けず、ownerが保持するbindingと同じtransaction接続を使います。callback capabilityが必要で、新しいDBを選択・接続する経路はありません。逆に`app.fetch`はcallbackのrouteを処理しません。percent-encodingでcallbackのpathになるrequestも、bodyを読む前に404を返します。
 
 ## 運用と移行
 

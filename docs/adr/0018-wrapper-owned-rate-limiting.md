@@ -65,9 +65,17 @@ because the library does not read them.
   1000 per 60 s against 100 for clients). Client traffic therefore cannot starve the
   validator into commit failures, and callback spam cannot spend the client budget. A
   deployment with fixed validator addresses can additionally allowlist them in the wrapper.
-- The library already rejects any callback path or method other than
-  `POST /v1/commit-checks/cval_<32 hex>/query` before reading the body, and it bounds the
-  body size. The wrapper does not repeat these checks.
+- The wrapper classifies on the raw `URL.pathname`: a path that starts with
+  `/v1/commit-checks/` goes to the callback bucket and `app.fetchCallback`, and every other
+  path goes to the client bucket and `app.fetch`. The library makes this classification
+  safe without the wrapper decoding anything. `app.fetchCallback` matches the exact raw path
+  `POST /v1/commit-checks/cval_<32 hex>/query` before reading the body. `app.fetch` never
+  serves the commit-check route (breaking change in this ADR): a percent-encoded path such
+  as `/v1/commit%2Dchecks/...` or `/v%31/...`, which the router would decode to that route,
+  returns 404 `POLICYSQL_NOT_FOUND` before any body read or Durable Object lookup. Such a
+  request is therefore an ordinary client request, counted in the client bucket, and never
+  enters the callback key space or the callback handler. The library also bounds the body
+  size. The wrapper does not repeat these checks.
 - The reference wrapper uses one counter per `cf-connecting-ip`. The example uses the
   database ID that the wrapper selected plus the client IP. Neither keys on an unverified
   token, claim, or path segment that a caller could rotate.
@@ -100,4 +108,9 @@ because the library does not read them.
   event; requests under the limit pass through; the fail-closed cases on both routes;
   callback spam gets 429 with no Durable Object, WASM, or database work; a real commit
   check succeeds through the wrapper while the client bucket is exhausted; the two buckets
-  are independent; and the `wrangler.jsonc` bindings match the code.
+  are independent; percent-encoded and mixed-case callback paths return 404 from the
+  library with no Durable Object lookup, and the test checks which bucket counted each one;
+  `app.fetch` does not serve the callback route; and the `wrangler.jsonc` bindings match
+  the code.
+- Breaking change: `app.fetch` no longer serves `/v1/commit-checks/...`. The route was
+  always meant for `fetchCallback`, and no supported wrapper sent callbacks through `fetch`.

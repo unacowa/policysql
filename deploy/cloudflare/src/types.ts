@@ -53,7 +53,12 @@ export type AppVariables = {
 };
 
 export type AppEnv = {
-  Bindings: { deployment: WorkerBindings; databaseBinding?: import("./database.ts").DatabaseBinding };
+  Bindings: {
+    deployment: WorkerBindings;
+    databaseBinding?: import("./database.ts").DatabaseBinding;
+    /** Set only by `fetchCallback`; the commit-check route is not served through `fetch`. */
+    callback?: true;
+  };
   Variables: AppVariables;
 };
 
