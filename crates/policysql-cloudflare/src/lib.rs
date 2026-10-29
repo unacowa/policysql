@@ -1745,7 +1745,7 @@ fn statement_request(
     let statement = SqliteFrontend::default()
         .bind(&raw.sql, catalog)
         .map_err(|error| RuntimeError::Rejected(classify_bind_error(&error)))?;
-    let parameter_types = statement_parameter_types(&statement)?;
+    let parameter_types = statement_parameter_types(&statement, catalog)?;
     let mut parameters = raw
         .params
         .into_iter()
@@ -1789,138 +1789,18 @@ fn placeholder_value(logical_type: LogicalType) -> LogicalValue {
 
 fn statement_parameter_types(
     statement: &BoundStatement,
-) -> Result<BTreeMap<ClientParameterName, LogicalType>, RuntimeError> {
-    let mut output = BTreeMap::new();
-    match statement {
-        BoundStatement::Select(select) => collect_select_parameter_types(select, &mut output)?,
-        BoundStatement::ConstantSelect(select) => {
-            for projection in &select.projections {
-                collect_parameter_types(&projection.expression, &mut output)?;
-            }
-        }
-        BoundStatement::JsonCollectionSelect(select) => {
-            collect_parameter_types(&select.path, &mut output)?;
-            if let Some(predicate) = &select.predicate {
-                collect_parameter_types(predicate, &mut output)?;
-            }
-        }
-        BoundStatement::Insert(insert) => {
-            for assignment in insert.rows.iter().flatten() {
-                collect_parameter_types(&assignment.value, &mut output)?;
-            }
-        }
-        BoundStatement::Update(update) => {
-            for assignment in &update.assignments {
-                collect_parameter_types(&assignment.value, &mut output)?;
-            }
-            if let Some(predicate) = &update.predicate {
-                collect_parameter_types(predicate, &mut output)?;
-            }
-        }
-        BoundStatement::Delete(delete) => {
-            if let Some(predicate) = &delete.predicate {
-                collect_parameter_types(predicate, &mut output)?;
-            }
-        }
-    }
-    Ok(output)
-}
-
-fn collect_select_parameter_types(
-    select: &BoundSelect,
-    output: &mut BTreeMap<ClientParameterName, LogicalType>,
-) -> Result<(), RuntimeError> {
-    for projection in &select.projections {
-        collect_parameter_types(&projection.expression, output)?;
-    }
-    for join in &select.joins {
-        collect_parameter_types(&join.on, output)?;
-    }
-    for expression in [
-        select.predicate.as_ref(),
-        select.having.as_ref(),
-        select.limit.as_ref(),
-        select.offset.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        collect_parameter_types(expression, output)?;
-    }
-    Ok(())
-}
-
-fn collect_parameter_types(
-    expression: &BoundExpr,
-    output: &mut BTreeMap<ClientParameterName, LogicalType>,
-) -> Result<(), RuntimeError> {
-    match expression {
-        BoundExpr::ClientParameter { name, logical_type } => {
-            if output
-                .insert(name.clone(), *logical_type)
-                .is_some_and(|old| old != *logical_type)
-            {
-                return Err(RuntimeError::Rejected(
-                    RejectionKind::AmbiguousParameterType,
-                ));
-            }
-        }
-        BoundExpr::Equal(left, right)
-        | BoundExpr::NotEqual(left, right)
-        | BoundExpr::Less(left, right)
-        | BoundExpr::LessEqual(left, right)
-        | BoundExpr::Greater(left, right)
-        | BoundExpr::GreaterEqual(left, right)
-        | BoundExpr::And(left, right)
-        | BoundExpr::Or(left, right)
-        | BoundExpr::Like(left, right)
-        | BoundExpr::Glob(left, right)
-        | BoundExpr::Least(left, right)
-        | BoundExpr::Concat(left, right)
-        | BoundExpr::ConditionalOutput {
-            value: left,
-            visible_if: right,
-        } => {
-            collect_parameter_types(left, output)?;
-            collect_parameter_types(right, output)?;
-        }
-        BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::CastText(inner) => {
-            collect_parameter_types(inner, output)?;
-        }
-        BoundExpr::In {
-            expression, values, ..
-        } => {
-            collect_parameter_types(expression, output)?;
-            for value in values {
-                collect_parameter_types(value, output)?;
-            }
-        }
-        BoundExpr::ScalarFunction { arguments, .. } => {
-            for argument in arguments {
-                collect_parameter_types(argument, output)?;
-            }
-        }
-        BoundExpr::Exists(select) => collect_select_parameter_types(select, output)?,
-        BoundExpr::Case {
-            branches,
-            else_expression,
-            ..
-        } => {
-            for (condition, value) in branches {
-                collect_parameter_types(condition, output)?;
-                collect_parameter_types(value, output)?;
-            }
-            if let Some(value) = else_expression {
-                collect_parameter_types(value, output)?;
-            }
-        }
-        BoundExpr::Column(_)
-        | BoundExpr::ServerParameter { .. }
-        | BoundExpr::Literal(_)
-        | BoundExpr::CountAll(_)
-        | BoundExpr::RowNumber { .. } => {}
-    }
-    Ok(())
+    catalog: &Catalog,
+) -> Result<ParameterTypes, RuntimeError> {
+    // The shared compiler pass is the only client-parameter walker.
+    policysql_sqlite::analyze_client_parameters(statement, catalog)
+        .contracts()
+        .map(|contracts| {
+            contracts
+                .iter()
+                .map(|(name, contract)| (name.clone(), contract.logical_type()))
+                .collect()
+        })
+        .map_err(|_| RuntimeError::Rejected(RejectionKind::AmbiguousParameterType))
 }
 
 fn logical_value(
