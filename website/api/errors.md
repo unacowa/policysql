@@ -33,7 +33,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 
 ## Error codeとHTTP status
 
-この表が、ライブラリが返すerror codeとHTTP statusの対応の正本です。HTTP adapter（`deploy/cloudflare/src/http/status.ts`）はこの表と同じ対応だけを持ち、ライブラリのコード（TypeScriptとRust）が返し得るcodeはすべてこの表にあります（どちらもテストで確認します）。engineの操作（[HTTPを使わない入口](../admin/operations-api)）はHTTP statusを返さず、同じ`code`を返します。表にないcodeはライブラリの不具合で、HTTPでは500になります。
+この表が、ライブラリが返すerror codeとHTTP statusの対応の正本です。HTTP adapter（`deploy/cloudflare/src/http/status.ts`）はこの表と同じ対応だけを持ち、ライブラリのコード（TypeScriptとRust）が返し得るcodeはすべてこの表にあり、逆にこの表のcodeはすべてライブラリのどこかが実際に返します（どちらもテストで確認します）。予約codeは現在ありません。engineの操作（[HTTPを使わない入口](../admin/operations-api)）はHTTP statusを返さず、同じ`code`を返します。表にないcodeはライブラリの不具合で、HTTPでは500になります。
 
 <!-- policysql:error-status-table:library -->
 | Code | Status | 意味 |

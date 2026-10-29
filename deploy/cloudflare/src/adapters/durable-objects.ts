@@ -13,13 +13,15 @@
 // Between the Worker and the object, commands travel as the internal HTTP messages they
 // always used (`https://owner/<command>`, JSON body, request id header, and the callback
 // capability as `authorization: Bearer <capability>`). A reply is a 2xx response whose body
-// is the value, or a non-2xx response whose body is `{ error: { code, message, path } }`;
-// the object sends 200 and 500 (ADR 0023). That status is this wire's marker, not the public
-// HTTP status, which only the HTTP adapter decides. A Worker of this version reads an older
-// object's replies unchanged; an older Worker forwards this object's errors as 500, which no
-// client treats as a definite outcome. The wire needs no `cloudflare:workers` import (RPC
+// is the value, or a non-2xx response whose body is `{ error: { code, message, path,
+// requestId } }`. A Worker of this version reads only that distinction. The object still
+// sends exactly the statuses and bodies of earlier versions (201 for a started transaction,
+// 200 for any other value, an error's public status from the one table in src/http/status.ts)
+// because an earlier Worker forwards them to the client unchanged during a rollout
+// (ADR 0023). The wire needs no `cloudflare:workers` import (RPC
 // stubs), so the adapter also runs in the Node test harness.
 import { internalError } from "../errors.ts";
+import { statusFor } from "../http/status.ts";
 import { TransactionOwnerCore } from "../transaction-owner.ts";
 import type { TransactionOwnerDependencies } from "../transaction-owner.ts";
 import type {
@@ -48,11 +50,18 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
   return { ok: false, error: { code: error?.code, message: error?.message, path: error?.path ?? null } };
 };
 
-// Object side: a reply as the wire response.
-const replyResponse = (reply: OwnerReply) => new Response(
-  JSON.stringify(reply.ok ? reply.value : { error: (reply as { error: unknown }).error }),
-  { status: reply.ok ? 200 : 500, headers: { "content-type": "application/json; charset=utf-8" } },
-);
+// Object side: a reply as the wire response, byte-compatible with what earlier objects sent,
+// since an earlier Worker forwards status and body to the client as they are.
+const replyResponse = (reply: OwnerReply, path: string, requestId: string) => {
+  const failure = reply as { ok: false; error: { code: string; message: string; path: string | null } };
+  return new Response(
+    JSON.stringify(reply.ok ? reply.value : { error: { ...failure.error, requestId } }),
+    {
+      status: reply.ok ? (path === "/begin" ? 201 : 200) : statusFor(failure.error.code),
+      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+    },
+  );
+};
 
 /** Routing over a Durable Object namespace: one object per owner name. */
 export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace): TransactionOwnerPort => {
@@ -91,7 +100,8 @@ export const durableObjectFacilities = (state: DurableObjectState): OwnerFacilit
 // Object side: decode one internal message and hand it to the core. An unparsable body
 // becomes null, which every core command rejects as invalid.
 const serve = async (core: TransactionOwnerCore, request: Request): Promise<Response> => {
-  const requestId = request.headers.get(REQUEST_ID_HEADER) ?? "";
+  // The core falls back to a fresh id for an empty one; the error body uses the same rule.
+  const requestId = request.headers.get(REQUEST_ID_HEADER) || crypto.randomUUID();
   let body: any = null;
   try { body = await request.json(); } catch { body = null; }
   const path = new URL(request.url).pathname;
@@ -106,7 +116,7 @@ const serve = async (core: TransactionOwnerCore, request: Request): Promise<Resp
     // An unknown path reaches the core as an unknown kind, which it rejects as invalid.
     reply = await core.command(kind ?? (path as OwnerCommandKind), body, requestId);
   }
-  return replyResponse(reply);
+  return replyResponse(reply, path, requestId);
 };
 
 /**

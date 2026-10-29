@@ -271,15 +271,17 @@ test("durable-objects: the object class decodes the internal messages and fails 
   }));
   for (const [path, body] of [["/begin", "{"], ["/atomic", "null"], ["/statement", "[]"], ["/unknown", "{}"]]) {
     const response = await send(path, body);
-    assert.equal(response.status, 500, `${path}: the wire marks every error reply the same way`);
+    // The same status and body as earlier objects, which an earlier Worker forwards (ADR 0023).
+    assert.equal(response.status, 400, path);
+    assert.equal(response.headers.get("cache-control"), "no-store");
     const reply = await response.json();
-    assert.deepEqual(reply, { error: { code: "POLICYSQL_INVALID_REQUEST", message: "The request is invalid.", path: null } }, path);
+    assert.deepEqual(reply, { error: { code: "POLICYSQL_INVALID_REQUEST", message: "The request is invalid.", path: null, requestId: "req_obj" } }, path);
   }
   const begun = await send("/begin", JSON.stringify({
     transactionId: `tx_${"a".repeat(32)}`, authFingerprint: "b".repeat(64), startFingerprint: "c".repeat(64), mode: "read",
     auth: {}, databaseBinding: testBinding(), snapshot: "test-snapshot",
   }));
-  assert.equal(begun.status, 200);
+  assert.equal(begun.status, 201);
   assert.equal((await begun.json()).transactionId, `tx_${"a".repeat(32)}`);
   assert.equal(alarm, values.get("transaction").expiresAtMs, "the core's timer is the object's alarm");
   await object.alarm();
@@ -312,4 +314,65 @@ test("createApp requires a TransactionOwner port, and app.fetch rejects malforme
   assert.equal(runtimeCalls, 0);
   const ok = await app.fetch(new Request("https://worker.test/healthz"), { database: testBinding() }, { run() {} });
   assert.equal(ok.status, 200);
+});
+
+// Mixed-version rollout (ADR 0023): a Worker of the previous release (origin/main before
+// #34) forwarded each owner reply's status and body to the client unchanged
+// (`ownerResponse(reply)`), and reshaped only a 2xx atomic reply. This object must therefore
+// send exactly what the client sees from the current Worker, route by route.
+test("durable-objects: an earlier Worker forwarding this object's replies shows the client what this Worker does", async (t) => {
+  const h = await harness(t, { ownerAdapter: "durable-objects" });
+  const wire = h.ownerWire();
+  // main's Worker: `{ status: response.status, body: await response.json() }`, then
+  // `ownerResponse(reply)`; for an atomic execute only a non-2xx reply was forwarded.
+  const earlierWorker = (entry) => ({ status: entry.status, body: entry.body });
+  const forwarded = async (label, ownerPath, send, { atomic = false } = {}) => {
+    const from = wire.length;
+    const current = await send();
+    const replies = wire.slice(from).filter((entry) => entry.path === ownerPath);
+    assert.equal(replies.length, 1, `${label}: one ${ownerPath} reply`);
+    if (atomic && replies[0].status >= 200 && replies[0].status <= 299) {
+      assert.equal(replies[0].status, 200, `${label}: an earlier Worker reshapes a 2xx atomic reply`);
+      assert.equal(current.status, 200, label);
+    } else {
+      assert.deepEqual(earlierWorker(replies[0]), current, label);
+    }
+    return current;
+  };
+
+  const begun = await forwarded("begin", "/begin", () => h.request("a", "/v1/transactions", { mode: "write" }, null));
+  assert.equal(begun.status, 201);
+  const id = begun.body.transactionId;
+  const path = `/v1/transactions/${id}`;
+  assert.equal((await forwarded("statement", "/statement",
+    () => h.request("a", `${path}/statements`, { sequence: 1, ...insert("rollout") }, null))).status, 200);
+  const hooksBefore = h.hooksSeen.length;
+  const committed = await forwarded("commit with a commit check", "/commit", () => h.request("a", `${path}/commit`, { sequence: 2 }, null));
+  assert.equal(committed.status, 200);
+  assert.equal(committed.body.status, "committed");
+  // The validator's callback query went through this object too.
+  const callbacks = wire.filter((entry) => entry.path === "/validation-query");
+  assert.ok(callbacks.length >= 1 && h.hooksSeen.length === hooksBefore + 1);
+  assert.deepEqual(earlierWorker(callbacks.at(-1)), { status: h.hooksSeen.at(-1).status, body: h.hooksSeen.at(-1).result }, "callback");
+  assert.equal(h.hooksSeen.at(-1).status, 200);
+
+  const other = (await h.request("a", "/v1/transactions", { mode: "read" }, null)).body.transactionId;
+  assert.equal((await forwarded("rollback", "/rollback",
+    () => h.request("a", `/v1/transactions/${other}/rollback`, { sequence: 1 }, null))).status, 200);
+  // Owner-side errors keep their public status and body, request id included.
+  const conflict = await forwarded("commit after rollback", "/commit",
+    () => h.request("a", `/v1/transactions/${other}/commit`, { sequence: 9 }, null));
+  assert.equal(conflict.status, 409);
+  const unknown = await forwarded("unknown transaction", "/statement",
+    () => h.request("a", `/v1/transactions/tx_${"9".repeat(32)}/statements`, { sequence: 1, ...read }, null));
+  assert.equal(unknown.status, 409);
+  assert.equal(unknown.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  assert.equal(typeof unknown.body.error.requestId, "string");
+
+  // Atomic executes that trigger a commit check run in the owner.
+  assert.equal((await forwarded("atomic", "/atomic",
+    () => h.request("a", "/v1/transactions:execute", { statements: [insert("atomic_rollout")] }, "rollout-atomic-key-01"), { atomic: true })).status, 200);
+  const replayConflict = await forwarded("atomic key reuse", "/atomic",
+    () => h.request("a", "/v1/transactions:execute", { statements: [insert("atomic_other")] }, "rollout-atomic-key-01"), { atomic: true });
+  assert.equal(replayConflict.status, 409);
 });

@@ -3,12 +3,15 @@
 // differentials are handled in one place:
 //
 // - well-formed Unicode: a string with a lone surrogate is rejected (it has no UTF-8 form);
-// - the total body limit, counted in UTF-8 bytes;
+// - the total body limit, counted in UTF-8 bytes of the text as given (a byte order mark
+//   included, so it counts as the 3 bytes it was on the wire);
+// - one leading byte order mark (U+FEFF) is removed, as HTTP has always accepted one;
 // - duplicate JSON object keys, including escaped equivalents, then strict JSON.
 //
 // Decoding bytes is the transport's job. The HTTP adapter (src/http/body.ts) decodes the
-// request stream with a fatal UTF-8 decoder, so malformed bytes never become replacement
-// characters, and bounds the stream with the same limit before buffering it.
+// request stream with a fatal UTF-8 decoder that keeps a byte order mark (`ignoreBOM`), so
+// malformed bytes never become replacement characters and the BOM rule above is the only
+// one, and bounds the stream with the same limit before buffering it.
 import { EngineError } from "./errors.ts";
 
 export const MAX_BODY_BYTES = 1_048_576;
@@ -92,14 +95,15 @@ const rejectDuplicateKeys = (text: string) => {
 
 /** Reads (if deferred) and checks a body. Returns the parsed value and the exact text. */
 export const parseBodyText = async (bodyText: BodyText): Promise<{ value: any; text: string }> => {
-  const text = typeof bodyText === "function" ? await bodyText() : bodyText;
-  if (typeof text !== "string") throw invalidBody("Request body is required.");
-  if (LONE_SURROGATE.test(text)) throw invalidBody("Request body is not valid UTF-8.");
+  const given = typeof bodyText === "function" ? await bodyText() : bodyText;
+  if (typeof given !== "string") throw invalidBody("Request body is required.");
+  if (LONE_SURROGATE.test(given)) throw invalidBody("Request body is not valid UTF-8.");
   // Every UTF-16 unit is at least one UTF-8 byte, so a longer string is over the limit
   // without encoding it.
-  if (text.length > MAX_BODY_BYTES || new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
+  if (given.length > MAX_BODY_BYTES || new TextEncoder().encode(given).byteLength > MAX_BODY_BYTES) {
     throw bodyTooLarge();
   }
+  const text = given.startsWith("\uFEFF") ? given.slice(1) : given;
   try {
     rejectDuplicateKeys(text);
     return { value: JSON.parse(text), text };

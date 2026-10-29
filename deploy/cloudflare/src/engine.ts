@@ -68,6 +68,9 @@ export type CallbackQueryInput = {
 /** Callback queries use the database the owner pinned, so they take no session or database. */
 export type CallbackContext = { requestId?: string };
 
+// Every client operation runs in the same order: request context, session (core), database
+// binding (the wrapper's provider), then the body. A body is never read for a caller whose
+// session or database is rejected.
 export interface PolicySqlEngine {
   /** `background` keeps post-response work (cost observation) alive; without it, it runs detached. */
   execute(input: ExecuteInput, context: RequestContext, background?: BackgroundTasks): Promise<OperationResult>;
@@ -249,9 +252,9 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         const fields = operationInput<TransactionCommandInput>(input, ["transactionId", "bodyText", "role"]);
         const auth = authorize(checked, fields.role, "execute");
         if (typeof fields.transactionId !== "string" || !TRANSACTION_ID.test(fields.transactionId)) throw invalidRequest();
-        const body = await parseBodyText(fields.bodyText);
         const snapshot = dependencies.getRuntime().snapshot;
         const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, snapshot);
+        const body = await parseBodyText(fields.bodyText);
         const fingerprint = await authFingerprint(auth, databaseBinding);
         const reply = await owner(fields.transactionId).command(kind, {
           transactionId: fields.transactionId, authFingerprint: fingerprint, command: body.value, databaseBinding, snapshot,
@@ -391,6 +394,8 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
     begin: (input, context) => run(context, undefined, async (checked): Promise<OperationResult> => {
       const fields = operationInput<BeginInput>(input, ["bodyText", "idempotencyKey", "role"]);
       const auth = authorize(checked, fields.role, "execute");
+      const snapshot = dependencies.getRuntime().snapshot;
+      const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, snapshot);
       const body = await parseBodyText(fields.bodyText);
       const keys = body.value && typeof body.value === "object" && !Array.isArray(body.value)
         ? Object.keys(body.value) : [];
@@ -410,8 +415,6 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
          body.value.expected.policyVersion !== (dependencies.publicConfig?.policyVersion ?? POLICY_VERSION))) {
         throw new EngineError("POLICYSQL_STALE_OPERATION", "The operation was compiled for a different active snapshot.");
       }
-      const snapshot = dependencies.getRuntime().snapshot;
-      const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, snapshot);
       const idempotency = await requestIdempotency(fields.idempotencyKey, auth, body.value, "interactive-start", databaseBinding);
       const transactionId = `tx_${idempotency?.keyHash.slice(0, 32) ?? crypto.randomUUID().replaceAll("-", "")}`;
       const fingerprint = await authFingerprint(auth, databaseBinding);

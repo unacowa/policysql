@@ -17,7 +17,8 @@ export const readBodyText = async (request: Request): Promise<string> => {
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw bodyTooLarge();
   if (!request.body) throw invalidBody("Request body is required.");
   const reader = request.body.getReader();
-  const decoder = new TextDecoder("utf-8", { fatal: true });
+  // The BOM is kept so the engine applies its one BOM rule to every transport alike.
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   let bytes = 0;
   let text = "";
   try {

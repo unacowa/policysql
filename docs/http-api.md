@@ -23,6 +23,10 @@ charset=utf-8`, and `X-Content-Type-Options: nosniff`. The `requestId` in bodies
 wrapper's correlation id or one the adapter generates; the library reads no platform header
 for it.
 
+A request body may start with one UTF-8 byte order mark, which is removed; its 3 bytes count
+toward the 1 MiB limit, and a second one makes the body invalid JSON. The same rule applies
+to every transport, because the engine applies it to the decoded text.
+
 ## Authentication
 
 Authentication is deployment-defined. The deployment's wrapper authenticates every client

@@ -56,3 +56,21 @@ test("HTTP body framing: media type, declared and streamed size, strict UTF-8", 
     error.code === "POLICYSQL_INVALID_REQUEST" && error.message === "Request body is not valid UTF-8.");
   assert.equal(await readBodyText(request('{"a":"é"}', { "content-type": "Application/JSON; charset=utf-8" })), '{"a":"é"}');
 });
+
+test("one leading byte order mark is accepted the same way over HTTP and directly, and counts toward the limit", async () => {
+  const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+  const bytes = (text) => new Uint8Array([...bom, ...new TextEncoder().encode(text)]);
+  // HTTP keeps the BOM in the text; the engine removes exactly one, for every transport.
+  const overHttp = await readBodyText(request(bytes("{}")));
+  assert.equal(overHttp, "﻿{}");
+  assert.deepEqual((await parseBodyText(overHttp)).value, {});
+  assert.equal((await parseBodyText("﻿{}")).text, "{}");
+  await assert.rejects(parseBodyText("﻿﻿{}"), code("POLICYSQL_INVALID_REQUEST"));
+  await assert.rejects(parseBodyText(await readBodyText(request(new Uint8Array([...bom, ...bytes("{}")])))), code("POLICYSQL_INVALID_REQUEST"));
+  // The BOM's 3 bytes count on both sides: limit - 2 bytes of JSON plus a BOM is over.
+  const json = `"${"x".repeat(MAX_BODY_BYTES - 4)}"`;
+  assert.equal(new TextEncoder().encode(json).byteLength, MAX_BODY_BYTES - 2);
+  await assert.rejects(parseBodyText(`﻿${json}`), code("POLICYSQL_REQUEST_TOO_LARGE"));
+  await assert.rejects(readBodyText(request(bytes(json))), code("POLICYSQL_REQUEST_TOO_LARGE"));
+  assert.equal((await parseBodyText(json)).text, json);
+});

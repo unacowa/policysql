@@ -31,3 +31,19 @@ test("the suite reports a non-conforming mapping instead of passing it", async (
   assert.ok(results.filter((result) => !result.ok).length >= 4, JSON.stringify(results.map((result) => [result.name, result.ok])));
   assert.ok((await runHttpConformance((engine) => createHttpAdapter(engine))).every((result) => result.ok));
 });
+
+test("the suite fails a mapping that reads the body before the engine checks the session and database", async (t) => {
+  t.mock.method(console, "log", () => {});
+  // The shipped adapter over an engine wrapper that resolves every body before the call.
+  const eager = (engine) => createHttpAdapter(Object.fromEntries(Object.entries(engine).map(([name, operation]) => [name,
+    async (input, ...rest) => {
+      if (typeof input?.bodyText !== "function") return operation(input, ...rest);
+      let bodyText;
+      try { bodyText = await input.bodyText(); } catch (error) { bodyText = async () => { throw error; }; }
+      return operation({ ...input, bodyText }, ...rest);
+    }])));
+  const results = await runHttpConformance(eager);
+  const failed = results.filter((result) => !result.ok);
+  assert.ok(failed.length > 0);
+  assert.ok(failed.some((result) => /read eagerly/u.test(String(result.error?.message))), JSON.stringify(failed.map((r) => r.name)));
+});

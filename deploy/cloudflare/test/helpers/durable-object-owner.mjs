@@ -47,6 +47,13 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
   };
 
   const lookups = { idFromName: 0, get: 0 };
+  // Every reply the object sent, as the wire carried it (status and parsed body).
+  const wire = [];
+  const record = async (input, pending) => {
+    const response = await pending;
+    wire.push({ path: new URL(input).pathname, status: response.status, body: await response.clone().json() });
+    return response;
+  };
   let nextBodyDelayMs = 0;
   const namespace = {
     idFromName(name) { lookups.idFromName++; return { name }; },
@@ -64,7 +71,7 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
           // must not let a later message overtake it.
           const delay = nextBodyDelayMs;
           nextBodyDelayMs = 0;
-          if (delay === 0) return slot.owner.object.fetch(new Request(input, init));
+          if (delay === 0) return record(input, slot.owner.object.fetch(new Request(input, init)));
           const text = init.body;
           const body = new ReadableStream({
             async pull(controller) {
@@ -73,7 +80,7 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
               controller.close();
             },
           }, { highWaterMark: 0 });
-          return slot.owner.object.fetch(new Request(input, { ...init, body, duplex: "half" }));
+          return record(input, slot.owner.object.fetch(new Request(input, { ...init, body, duplex: "half" })));
         },
       };
     },
@@ -82,6 +89,7 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
   return {
     namespace,
     lookups,
+    wire,
     port: durableObjectTransactionOwners(namespace),
     names: () => [...objects.keys()],
     record: async (name) => structuredClone(objects.get(name)?.data.get("transaction")),

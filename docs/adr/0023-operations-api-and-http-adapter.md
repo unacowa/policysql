@@ -41,16 +41,22 @@ run the same code.
 ### The body is text; the engine checks it
 
 The engine takes the body as text (`bodyText`), either the string or a reader
-`() => Promise<string>` that the engine calls when the operation reaches its body. The reader
-keeps the existing order (session and database before the body, as ADR 0019 requires) without
-the transport buffering a body it may never need. The engine applies the
-transport-independent checks to the text, once, for every transport: well-formed Unicode (a
-lone surrogate has no UTF-8 form), the 1 MiB limit counted in UTF-8 bytes, duplicate keys
-including escaped equivalents, then strict JSON (`src/request-body.ts`).
+`() => Promise<string>` that the engine calls when the operation reaches its body. Every client
+operation runs in one order: request context, session, database binding (the wrapper's
+provider), then the body, so a body is never read for a caller whose session or database is
+rejected, and the transport never buffers a body that may not be needed. The engine applies
+the transport-independent checks to the text, once, for every transport: well-formed Unicode
+(a lone surrogate has no UTF-8 form), the 1 MiB limit counted in UTF-8 bytes of the text as
+given, removal of one leading byte order mark, duplicate keys including escaped equivalents,
+then strict JSON (`src/request-body.ts`). HTTP has always accepted one leading BOM, so the
+engine keeps that rule for every transport; the BOM's 3 bytes count toward the limit on both
+sides, as they did on the wire.
 
 Decoding bytes is the transport's. The HTTP adapter decodes the stream with a fatal UTF-8
-decoder, so malformed bytes are rejected rather than replaced, and bounds the stream with the
-same limit before buffering (`src/http/body.ts`). Strict decoding therefore exists twice in
+decoder that keeps a BOM (`ignoreBOM: true`), so malformed bytes are rejected rather than
+replaced and the engine's BOM rule is the only one, and bounds the stream with the same limit
+before buffering (`src/http/body.ts`). The conformance suite fails a mapping that passes a body
+it already read. Strict decoding therefore exists twice in
 form but once in effect: a transport hands the engine either well-formed text or nothing.
 
 ### The HTTP adapter (`src/http/`)
@@ -69,7 +75,10 @@ wrapper fault is reported on every route. The library reads no platform header: 
 and one of wrapper-returned codes (`UNAUTHENTICATED`, `AUTHENTICATION_FAILED`, `RATE_LIMITED`).
 `src/http/status.ts` holds exactly the library table, and a test checks that, and that every
 `POLICYSQL_*` code in the TypeScript library source and the Rust crates is in one of the two
-tables. `createErrorResponse` refuses a library code with a different status. The client's
+tables, and the reverse: every library code in the table is returned somewhere in the library
+or Rust source outside the table and the conformance suite, so a dead code cannot come back
+(a reserved code would have to be marked in the specification and listed in the test).
+`createErrorResponse` refuses a library code with a different status. The client's
 definite-rejection pairs are checked against the same tables.
 
 Duplicate and stale codes are resolved as ADR 0020 resolved `UNAUTHENTICATED` and
@@ -109,12 +118,15 @@ or passes it; `test/http-conformance.test.mjs` runs it against the shipped adapt
 
 `OwnerReply` is `{ ok: true, value } | { ok: false, error: { code, message, path } }`, checked
 by the engine like any data crossing an adapter. The Durable Objects adapter keeps its paths
-and headers; its reply is a 2xx response whose body is the value or a non-2xx response whose
-body is `{ error }` (the object sends 200 and 500). That status is the wire's marker, not the
-public status. A Worker of this version reads an older object's replies unchanged. An older
-Worker forwards a newer object's errors as 500 and its `begin` as 200, which the client treats
-as an unknown outcome rather than a success, so a mixed-version rollout fails safe. The
-callback capability crosses the wire as `authorization: Bearer <capability>`, as before.
+and headers, and its replies stay exactly what earlier objects sent: 201 with the value for a
+started transaction, 200 with the value for every other command, atomic execute, and callback
+query, and an error's public status (from the one table, `src/http/status.ts`) with
+`{ error: { code, message, path, requestId } }`. A Worker of this version reads only "2xx is
+the value, otherwise the error". An earlier Worker forwarded each owner reply's status and
+body to the client unchanged, so during a mixed-version rollout clients see the same
+responses from either Worker; a test runs that earlier forwarding against this object for
+begin, statement, commit, rollback, atomic execute, and the callback query. The callback
+capability crosses the wire as `authorization: Bearer <capability>`, as before.
 
 ## Consequences
 
@@ -122,7 +134,8 @@ callback capability crosses the wire as `authorization: Bearer <capability>`, as
   wrapper-context errors, has the three fixed headers (owner-routed responses lacked
   `x-content-type-options`, context errors used `application/json` without a charset);
   (2) a `fetchCallback` 404 has the full error shape (`path`, `requestId`); (3) a transaction
-  route with a malformed id or unknown command is 404 before the session is checked;
+  route with a malformed id or unknown command is 404 before the session is checked, and `begin`, `statement`, `commit`, and `rollback` check the database binding before
+  the body (a rejected binding now wins over a body error, as for the other routes);
   (4) the request id is the wrapper's or a fresh UUID, never read from `cf-ray` by the library
   (the reference wrappers pass `cf-ray`, so their responses are unchanged).
 - Breaking (beta, no compatibility layer): `HttpError` is replaced by `EngineError` without a

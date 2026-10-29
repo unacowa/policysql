@@ -9,7 +9,7 @@ description: PolicySQL APIのversion、header、JSON、snapshot、cache、HTTP s
 
 public endpointはmajor versionをpathに含めます。この文書のcontractは`/v1`です。field追加など既存clientが無視できる変更はv1内で行い、field削除、型変更、既存意味の変更は新しいmajor pathを使用します。
 
-requestとresponseのmedia typeは`application/json`です。request bodyはUTF-8 JSON objectで、duplicate key、未知field、末尾data、不正Unicode、設定上限を超えるbodyを拒否します。
+requestとresponseのmedia typeは`application/json`です。request bodyはUTF-8 JSON objectで、duplicate key、未知field、末尾data、不正Unicode、設定上限を超えるbodyを拒否します。先頭のUTF-8 BOM（`EF BB BF`）は1つだけ受け付けて取り除きます。BOMの3 byteも上限に数えます。2つ目のBOMは不正なJSONとして拒否します。HTTPを使わない入口でも同じ規則です。
 
 ## 共通header
 

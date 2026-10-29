@@ -94,3 +94,29 @@ test("the client's definite-rejection table agrees with the specification", asyn
     for (const code of codes) assert.equal(all[`POLICYSQL_${code}`], status, `client lists ${code} under ${status}`);
   }
 });
+
+// Rust source without its test code: `*_tests.rs`, `tests/` directories, and everything from
+// a file's first inline `#[cfg(test)] mod name {` on.
+const rustSource = () => files("crates", ".rs")
+  .filter((path) => !/(^|[\\/])tests[\\/]|_tests\.rs$/u.test(path))
+  .map((path) => [path, read(path).split(/#\[cfg\(test\)\]\s*mod\s+\w+\s*\{/u)[0]]);
+
+test("every code in the library table is returned somewhere, so dead codes cannot creep back", () => {
+  const library = specTable("library");
+  // Where a code may appear without being returned: the table itself and the conformance suite.
+  const excluded = new Set([join("deploy/cloudflare/src", "http", "status.ts"), join("deploy/cloudflare/src", "http", "conformance.ts")]);
+  const sources = [
+    ...files("deploy/cloudflare/src", ".ts").filter((path) => !excluded.has(path)).map((path) => [path, read(path)]),
+    ...rustSource(),
+  ];
+  const emitted = new Set(sources.flatMap(([, text]) => [...text.matchAll(/"(POLICYSQL_[A-Z0-9_]+)"/gu)].map((match) => match[1])));
+  // No code is reserved today; a reserved one would be marked in the specification and listed here.
+  const RESERVED = new Set();
+  for (const code of Object.keys(library)) {
+    assert.ok(emitted.has(code) || RESERVED.has(code), `${code} is in the status table but no library or Rust source returns it`);
+  }
+  assert.ok(sources.some(([path]) => path.endsWith("lib.rs")), "the Rust core is scanned");
+  // Non-vacuity: a removed code is not found, and a code only Rust test code names is not either.
+  assert.equal(emitted.has("POLICYSQL_ACCESS_DENIED"), false);
+  assert.ok(read("crates/policysql-wasm/src/lib.rs").includes('assert_eq!(unknown["error"]["code"], "POLICYSQL_INTERNAL")'));
+});

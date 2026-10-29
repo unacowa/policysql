@@ -242,6 +242,8 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     loseOwner: (name) => owners.lose(name),
     fireTimer: (name) => owners.fireTimer(name),
     delayNextOwnerBody: (ms) => owners.delayNextBody(ms),
+    /** Durable Objects only: every raw reply the object sent over its wire. */
+    ownerWire: () => owners.wire,
     rotateCredential(tenant, value) {
       env[`TENANT_${tenant.toUpperCase()}_TOKEN`] = value;
       acceptedTokens.get(tenant).add(value);

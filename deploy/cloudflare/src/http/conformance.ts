@@ -42,10 +42,16 @@ const same = (actual: unknown, expected: unknown, message: string) => {
   if (a !== e) fail(`${message}: expected ${e}, got ${a}`);
 };
 
+// Bodies a mapping handed over already read, collected per case. The engine checks the
+// session and the database before it reads a body (ADR 0023), so a mapping must pass the
+// body as a reader; one that reads it eagerly would read bodies the engine then rejects.
+let eagerBodies: string[] = [];
+
 /**
  * An engine that records each call and answers with `answer(call)` (default: a success whose
- * value names the operation). Like the real engine, it reads a deferred body when it runs
- * and returns the reader's error as the operation's, and it checks the request context.
+ * value names the operation). Like the real engine, it checks the request context, then reads
+ * the deferred body and returns the reader's error as the operation's. A body that is not a
+ * reader is a conformance failure.
  */
 const recordingEngine = (answer?: Answer) => {
   const calls: Call[] = [];
@@ -59,6 +65,7 @@ const recordingEngine = (answer?: Answer) => {
       }
     }
     if (input && Object.hasOwn(input, "bodyText")) {
+      if (typeof input.bodyText !== "function") eagerBodies.push(name);
       try { call.body = (await parseBodyText(input.bodyText)).text; } catch (error) {
         return { ok: false, error: operationError(error), requestId };
       }
@@ -123,7 +130,19 @@ const fieldsOf = (call: Call) => {
   return fields;
 };
 
-export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze([
+// Every case also fails when the mapping passed any body already read.
+const conformanceCase = (name: string, run: ConformanceCase["run"]): ConformanceCase => ({
+  name,
+  async run(createMapping) {
+    eagerBodies = [];
+    await run(createMapping);
+    if (eagerBodies.length > 0) {
+      fail(`bodyText must be a reader the engine calls after the session and database checks; read eagerly for ${[...new Set(eagerBodies)].join(", ")}`);
+    }
+  },
+});
+
+export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
   {
     name: "each route calls its operation with the header fields, the body text, and the wrapper context",
     async run(createMapping) {
@@ -223,6 +242,7 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze([
         request.headers.set("policysql-role", "member, admin");
         await expectError(await createMapping(engine).fetch(request, context()), 400, "POLICYSQL_INVALID_REQUEST", `${route.label} role`, "req_conformance");
         same(calls.length, 0, `${route.label}: no operation`);
+        same(request.bodyUsed, false, `${route.label}: the body is not read`);
       }
     },
   },
@@ -282,12 +302,14 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze([
         ["malformed request id", context({ requestId: "has space" }), "POLICYSQL_INTERNAL"],
       ] as const) {
         const { engine, calls } = recordingEngine();
-        await expectError(await createMapping(engine).fetch(post("/v1/transactions:execute", "{}"), value), 500, code, label);
+        const request = post("/v1/transactions:execute", "{}");
+        await expectError(await createMapping(engine).fetch(request, value), 500, code, label);
         check(calls.every((call) => call.operation === "execute"), `${label}: only the operation itself may see it`);
+        same(request.bodyUsed, false, `${label}: the body is not read`);
       }
     },
   },
-]);
+] as ConformanceCase[]).map((item) => conformanceCase(item.name, item.run)));
 
 /** Runs every case against mappings built by `createMapping`. Never throws. */
 export const runHttpConformance = async (createMapping: CreateHttpMapping): Promise<ConformanceResult[]> => {
