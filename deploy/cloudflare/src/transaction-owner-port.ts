@@ -48,9 +48,16 @@ export type OwnerCallbackInput = { authorization: string; command: unknown };
  * A handle to the single owner of one name. Every input and reply is plain JSON data: an
  * adapter may serialize it, and the owner validates every input as untrusted.
  *
- * Client commands (`begin`, `atomic`, `command`) are processed one at a time, in arrival
- * order. Callback queries are processed one at a time on a second lane, because they arrive
- * while a commit on the first lane waits for its validator.
+ * Client commands (`begin`, `atomic`, `command`) are processed one at a time, in the order
+ * they reach the owner. Callback queries are processed one at a time, in the order they
+ * reach the owner, on a second lane, because they arrive while a commit on the first lane
+ * waits for its validator.
+ *
+ * "Reach the owner" means the call on `TransactionOwnerCore`, which queues it synchronously.
+ * An adapter that carries calls as messages must queue each message on its lane when it
+ * arrives, before reading or decoding it, so a late body never lets a later message overtake
+ * an earlier one. Nothing orders calls that are still in transit: two concurrent client
+ * requests may reach the owner in either order, and ADR 0007 then fails a conflicting one.
  */
 export interface TransactionOwnerHandle {
   begin(input: OwnerBeginInput, requestId: string): Promise<OwnerReply>;

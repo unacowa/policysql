@@ -16,7 +16,9 @@ the opaque capability to its owner.
 Applications must inject a `database` provider and the explicit `PolicySqlConfig`
 ([engine configuration](../../docs/configuration.md), [ADR 0021](../../docs/adr/0021-explicit-engine-config.md))
 into `createApp` or `createPolicySqlWorker` and pass an already-selected binding and the authenticated trusted session to each
-`app.fetch(request, env, context, { database, session })`. The library verifies no credential
+request: `createPolicySqlWorker().app.fetch(request, env, executionContext, { database, session })`
+on Workers (env goes only to `deployment(env)`), or `createApp().fetch(request, { database, session }, background?)`,
+which takes no env or `ExecutionContext` ([ADR 0022](../../docs/adr/0022-transaction-owner-port.md)). The library verifies no credential
 ([ADR 0020](../../docs/adr/0020-trusted-session-input-and-jwt-identity-adapter.md)); core
 validates the session before any body read, owner lookup, or DB work.
 Database injection has no JWT dependency. The wrapper authorizes and chooses its DB;

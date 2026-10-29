@@ -107,13 +107,20 @@ export const durableObjectTransactionOwnerClass = <Env extends object>(
   }
   return class DurableObjectTransactionOwner {
     core: TransactionOwnerCore;
+    // Messages enter the core in the order they arrive at the object. Each is queued on its
+    // lane before its body is read, so a body delivered late cannot let a later message
+    // overtake it. The core keeps its own lanes; these only preserve arrival order.
+    lanes: { client: Promise<unknown>; callback: Promise<unknown> } = { client: Promise.resolve(), callback: Promise.resolve() };
 
     constructor(state: DurableObjectState, env: Env) {
       this.core = new TransactionOwnerCore(durableObjectFacilities(state), deployment(env));
     }
 
     fetch(request: Request): Promise<Response> {
-      return serve(this.core, request);
+      const lane = new URL(request.url).pathname === "/validation-query" ? "callback" : "client";
+      const run = this.lanes[lane].then(() => serve(this.core, request));
+      this.lanes[lane] = run.then(() => undefined, () => undefined);
+      return run;
     }
 
     alarm(): Promise<void> {

@@ -44,6 +44,51 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
   });
 
+  test(`${ownerAdapter}: commands are processed in the order they reach the owner, whatever their body timing`, async (t) => {
+    const h = await setup(t, { hooks: false });
+    const id = await start(h, "write");
+    const { authFingerprint, databaseBinding, snapshot } = await h.ownerRecord(id);
+    const owner = h.transactionOwners.route(id);
+    const input = (command) => ({ transactionId: id, authFingerprint, command, databaseBinding, snapshot });
+    // The first message's body is delivered late. A later command must not overtake it:
+    // overtaking would put sequence 2 before 1 and fail the transaction (ADR 0007).
+    h.delayNextOwnerBody(30);
+    const replies = await Promise.all([
+      owner.command("statement", input({ sequence: 1, ...insert("ordered") }), "req_1"),
+      owner.command("commit", input({ sequence: 2 }), "req_2"),
+    ]);
+    assert.deepEqual(replies.map((reply) => reply.status), [200, 200], JSON.stringify(replies));
+    assert.equal(replies[1].body.status, "committed");
+    assert.ok(h.rows("a").some((row) => row.id === "ordered"));
+  });
+
+  test(`${ownerAdapter}: timer expiry and owner loss while a commit waits on its validator never commit`, async (t) => {
+    const h = await setup(t);
+    for (const [label, interrupt] of [["expired", (id) => h.fireTimer(id)], ["lost", (id) => h.loseOwner(id)]]) {
+      const id = await start(h, "write");
+      const path = `/v1/transactions/${id}`;
+      assert.equal((await h.request("a", `${path}/statements`, { sequence: 1, ...insert(label) }, null)).status, 200);
+      h.setValidator(async () => { await interrupt(id); return true; });
+      const commit = await h.request("a", `${path}/commit`, { sequence: 2 }, null);
+      const retry = await h.request("a", `${path}/commit`, { sequence: 2 }, null);
+      if (label === "expired") {
+        // Expiry ends the commit on the waiting lane: the check is rejected and rolled back.
+        assert.equal(commit.status, 409, label);
+        assert.equal(commit.body.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED", label);
+        assert.equal((await h.ownerRecord(id)).status, "failed", label);
+      } else {
+        // The lost owner cannot record anything; its successor has no open transaction.
+        assert.equal(commit.status, 500, label);
+        assert.equal(commit.body.error.code, "POLICYSQL_INTERNAL", label);
+        assert.equal(retry.status, 409, label);
+        assert.equal(retry.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", label);
+      }
+      assert.notEqual(commit.body.status, "committed", label);
+      assert.notEqual(retry.body.status, "committed", label);
+      assert.equal(h.rows("a").some((row) => row.id === label), false, label);
+    }
+  });
+
   test(`${ownerAdapter}: one name has exactly one owner, and names are isolated`, async (t) => {
     const h = await setup(t, { hooks: false });
     // The same start key, concurrently: one owner, one database transaction.

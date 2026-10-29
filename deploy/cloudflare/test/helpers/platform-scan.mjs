@@ -8,7 +8,12 @@ import ts from "typescript";
 export const PLATFORM_NAMES = new Set([
   // Durable Object routing and types.
   "DurableObject", "DurableObjectNamespace", "DurableObjectState", "DurableObjectStub", "DurableObjectId",
-  "DurableObjectStorage", "idFromName", "idFromString", "newUniqueId",
+  "DurableObjectStorage", "DurableObjectNamespaceGetDurableObjectOptions",
+  "DurableObjectNamespaceNewUniqueIdOptions", "LoopbackDurableObjectNamespace",
+  // Every DurableObjectNamespace method: get / getByName / idFromName / idFromString /
+  // newUniqueId / jurisdiction (`get` alone is too common a name to ban; its namespace
+  // can only come from one of the others or from the banned types).
+  "idFromName", "idFromString", "newUniqueId", "getByName", "jurisdiction",
   // Durable Object state: storage and its alarm.
   "storage", "setAlarm", "getAlarm", "deleteAlarm",
   // Background continuation (Durable Object state, Workers ExecutionContext, Hono's accessor).

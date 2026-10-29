@@ -47,6 +47,7 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
   };
 
   const lookups = { idFromName: 0, get: 0 };
+  let nextBodyDelayMs = 0;
   const namespace = {
     idFromName(name) { lookups.idFromName++; return { name }; },
     get(id) {
@@ -59,7 +60,20 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
             objects.set(id.name, slot);
             slot.owner = incarnate(id.name, slot);
           }
-          return slot.owner.object.fetch(new Request(input, init));
+          // The platform may deliver a message's body later than its arrival; a delayed body
+          // must not let a later message overtake it.
+          const delay = nextBodyDelayMs;
+          nextBodyDelayMs = 0;
+          if (delay === 0) return slot.owner.object.fetch(new Request(input, init));
+          const text = init.body;
+          const body = new ReadableStream({
+            async pull(controller) {
+              await new Promise((resolve) => setTimeout(resolve, delay));
+              controller.enqueue(new TextEncoder().encode(text));
+              controller.close();
+            },
+          }, { highWaterMark: 0 });
+          return slot.owner.object.fetch(new Request(input, { ...init, body, duplex: "half" }));
         },
       };
     },
@@ -73,6 +87,8 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
     record: async (name) => structuredClone(objects.get(name)?.data.get("transaction")),
     core: (name) => objects.get(name)?.owner.object.core,
     timerAt: (name) => objects.get(name)?.alarmAt ?? null,
+    /** The next message's body reaches the object only after `ms`. */
+    delayNextBody(ms) { nextBodyDelayMs = ms; },
     /** The platform resets the object: storage and alarm survive, memory does not. */
     lose(name) {
       const slot = objects.get(name);

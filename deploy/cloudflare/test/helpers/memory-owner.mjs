@@ -68,6 +68,8 @@ export const createMemoryTransactionOwners = (dependencies, { background = { run
     record: async (name) => structuredClone(slots.get(name)?.data.get("transaction")),
     core: (name) => slots.get(name)?.owner.core,
     timerAt: (name) => slots.get(name)?.timerAt ?? null,
+    /** No message body to deliver late: calls reach the owner synchronously, in call order. */
+    delayNextBody() {},
     /** Owner loss: the successor keeps the store and timer, not the open transaction. */
     lose(name) {
       const slot = slots.get(name);

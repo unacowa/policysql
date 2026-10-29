@@ -40,6 +40,10 @@ test("the scan matches syntax, not comments", () => {
   const caught = [
     "const f = (namespace: DurableObjectNamespace) => namespace;",
     "const id = namespace.idFromName(name);",
+    "const stub = namespace.getByName(name);",
+    "const stub = namespace.get(namespace.idFromString(hex));",
+    "const stub = namespace.get(namespace.newUniqueId());",
+    "const eu = namespace.jurisdiction('eu');",
     "state.storage.get('transaction');",
     "state['storage'].put('k', 1);",
     "const { storage } = state;",

@@ -31,17 +31,26 @@ Two sides, both plain interfaces:
 
 Contract every adapter keeps (the conformance suite checks it):
 
-- At most one live owner per name, and every call for that name reaches it.
+- At most one live owner per name, and every call for that name reaches it, in the order it
+  arrived (see below).
 - An owner may be lost. Its successor sees the same store and timer but none of the lost
   owner's memory, and the lost owner never writes again. The open database transaction lives
   only in memory, so the core fails it closed exactly as before (ADR 0007): no reconnection,
-  no resumed transaction, the stored state becomes `failed`.
+  no resumed transaction, no commit reported. A command that was in flight fails (500); later
+  commands get 409 `POLICYSQL_TRANSACTION_UNAVAILABLE`. The record becomes `failed`, or, when
+  the loss happened while a commit waited on its validator, stays `validating` until the timer
+  expires it.
 - Inputs and replies cross a data boundary; the owner validates every input as untrusted.
 
-Serialization stays in the core, not in each adapter: client commands run one at a time in
-arrival order, callback queries on a second serialized lane (they arrive while a commit on the
-first lane waits for its validator), and `onTimer` is not queued, so expiry also ends a commit
-blocked on a validator. An adapter only has to deliver calls to the single live instance.
+Serialization stays in the core: client commands run one at a time in the order they reach
+the owner, callback queries likewise on a second lane (they arrive while a commit on the first
+lane waits for its validator), and `onTimer` is not queued, so expiry also ends a commit
+blocked on a validator. "Reach the owner" is the call on `TransactionOwnerCore`, which queues
+synchronously. An adapter that carries calls as messages must also queue each message on its
+lane when it arrives, before reading its body, so a late body never lets a later message
+overtake an earlier one; the Durable Objects class does this per lane, as the old
+`fetch` did. Calls still in transit are not ordered: two concurrent client requests may reach
+the owner in either order, and ADR 0007 fails a conflicting one.
 
 The engine's own post-response work also uses `BackgroundTasks`: `app.fetch(request, context,
 background?)` takes it per request because Workers scopes `waitUntil` to one request. Without
@@ -95,7 +104,8 @@ shipped, so no deployment can pick it by mistake.
   request with `deployment_config_rejected`, as any invalid deployment does.
 - The library reads no property of `env`. The env guard has no exception, and a structural
   guard confines the Durable Object names, `waitUntil`, and `cloudflare:workers` to the adapter.
-- `test/transaction-owner-port.test.mjs` runs one conformance suite (serialization, single owner
-  per name, owner loss, timer expiry, exact retry, callback routing, binding pinning) against
-  both adapters, and `npm run test:memory-owner` runs the whole suite on the in-memory adapter.
+- `test/transaction-owner-port.test.mjs` runs one conformance suite (serialization, order of
+  arrival with a late body, single owner per name, owner loss, timer expiry, timer expiry and
+  owner loss while a commit waits on its validator, exact retry, callback routing, binding
+  pinning) against both adapters, and `npm run test:memory-owner` runs the whole suite on the in-memory adapter.
 - ADR 0007 and ADR 0014 guarantees are unchanged; they are now stated as port obligations.
