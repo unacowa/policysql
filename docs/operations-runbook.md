@@ -78,7 +78,10 @@ remove the wrapper step in code. To change limits, edit `simple.limit`/`period` 
 
 ## Incident drills
 
-- Expired/revoked JWT: expect 401 before compilation or database access.
+- Expired/revoked JWT: expect 401 from the wrapper before the library runs (no compilation or
+  database access). The wrapper authenticates every interactive command and commit.
+- `trusted_session_rejected` log with 500 `POLICYSQL_INTERNAL`: the wrapper passed a malformed
+  session (often identity-provider claims that break the session rules). Fix the wrapper or IdP.
 - Rate limit exhausted: expect 429 `POLICYSQL_RATE_LIMITED` with `Retry-After` from the wrapper,
   with no JWT verification, compilation, or database call.
 - Turso outage/token revocation: expect normalized 503/504 and rollback, with no raw error exposed.

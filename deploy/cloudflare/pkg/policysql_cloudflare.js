@@ -25,6 +25,39 @@ export class PolicySqlRuntime {
         return ret >>> 0;
     }
     /**
+     * Validates a wrapper-supplied trusted session, selects the role named by the
+     * `PolicySQL-Role` header (or `defaultRole` when absent), and checks the endpoint's
+     * required access. This is the only place these rules exist.
+     *
+     * Returns `{"auth": {...}}` with the canonical result that `compile_json` and
+     * `catalog_json` accept, `{"error": {"code": "POLICYSQL_FORBIDDEN_ACCESS", ...}}`
+     * for a client-caused denial, or `{"error": {"code": "POLICYSQL_INTERNAL", ...},
+     * "fault": "<part>"}` when the session itself violates the contract. `fault` names
+     * the malformed part and never contains a session value.
+     * @param {string} session_json
+     * @param {string | null | undefined} requested_role
+     * @param {string} required_access
+     * @returns {string}
+     */
+    authorize_session_json(session_json, requested_role, required_access) {
+        let deferred4_0;
+        let deferred4_1;
+        try {
+            const ptr0 = passStringToWasm0(session_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            var ptr1 = isLikeNone(requested_role) ? 0 : passStringToWasm0(requested_role, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(required_access, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len2 = WASM_VECTOR_LEN;
+            const ret = wasm.policysqlruntime_authorize_session_json(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            deferred4_0 = ret[0];
+            deferred4_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+        }
+    }
+    /**
      * Returns the activated, role-visible logical Catalog.
      * @param {string} verified_auth_json
      * @returns {string}
@@ -251,6 +284,10 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function isLikeNone(x) {
+    return x === undefined || x === null;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {

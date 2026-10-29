@@ -8,7 +8,7 @@ Edge and HTTP clients can lose a response after a database action has completed.
 
 ## Decision
 
-`Idempotency-Key` is optional for atomic mutations and interactive transaction start (amended by issue #3). A supplied key is validated and scoped to authenticated issuer, subject, selected role, session, endpoint, and database identity. Its canonical request fingerprint includes the pinned DB binding. Reusing a key with the same payload returns the stored result while retained; a different payload is rejected. Atomic mutation results are stored in `policysql_idempotency` within the same DB transaction as the mutation, preserving the keyed retry contract.
+`Idempotency-Key` is optional for atomic mutations and interactive transaction start (amended by issue #3). A supplied key is validated and scoped to the trusted session's principal (replacing the JWT issuer, ADR 0020), subject, selected role, session, endpoint, and database identity. Its canonical request fingerprint includes the pinned DB binding. Reusing a key with the same payload returns the stored result while retained; a different payload is rejected. Atomic mutation results are stored in `policysql_idempotency` within the same DB transaction as the mutation, preserving the keyed retry contract.
 
 Without a key, each request is a new execution without request-level deduplication. Atomic execution does not look up, insert into, probe for, or create `policysql_idempotency`. This applies to both direct execution and the commit-check DO path. The latter creates a random owner/validation ID per request, preserving callback isolation without enabling idempotency storage. A malformed supplied key is an error; it is never treated as omission. A keyed atomic mutation still fails if the table is missing.
 

@@ -1,12 +1,14 @@
 # Explicitly passing a database from the wrapper
 
-The wrapper must supply a DB on every ordinary request. The library neither reads
-fixed Turso env variables nor selects a DB from a JWT. Its database API requires:
+The wrapper must supply a DB and the authenticated trusted session on every ordinary
+request. The library neither reads fixed Turso env variables nor selects a DB from a JWT,
+and it verifies no credential. Its API requires:
 
 ```ts
 const worker = createPolicySqlWorker({ ...configuration, database: registry.provider });
+const session = await authenticate(request, env); // auth.ts: the JWT identity adapter
 const database = registry.binding(authorizedDatabaseId, env);
-const response = await worker.app.fetch(request, env, context, database);
+const response = await worker.app.fetch(request, env, context, { database, session });
 ```
 
 `provider.ts` is an application-owned registry with no request, JWT, or authentication
@@ -17,14 +19,16 @@ not a library default. Omission is an error, even when old Turso env credentials
 
 For request-scoped selection, replace the wrapper's configuration lookup with an
 already-authorized DB ID from your application routing/authorization service. Then pass
-its binding as the fourth argument. The wrapper must authorize access to that DB before
+its binding as `database` in the fourth argument. The wrapper must authorize access to that DB before
 injecting it; a client-provided ID or hostname alone does not grant access. The library
 cannot infer the application's tenant-to-DB authorization rules.
 
-The gateway still verifies the SQL session JWT for policies and endpoint access. That
-JWT needs no database claim, and adding a database claim does not select or override the
-injected DB. The two-database tests inject different bindings independently of JWT routing
-claims and still exercise real policy-session authentication.
+This wrapper verifies the SQL session JWT in `auth.ts` with the library's optional
+`createJwtSessionVerifier` and passes the resulting trusted session; PolicySQL then checks
+policies and endpoint access against it. The JWT needs no database claim, and adding a
+database claim does not select or override the injected DB. The wrapper authenticates every
+request, including every interactive command and commit, so an expired or revoked token stops
+a transaction ([ADR 0020](../../docs/adr/0020-trusted-session-input-and-jwt-identity-adapter.md)).
 
 ## Setup
 
@@ -34,8 +38,8 @@ claims and still exercise real policy-session authentication.
    Unkeyed mutations and interactive transactions do not require it. DDL is not a public API operation.
 2. Replace the two `.invalid` URLs in `worker.ts` with registered HTTPS origins and
    configure separate `TENANT_A_TOKEN` / `TENANT_B_TOKEN` secrets.
-3. Configure the SQL session verifier using `POLICYSQL_JWKS_JSON`, `POLICYSQL_JWT_ISSUER`,
-   and `POLICYSQL_JWT_AUDIENCE`. The JWT contains the normal `policysql` roles/access/session
+3. Configure this wrapper's SQL session verifier (`auth.ts`) using `POLICYSQL_JWKS_JSON`,
+   `POLICYSQL_JWT_ISSUER`, and `POLICYSQL_JWT_AUDIENCE`; the library reads none of them. The JWT contains the normal `policysql` roles/access/session
    object; the policy uses `session.tenant_id`. It has no DB routing claim requirement.
 4. Choose `APPLICATION_DATABASE_ID` in this wrapper's `wrangler.jsonc` and review the
    environment, enabled flags, DO migration, rate limit, and shared conservative cost bounds.
@@ -77,7 +81,8 @@ context)`. That method accepts only the callback route and uses the database alr
 pinned by its owner. It cannot execute normal API requests without a database argument.
 The callback capability remains required. There is no fallback or new selection here.
 
-Ordinary requests keep their existing SQL envelopes and JWT policy authentication:
+Ordinary requests keep their existing SQL envelopes; the client sends the JWT that this
+wrapper verifies:
 
 ```json
 {"statements":[{"sql":"SELECT id, name FROM projects ORDER BY id","params":{}}]}
@@ -130,7 +135,7 @@ await operation.send()
 
 Set `autoIdempotencyKey: true` to generate keys for mutation executions without an explicit
 key. Each execution gets a new key, so this alone does not deduplicate application retries.
-Explicit keys take precedence in either mode. `role` is optional (the verified JWT default
+Explicit keys take precedence in either mode. `role` is optional (the trusted session's default
 role applies); `schemaVersion` and `policyVersion` can optionally be specified together.
 Neither setting selects the database. Persist the key and payload to retry after
 an application reload, using the same authenticated context and DB binding while the
@@ -162,7 +167,8 @@ Local regression tests require Node 24+ and run with:
 node --test deploy/cloudflare/test/database-routing.test.mjs deploy/cloudflare/test/kysely-client.test.mjs
 ```
 
-They use this registry, real JWT verification for SQL sessions, Rust/Wasm, HTTP transport,
+They use this registry, trusted sessions passed directly or through this wrapper's JWT
+verification, Rust/Wasm, HTTP transport,
 and two independent SQLite files. They cover missing DBs, irrelevant JWT DB claims,
 parallel reads/writes, rollback, retries, callbacks, cost observation, owner loss,
 configuration mismatch, credential rotation/revocation, and snapshot changes.

@@ -12,23 +12,37 @@ immutable runtime snapshot. Per-database policy/schema/backend loading is not pr
 Two inputs are mandatory:
 
 1. Configure a `DatabaseProvider` when constructing `createApp` or `createPolicySqlWorker`.
-2. Pass the selected `DatabaseBinding` as the fourth argument of `app.fetch` on each request.
+2. Pass the selected `DatabaseBinding` as `database` in the fourth argument of `app.fetch`
+   on each request, next to the trusted session the wrapper authenticated
+   (`{ database, session, requestId? }`,
+   [ADR 0020](adr/0020-trusted-session-input-and-jwt-identity-adapter.md)).
 
 ```ts
 const worker = createPolicySqlWorker({ ...runtimeConfiguration, database: provider });
 export const TransactionOwner = worker.TransactionOwner;
+const verify = createJwtSessionVerifier({ jwks: JWKS, issuer: ISSUER, audience: AUDIENCE });
 
 export default {
-  fetch(request, env, context) {
+  async fetch(request, env, context) {
+    // Application-owned authentication; PolicySQL never sees the credential.
+    let session;
+    try {
+      session = await verify(request);
+    } catch (error) {
+      if (error instanceof JwtAuthenticationError) {
+        return createErrorResponse(401, error.code, error.message);
+      }
+      throw error;
+    }
     // Application-owned selection; this can be a fixed registered database.
     const database = registry.binding(env.APPLICATION_DATABASE_ID, env);
-    return worker.app.fetch(request, env, context, database);
+    return worker.app.fetch(request, env, context, { database, session });
   },
 };
 ```
 
 A missing or malformed provider throws `TypeError` at construction, before any request.
-A missing/null per-request binding returns HTTP 500 with `POLICYSQL_DATABASE_REQUIRED`,
+A missing/null per-request `database` returns HTTP 500 with `POLICYSQL_DATABASE_REQUIRED`,
 even if `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` exist in env. Both inputs are required
 by the TypeScript API as well. A malformed/disallowed binding returns 403
 `POLICYSQL_DATABASE_BINDING_REJECTED`; a snapshot mismatch returns 409
@@ -50,7 +64,7 @@ interface DatabaseProvider {
 }
 ```
 
-The provider has no `select` method and receives no JWT or authentication context.
+The provider has no `select` method and receives no credential or authentication context.
 `check` must return exactly `true` for an enabled, compatible registered binding.
 It validates that exact binding; it does not choose a replacement. `connect` constructs
 its transport without starting a transaction or executing SQL. PolicySQL owns BEGIN,
@@ -63,10 +77,10 @@ service, trusted routing configuration, or verified token claims to select a DB.
 choice is outside the injection API. Never accept an arbitrary client-supplied DB ID,
 URL, or credential reference as authorization.
 
-The gateway's existing JWT verification still authenticates SQL policy sessions and
-endpoint access. Supplying a DB does not bypass that authentication. Conversely, a JWT
-cannot supply or override a missing database argument. Database injection and policy
-session authentication are separate contracts.
+The wrapper authenticates the caller and passes the trusted session next to the database;
+PolicySQL validates the session and checks endpoint access in core. Supplying a DB does not
+bypass that check. Conversely, a session or token claim cannot supply or override a missing
+database argument. Database injection and the trusted-session contract are separate.
 
 Each provider call is bounded by the shorter of 1,000 ms and the remaining transaction
 time. Provider exceptions or exhaustion of the provider-only budget produce a generic
@@ -133,8 +147,8 @@ The DO namespace is private trusted infrastructure, not a public forwarding endp
 
 | Path | Database source |
 | --- | --- |
-| Execute / interactive / Catalog / Capabilities / Explain | Required fourth argument of `app.fetch` |
-| Health / unknown paths through `fetch` | Binding argument still required; no DB connection |
+| Execute / interactive / Catalog / Capabilities / Explain | Required `database` in the fourth argument of `app.fetch` |
+| Health / unknown paths through `fetch` | `database` still required; no session needed; no DB connection |
 | Commit-check callback | Binding and open connection already stored by its transaction owner |
 | Cost observation | Same binding as execution, on a separate connection |
 
@@ -146,7 +160,9 @@ percent-encoded paths that decode to it; they return 404 before the body is read
 chosen or connected, and this entrypoint cannot execute ordinary requests without a DB.
 Changing to a validator role never reselects the database.
 
-Interactive commands must supply the same binding and authenticated context as start.
+Interactive commands must supply the same binding and trusted session (same `principal`,
+subject, role, and session values) as start. The wrapper authenticates every command and
+commit; stopping a transaction after token expiry or revocation is its obligation.
 Owner loss, connection loss, or a changed runtime snapshot cannot resume a transaction
 on a new connection. Credentials and original JWTs are not stored in owner state or
 sent in callback payloads. Remote timeout remains necessary after owner eviction.
@@ -186,8 +202,8 @@ have been removed. Fixed-env connection construction now lives explicitly in
 must provide a provider and a binding. This also changes legacy retry identities; drain
 unresolved retries before migrating an endpoint. Old owner state without a binding fails closed.
 
-See [the complete example](../examples/database-routing/README.md). Local tests use real
-JWT verification for the SQL session, Rust/Wasm, HTTP transport, and two independent SQLite
+See [the complete example](../examples/database-routing/README.md). Local tests pass
+trusted sessions directly or through the example's JWT verification, Rust/Wasm, HTTP transport, and two independent SQLite
 files. They also prove that injection itself does not need JWT routing claims. Cloudflare
 storage/eviction and Turso networking are simulated; real deployment acceptance remains
 required before claiming operational verification.

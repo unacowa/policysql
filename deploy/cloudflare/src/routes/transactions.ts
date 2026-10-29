@@ -14,7 +14,7 @@ const invalidRequest = () =>
   new HttpError(400, "POLICYSQL_INVALID_REQUEST", "The request is invalid.");
 
 export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDependencies) => {
-  app.post("/v1/transactions", authorize("execute"), async (context) => {
+  app.post("/v1/transactions", authorize(dependencies, "execute"), async (context) => {
     const auth = context.get("auth");
     const body = await readJsonBody(context.req.raw);
     const keys = body.value && typeof body.value === "object" && !Array.isArray(body.value)
@@ -39,14 +39,13 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDe
     const databaseBinding = await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, snapshot);
     const idempotency = await requestIdempotency(
       context.req.raw,
-      context.env.deployment,
       auth,
       body.value,
       "interactive-start",
       databaseBinding,
     );
     const transactionId = `tx_${idempotency?.keyHash.slice(0, 32) ?? crypto.randomUUID().replaceAll("-", "")}`;
-    const fingerprint = await authFingerprint(context.env.deployment, auth, databaseBinding);
+    const fingerprint = await authFingerprint(auth, databaseBinding);
     // The owner still validates its start command; this digest is not a public retry key.
     const startFingerprint = idempotency?.fingerprint ?? await sha256(stableJson({ transactionId, request: body.value }));
     const owner = context.env.deployment.TRANSACTION_OWNER.get(context.env.deployment.TRANSACTION_OWNER.idFromName(transactionId));
@@ -66,7 +65,7 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDe
     });
   });
 
-  app.post("/v1/transactions/:transactionId/:command", authorize("execute"), async (context) => {
+  app.post("/v1/transactions/:transactionId/:command", authorize(dependencies, "execute"), async (context) => {
     const transactionId = context.req.param("transactionId");
     const command = context.req.param("command");
     if (!TRANSACTION_ID.test(transactionId) || !["statements", "commit", "rollback"].includes(command)) {
@@ -76,7 +75,7 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDe
     const body = await readJsonBody(context.req.raw);
     const snapshot = dependencies.getRuntime().snapshot;
     const databaseBinding = await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, snapshot);
-    const fingerprint = await authFingerprint(context.env.deployment, auth, databaseBinding);
+    const fingerprint = await authFingerprint(auth, databaseBinding);
     const owner = context.env.deployment.TRANSACTION_OWNER.get(context.env.deployment.TRANSACTION_OWNER.idFromName(transactionId));
     return owner.fetch(`https://owner/${command === "statements" ? "statement" : command}`, {
       method: "POST",

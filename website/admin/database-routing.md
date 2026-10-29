@@ -16,7 +16,7 @@ DBの選択と認可はラッパー側で行い、PolicySQLは渡されたDBで�
 `@unacowa/policysql/cloudflare`から公開するAPIには、次の二つを渡します。
 
 1. `createApp` / `createPolicySqlWorker`の`database`に接続提供処理を設定する。
-2. 各`app.fetch`の第4引数に、選択済みの`DatabaseBinding`を渡す。
+2. 各`app.fetch`の第4引数`{ database, session }`に、選択済みの`DatabaseBinding`と、ラッパーが認証したtrusted sessionを渡す（[JWT認証](../security/jwt)）。
 
 ```ts
 const worker = createPolicySqlWorker({
@@ -27,9 +27,10 @@ const worker = createPolicySqlWorker({
 
 export const TransactionOwner = worker.TransactionOwner;
 export default {
-  fetch(request, env, context) {
+  async fetch(request, env, context) {
+    const session = await authenticate(request, env); // 失敗時はラッパーが401を返す
     const database = registry.binding(env.APPLICATION_DATABASE_ID, env);
-    return worker.app.fetch(request, env, context, database);
+    return worker.app.fetch(request, env, context, { database, session });
   },
 };
 ```
@@ -57,7 +58,7 @@ export default {
 
 DB注入APIはJWTや認証情報を受け取りません。ラッパーは固定設定、独自の認可service、検証済みtokenなど、自分の設計で接続先を選べます。
 
-SQLのpolicy適用に必要なJWT認証とsessionは別の契約として維持します。DBを渡しても認証を迂回できず、JWTにDB情報を書いても省略したDB引数を補ったり、注入済みDBを変更したりできません。
+SQLのpolicy適用に必要な認証はラッパーが行い、trusted sessionを別の契約として渡します。DBを渡しても認証を迂回できず、JWTにDB情報を書いても省略したDB引数を補ったり、注入済みDBを変更したりできません。
 
 Tursoを使う場合も、接続設定を明示します。
 
@@ -87,4 +88,4 @@ validatorのcallbackだけは、ラッパーで`app.fetchCallback(request, env, 
 
 リポジトリの`examples/database-routing/`にJWTから独立したregistryとWorker/DOサンプルがあります。既存の固定DB配備コードは`deploy/cloudflare/wrapper/`に移し、そこから明示的にDBを注入しています。
 
-ローカルテストは独立SQLite DB・実JWT・WASMを使いますが、通信とDO基盤は模擬です。実Cloudflare/Tursoの受入検証は別途必要です。
+ローカルテストは独立SQLite DB・trusted session（またはサンプルのJWT検証）・WASMを使いますが、通信とDO基盤は模擬です。実Cloudflare/Tursoの受入検証は別途必要です。

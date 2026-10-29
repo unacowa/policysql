@@ -13,6 +13,9 @@ export { TransactionOwnerCore } from "./transaction-owner.ts";
 export { TursoHttpTransport } from "./turso-http.ts";
 export { createErrorResponse } from "./errors.ts";
 export type { ErrorResponseOptions } from "./errors.ts";
+// Optional identity adapter for wrappers. The engine never imports it (ADR 0019).
+export { createJwtSessionVerifier, JwtAuthenticationError } from "./adapters/jwt.ts";
+export type { JwtSessionVerifierOptions } from "./adapters/jwt.ts";
 export type {
   DatabaseBinding, DatabaseProvider, DatabaseTransport, DatabaseTransportOptions,
   DatabaseTransaction, DatabaseResult, DatabaseUsage,
@@ -21,6 +24,8 @@ export type {
   AppDependencies,
   AppEnv,
   AuthContext,
+  RequestContext,
+  TrustedSession,
   ExecutionTrace,
   ExecutionTraceParameter,
   ExecutionTraceSink,

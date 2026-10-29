@@ -14,7 +14,7 @@ export const sha256 = async (value) => {
   return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 };
 
-export const requestIdempotency = async (request, env, auth, body, endpoint, databaseBinding) => {
+export const requestIdempotency = async (request, auth, body, endpoint, databaseBinding) => {
   if (!databaseBinding) throw new HttpError(500, "POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
   const key = request.headers.get("idempotency-key");
   if (key === null) return null;
@@ -25,8 +25,9 @@ export const requestIdempotency = async (request, env, auth, body, endpoint, dat
       "Idempotency-Key must contain 16-128 letters, digits, dots, underscores, colons, or hyphens when provided.",
     );
   }
+  // `principal` is the wrapper-namespaced caller identity (ADR 0019); it replaces the JWT issuer.
   const identity = stableJson({
-    issuer: env.POLICYSQL_JWT_ISSUER,
+    principal: auth.principal,
     subject: auth.subject,
     role: auth.role,
     session: auth.session,
@@ -39,13 +40,13 @@ export const requestIdempotency = async (request, env, auth, body, endpoint, dat
   };
 };
 
-export const mutationIdempotency = (request, env, auth, body, databaseBinding) =>
-  requestIdempotency(request, env, auth, body, "execute", databaseBinding);
+export const mutationIdempotency = (request, auth, body, databaseBinding) =>
+  requestIdempotency(request, auth, body, "execute", databaseBinding);
 
-export const authFingerprint = (env, auth, databaseBinding) => {
+export const authFingerprint = (auth, databaseBinding) => {
   if (!databaseBinding) throw new HttpError(500, "POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
   return sha256(stableJson({
-    issuer: env.POLICYSQL_JWT_ISSUER,
+    principal: auth.principal,
     subject: auth.subject,
     role: auth.role,
     session: auth.session,

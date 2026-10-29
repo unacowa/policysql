@@ -119,7 +119,7 @@ test("Capabilities and the adapter take maxBytesPerValue from the same runtime v
   }
 });
 
-for (const hooks of [false, true]) test(`bytes round-trip with JWT, real WASM, HTTP transport, SQLite, presets and replay (hooks=${hooks})`, async t => {
+for (const hooks of [false, true]) test(`bytes round-trip with the trusted session, real WASM, HTTP transport, SQLite, presets and replay (hooks=${hooks})`, async t => {
   const h = await harness(t, { hooks, fixture });
   const values = [...cases.valid.map(c => c.base64), null];
   const statements = values.map((value, i) => insert(`bytes_${i}`, value));

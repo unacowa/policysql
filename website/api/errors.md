@@ -36,9 +36,10 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | Code | 意味 |
 | --- | --- |
 | `POLICYSQL_INVALID_REQUEST` | JSONや必須fieldが不正 |
-| `POLICYSQL_UNAUTHENTICATED` | JWTがない、または検証できない |
-| `POLICYSQL_FORBIDDEN_ROLE` | 選択したroleがJWTで許可されていない |
-| `POLICYSQL_FORBIDDEN_ACCESS` | JWTがendpointに必要なaccessを持たない |
+| `POLICYSQL_UNAUTHENTICATED` | credentialがない、または無効・期限切れ・失効（HTTP 401）。ラッパーが返す401の標準code。参考ラッパーとJWT adapterはこのcodeだけを使う。[ラッパーが返すエラー](#ラッパーが返すエラー)を参照 |
+| `POLICYSQL_AUTHENTICATION_FAILED` | 予約code（HTTP 401）。同梱のコードはどれも返さない。独自のラッパーが「credentialはあるが検証に失敗した（署名不正、期限切れ、失効など）」を、credentialがない場合と区別したいときに使える。clientは`POLICYSQL_UNAUTHENTICATED`と同じく「実行されていない」拒否として扱う |
+| `POLICYSQL_FORBIDDEN_ROLE` | 選択したroleがtrusted sessionで許可されていない |
+| `POLICYSQL_FORBIDDEN_ACCESS` | `PolicySQL-Role`がtrusted sessionの`roles`にない、またはendpointに必要なaccessがない |
 | `POLICYSQL_INVALID_SQL` | SQLをparseできない |
 | `POLICYSQL_MULTIPLE_STATEMENTS` | statementが複数含まれる |
 | `POLICYSQL_UNSUPPORTED_SQL` | 対応範囲外の構文 |
@@ -74,7 +75,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_IDEMPOTENCY_KEY_REQUIRED` | 明示されたkeyが空または形式不正。省略時には発生しない（互換性のため既存codeを維持） |
 | `POLICYSQL_IDEMPOTENCY_CONFLICT` | 通常atomicで同じkeyが異なるrequestに使われた |
 | `POLICYSQL_REQUEST_IN_PROGRESS` | 同じidempotency keyのrequestがまだ実行中 |
-| `POLICYSQL_INTERNAL` | 公開できない内部エラー |
+| `POLICYSQL_INTERNAL` | 公開できない内部エラー。ラッパーが渡したtrusted sessionの形が不正な場合もこのcode（HTTP 500）になる |
 
 `POLICYSQL_USAGE_BUDGET_EXCEEDED`（queryの推定usageが予算を超えた）と`POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`（transactionの上限を超えた）も、ライブラリがHTTP 429で返します。これらはrequest rateの制限ではありません。
 
@@ -82,7 +83,9 @@ error codeはAPI versionごとの安定したcontractです。minor releaseで�
 
 ## ラッパーが返すエラー
 
-レート制限はライブラリの機能ではなく、実装側（ラッパー）の責務です。ラッパーはWorkerの`fetch`で`app.fetch`より前にrequestを判定し、上限を超えた場合は`POLICYSQL_RATE_LIMITED`（HTTP 429）を返します。キー（IP、token、ラッパーが判定したtenantなど）と制限基盤もラッパーが決めます。ライブラリはlimiterのbindingを読まず、bindingがなくても全endpointが動作します。
+認証はライブラリの機能ではなく、ラッパーの責務です（[JWT認証](../security/jwt)）。ラッパーはcredentialを検証し、失敗した場合は`app.fetch`を呼ばずにHTTP 401を返します。標準codeは`POLICYSQL_UNAUTHENTICATED`です（参考実装はこれだけを返す）。`POLICYSQL_AUTHENTICATION_FAILED`は予約codeで、独自のラッパーが「credentialはあるが検証に失敗した」場合を区別したいときだけ使います。ライブラリは401を返しません。対話型transactionのcommandとcommitも毎回認証するため、token失効や期限切れの後はtransactionを継続できません。
+
+レート制限もライブラリの機能ではなく、実装側（ラッパー）の責務です。ラッパーはWorkerの`fetch`で`app.fetch`より前にrequestを判定し、上限を超えた場合は`POLICYSQL_RATE_LIMITED`（HTTP 429）を返します。キー（IP、token、ラッパーが判定したtenantなど）と制限基盤もラッパーが決めます。ライブラリはlimiterのbindingを読まず、bindingがなくても全endpointが動作します。
 
 ラッパーが返すエラーも同じ形式にするため、`@unacowa/policysql/cloudflare`は`createErrorResponse`を公開しています。
 
@@ -106,7 +109,7 @@ return createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", 
 
 不正な引数は`TypeError`になります。参考実装（`deploy/cloudflare/wrapper/`、`examples/database-routing/`）は、すべてのrequestをライブラリより前に制限します。clientのrequestはCloudflare Rate Limiting binding `RATE_LIMITER`、commit checkのcallbackは別のbinding `CALLBACK_RATE_LIMITER`（別のkey）で数えます。callbackのcapabilityはtransaction ownerの中でしか検証されません。そのため制限しないと、認証なしでbodyの読み込み、Durable Objectの参照、storageの読み込みを繰り返し実行させられます。bucketを分けているので、clientのrequestが多くてもvalidatorのcallbackは制限されません。
 
-上限超過時は`Retry-After: 60`（bindingの`period`秒）を付けて429を返します。このとき、JWT検証、WASMの初期化、SQL compile、Durable Object、DB接続は行いません。bindingがない、またはbindingが例外を投げた場合は、ライブラリを呼ばずにHTTP 500 `POLICYSQL_INTERNAL`を返します（fail closed）。
+上限超過時は`Retry-After: 60`（bindingの`period`秒）を付けて429を返します。このとき、認証、WASMの初期化、SQL compile、Durable Object、DB接続は行いません。bindingがない、またはbindingが例外を投げた場合は、ライブラリを呼ばずにHTTP 500 `POLICYSQL_INTERNAL`を返します（fail closed）。
 
 ## 情報を公開しないエラー
 

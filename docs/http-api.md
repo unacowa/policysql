@@ -8,6 +8,23 @@ same endpoints, JSON representations and transaction protocol with any conformin
 SQL dialect, supported features and limits remain governed by the endpoint's backend
 profile and published Capabilities.
 
+## Authentication
+
+Authentication is deployment-defined. The deployment's wrapper authenticates every client
+request, including every interactive command and commit, and passes the resulting trusted
+session to PolicySQL as data; PolicySQL never sees the credential and never returns 401.
+A wrapper returns 401 itself: `POLICYSQL_UNAUTHENTICATED` for a missing or invalid
+credential (the reference wrapper's only code), or the reserved
+`POLICYSQL_AUTHENTICATION_FAILED` that a custom wrapper may use when a present credential
+failed verification. Clients treat both as not executed. PolicySQL checks the endpoint's required access and the optional `PolicySQL-Role`
+header against the trusted session (403 `POLICYSQL_FORBIDDEN_ACCESS`; a repeated role
+header is 400 `POLICYSQL_INVALID_REQUEST`). A malformed session from the wrapper is a
+deployment fault (500 `POLICYSQL_INTERNAL`). Stopping an interactive transaction after
+token expiry or revocation is the wrapper's obligation. The reference wrapper uses a bearer
+JWT (`Authorization: Bearer <token>`); see
+[ADR 0020](adr/0020-trusted-session-input-and-jwt-identity-adapter.md). The examples below
+show that header.
+
 For `bytes / string / base64`, parameters and result cells use base64 JSON strings on
 every conforming host. Empty bytes use `""`; SQL NULL in a nullable result cell uses
 JSON `null`. JSON `null` for a bytes parameter follows the NULL parameter rule below,
@@ -76,7 +93,7 @@ Resending an unkeyed atomic execution or start request creates a separate operat
 commands within an existing interactive transaction retain their sequence-based retry rules.
 
 An authorized development deployment may add `debug.executionTrace` after execution. The trace is
-present only when the deployment enables execution tracing and the verified JWT has `debug` access.
+present only when the deployment enables execution tracing and the trusted session has `debug` access.
 It is captured from the statement objects handed to the Turso transport, not by running Explain a
 second time. Parameter values are never returned:
 

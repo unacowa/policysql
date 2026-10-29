@@ -5,18 +5,16 @@ import { PolicySqlClient, createHttpTransport } from "../../../packages/client/i
 import { PolicySqlDialect, policyOptions } from "../../../packages/kysely/index.js";
 import { harness } from "./helpers/routing.mjs";
 
-const makeClient = async (t, h, { tenant = "a", token, autoIdempotencyKey, plugins, wrapFetch = f => f, ...options } = {}) => {
+// The wrapper's authentication is out of scope here; each request carries the trusted
+// session the wrapper would pass (ADR 0019).
+const makeClient = async (t, h, { tenant = "a", session, autoIdempotencyKey, plugins, wrapFetch = f => f, ...options } = {}) => {
   const requests = [];
+  const trusted = session ?? h.session(tenant);
   const fetchImpl = wrapFetch(async (url, init) => {
     requests.push({ path: new URL(url).pathname, body: JSON.parse(init.body), headers: new Headers(init.headers) });
-    return h.app.fetch(new Request(url, init), h.env, h.ctx, h.binding(tenant));
+    return h.app.fetch(new Request(url, init), h.env, h.ctx, { database: h.binding(tenant), session: trusted });
   });
-  const credential = token ?? await h.token(tenant);
-  const transport = createHttpTransport({ endpoint: "https://worker.test", fetchImpl: (url, init) => {
-    const headers = new Headers(init.headers);
-    headers.set("authorization", `Bearer ${credential}`);
-    return fetchImpl(url, { ...init, headers });
-  } });
+  const transport = createHttpTransport({ endpoint: "https://worker.test", fetchImpl });
   const client = new PolicySqlClient({ transport, ...options });
   const db = new Kysely({ dialect: new PolicySqlDialect({ client, autoIdempotencyKey }), plugins });
   t.after(() => db.destroy());
@@ -26,24 +24,24 @@ const read = db => db.selectFrom("projects").select(["id", "name"]).orderBy("id"
 const update = (db, name = "Updated") => db.updateTable("projects").set({ name }).where("id", "=", "seed");
 const versions = { schemaVersion: "schema_routing_1", policyVersion: "policy_routing_1" };
 
-test("minimal client and default/explicit roles are enforced by JWT + Wasm + SQLite", async (t) => {
+test("minimal client and default/explicit roles are enforced by the trusted session + Wasm + SQLite", async (t) => {
   const h = await harness(t, { hooks: false, customizePolicy: policy => policy.replace("      member:", `      reader:
         select:
           columns: [id]
           filter: { id: { eq: nonexistent } }
           limit: 10
       member:`) });
-  const token = await h.token("a", { policysql: { roles: ["member", "reader"], default_role: "member", access: ["execute"], session: { tenant_id: "tenant_a" } } });
-  const normal = await makeClient(t, h, { token });
+  const session = h.session("a", { roles: ["member", "reader"], access: ["execute"] });
+  const normal = await makeClient(t, h, { session });
   assert.deepEqual(await read(normal.db).execute(), [{ id: "seed", name: "database_a" }]);
   assert.equal(normal.requests.length, 1);
   assert.equal(normal.requests[0].headers.has("policysql-role"), false);
   assert.equal(Object.hasOwn(normal.requests[0].body, "expected"), false);
-  const restricted = await makeClient(t, h, { token, role: "reader" });
+  const restricted = await makeClient(t, h, { session, role: "reader" });
   assert.deepEqual(await restricted.db.selectFrom("projects").select("id").execute(), []);
   await assert.rejects(read(restricted.db).execute());
   const before = h.events.length;
-  const forbidden = await makeClient(t, h, { token, role: "admin" });
+  const forbidden = await makeClient(t, h, { session, role: "admin" });
   await assert.rejects(read(forbidden.db).execute(), { status: 403 });
   assert.equal(h.events.length, before);
 });

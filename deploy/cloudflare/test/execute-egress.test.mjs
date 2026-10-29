@@ -1,15 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_cloudflare.js";
 import { testBinding, testProvider } from "./helpers/database.mjs";
 import { createApp as createHandlerCore } from "../src/app.ts";
 import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 
-const issuer = "https://issuer.test";
-const audience = "policysql-test";
 let runtime;
 
 const runtimeFrom = (catalogYaml, policyYaml) => new PolicySqlRuntime(
@@ -86,44 +83,23 @@ const result = (columns, rows, usage = {}) => ({
   },
 });
 
-const tokenFixture = async (access = ["execute"]) => {
-  const { privateKey, publicKey } = await generateKeyPair("ES256");
-  const publicJwk = await exportJWK(publicKey);
-  publicJwk.kid = "test-key";
-  publicJwk.alg = "ES256";
-  const token = await new SignJWT({
-    policysql: {
-      roles: ["member"],
-      default_role: "member",
-      access,
-      session: { tenant_id: "tenant_1" },
-    },
-  })
-    .setProtectedHeader({ alg: "ES256", kid: "test-key" })
-    .setIssuer(issuer)
-    .setAudience(audience)
-    .setSubject("user_1")
-    .setIssuedAt()
-    .setExpirationTime("5m")
-    .sign(privateKey);
-  return {
-    token,
-    authEnv: {
-      POLICYSQL_JWKS_JSON: JSON.stringify({ keys: [publicJwk] }),
-      POLICYSQL_JWT_ISSUER: issuer,
-      POLICYSQL_JWT_AUDIENCE: audience,
-    },
-  };
-};
+// The trusted session a wrapper passes after authentication (ADR 0019).
+const sessionFixture = (access = ["execute"]) => ({
+  principal: "https://issuer.test:user_1",
+  subject: "user_1",
+  roles: ["member"],
+  defaultRole: "member",
+  access,
+  session: { tenant_id: "tenant_1" },
+});
 
 test("Explain exposes role-visible resource names instead of internal identities", async () => {
-  const { token, authEnv } = await tokenFixture(["explain"]);
+  const session = sessionFixture(["explain"]);
   const handler = createHandlerCore({ getRuntime, database: testProvider() });
   const response = await handler.fetch(
     new Request("https://worker.test/v1/transactions:explain", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${token}`,
         "content-type": "application/json",
         "cf-ray": "req_explain",
       },
@@ -131,11 +107,9 @@ test("Explain exposes role-visible resource names instead of internal identities
         statements: [{ sql: "SELECT id FROM projects", params: {} }],
       }),
     }),
-    {
-      ...authEnv,
-    },
     {},
-    testBinding(getRuntime().snapshot),
+    {},
+    { database: testBinding(getRuntime().snapshot), session },
   );
   const body = await response.json();
   assert.equal(response.status, 200);
@@ -150,8 +124,7 @@ test("Explain exposes role-visible resource names instead of internal identities
 
 const executeRequest = async ({
   runtime,
-  token,
-  authEnv,
+  session,
   body,
   fetchImpl,
   idempotencyKey = undefined,
@@ -167,7 +140,6 @@ const executeRequest = async ({
     new Request("https://worker.test/v1/transactions:execute", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${token}`,
         "content-type": "application/json",
         "cf-ray": requestId,
         ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
@@ -175,18 +147,17 @@ const executeRequest = async ({
       body: JSON.stringify(body),
     }),
     {
-      ...authEnv,
       TURSO_DATABASE_URL: "https://db.test",
       TURSO_AUTH_TOKEN: "secret",
     },
     {},
-    testBinding(runtime.snapshot),
+    { database: testBinding(runtime.snapshot), session },
   );
 };
 
 test("returns exact redacted Turso egress SQL only to an authorized developer", async () => {
   const expectedProtectedSql = 'SELECT "__policysql_t0"."id" AS "id", "__policysql_t0"."name" AS "name" FROM "projects" AS "__policysql_t0" WHERE (("__policysql_t0"."status" = :status) AND ("__policysql_t0"."tenant_id" = :__policysql_session_tenant_id)) LIMIT MIN (:limit, 100)';
-  const { token, authEnv } = await tokenFixture(["execute", "debug"]);
+  const session = sessionFixture(["execute", "debug"]);
   const pipelineBodies = [];
   const fetchImpl = async function (_url, init) {
     assert.equal(this, undefined, "host fetch must not be invoked as a transport method");
@@ -214,8 +185,7 @@ test("returns exact redacted Turso egress SQL only to an authorized developer", 
   };
   const response = await executeRequest({
     runtime: getRuntime(),
-    token,
-    authEnv,
+    session,
     fetchImpl,
     executionTrace: { enabled: true },
     body: {
@@ -324,22 +294,20 @@ test("execution trace requires both deployment enablement and JWT debug access",
   };
   const requestBody = { statements: [{ sql: "SELECT id FROM projects", params: {} }] };
 
-  const withoutAccess = await tokenFixture(["execute"]);
+  const withoutAccess = sessionFixture(["execute"]);
   const responseWithoutAccess = await executeRequest({
     runtime: getRuntime(),
-    token: withoutAccess.token,
-    authEnv: withoutAccess.authEnv,
+    session: withoutAccess,
     fetchImpl,
     body: requestBody,
     executionTrace: { enabled: true },
   });
   assert.equal((await responseWithoutAccess.json()).debug, undefined);
 
-  const withAccess = await tokenFixture(["execute", "debug"]);
+  const withAccess = sessionFixture(["execute", "debug"]);
   const responseWithoutDeploymentFlag = await executeRequest({
     runtime: getRuntime(),
-    token: withAccess.token,
-    authEnv: withAccess.authEnv,
+    session: withAccess,
     fetchImpl,
     body: requestBody,
   });
@@ -407,7 +375,7 @@ for (const variation of selectVariations) {
       : readFixture(variation.fixture, "expected/protected.sql");
     const inputSql = readFixture(variation.fixture, "input.sql");
     const clientParams = JSON.parse(readFixture(variation.fixture, "client-params.json"));
-    const { token, authEnv } = await tokenFixture();
+    const session = sessionFixture();
     const pipelineBodies = [];
     const fetchImpl = async (_url, init) => {
       const body = JSON.parse(init.body);
@@ -429,8 +397,7 @@ for (const variation of selectVariations) {
     };
     const response = await executeRequest({
       runtime: runtimeForFixture(variation.fixture),
-      token,
-      authEnv,
+      session,
       fetchImpl,
       body: { statements: [{ sql: inputSql, params: clientParams }] },
     });
@@ -454,7 +421,7 @@ for (const variation of selectVariations) {
 }
 
 test("documented function GLOB alias ordering and OFFSET reach protected Turso egress", async () => {
-  const { token, authEnv } = await tokenFixture();
+  const session = sessionFixture();
   const pipelineBodies = [];
   const fetchImpl = async (_url, init) => {
     const body = JSON.parse(init.body);
@@ -476,8 +443,7 @@ test("documented function GLOB alias ordering and OFFSET reach protected Turso e
   };
   const response = await executeRequest({
     runtime: getRuntime(),
-    token,
-    authEnv,
+    session,
     fetchImpl,
     body: {
       statements: [{
@@ -496,12 +462,11 @@ test("documented function GLOB alias ordering and OFFSET reach protected Turso e
 });
 
 test("denied SQL returns before any Turso egress call", async () => {
-  const { token, authEnv } = await tokenFixture();
+  const session = sessionFixture();
   let egressCalls = 0;
   const response = await executeRequest({
     runtime: runtimeForFixture("security/forbidden-order-column"),
-    token,
-    authEnv,
+    session,
     fetchImpl: async () => {
       egressCalls += 1;
       throw new Error("forbidden SQL must not reach Turso");
@@ -566,12 +531,11 @@ resources:
 
 for (const variation of policyDeniedSelects) {
   test(variation.name, async () => {
-    const { token, authEnv } = await tokenFixture();
+    const session = sessionFixture();
     let egressCalls = 0;
     const response = await executeRequest({
       runtime: runtimeForFixturePolicy(variation.fixture, variation.policy),
-      token,
-      authEnv,
+      session,
       fetchImpl: async () => {
         egressCalls += 1;
         throw new Error("policy-denied SQL must not reach Turso");
@@ -594,7 +558,7 @@ for (const variation of policyDeniedSelects) {
 test("write mutation egress stays inside one BEGIN IMMEDIATE transaction with idempotency", async () => {
   const fixture = "mutation/update-filtered";
   const expectedProtectedSql = readFixture(fixture, "expected/protected.sql");
-  const { token, authEnv } = await tokenFixture();
+  const session = sessionFixture();
   const pipelineBodies = [];
   const fetchImpl = async (_url, init) => {
     const body = JSON.parse(init.body);
@@ -625,8 +589,7 @@ test("write mutation egress stays inside one BEGIN IMMEDIATE transaction with id
   };
   const response = await executeRequest({
     runtime: runtimeForFixture(fixture),
-    token,
-    authEnv,
+    session,
     fetchImpl,
     idempotencyKey: "write-egress-key-0001",
     body: {

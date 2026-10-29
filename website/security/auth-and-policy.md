@@ -5,11 +5,11 @@ description: Trusted sessionとrow・column policyの適用方法です。
 
 # 認証とポリシー
 
-PolicySQLは、検証済みJWTから構築したsessionを使って適用するpolicyを選択します。JWTの形式と検証規則は[JWT認証](./jwt)を参照してください。
+PolicySQLは、ラッパーが認証して渡したtrusted sessionを使って適用するpolicyを選択します。trusted sessionの形と、参考ラッパーが使うJWTの検証規則は[JWT認証](./jwt)を参照してください。
 
 ## 認証からSessionまで
 
-gatewayはJWTの署名、issuer、audience、有効期間とPolicySQL claimsを検証し、trusted sessionを構築します。
+ラッパーがcredentialを検証してtrusted sessionを作ります。参考ラッパーはJWT identity adapterでJWTの署名、issuer、audience、有効期間を検証し、PolicySQL claimsからsessionを作ります。PolicySQLのcoreはsessionの形を検証し、roleを選択して、次の値を使います。
 
 ```json
 {
@@ -20,7 +20,7 @@ gatewayはJWTの署名、issuer、audience、有効期間とPolicySQL claimsを�
 }
 ```
 
-roleはJWTの`policysql.default_role`、または`policysql.roles`に含まれる`PolicySQL-Role`から選択されます。`subject_id`は標準`sub`から作られ、その他のsession variableは`policysql.session`から作られます。
+roleはsessionの`defaultRole`（JWTでは`policysql.default_role`）、または`roles`に含まれる`PolicySQL-Role`から選択されます。`subject_id`はsessionの`subject`（JWTでは標準`sub`）から作られ、その他のsession variableは`session`（JWTでは`policysql.session`）から作られます。
 
 ## Policyの選択
 

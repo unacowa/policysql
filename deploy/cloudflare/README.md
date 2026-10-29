@@ -5,12 +5,15 @@ It must never pass caller SQL directly to Turso.
 
 The public HTTP adapter is implemented in TypeScript with Hono. `src/app.ts` composes the app,
 `src/routes/` owns endpoint handlers, and `src/middleware/` owns request context and endpoint access
-checks. Transport, authentication, idempotency, and Durable Object state-machine modules remain
+checks. Transport, idempotency, and Durable Object state-machine modules remain
 framework-independent. Interactive routes obtain the runtime snapshot in the outer Worker
 before delegating to the DO; callback routes forward the opaque capability to its owner.
 
 Applications must inject a `database` provider into `createApp` or `createPolicySqlWorker`
-and pass an already-selected binding to each `app.fetch(request, env, context, binding)`.
+and pass an already-selected binding and the authenticated trusted session to each
+`app.fetch(request, env, context, { database, session })`. The library verifies no credential
+([ADR 0020](../../docs/adr/0020-trusted-session-input-and-jwt-identity-adapter.md)); core
+validates the session before any body read, owner lookup, or DB work.
 Database injection has no JWT dependency. The wrapper authorizes and chooses its DB;
 PolicySQL pins the binding across execution, DOs, callbacks, retries, and cost observations.
 The packaged factory also returns the matching `TransactionOwner` class. See the
@@ -25,6 +28,11 @@ Request-rate limiting is also wrapper-owned ([ADR 0018](../../docs/adr/0018-wrap
 and with the separate `CALLBACK_RATE_LIMITER` binding before `app.fetchCallback`. It returns 429
 `POLICYSQL_RATE_LIMITED` with `Retry-After: 60` via the exported `createErrorResponse`, and fails
 closed with 500 `POLICYSQL_INTERNAL` when a binding is missing. The library reads no limiter binding.
+After rate limiting, `wrapper/auth.ts` verifies the development JWT with the library's identity
+adapter (`createJwtSessionVerifier`), reading `POLICYSQL_JWKS_JSON` or `POLICYSQL_JWKS_URL`,
+`POLICYSQL_JWT_ISSUER`, and `POLICYSQL_JWT_AUDIENCE`. It authenticates every client request
+except `/healthz`, including every interactive command and commit, and returns 401
+`POLICYSQL_UNAUTHENTICATED` itself; missing configuration is 500. `principal` is `JSON.stringify([issuer, sub])`.
 
 Build and validate without deployment:
 
