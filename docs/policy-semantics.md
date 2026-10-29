@@ -146,13 +146,15 @@ commit_checks:
     triggered_by: [posts, comments]
     role: admin
     hook:
-      url_env: POST_VALIDATOR_URL
       timeout_ms: 1500
-      hmac_secret_env: POST_VALIDATOR_SECRET
 ```
 
 Semantics:
 
+- the policy names no validator endpoint or secret: the wrapper supplies the URL and HMAC
+  secret per check id in `PolicySqlConfig.commitChecks`
+  ([ADR 0021](adr/0021-explicit-engine-config.md)); a triggered check without an entry
+  rejects the commit;
 - matching checks run after every operation and operation check, immediately before commit;
 - omitted `role` inherits the initiating role;
 - an explicit role is policy-owned system privilege and need not appear in the caller JWT;

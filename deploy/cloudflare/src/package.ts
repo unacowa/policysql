@@ -3,13 +3,19 @@ import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 // declaration describes raw exports instead, so consumers need this bundler-specific override.
 // @ts-ignore
 import wasm from "../pkg/policysql_wasm_bg.wasm";
-import { createApp } from "./app.ts";
 import { runtimeBytesLimit } from "./binary.ts";
-import { TransactionOwnerCore } from "./transaction-owner.ts";
+import { createWorkerEntrypoints } from "./worker.ts";
+import type { PolicySqlDeployment } from "./worker.ts";
+import type { PlatformBindings } from "./types.ts";
 
 export { createApp } from "./app.ts";
 export type { PolicySqlApp } from "./app.ts";
 export { TransactionOwnerCore } from "./transaction-owner.ts";
+export type { PolicySqlDeployment, PolicySqlWorkerApp } from "./worker.ts";
+export type { TransactionOwnerDependencies } from "./transaction-owner.ts";
+// The deployment configuration contract, in one place (ADR 0021).
+export { ConfigError, validateConfig } from "./engine-config.ts";
+export type { CommitCheckEndpoint, CostCatalog, PolicySqlConfig } from "./engine-config.ts";
 export { TursoHttpTransport } from "./turso-http.ts";
 export { createErrorResponse } from "./errors.ts";
 export type { ErrorResponseOptions } from "./errors.ts";
@@ -30,7 +36,7 @@ export type {
   ExecutionTraceParameter,
   ExecutionTraceSink,
   ExecutionTraceStatement,
-  WorkerBindings,
+  PlatformBindings,
 } from "./types.ts";
 
 export type RuntimeLimits = {
@@ -47,7 +53,6 @@ export type RuntimeConfiguration = {
   schemaVersion: string;
   policyVersion: string;
   limits: RuntimeLimits;
-  database: import("./database.ts").DatabaseProvider;
   developer?: {
     executionTrace?: boolean;
     executionTraceSink?: import("./types.ts").ExecutionTraceSink;
@@ -60,7 +65,7 @@ let wasmInitialized = false;
  * Creates an isolate-local, lazily initialized PolicySQL runtime factory.
  * Configuration belongs to the deployment; authorization and SQL compilation remain in Rust/Wasm.
  */
-export const createRuntimeFactory = (configuration: Omit<RuntimeConfiguration, "database">) => {
+export const createRuntimeFactory = (configuration: RuntimeConfiguration) => {
   let runtime: PolicySqlRuntime | undefined;
   return () => {
     if (runtime) return runtime;
@@ -92,27 +97,38 @@ export const createRuntimeFactory = (configuration: Omit<RuntimeConfiguration, "
   };
 };
 
-export const createPolicySqlWorker = (configuration: RuntimeConfiguration) => {
-  const getRuntime = createRuntimeFactory(configuration);
-  return {
-    getRuntime,
-    TransactionOwner: class extends TransactionOwnerCore {
-      constructor(state, env) {
-        super(state, env, getRuntime, configuration.database);
-      }
+export type PolicySqlWorkerConfiguration<Env extends PlatformBindings = PlatformBindings> = RuntimeConfiguration & {
+  /**
+   * Wrapper-owned. Builds the database provider and `PolicySqlConfig` from the Workers
+   * `env` (ADR 0021). Workers delivers `env` per request and to the Durable Object
+   * constructor, not at module load, so the library calls this with the `env` it was
+   * handed. The Worker calls it at most once per `env` object; a request that arrives with
+   * a different `env` object rebuilds (and revalidates) the deployment for that object.
+   * Each Durable Object instance calls it once, in its constructor. The Worker and a Durable
+   * Object therefore share a configuration only if this is a pure function of the bindings.
+   * The library itself reads nothing from `env` except `TRANSACTION_OWNER`.
+   */
+  deployment: (env: Env) => PolicySqlDeployment;
+};
+
+export const createPolicySqlWorker = <Env extends PlatformBindings>(configuration: PolicySqlWorkerConfiguration<Env>) => {
+  if (typeof configuration?.deployment !== "function") {
+    throw new TypeError("deployment is required: (env) => ({ database, config })");
+  }
+  if ("database" in configuration) {
+    throw new TypeError("database moved into deployment(env); see PolicySqlDeployment");
+  }
+  return createWorkerEntrypoints<Env>({
+    getRuntime: createRuntimeFactory(configuration),
+    deployment: configuration.deployment,
+    executionTrace: {
+      enabled: configuration.developer?.executionTrace === true,
+      sink: configuration.developer?.executionTraceSink,
     },
-    app: createApp({
-      getRuntime,
-      database: configuration.database,
-      executionTrace: {
-        enabled: configuration.developer?.executionTrace === true,
-        sink: configuration.developer?.executionTraceSink,
-      },
-      publicConfig: {
-        schemaVersion: configuration.schemaVersion,
-        policyVersion: configuration.policyVersion,
-        limits: configuration.limits,
-      },
-    }),
-  };
+    publicConfig: {
+      schemaVersion: configuration.schemaVersion,
+      policyVersion: configuration.policyVersion,
+      limits: configuration.limits,
+    },
+  });
 };

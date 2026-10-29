@@ -9,8 +9,9 @@ checks. Transport, idempotency, and Durable Object state-machine modules remain
 framework-independent. Interactive routes obtain the runtime snapshot in the outer Worker
 before delegating to the DO; callback routes forward the opaque capability to its owner.
 
-Applications must inject a `database` provider into `createApp` or `createPolicySqlWorker`
-and pass an already-selected binding and the authenticated trusted session to each
+Applications must inject a `database` provider and the explicit `PolicySqlConfig`
+([engine configuration](../../docs/configuration.md), [ADR 0021](../../docs/adr/0021-explicit-engine-config.md))
+into `createApp` or `createPolicySqlWorker` and pass an already-selected binding and the authenticated trusted session to each
 `app.fetch(request, env, context, { database, session })`. The library verifies no credential
 ([ADR 0020](../../docs/adr/0020-trusted-session-input-and-jwt-identity-adapter.md)); core
 validates the session before any body read, owner lookup, or DB work.
@@ -20,8 +21,11 @@ The packaged factory also returns the matching `TransactionOwner` class. See the
 [API contract](../../docs/database-routing.md) and [complete example](../../examples/database-routing/README.md).
 Omitting the provider fails at construction; omitting the request binding returns
 `POLICYSQL_DATABASE_REQUIRED`. The library has no fixed-env fallback.
-`wrapper/index.ts` and `wrapper/database.ts` explicitly construct the bundled deployment
-connections from env and pass them into the library. Callback requests use `fetchCallback`
+`wrapper/index.ts`, `wrapper/database.ts`, and `wrapper/config.ts` explicitly construct the
+bundled deployment connections and configuration from env and pass them into the library
+through `createPolicySqlWorker({ deployment: (env) => ({ database, config }) })`. The env names
+(`POLICYSQL_ENVIRONMENT`, `POLICYSQL_PUBLIC_BASE_URL`, `POLICYSQL_COST_CATALOG_JSON`, and the
+database settings) are this wrapper's convention; the library reads only `TRANSACTION_OWNER`. Callback requests use `fetchCallback`
 and their existing owner binding. These wrapper files are not the public library API.
 Request-rate limiting is also wrapper-owned ([ADR 0018](../../docs/adr/0018-wrapper-owned-rate-limiting.md)):
 `wrapper/fetch.ts` runs `wrapper/rate-limit.ts` with the `RATE_LIMITER` binding before `app.fetch`
@@ -64,9 +68,12 @@ atomic rollback. Provisioning executes the advertised read matrix and a mutation
 forced to roll back, then proves that its probe row is absent.
 
 To enable a check, define it under `commit_checks` in the policy, set
-`POLICYSQL_PUBLIC_BASE_URL` to the HTTPS public Worker origin, and upload every `url_env` and
-`hmac_secret_env` named by the policy as Worker secrets. Hook URLs must be HTTPS and secrets must be
-at least 16 characters. Missing or invalid bindings fail closed and roll back the transaction.
+`POLICYSQL_PUBLIC_BASE_URL` to the HTTPS public Worker origin, add the check id to
+`COMMIT_CHECK_ENV` in `wrapper/config.ts` with the env names of its validator URL and HMAC secret,
+and upload those as Worker secrets. The policy names no endpoint or secret; the wrapper passes
+them per check id as `config.commitChecks`. Hook URLs must be HTTPS and secrets must be at least
+16 characters; an invalid value fails every request with 500 before any I/O, and a triggered check
+without an entry fails closed and rolls back the transaction.
 
 Provision or rotate the development database credential, JWT issuer key, Worker secrets, and
 deployment in one run:

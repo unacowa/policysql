@@ -1,45 +1,36 @@
-import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
-import wasm from "../pkg/policysql_wasm_bg.wasm";
 import catalog from "../config/catalog.yaml";
 import policy from "../config/policy.compiled.yaml";
 import physicalSchema from "../config/schema-introspection.json";
-import { createApp } from "../src/app.ts";
+import { createPolicySqlWorker } from "../src/package.ts";
 import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
-import { TransactionOwnerCore } from "../src/transaction-owner.ts";
+import { configFromEnv } from "./config.ts";
 import { createDeploymentDatabase } from "./database.ts";
 import { createWrapperFetch } from "./fetch.ts";
+import type { RateLimitedBindings } from "./rate-limit.ts";
 
 const ABI_VERSION = 1;
 
-let runtime;
-const getRuntime = () => {
-  if (!runtime) {
-    initSync({ module: wasm });
-    runtime = PolicySqlRuntime.newWithPhysicalSchema(
-      catalog,
-      policy,
-      SCHEMA_VERSION,
-      POLICY_VERSION,
-      JSON.stringify({
-        max_rows: LIMITS.maxRows,
-        max_result_bytes: LIMITS.maxResultBytes,
-        timeout_ms: LIMITS.timeoutMs,
-        max_statements: LIMITS.maxStatements,
-      }),
-      JSON.stringify(physicalSchema),
-    );
-  }
-  return runtime;
-};
+const deploymentDatabase = createDeploymentDatabase(() => worker.getRuntime().snapshot);
 
-const deploymentDatabase = createDeploymentDatabase(() => getRuntime().snapshot);
-export const createHandler = (options = {}) => createApp({ getRuntime, database: deploymentDatabase.provider, ...options });
+const worker = createPolicySqlWorker<RateLimitedBindings>({
+  catalog,
+  policy,
+  physicalSchema,
+  schemaVersion: SCHEMA_VERSION,
+  policyVersion: POLICY_VERSION,
+  limits: {
+    maxRows: LIMITS.maxRows,
+    maxResultBytes: LIMITS.maxResultBytes,
+    timeoutMs: LIMITS.timeoutMs,
+    maxStatements: LIMITS.maxStatements,
+  },
+  // This wrapper's env convention becomes the library's explicit configuration (ADR 0021).
+  // The library calls this for the Worker and for each Durable Object with its env.
+  deployment: (env) => ({ database: deploymentDatabase.provider(env), config: configFromEnv(env) }),
+});
 
-const app = createHandler();
 // Rate limiting runs here, before app.fetch and before binding() initializes WASM (ADR 0018).
-export default { fetch: createWrapperFetch(app, (env) => deploymentDatabase.binding(env)) };
+export default { fetch: createWrapperFetch(worker.app, (env) => deploymentDatabase.binding(env)) };
 export { ABI_VERSION };
 
-export class TransactionOwner extends TransactionOwnerCore {
-  constructor(state, env) { super(state, env, getRuntime, deploymentDatabase.provider); }
-}
+export const TransactionOwner = worker.TransactionOwner;

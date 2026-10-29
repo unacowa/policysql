@@ -43,9 +43,7 @@ commit_checks:
     triggered_by: [posts, comments]
     role: admin
     hook:
-      url_env: POST_VALIDATOR_URL
       timeout_ms: 1500
-      hmac_secret_env: POST_VALIDATOR_SECRET
 ```
 
 include pathはpolicy rootからの相対pathです。fileの記載順によってpermissionの優先順位は変わりません。複数resourceにまたがる`commit_checks`はroot manifestへ定義します。
@@ -374,9 +372,7 @@ commit_checks:
     triggered_by: [posts, comments]
     role: admin
     hook:
-      url_env: POST_VALIDATOR_URL
       timeout_ms: 1500
-      hmac_secret_env: POST_VALIDATOR_SECRET
 ```
 
 機能の使い分けは[書き込みの整合性](../sql/write-integrity#commit-check)、callback query、role昇格、opaque capability、Transaction APIとの関係は[Commit check](../sql/commit-checks)を参照してください。

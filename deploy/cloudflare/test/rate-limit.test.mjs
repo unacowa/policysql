@@ -33,7 +33,7 @@ const limiter = (success) => {
 const lazyApp = (h) => {
   let runtimeCalls = 0;
   const getRuntime = () => { runtimeCalls++; return h.runtime; };
-  const app = createApp({ getRuntime, database: h.database, publicConfig: { schemaVersion, policyVersion, limits } });
+  const app = createApp({ getRuntime, database: h.database, config: h.config, publicConfig: { schemaVersion, policyVersion, limits } });
   const binding = () => { getRuntime(); return h.binding("a"); };
   return { app, binding, runtimeCalls: () => runtimeCalls };
 };

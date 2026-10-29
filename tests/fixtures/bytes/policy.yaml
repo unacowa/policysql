@@ -33,6 +33,4 @@ commit_checks:
   consistency:
     triggered_by: [projects]
     hook:
-      url_env: VALIDATOR_URL
       timeout_ms: 1500
-      hmac_secret_env: VALIDATOR_SECRET

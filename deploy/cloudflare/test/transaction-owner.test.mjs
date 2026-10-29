@@ -55,12 +55,21 @@ const runtime = () => ({
   release_execution() { this.released += 1; },
 });
 
-const environment = {
-  POLICYSQL_COST_CATALOG_JSON: JSON.stringify({
+// Explicit deployment configuration (ADR 0021), the same object the Worker app receives.
+const config = {
+  environment: "test",
+  costCatalog: {
     maxEstimatedRowsRead: 10,
     maxEstimatedRowsWritten: 10,
     resources: { 1: { upperRows: 10, uniqueSearchPatterns: ["sqlite_autoindex_projects_1"] } },
-  }),
+  },
+};
+const checkedConfig = {
+  ...config,
+  publicBaseUrl: "https://gateway.example.test",
+  commitChecks: {
+    project_consistency: { url: "https://validator.example.test/check", hmacSecret: "0123456789abcdef0123456789abcdef" },
+  },
 };
 const txId = `tx_${"a".repeat(32)}`;
 const fingerprint = "b".repeat(64);
@@ -69,10 +78,10 @@ const auth = { principal: "test:u1", subject: "u1", role: "member", roles: ["mem
 
 test("malformed delegated idempotency cannot silently disable replay protection", async () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/optional-idempotency.json", import.meta.url), "utf8"));
-  const owner = new TransactionOwnerCore({ storage: makeStorage() }, environment, () => runtime(), {
+  const owner = new TransactionOwnerCore({ storage: makeStorage() }, { config, getRuntime: () => runtime(), database: {
     check() { assert.fail("must reject before checking or opening a database"); },
     connect() { assert.fail("must not execute"); },
-  });
+  } });
   for (const idempotency of fixture.invalidDelegatedValues) {
     const response = await call(owner, "atomic", {
       validationId: `cval_${"d".repeat(32)}`, auth,
@@ -93,12 +102,11 @@ const setup = async () => {
   const storage = makeStorage();
   const database = transaction();
   const compiler = runtime();
-  const owner = new TransactionOwnerCore(
-    { storage },
-    environment,
-    () => compiler,
-    testProvider(() => ({ begin: async () => database })),
-  );
+  const owner = new TransactionOwnerCore({ storage }, {
+    config,
+    getRuntime: () => compiler,
+    database: testProvider(() => ({ begin: async () => database })),
+  });
   const begin = await call(owner, "begin", { transactionId: txId, authFingerprint: fingerprint, startFingerprint, mode: "read", auth });
   assert.equal(begin.status, 201);
   return { owner, storage, database, compiler };
@@ -126,9 +134,9 @@ test("rolls back on a sequence gap", async () => {
 
 test("fails closed after owner replacement and on alarm expiry", async () => {
   const { storage, database, compiler } = await setup();
-  const replacement = new TransactionOwnerCore(
-    { storage }, environment, () => compiler, testProvider(() => ({ begin: async () => transaction() })),
-  );
+  const replacement = new TransactionOwnerCore({ storage }, {
+    config, getRuntime: () => compiler, database: testProvider(() => ({ begin: async () => transaction() })),
+  });
   const lost = await call(replacement, "statement", { transactionId: txId, authFingerprint: fingerprint, command: { sequence: 1, sql: "SELECT id FROM projects", params: {} } });
   assert.equal(lost.status, 409);
   assert.equal((await storage.get("transaction")).status, "failed");
@@ -156,9 +164,7 @@ const commitRuntime = () => ({
         id: "project_consistency",
         triggeredBy: ["projects"],
         role: "admin",
-        urlEnv: "VALIDATOR_URL",
         timeoutMs: 1000,
-        hmacSecretEnv: "VALIDATOR_SECRET",
       }],
       statements: [{
         operation: select ? "select" : "update",
@@ -217,18 +223,12 @@ test("commit check callback SELECT uses the same owner transaction before commit
     assert.deepEqual(await replay.json(), result);
     return new Response(JSON.stringify({ version: "1", allowed: true }), { status: 200 });
   };
-  owner = new TransactionOwnerCore(
-    { storage },
-    {
-      ...environment,
-      POLICYSQL_PUBLIC_BASE_URL: "https://gateway.example.test",
-      VALIDATOR_URL: "https://validator.example.test/check",
-      VALIDATOR_SECRET: "0123456789abcdef0123456789abcdef",
-    },
-    () => compiler,
-    testProvider(() => ({ begin: async () => database })),
-    hookFetch,
-  );
+  owner = new TransactionOwnerCore({ storage }, {
+    config: checkedConfig,
+    getRuntime: () => compiler,
+    database: testProvider(() => ({ begin: async () => database })),
+    fetchImpl: hookFetch,
+  });
   await call(owner, "begin", { transactionId: txId, authFingerprint: fingerprint, startFingerprint, mode: "write", auth });
   const statement = await call(owner, "statement", {
     transactionId: txId,
@@ -256,18 +256,12 @@ test("commit check denial rolls back and suppresses commit", async () => {
     rowsAffected: 1,
     usage: { rowsRead: 1, rowsWritten: 1, queryDurationMs: 1 },
   }];
-  const owner = new TransactionOwnerCore(
-    { storage },
-    {
-      ...environment,
-      POLICYSQL_PUBLIC_BASE_URL: "https://gateway.example.test",
-      VALIDATOR_URL: "https://validator.example.test/check",
-      VALIDATOR_SECRET: "0123456789abcdef0123456789abcdef",
-    },
-    () => commitRuntime(),
-    testProvider(() => ({ begin: async () => database })),
-    async () => new Response(JSON.stringify({ version: "1", allowed: false }), { status: 200 }),
-  );
+  const owner = new TransactionOwnerCore({ storage }, {
+    config: checkedConfig,
+    getRuntime: () => commitRuntime(),
+    database: testProvider(() => ({ begin: async () => database })),
+    fetchImpl: async () => new Response(JSON.stringify({ version: "1", allowed: false }), { status: 200 }),
+  });
   await call(owner, "begin", { transactionId: txId, authFingerprint: fingerprint, startFingerprint, mode: "write", auth });
   await call(owner, "statement", {
     transactionId: txId,
@@ -316,18 +310,12 @@ test("atomic mutation runs commit check and callback query before idempotency co
     assert.equal(query.status, 200);
     return new Response(JSON.stringify({ version: "1", allowed: true }), { status: 200 });
   };
-  owner = new TransactionOwnerCore(
-    { storage },
-    {
-      ...environment,
-      POLICYSQL_PUBLIC_BASE_URL: "https://gateway.example.test",
-      VALIDATOR_URL: "https://validator.example.test/check",
-      VALIDATOR_SECRET: "0123456789abcdef0123456789abcdef",
-    },
-    () => compiler,
-    testProvider(() => ({ begin: async () => database })),
-    hookFetch,
-  );
+  owner = new TransactionOwnerCore({ storage }, {
+    config: checkedConfig,
+    getRuntime: () => compiler,
+    database: testProvider(() => ({ begin: async () => database })),
+    fetchImpl: hookFetch,
+  });
   const response = await call(owner, "atomic", {
     validationId: `cval_${"d".repeat(32)}`,
     auth,
@@ -358,12 +346,11 @@ test("atomic replay rejects malformed database-owned response JSON", async () =>
     rowsAffected: 0,
     usage: { rowsRead: 1, rowsWritten: 0, queryDurationMs: 1 },
   }];
-  const owner = new TransactionOwnerCore(
-    { storage },
-    environment,
-    () => commitRuntime(),
-    testProvider(() => ({ begin: async () => database })),
-  );
+  const owner = new TransactionOwnerCore({ storage }, {
+    config,
+    getRuntime: () => commitRuntime(),
+    database: testProvider(() => ({ begin: async () => database })),
+  });
   const response = await call(owner, "atomic", {
     validationId: `cval_${"d".repeat(32)}`,
     auth,

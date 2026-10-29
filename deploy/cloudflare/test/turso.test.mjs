@@ -63,7 +63,6 @@ test("rolls back and publishes no partial result after a cumulative limit breach
           limits: { maxRows: 3, maxResultBytes: 1_000, timeoutMs: 1_000 },
         })),
       },
-      { TURSO_DATABASE_URL: "https://db.test", TURSO_AUTH_TOKEN: "secret" },
       "req_cumulative",
       () => ({ async begin() { return transaction; } }),
     ),
@@ -120,7 +119,6 @@ test("executes only protected SQL and validates every result before publication"
   const output = await executeSealedEnvelope(
     runtime,
     compiled,
-    { TURSO_DATABASE_URL: "https://db.test", TURSO_AUTH_TOKEN: "secret" },
     "req_1",
     () => ({ async begin() { return transaction; } }),
   );
@@ -188,7 +186,6 @@ test("validates mutation inside the dedicated transaction and stores terminal id
         limits: { timeoutMs: 1000 },
       }],
     },
-    { TURSO_DATABASE_URL: "https://db.test", TURSO_AUTH_TOKEN: "secret" },
     "req_write",
     () => ({ async begin() { return tx; } }),
     { keyHash: "a".repeat(64), fingerprint: "b".repeat(64) },
@@ -228,7 +225,7 @@ test("serverless oversized BLOB and malformed rows fail before validation, log s
     await assert.rejects(executeSealedEnvelope(runtime, {
       executionHandle: 7, transactionMode: "read",
       statements: [{ operation: "select", protectedSql: "SELECT state FROM projects", clientParameters: {}, serverParameters: {}, result: [], limits: { timeoutMs: 1000 } }],
-    }, {}, "req_invalid_result", () => ({ async begin() { return transaction; } })), { status, code });
+    }, "req_invalid_result", () => ({ async begin() { return transaction; } })), { status, code });
     assert.ok(rolledBack);
     assert.ok(released);
     const logged = log.mock.calls.map(call => JSON.parse(call.arguments[0])).filter(entry => entry.event === "database_result_received").at(-1);
@@ -279,7 +276,7 @@ test("execution follows the runtime's advertised per-value limit end to end", as
         }),
       };
       const run = executeSealedEnvelope(runtime, { executionHandle: 9, transactionMode: "read", statements: [statement(fits.toString("base64"))] },
-        {}, "req_drift", databaseTransportFactory(provider, testBinding(), runtime.max_bytes_per_value));
+        "req_drift", databaseTransportFactory(provider, testBinding(), runtime.max_bytes_per_value));
       if (expected === 413) {
         await assert.rejects(run, { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" }, `advertised=${advertised}`);
         assert.ok(rolledBack);
@@ -334,7 +331,7 @@ test("a malformed runtime limit fails before BEGIN on serverless and interactive
       return { async begin() { begun++; assert.fail("must not BEGIN"); } };
     };
     const error = await executeSealedEnvelope(runtime, { executionHandle: 9, transactionMode: "read", statements: [statement] },
-      {}, "req_bad_runtime", transportFactory).then(() => assert.fail("must reject"), e => e);
+      "req_bad_runtime", transportFactory).then(() => assert.fail("must reject"), e => e);
     assert.ok(error instanceof TypeError, `limit=${String(max_bytes_per_value)}`);
     assert.notEqual(error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
     assert.equal(connected, 0);

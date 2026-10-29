@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { testBinding, testProvider } from "./helpers/database.mjs";
+import { testBinding, testConfig, testProvider } from "./helpers/database.mjs";
 import { createApp } from "../src/app.ts";
 import { capabilities } from "../src/presenters.ts";
 
@@ -12,10 +12,11 @@ const runtime = {
   max_bytes_per_value: 1_024,
 };
 
-const env = { POLICYSQL_ENVIRONMENT: "test" };
+// Only the platform binding the library reads; deployment settings are `config` (ADR 0021).
+const env = { TRANSACTION_OWNER: {} };
 
 test("Hono health route preserves the public response and security headers", async () => {
-  const app = createApp({ getRuntime: () => runtime, database: testProvider() });
+  const app = createApp({ getRuntime: () => runtime, database: testProvider(), config: testConfig() });
   // /healthz is public: it needs no session, and readiness no longer depends on any
   // identity configuration (which belongs to the wrapper).
   const response = await app.fetch(new Request("https://worker.test/healthz"), env, {}, { database: testBinding(runtime.snapshot) });
@@ -25,6 +26,7 @@ test("Hono health route preserves the public response and security headers", asy
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(body.ready, true);
+  assert.equal(body.environment, "test", "reported from config.environment");
   assert.equal(body.snapshot, runtime.snapshot);
   assert.equal(typeof body.requestId, "string");
 });
@@ -34,7 +36,7 @@ test("Hono not-found handler preserves the safe error contract", async () => {
   const app = createApp({ getRuntime: () => {
     runtimeCalls += 1;
     return runtime;
-  }, database: testProvider() });
+  }, database: testProvider(), config: testConfig() });
   const response = await app.fetch(new Request("https://worker.test/not-a-route"), env, {}, { database: testBinding(runtime.snapshot) });
   const body = await response.json();
 

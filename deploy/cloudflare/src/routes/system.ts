@@ -1,9 +1,9 @@
 import type { Hono } from "hono";
 import { runtimeContext } from "../middleware/request-context.ts";
 import { jsonResponse } from "../responses.ts";
-import type { AppDependencies, AppEnv } from "../types.ts";
+import type { AppEnv, EngineDependencies } from "../types.ts";
 
-export const registerSystemRoutes = (app: Hono<AppEnv>, dependencies: AppDependencies) => {
+export const registerSystemRoutes = (app: Hono<AppEnv>, dependencies: EngineDependencies) => {
   app.get("/healthz", runtimeContext(dependencies), (context) => {
     const runtime = context.get("runtime");
     return jsonResponse(context, {
@@ -11,7 +11,7 @@ export const registerSystemRoutes = (app: Hono<AppEnv>, dependencies: AppDepende
       live: true,
       // The runtime loaded. Identity configuration belongs to the wrapper (ADR 0019).
       ready: true,
-      environment: context.env.deployment.POLICYSQL_ENVIRONMENT,
+      environment: dependencies.config.environment,
       abiVersion: runtime.abi_version,
       profile: runtime.profile,
       snapshot: runtime.snapshot,

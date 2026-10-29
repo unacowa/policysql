@@ -39,13 +39,16 @@ export type AuthContext = {
   session: Record<string, string>;
 };
 
-export type WorkerBindings = {
-  POLICYSQL_ENVIRONMENT?: string;
-  POLICYSQL_PUBLIC_BASE_URL?: string;
-  POLICYSQL_COST_CATALOG_JSON?: string;
-  POLICYSQL_IDEMPOTENCY_SECRET?: string;
+/**
+ * The platform bindings `app.fetch` and `app.fetchCallback` still take. Deployment settings
+ * are not here: they are the explicit `PolicySqlConfig` (ADR 0021). A wrapper may pass its
+ * whole Workers `env`; the library reads only `TRANSACTION_OWNER`.
+ *
+ * `TRANSACTION_OWNER` is the one remaining platform read, kept until the `TransactionOwner`
+ * port replaces the Durable Object namespace (#31).
+ */
+export type PlatformBindings = {
   TRANSACTION_OWNER: DurableObjectNamespace;
-  [key: string]: unknown;
 };
 
 export type ExecutionTraceParameter = {
@@ -80,8 +83,9 @@ export type AppVariables = {
 };
 
 export type AppEnv = {
+  // Hono bindings built by `app.fetch` itself; never the platform `env` object.
   Bindings: {
-    deployment: WorkerBindings;
+    transactionOwner?: DurableObjectNamespace;
     databaseBinding?: import("./database.ts").DatabaseBinding;
     /** The wrapper's trusted session, unvalidated until the authorization middleware runs. */
     session?: unknown;
@@ -95,6 +99,8 @@ export type AppEnv = {
 export type AppDependencies = {
   getRuntime: () => PolicySqlRuntime;
   database: import("./database.ts").DatabaseProvider;
+  /** Deployment settings, validated at construction (ADR 0021). */
+  config: import("./engine-config.ts").PolicySqlConfig;
   executionTrace?: {
     enabled: boolean;
     sink?: ExecutionTraceSink;
@@ -104,4 +110,9 @@ export type AppDependencies = {
     policyVersion: string;
     limits: Record<string, number>;
   };
+};
+
+/** `AppDependencies` after `createApp` validated them; routes see only this form. */
+export type EngineDependencies = Omit<AppDependencies, "config"> & {
+  config: import("./engine-config.ts").ValidatedConfig;
 };

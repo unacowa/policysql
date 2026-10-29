@@ -5,14 +5,20 @@ request. The library neither reads fixed Turso env variables nor selects a DB fr
 and it verifies no credential. Its API requires:
 
 ```ts
-const worker = createPolicySqlWorker({ ...configuration, database: registry.provider });
+const worker = createPolicySqlWorker({
+  ...configuration,
+  // Called with the Worker's and each Durable Object's env; the library reads no env name.
+  deployment: (env) => ({ database: registry.provider(env), config: configFromEnv(env) }),
+});
 const session = await authenticate(request, env); // auth.ts: the JWT identity adapter
 const database = registry.binding(authorizedDatabaseId, env);
 const response = await worker.app.fetch(request, env, context, { database, session });
 ```
 
-`provider.ts` is an application-owned registry with no request, JWT, or authentication
-dependency. Its provider checks registered bindings and constructs transports from
+`config.ts` maps this wrapper's env names to the library's `PolicySqlConfig`
+([engine configuration](../../docs/configuration.md)). `provider.ts` is an application-owned
+registry with no request, JWT, or authentication dependency; `registry.provider(env)` binds it
+to the env it was built from, because the library hands the provider no env. Its provider checks registered bindings and constructs transports from
 local credentials. `worker.ts` demonstrates fixed selection from the wrapper setting
 `APPLICATION_DATABASE_ID`. Choosing `db_a` or `db_b` is explicit application configuration,
 not a library default. Omission is an error, even when old Turso env credentials exist.
@@ -53,10 +59,14 @@ a transaction ([ADR 0020](../../docs/adr/0020-trusted-session-input-and-jwt-iden
    touching WASM, a Durable Object, or a DB. A missing or failing binding returns 500
    `POLICYSQL_INTERNAL` (fail closed). Keep each `period` in `wrangler.jsonc` equal to
    `periodSeconds` in `rate-limit.ts`. Replace the keys or the limiter as your deployment requires.
-5. This policy enables commit checks. Configure `VALIDATOR_URL`, `VALIDATOR_SECRET`,
-   and the deployed Worker origin in `POLICYSQL_PUBLIC_BASE_URL`. Implement the
-   [commit-check contract](../../docs/commit-checks.md) in the validator. To disable checks,
-   remove `commit_checks` and change `policyVersion`.
+5. This policy enables the `consistency` commit check. Configure `VALIDATOR_URL`,
+   `VALIDATOR_SECRET`, and the deployed Worker origin in `POLICYSQL_PUBLIC_BASE_URL`;
+   `config.ts` passes them as `commitChecks.consistency` (the policy names no env variable).
+   Missing values fail every request with 500 `POLICYSQL_INTERNAL` before any I/O.
+   Implement the [commit-check contract](../../docs/commit-checks.md) in the validator.
+   To disable checks, remove `commit_checks` from the policy, change `policyVersion`, and
+   also remove the `commitChecks.consistency` entry from `configFromEnv` in `config.ts`;
+   otherwise, without `VALIDATOR_URL` and `VALIDATOR_SECRET`, every request is 500.
 
 Build-check from the repository root:
 

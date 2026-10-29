@@ -11,14 +11,20 @@ immutable runtime snapshot. Per-database policy/schema/backend loading is not pr
 
 Two inputs are mandatory:
 
-1. Configure a `DatabaseProvider` when constructing `createApp` or `createPolicySqlWorker`.
+1. Configure a `DatabaseProvider` when constructing `createApp` or `createPolicySqlWorker`
+   (inside its `deployment(env)` function, next to the `PolicySqlConfig`;
+   see [engine configuration](configuration.md)).
 2. Pass the selected `DatabaseBinding` as `database` in the fourth argument of `app.fetch`
    on each request, next to the trusted session the wrapper authenticated
    (`{ database, session, requestId? }`,
    [ADR 0020](adr/0020-trusted-session-input-and-jwt-identity-adapter.md)).
 
 ```ts
-const worker = createPolicySqlWorker({ ...runtimeConfiguration, database: provider });
+const worker = createPolicySqlWorker({
+  ...runtimeConfiguration,
+  // Wrapper-owned; called with the Worker's and each Durable Object's env (ADR 0021).
+  deployment: (env) => ({ database: registry.provider(env), config: configFromEnv(env) }),
+});
 export const TransactionOwner = worker.TransactionOwner;
 const verify = createJwtSessionVerifier({ jwks: JWKS, issuer: ISSUER, audience: AUDIENCE });
 
@@ -58,13 +64,15 @@ Types and the optional Turso HTTP adapter are exported from `@unacowa/policysql/
 
 ```ts
 interface DatabaseProvider {
-  check(binding: DatabaseBinding, env: WorkerBindings): boolean | Promise<boolean>;
-  connect(binding: DatabaseBinding, env: WorkerBindings, requestId: string):
+  check(binding: DatabaseBinding): boolean | Promise<boolean>;
+  connect(binding: DatabaseBinding, requestId: string):
     DatabaseTransport | Promise<DatabaseTransport>;
 }
 ```
 
 The provider has no `select` method and receives no credential or authentication context.
+It also receives no platform `env` ([ADR 0021](adr/0021-explicit-engine-config.md)): the
+wrapper builds it with its own credentials and registry.
 `check` must return exactly `true` for an enabled, compatible registered binding.
 It validates that exact binding; it does not choose a replacement. `connect` constructs
 its transport without starting a transaction or executing SQL. PolicySQL owns BEGIN,
@@ -140,7 +148,8 @@ Binding fields must not contain secrets.
 
 Use the factory's paired `TransactionOwner` export so both isolates have the same provider.
 For lower-level embedding, the constructor is
-`TransactionOwnerCore(state, env, getRuntime, databaseProvider, fetchImpl?)`.
+`TransactionOwnerCore(state, { getRuntime, database, config, fetchImpl? })`, with the same
+`config` the app receives.
 It rejects an omitted provider. Internal begin/atomic messages require a binding and
 snapshot; the DO rechecks these before constructing a connection with local credentials.
 The DO namespace is private trusted infrastructure, not a public forwarding endpoint.

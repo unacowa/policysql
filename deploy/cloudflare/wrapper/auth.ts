@@ -3,9 +3,10 @@
 // and reads its configuration from these env names; the library itself reads none of them.
 import { createJwtSessionVerifier, JwtAuthenticationError } from "../src/adapters/jwt.ts";
 import { createErrorResponse } from "../src/errors.ts";
-import type { TrustedSession, WorkerBindings } from "../src/types.ts";
+import type { TrustedSession } from "../src/types.ts";
+import type { WrapperBindings } from "./config.ts";
 
-export type JwtBindings = WorkerBindings & {
+export type JwtBindings = WrapperBindings & {
   POLICYSQL_JWKS_JSON?: string;
   POLICYSQL_JWKS_URL?: string;
   POLICYSQL_JWT_ISSUER?: string;

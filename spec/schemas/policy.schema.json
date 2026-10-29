@@ -242,11 +242,9 @@
         "hook": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["url_env", "timeout_ms", "hmac_secret_env"],
+          "required": ["timeout_ms"],
           "properties": {
-            "url_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" },
-            "timeout_ms": { "type": "integer", "minimum": 1 },
-            "hmac_secret_env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
+            "timeout_ms": { "type": "integer", "minimum": 1 }
           }
         }
       }

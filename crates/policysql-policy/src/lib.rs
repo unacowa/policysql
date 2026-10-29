@@ -51,9 +51,7 @@ pub struct ActivatedCommitCheck {
     pub id: String,
     pub triggered_by: BTreeSet<policysql_core::ResourceId>,
     pub role: Option<RoleName>,
-    pub url_env: String,
     pub timeout_ms: u64,
-    pub hmac_secret_env: String,
 }
 
 #[derive(Clone, Debug)]
@@ -152,9 +150,9 @@ struct RawCommitCheck {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawCommitHook {
-    url_env: String,
+    // The validator URL and HMAC secret are deployment configuration, keyed by check id
+    // (ADR 0021). The policy carries no reference to them.
     timeout_ms: u64,
-    hmac_secret_env: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -846,8 +844,6 @@ fn activate_commit_checks(
             if check.triggered_by.is_empty()
                 || check.hook.timeout_ms == 0
                 || check.hook.timeout_ms > MAX_COMMIT_CHECK_TIMEOUT_MS
-                || !environment_key(&check.hook.url_env)
-                || !environment_key(&check.hook.hmac_secret_env)
             {
                 return Err(PolicyError::InvalidBundle);
             }
@@ -870,20 +866,10 @@ fn activate_commit_checks(
                 id,
                 triggered_by,
                 role,
-                url_env: check.hook.url_env,
                 timeout_ms: check.hook.timeout_ms,
-                hmac_secret_env: check.hook.hmac_secret_env,
             })
         })
         .collect()
-}
-
-fn environment_key(value: &str) -> bool {
-    let mut characters = value.chars();
-    matches!(characters.next(), Some('A'..='Z' | '_'))
-        && characters.all(|character| {
-            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
-        })
 }
 
 fn activate_select(
@@ -2174,9 +2160,7 @@ commit_checks:
     triggered_by: [projects]
     role: member
     hook:
-      url_env: PROJECT_CHECK_URL
       timeout_ms: 1500
-      hmac_secret_env: PROJECT_CHECK_SECRET
 ",
         );
         assert_eq!(bundle.commit_checks().len(), 1);
@@ -2196,7 +2180,7 @@ resources:
 commit_checks:
   bad:
     triggered_by: [missing]
-    hook: { url_env: bad, timeout_ms: 0, hmac_secret_env: SECRET }
+    hook: { timeout_ms: 0 }
 ",
                 &catalog(),
                 SnapshotId::new("policy_2")
@@ -2204,6 +2188,40 @@ commit_checks:
             )
             .is_err()
         );
+        // ADR 0021: validator endpoints are wrapper configuration keyed by check id. A
+        // policy that still names env variables for them is rejected, not ignored.
+        for hook in [
+            "{ url_env: CHECK_URL, timeout_ms: 1500 }",
+            "{ timeout_ms: 1500, hmac_secret_env: CHECK_SECRET }",
+            "{ url: 'https://validator.test', timeout_ms: 1500 }",
+        ] {
+            let yaml = format!(
+                r"
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id]
+          filter: {{ tenant_id: {{ eq: {{ session: tenant_id }} }} }}
+commit_checks:
+  project_consistency:
+    triggered_by: [projects]
+    hook: {hook}
+"
+            );
+            assert!(
+                PolicyBundle::activate(
+                    &yaml,
+                    &catalog(),
+                    SnapshotId::new("policy_2")
+                        .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
+                )
+                .is_err(),
+                "{hook}"
+            );
+        }
     }
 
     #[test]

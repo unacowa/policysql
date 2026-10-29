@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { estimateSealedEnvelope, observeCostEnvelope } from "../src/cost.ts";
+import { validateConfig } from "../src/engine-config.ts";
 
 const compiled = {
   statements: [{
@@ -13,12 +14,11 @@ const compiled = {
   }],
 };
 
-const env = {
-  TURSO_DATABASE_URL: "https://db.test",
-  TURSO_AUTH_TOKEN: "token",
-  POLICYSQL_COST_CATALOG_JSON:
-    '{"maxEstimatedRowsRead":100,"maxEstimatedRowsWritten":100,"resources":{"1":{"upperRows":20,"uniqueSearchPatterns":["unique_projects"]}}}',
-};
+// `PolicySqlConfig.costCatalog`, validated once by the engine (ADR 0021).
+const catalog = validateConfig({
+  environment: "test",
+  costCatalog: { maxEstimatedRowsRead: 100, maxEstimatedRowsWritten: 100, resources: { 1: { upperRows: 20, uniqueSearchPatterns: ["unique_projects"] } } },
+}).costCatalog;
 
 const transport = (execute) => ({
   async begin() {
@@ -45,7 +45,7 @@ test("bounds a statement from the catalog without interpreting planner prose", a
         usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 1 },
       }];
   });
-  const result = await estimateSealedEnvelope(compiled, env, "req", () => fake, 1_024);
+  const result = await estimateSealedEnvelope(compiled, catalog, "req", () => fake, 1_024);
   assert.equal(result.estimates[0].upperRowsRead, 20);
   assert.equal(result.estimates[0].access, "unknown");
   assert.equal(result.estimates[0].planSteps, 1);
@@ -59,7 +59,7 @@ test("records complex planner output without treating unstable detail text as au
         usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 1 },
       }];
   });
-  const result = await estimateSealedEnvelope(compiled, env, "req", () => fake, 1_024);
+  const result = await estimateSealedEnvelope(compiled, catalog, "req", () => fake, 1_024);
   assert.equal(result.estimates[0].upperRowsRead, 20);
   assert.equal(result.estimates[0].access, "unknown");
   assert.equal(result.estimates[0].planSteps, 3);
@@ -75,7 +75,7 @@ test("logs complex cost observations without blocking execution", async () => {
       rows: [["SCAN outer"], ["CORRELATED SCALAR SUBQUERY"], ["SCAN inner"]],
       usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 1 },
     }]);
-    await observeCostEnvelope(compiled, env, "req", () => fake, 1_024);
+    await observeCostEnvelope(compiled, catalog, "req", () => fake, 1_024);
   } finally {
     console.log = previous;
   }
@@ -94,7 +94,7 @@ test("logs cost observations and their own Turso usage", async () => {
       rows: [["SCAN projects"]],
       usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 2 },
     }]);
-    await observeCostEnvelope(compiled, env, "req", () => fake, 1_024);
+    await observeCostEnvelope(compiled, catalog, "req", () => fake, 1_024);
   } finally {
     console.log = previous;
   }
@@ -121,7 +121,7 @@ test("bounds inserts directly and updates conservatively without parsing SEARCH 
         { ...compiled.statements[0], operation: "update" },
       ],
     },
-    env,
+    catalog,
     "req",
     () => fake,
     1_024,
@@ -137,7 +137,7 @@ test("a malformed per-value limit fails before the cost transaction begins", asy
   for (const limit of [undefined, 0, "1024", Infinity]) {
     let connected = 0;
     const factory = () => { connected++; return { async begin() { assert.fail("must not BEGIN"); } }; };
-    await assert.rejects(estimateSealedEnvelope(compiled, env, "req", factory, limit), TypeError, String(limit));
+    await assert.rejects(estimateSealedEnvelope(compiled, catalog, "req", factory, limit), TypeError, String(limit));
     assert.equal(connected, 0);
   }
 });

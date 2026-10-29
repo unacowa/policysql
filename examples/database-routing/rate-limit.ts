@@ -1,4 +1,4 @@
-import type { createErrorResponse, DatabaseBinding, PolicySqlApp } from "@unacowa/policysql/cloudflare";
+import type { createErrorResponse, DatabaseBinding, PolicySqlWorkerApp } from "@unacowa/policysql/cloudflare";
 import { authenticateRequest, type Authenticate, type JwtEnv } from "./auth.ts";
 
 // Application-owned request-rate limiting. PolicySQL has no limiter (ADR 0018); this
@@ -85,7 +85,7 @@ export const withRateLimit = <Env extends RateLimitEnv>(
  * then is `binding(env)` computed, which reads the runtime snapshot and so initializes WASM.
  */
 export const createRateLimitedFetch = <Env extends RateLimitEnv>(
-  app: PolicySqlApp,
+  app: PolicySqlWorkerApp<Env>,
   binding: (env: Env) => DatabaseBinding,
   errorResponse: typeof createErrorResponse,
   authenticate: Authenticate<Env>,

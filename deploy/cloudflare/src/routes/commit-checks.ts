@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import { HttpError } from "../errors.ts";
 import { readJsonBody } from "../http.ts";
+import { transactionOwner } from "../middleware/request-context.ts";
 import type { AppEnv } from "../types.ts";
 
 const VALIDATION_ID = /^cval_[a-f0-9]{32}$/u;
@@ -18,7 +19,7 @@ export const registerCommitCheckRoutes = (app: Hono<AppEnv>) => {
     }
     const body = await readJsonBody(context.req.raw);
     const ownerName = `tx_${validationId.slice("cval_".length)}`;
-    const owner = context.env.deployment.TRANSACTION_OWNER.get(context.env.deployment.TRANSACTION_OWNER.idFromName(ownerName));
+    const owner = transactionOwner(context, ownerName);
     return owner.fetch("https://owner/validation-query", {
       method: "POST",
       headers: {
