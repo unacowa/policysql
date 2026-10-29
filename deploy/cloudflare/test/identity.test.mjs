@@ -4,6 +4,7 @@ import { authFingerprint, requestIdempotency, sha256, stableJson } from "../src/
 import { authIdentity, callbackDigest, commandDigest, requestIdentity, startDigest } from "../src/identity.ts";
 import { createInProcessPolicySql, loadRuntime } from "../../../examples/in-process/policysql.ts";
 import { identityRuntime as runtime } from "./helpers/identity.mjs";
+import { MAX_BODY_BYTES } from "../src/request-body.ts";
 
 // ADR 0024 pull request 2: canonical JSON, SHA-256, and the identities move to core, and the
 // engine uses core's result. These tests are the compatibility evidence: core and the
@@ -365,4 +366,80 @@ test("the gate fails closed: a core result that differs from the reference is a 
   assert.deepEqual(mismatches().slice(5), [
     { event: "identity_mismatch", computation: "command", requestId: "req_commit_gate", core: "value", reference: "value" },
   ], "one more for the gated commit, none when core and the reference agree");
+});
+
+// #55 review: canonicalization must stay near linear up to the body limit. The owner computes
+// the command digest before it compiles, so a slow canonicalizer would let an authenticated
+// client spend an owner's CPU (Workers: 50 ms per request). 20,000 equal-length keys that
+// share a 40-character prefix took 11 s with the earlier per-key duplicate scan.
+const CPU_LIMIT_MS = 50;
+const wideParams = (count = 20_000) =>
+  `{${Array.from({ length: count }, (_, index) => `"${"a".repeat(40)}${String(index).padStart(6, "0")}":0`).join(",")}}`;
+// The fastest of a few runs, so a busy test machine does not fail the bound by chance.
+const fastest = (runs, work) => Math.min(...Array.from({ length: runs }, () => {
+  const started = performance.now();
+  work();
+  return performance.now() - started;
+}));
+
+test("a wide object near the body limit hashes like the reference, well within the Worker CPU limit", async () => {
+  const params = wideParams();
+  const body = `{"sequence":1,"sql":"SELECT id FROM projects","params":${params}}`;
+  assert.ok(body.length > 1_000_000 && body.length < MAX_BODY_BYTES, `${body.length}`);
+  const command = JSON.parse(body);
+  const input = JSON.stringify({ op: "command", kind: "statement", command });
+  assert.equal(core(input).digest, await sha256(stableJson({ kind: "statement", command })));
+  assert.equal(coreDigestOfText(body), await referenceDigestOfText(body));
+  const request = JSON.stringify({ op: "request", endpoint: "execute", auth, binding, body, key: KEY });
+  assert.deepEqual(core(request).idempotency, await requestIdempotency(KEY, auth, command, "execute", binding));
+  const elapsed = fastest(3, () => runtime.identity_json(input));
+  assert.ok(elapsed < CPU_LIMIT_MS, `command digest of a 20,000-key body took ${elapsed.toFixed(1)} ms`);
+  const requestElapsed = fastest(3, () => runtime.identity_json(request));
+  assert.ok(requestElapsed < CPU_LIMIT_MS, `request identity took ${requestElapsed.toFixed(1)} ms`);
+  // A duplicate key among them is still rejected (the engine rejects it before core runs).
+  const duplicate = `{"op":"callback","command":${params.slice(0, -1)},"${"a".repeat(40)}000000":1}}`;
+  assert.equal(core(duplicate).error.code, "POLICYSQL_INTERNAL");
+  const duplicateElapsed = fastest(3, () => runtime.identity_json(duplicate));
+  assert.ok(duplicateElapsed < CPU_LIMIT_MS, `duplicate detection took ${duplicateElapsed.toFixed(1)} ms`);
+});
+
+test("the owner digests a wide statement body within the Worker CPU limit and answers it definitely", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const real = loadRuntime()();
+  const timings = [];
+  // The real runtime, timing each identity computation the engine and the owner make.
+  const runtimeProxy = new Proxy(real, {
+    get(target, key) {
+      if (key === "identity_json") {
+        return (input) => {
+          const started = performance.now();
+          const output = target.identity_json(input);
+          timings.push({ op: JSON.parse(input).op, ms: performance.now() - started });
+          return output;
+        };
+      }
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const p = createInProcessPolicySql(() => runtimeProxy);
+  t.after(() => p.close());
+  const session = {
+    principal: "in-process:tenant_a", subject: "user_a", roles: ["member"], defaultRole: "member",
+    access: ["execute"], session: { tenant_id: "tenant_a" },
+  };
+  const context = { database: p.binding, session, requestId: "req_wide" };
+  const begun = await p.engine.begin({ bodyText: "{\"mode\":\"read\"}" }, context);
+  assert.equal(begun.ok, true, JSON.stringify(begun));
+  const bodyText = `{"sequence":1,"sql":"SELECT id FROM projects","params":${wideParams()}}`;
+  assert.ok(bodyText.length < MAX_BODY_BYTES);
+  const result = await p.engine.statement({ transactionId: begun.value.transactionId, bodyText }, context);
+  // The compiler rejects parameters the statement does not use: a definite client error, not
+  // an internal one, so no gate mismatch either.
+  assert.equal(result.ok, false);
+  assert.notEqual(result.error.code, "POLICYSQL_INTERNAL", JSON.stringify(result.error));
+  const owner = timings.filter(({ op }) => op === "command");
+  assert.equal(owner.length, 1, "the owner computed the command digest once");
+  // One run, not the fastest of several: allow for a cold call on a busy machine.
+  assert.ok(owner[0].ms < CPU_LIMIT_MS * 2, `the owner's command digest took ${owner[0].ms.toFixed(1)} ms`);
 });

@@ -32,7 +32,8 @@ pub enum Json {
     Number(f64),
     String(Vec<u16>),
     Array(Vec<Json>),
-    /// Members in text order; keys are unique.
+    /// Members with unique keys. [`parse`] returns them sorted by key; the writer sorts every
+    /// object, so a value built in code may list them in any order.
     Object(Vec<(Vec<u16>, Json)>),
 }
 
@@ -105,6 +106,19 @@ pub fn to_stable(value: &Json) -> String {
     out
 }
 
+/// The members sorted by key (UTF-16 code units), or an error for a duplicate key.
+///
+/// One sort and one pass over neighbours: `O(n log n)` key comparisons. Checking each new key
+/// against every earlier one is quadratic in the member count, which a body within the 1 MiB
+/// limit can make take seconds (20,000 keys with a shared 40-character prefix).
+fn sorted_unique(mut members: Vec<(Vec<u16>, Json)>) -> Result<Json, ParseError> {
+    members.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    if members.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(ParseError);
+    }
+    Ok(Json::Object(members))
+}
+
 struct Parser<'a> {
     text: &'a str,
     offset: usize,
@@ -166,9 +180,6 @@ impl Parser<'_> {
         loop {
             self.whitespace();
             let key = self.string()?;
-            if members.iter().any(|(name, _)| *name == key) {
-                return Err(ParseError);
-            }
             self.whitespace();
             self.expect(b':')?;
             self.whitespace();
@@ -179,7 +190,7 @@ impl Parser<'_> {
                 Some(b',') => self.offset += 1,
                 Some(b'}') => {
                     self.offset += 1;
-                    return Ok(Json::Object(members));
+                    return sorted_unique(members);
                 }
                 _ => return Err(ParseError),
             }
@@ -393,6 +404,14 @@ fn number_to_string(value: f64) -> String {
     if value < 0.0 {
         return format!("-{}", number_to_string(-value));
     }
+    // Fast path: a whole number below 2^53 prints as its integer digits, which is step 6 of
+    // the algorithm (k ≤ n ≤ 21) with the shortest digits of an exact integer.
+    if value.fract() == 0.0 && value < 9_007_199_254_740_992.0 {
+        // Exact: a whole double below 2^53 converts to `u64` without truncation.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let whole = value as u64;
+        return whole.to_string();
+    }
     let (digits, exponent) = shortest_digits(value);
     let k = i64::try_from(digits.len()).unwrap_or(i64::MAX);
     let n = exponent + 1;
@@ -432,10 +451,14 @@ fn scientific(text: &str) -> (String, i64) {
 /// tie between the two closest candidates upward (`93794707416597.125` prints as `…597.13`,
 /// where ECMAScript prints `…597.12`). This resolves a tie to the even candidate. A tie needs
 /// the exact expansion of `x` to have `k + 1` digits, which for a normal double requires
-/// `k ≥ 15`, because every decimal of at most 15 digits reads back as a distinct double.
+/// `k ≥ 15`, because every decimal of at most 15 digits reads back as a distinct double
+/// (a subnormal's exact expansion has hundreds of digits, so it never ties).
+///
+/// The tie test is constant-time integer arithmetic ([`is_exactly`]), not an exact decimal
+/// expansion: a body may hold tens of thousands of numbers.
 fn shortest_digits(value: f64) -> (String, i64) {
     let (digits, exponent) = scientific(&format!("{value:e}"));
-    if digits.len() < 15 && value >= f64::MIN_POSITIVE {
+    if digits.len() < 15 {
         return (digits, exponent);
     }
     let Ok(candidate) = digits.parse::<u64>() else {
@@ -444,31 +467,69 @@ fn shortest_digits(value: f64) -> (String, i64) {
     if candidate % 2 == 0 {
         return (digits, exponent);
     }
-    // The exact expansion of a double has at most 767 significant digits, so this is exact.
-    let (exact, exact_exponent) = scientific(&format!("{value:.800e}"));
-    let aligned = match exponent - exact_exponent {
-        0 => exact,
-        1 => format!("0{exact}"),
-        _ => return (digits, exponent),
-    };
     let k = digits.len();
+    // The candidate's value is `candidate × 10^scale`.
     let scale = exponent + 1 - i64::try_from(k).unwrap_or(0);
     for neighbor in [candidate - 1, candidate + 1] {
         let text = format!("{neighbor:0k$}");
         if text.len() != k || text.starts_with('0') {
             continue;
         }
-        // `x` is exactly half a unit in the last place above the lower of the two.
-        let lower = format!("{:0k$}", neighbor.min(candidate));
-        let tie = aligned
-            .strip_prefix(lower.as_str())
-            .and_then(|rest| rest.strip_prefix('5'))
-            .is_some_and(|rest| rest.bytes().all(|byte| byte == b'0'));
-        if tie && format!("{neighbor}e{scale}").parse::<f64>() == Ok(value) {
+        // `x` is exactly the midpoint `(10 × lower + 5) × 10^(scale − 1)` of the two.
+        let lower = u128::from(neighbor.min(candidate));
+        if is_exactly(value, lower * 10 + 5, scale - 1)
+            && format!("{neighbor}e{scale}").parse::<f64>() == Ok(value)
+        {
             return (text, exponent);
         }
     }
     (digits, exponent)
+}
+
+/// Whether the finite `x > 0` equals `m × 10^t` exactly, for `m < 2^64 × 10`.
+///
+/// `x = b × 2^e` with `b < 2^53`. For `t ≥ 0`, `m × 5^t × 2^t` has the odd part of `m × 5^t`,
+/// which must be the odd part of `b`, so `5^t < 2^53` (`t ≤ 22`). For `t < 0`,
+/// `m = b × 5^−t × 2^(e−t)`, so `5^−t ≤ m < 2^68` (`−t ≤ 29`). Beyond those bounds `x` cannot
+/// equal `m × 10^t`. Within them every product fits a `u128`.
+fn is_exactly(value: f64, m: u128, t: i64) -> bool {
+    let bits = value.to_bits();
+    let field = i64::try_from((bits >> 52) & 0x7ff).unwrap_or(0);
+    let fraction = bits & ((1 << 52) - 1);
+    let (b, e) = if field == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1 << 52), field - 1075)
+    };
+    if b == 0 || m == 0 {
+        return false;
+    }
+    let odd = |n: u128| -> (u128, i64) {
+        let zeros = n.trailing_zeros();
+        (n >> zeros, i64::from(zeros))
+    };
+    let power_of_five = |n: i64| u32::try_from(n).ok().and_then(|n| 5_u128.checked_pow(n));
+    if t >= 0 {
+        if t > 22 {
+            return false;
+        }
+        let Some(left) = power_of_five(t).and_then(|five| m.checked_mul(five)) else {
+            return false;
+        };
+        let (left_odd, left_twos) = odd(left);
+        let (right_odd, right_twos) = odd(u128::from(b));
+        left_odd == right_odd && left_twos + t == right_twos + e
+    } else {
+        if -t > 29 {
+            return false;
+        }
+        let Some(right) = power_of_five(-t).and_then(|five| u128::from(b).checked_mul(five)) else {
+            return false;
+        };
+        let (left_odd, left_twos) = odd(m);
+        let (right_odd, right_twos) = odd(right);
+        left_odd == right_odd && left_twos == right_twos + e - t
+    }
 }
 
 #[cfg(test)]
@@ -582,6 +643,29 @@ mod tests {
             assert_eq!(parse(text), Err(ParseError), "{text:?}");
         }
         assert_eq!(canonical(" \t\r\n{ \"a\" : [ ] } \n"), r#"{"a":[]}"#);
+    }
+
+    #[test]
+    fn exactness_test_for_ties() {
+        use super::is_exactly;
+        assert!(is_exactly(
+            93_794_707_416_597.0 + 0.125,
+            93_794_707_416_597_125,
+            -3
+        ));
+        assert!(!is_exactly(
+            93_794_707_416_597.0 + 0.125,
+            93_794_707_416_597_135,
+            -3
+        ));
+        assert!(is_exactly(1e22, 1, 22));
+        assert!(!is_exactly(1e23, 1, 23), "1e23 is not a double");
+        assert!(is_exactly(0.5, 5, -1));
+        assert!(!is_exactly(0.1, 1, -1));
+        assert!(is_exactly(6_144.0, 6_144, 0));
+        assert!(is_exactly(6_144.0, 6_144_000, -3));
+        assert!(!is_exactly(5e-324, 5, -324));
+        assert!(!is_exactly(f64::MAX, 17_976_931_348_623_157, 292));
     }
 
     #[test]
