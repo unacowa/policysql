@@ -21,5 +21,14 @@ export const snapshotHeaders = (runtime: { snapshot: string }): HeadersInit => (
   etag: `"${runtime.snapshot}"`,
 });
 
-export const notModified = (request: Request, runtime: { snapshot: string }) =>
+/**
+ * An owner's reply as the client response. These are the headers owner responses have
+ * always had, so the public HTTP protocol does not depend on the owner adapter.
+ */
+export const ownerResponse = (reply: { status: number; body: unknown }) => new Response(JSON.stringify(reply.body), {
+  status: reply.status,
+  headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+});
+
+export const notModified =(request: Request, runtime: { snapshot: string }) =>
   request.headers.get("if-none-match") === `"${runtime.snapshot}"`;

@@ -1,6 +1,7 @@
-import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 import { HttpError } from "../errors.ts";
+import { isOwnerHandle, OWNER_NAME } from "../transaction-owner-port.ts";
+import type { TransactionOwnerHandle } from "../transaction-owner-port.ts";
 import type { AppEnv, EngineDependencies } from "../types.ts";
 
 export const requestContext = () => createMiddleware<AppEnv>(async (context, next) => {
@@ -14,13 +15,12 @@ export const runtimeContext = (dependencies: EngineDependencies) => createMiddle
 });
 
 /**
- * The Durable Object namespace `app.fetch` took from the platform bindings. A missing
- * namespace is a wrapper fault, raised before any owner lookup.
+ * The handle of the one owner for `name`, through the wrapper's TransactionOwner port
+ * (ADR 0022). A malformed name or handle is a library or wrapper fault: 500, no command sent.
  */
-export const transactionOwner = (context: Context<AppEnv>, name: string) => {
-  const namespace = context.env.transactionOwner;
-  if (!namespace || typeof namespace.get !== "function" || typeof namespace.idFromName !== "function") {
-    throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
-  }
-  return namespace.get(namespace.idFromName(name));
+export const transactionOwner = (dependencies: EngineDependencies, name: string): TransactionOwnerHandle => {
+  if (!OWNER_NAME.test(name)) throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+  const handle = dependencies.transactionOwners.route(name);
+  if (!isOwnerHandle(handle)) throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+  return handle;
 };

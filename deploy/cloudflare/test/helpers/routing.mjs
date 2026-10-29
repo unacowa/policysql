@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { initSync, PolicySqlRuntime } from "../../pkg/policysql_wasm.js";
 import { createApp } from "../../src/app.ts";
-import { TransactionOwnerCore } from "../../src/transaction-owner.ts";
+import { createWorkerEntrypoints } from "../../src/worker.ts";
+import { createMemoryTransactionOwners } from "./memory-owner.mjs";
+import { createSimulatedDurableObjects } from "./durable-object-owner.mjs";
 import { TursoHttpTransport } from "../../src/turso-http.ts";
 import { createErrorResponse } from "../../src/errors.ts";
 import { createJwtSessionVerifier } from "../../src/adapters/jwt.ts";
@@ -35,9 +37,21 @@ const encode = (value) => value === null ? { type: "null" } : typeof value === "
   ? { type: "integer", value: String(value) } : value instanceof Uint8Array
     ? { type: "blob", base64: Buffer.from(value).toString("base64").replace(/=+$/, "") } : { type: "text", value };
 
+// The TransactionOwner adapters the harness can run on (ADR 0022). The default is the
+// production Durable Objects adapter over a simulated platform.
+export const OWNER_ADAPTERS = ["durable-objects", "memory"];
+
+/** Wraps a TransactionOwner port and counts every owner lookup through it. */
+export const countingOwners = (port) => {
+  const counts = { lookups: 0 };
+  return { counts, port: { route(name) { counts.lookups++; return port.route(name); } } };
+};
+
 // Exercise real SQL, rollback, and transaction visibility through the real HTTP transport.
-// Only the remote HTTP server and Cloudflare storage/routing are simulated.
-export const harness = async (t, { hooks = true, idempotencyTable = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding, customizePolicy = (policy) => policy, customizeConfig = (config) => config, fixture, runtimeLimits = limits } = {}) => {
+// Only the remote HTTP server and the owner platform (Durable Object routing and state, or
+// the in-memory owner adapter) are simulated.
+export const harness = async (t, { hooks = true, idempotencyTable = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding, customizePolicy = (policy) => policy, customizeConfig = (config) => config, fixture, runtimeLimits = limits, ownerAdapter = process.env.POLICYSQL_TEST_OWNER_ADAPTER ?? "durable-objects" } = {}) => {
+  assert.ok(OWNER_ADAPTERS.includes(ownerAdapter), "known owner adapter");
   const directory = mkdtempSync(join(tmpdir(), "policysql-routing-"));
   const runtime = PolicySqlRuntime.newWithPhysicalSchema(
     fixture?.catalog ?? example("catalog.yaml"), customizePolicy(hooks ? (fixture?.policy ?? example("policy.yaml")) : (fixture?.policy ?? example("policy.yaml")).split("commit_checks:")[0]),
@@ -135,42 +149,38 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   });
   const config = customizeConfig(configFromEnv(env));
   const pending = [];
+  // Background work (cost observation) from the Worker and from owners; `flush` awaits it.
+  const background = { run(promise) { pending.push(promise); } };
+  // A Workers ExecutionContext, for tests that drive a wrapper's Worker-shaped entry point.
   const ctx = { waitUntil(promise) { pending.push(promise); } };
-  const owners = new Map();
   const hooksSeen = [];
-  const state = () => {
-    const data = new Map();
-    return { ...ctx, storage: {
-      get: async (key) => structuredClone(data.get(key)),
-      put: async (key, value) => { data.set(key, structuredClone(value)); },
-      setAlarm: async () => {},
-    } };
-  };
   let app;
   let validator = async (hook) => {
     const query = await app.fetchCallback(new Request(hook.query.url, {
       method: "POST", headers: { authorization: `Bearer ${hook.query.token}`, "content-type": "application/json" },
       body: JSON.stringify({ sequence: 1, ...(fixture?.callbackQuery ?? read) }),
-    }), env, ctx);
+    }));
     const result = await query.json();
     hooksSeen.push({ hook, result, status: query.status });
     return query.ok;
   };
-  const makeOwner = (ownerState) => new TransactionOwnerCore(ownerState, {
+  // Each new owner gets the same ports a wrapper's deployment(env) builds (ADR 0021).
+  const ownerDependencies = () => ({
     getRuntime: () => runtime, database, config,
     fetchImpl: async (_url, options) => Response.json({ version: "1", allowed: await validator(JSON.parse(options.body)) }),
   });
-  env.TRANSACTION_OWNER = {
-    idFromName: (name) => name,
-    get(name) {
-      if (!owners.has(name)) {
-        const ownerState = state();
-        owners.set(name, { state: ownerState, owner: makeOwner(ownerState) });
-      }
-      return { fetch: (url, options) => owners.get(name).owner.fetch(new Request(url, options)) };
-    },
-  };
-  app = createApp({ getRuntime: () => runtime, database, config, publicConfig: { schemaVersion, policyVersion, limits: runtimeLimits } });
+  const owners = ownerAdapter === "memory"
+    ? createMemoryTransactionOwners(ownerDependencies, { background })
+    : createSimulatedDurableObjects(ownerDependencies, { background });
+  const transactionOwners = owners.port;
+  const publicConfig = { schemaVersion, policyVersion, limits: runtimeLimits };
+  const appWith = (ports) => createApp({ getRuntime: () => runtime, database, config, transactionOwners: ports, publicConfig });
+  app = appWith(transactionOwners);
+  // The Worker-shaped entry point a wrapper calls, built from a fixed deployment. Tests that
+  // count runtime use pass their own `getRuntime`.
+  const workerApp = (getRuntime = () => runtime, ports = transactionOwners) => createWorkerEntrypoints({
+    getRuntime, publicConfig, deployment: () => ({ database, config, transactionOwners: ports }),
+  }).app;
   const token = (tenant, overrides = {}, jwt = {}) => new SignJWT({
     policysql: { roles: ["member"], default_role: "member", access: ["execute", "explain", "catalog"], session: { tenant_id: `tenant_${tenant}` } },
     ...overrides,
@@ -196,7 +206,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     });
     let response;
     if (path.startsWith("/v1/commit-checks/")) {
-      response = await app.fetchCallback(input, env, ctx);
+      response = await app.fetchCallback(input);
     } else {
       let trusted = credential;
       if (typeof credential === "string") {
@@ -204,7 +214,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
         if ("response" in outcome) return { status: outcome.response.status, body: await outcome.response.json() };
         trusted = outcome.session;
       }
-      response = await app.fetch(input, env, ctx, { database: customizeBinding(registry.binding(`db_${tenant}`, env)), session: trusted });
+      response = await app.fetch(input, { database: customizeBinding(registry.binding(`db_${tenant}`, env)), session: trusted }, background);
     }
     return { status: response.status, body: await response.json() };
   };
@@ -219,11 +229,19 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     rmSync(directory, { recursive: true, force: true });
   });
   return {
-    runtime, env, config, app, ctx, database, databases, events, owners, hooksSeen, token, session, request, flush,
+    runtime, env, config, app, ctx, background, database, databases, events, hooksSeen, token, session, request, flush,
+    ownerAdapter, transactionOwners, workerApp, appWith,
     binding: (tenant) => registry.binding(`db_${tenant}`, env),
     setValidator(value) { validator = value; },
     counts: () => ({ checks, connects }),
-    replaceOwner(id) { const entry = owners.get(id); entry.owner = makeOwner(entry.state); },
+    // Port-level views of the owners, identical for both adapters.
+    ownerNames: () => owners.names(),
+    ownerRecord: (name) => owners.record(name),
+    ownerCore: (name) => owners.core(name),
+    ownerTimerAt: (name) => owners.timerAt(name),
+    loseOwner: (name) => owners.lose(name),
+    fireTimer: (name) => owners.fireTimer(name),
+    delayNextOwnerBody: (ms) => owners.delayNextBody(ms),
     rotateCredential(tenant, value) {
       env[`TENANT_${tenant.toUpperCase()}_TOKEN`] = value;
       acceptedTokens.get(tenant).add(value);

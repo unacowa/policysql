@@ -1,5 +1,6 @@
 import {
-  createErrorResponse, createJwtSessionVerifier, createPolicySqlWorker, TursoHttpTransport,
+  createErrorResponse, createJwtSessionVerifier, createPolicySqlWorker, durableObjectTransactionOwnerClass,
+  durableObjectTransactionOwners, TursoHttpTransport,
 } from "@unacowa/policysql/cloudflare";
 import { createJwtAuthentication } from "./auth.ts";
 import { configFromEnv, type ConfigEnv } from "./config.ts";
@@ -9,7 +10,8 @@ import catalog from "./catalog.yaml";
 import policy from "./policy.yaml";
 import physicalSchema from "./physical-schema.json";
 
-type Env = RateLimitEnv & ConfigEnv;
+// TRANSACTION_OWNER is this example's Durable Object binding name (wrangler.jsonc).
+type Env = RateLimitEnv & ConfigEnv & { TRANSACTION_OWNER?: DurableObjectNamespace };
 
 const registry = createDatabaseRegistry([
   { environment: "development", tenant: "tenant_a", databaseId: "db_a", generation: "1",
@@ -23,14 +25,19 @@ const worker = createPolicySqlWorker<Env>({
   schemaVersion: "schema_routing_1",
   policyVersion: "policy_routing_1",
   limits: { maxRows: 100, maxResultBytes: 64_000, timeoutMs: 1_000, maxStatements: 8 },
-  // Wrapper-owned (ADR 0021). The library calls this with the Workers env for the Worker
-  // and for each Durable Object, so both use the same provider and configuration; it never
-  // reads these env names itself.
-  deployment: (env) => ({ database: registry.provider(env), config: configFromEnv(env) }),
+  // Wrapper-owned (ADR 0021, ADR 0022). The library calls this with the Workers env for the
+  // Worker and for each Durable Object, so both use the same provider and configuration; it
+  // never reads these env names itself. Transaction owners are this deployment's Durable
+  // Objects, routed through the library's Durable Objects adapter.
+  deployment: (env) => ({
+    database: registry.provider(env),
+    config: configFromEnv(env),
+    transactionOwners: durableObjectTransactionOwners(env.TRANSACTION_OWNER),
+  }),
 });
 
 // No credentials cross the DO message boundary; the DO builds its provider from its own env.
-export const TransactionOwner = worker.TransactionOwner;
+export const TransactionOwner = durableObjectTransactionOwnerClass(worker.ownerDependencies);
 
 // The wrapper owns rate limiting (rate-limit.ts) and authentication (auth.ts) and runs both
 // before the library: client requests are limited, then authenticated with the JWT identity

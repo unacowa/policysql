@@ -20,6 +20,12 @@ Session shape was also validated twice, in TypeScript `auth.ts` and in Rust
 
 The wrapper authenticates the caller and passes the result per request:
 
+Superseded in form by [ADR 0022](0022-transaction-owner-port.md): the request context is
+unchanged, but `createApp().fetch(request, { database, session, requestId? }, background?)`
+takes no `env` or `ExecutionContext`; the Workers entry
+`createPolicySqlWorker().app.fetch(request, env, executionContext, context)` keeps the form
+below. The block records the state this ADR left.
+
 ```ts
 app.fetch(request, env, executionContext, { database, session, requestId? })
 

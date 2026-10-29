@@ -7,7 +7,7 @@
     "catalog:build": "node scripts/catalog-build.mjs",
     "build:wasm": "npm run stage:policy && wasm-pack build ../../crates/policysql-wasm --release --target web --out-dir ../../deploy/cloudflare/pkg",
     "check": "tsc --noEmit",
-    "verify": "npm run check && npm test && npm --prefix ../.. run check:package",
+    "verify": "npm run check && npm test && npm run test:memory-owner && npm --prefix ../.. run check:package",
     "predeploy:dry": "npm run check && npm run stage:policy",
     "deploy:dry": "wrangler deploy --dry-run",
     "predeploy": "npm run verify && npm run stage:policy",
@@ -15,7 +15,8 @@
     "provision:dev": "npm run verify && node scripts/provision-dev.mjs",
     "token:dev": "node scripts/mint-dev-token.mjs",
     "rollback": "node scripts/rollback.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "test:memory-owner": "POLICYSQL_TEST_OWNER_ADAPTER=memory node --test test/*.test.mjs"
   },
   "dependencies": {
     "@tursodatabase/serverless": "1.4.0",

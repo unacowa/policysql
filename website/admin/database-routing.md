@@ -15,18 +15,23 @@ DBの選択と認可はラッパー側で行い、PolicySQLは渡されたDBで�
 
 `@unacowa/policysql/cloudflare`から公開するAPIには、次の二つを渡します。
 
-1. `createApp` / `createPolicySqlWorker`に接続提供処理（`database`）と設定（`config`）を渡す。Workersでは`deployment(env)`関数で両方を組み立てる。
-2. 各`app.fetch`の第4引数`{ database, session }`に、選択済みの`DatabaseBinding`と、ラッパーが認証したtrusted sessionを渡す（[JWT認証](../security/jwt)）。
+1. `createApp` / `createPolicySqlWorker`に接続提供処理（`database`）、設定（`config`）、transaction ownerのport（`transactionOwners`）を渡す。Workersでは`deployment(env)`関数でこれらを組み立てる。
+2. 各`app.fetch`の要求context `{ database, session }`（`createPolicySqlWorker().app.fetch`では第4引数）に、選択済みの`DatabaseBinding`と、ラッパーが認証したtrusted sessionを渡す（[JWT認証](../security/jwt)）。
 
 ```ts
 const worker = createPolicySqlWorker({
   catalog, policy, physicalSchema,
   schemaVersion, policyVersion, limits,
   // ラッパー所有。WorkerとDurable Objectがそれぞれのenvで呼び出す。
-  deployment: (env) => ({ database: registry.provider(env), config: configFromEnv(env) }),
+  deployment: (env) => ({
+    database: registry.provider(env),
+    config: configFromEnv(env),
+    // transaction ownerはこのデプロイのDurable Object（binding名はラッパーの規約）
+    transactionOwners: durableObjectTransactionOwners(env.TRANSACTION_OWNER),
+  }),
 });
 
-export const TransactionOwner = worker.TransactionOwner;
+export const TransactionOwner = durableObjectTransactionOwnerClass(worker.ownerDependencies);
 export default {
   async fetch(request, env, context) {
     const session = await authenticate(request, env); // 失敗時はラッパーが401を返す
@@ -61,7 +66,7 @@ providerはplatformの`env`を受け取りません。ラッパーが自分の�
 
 ## 設定（`PolicySqlConfig`）
 
-ライブラリはplatformの`env`から設定を読みません（`TRANSACTION_OWNER`を除く）。ラッパーが次の値を明示的に渡します。env名はラッパー側の規約です。
+ライブラリはplatformの`env`から何も読みません。Durable Objectのbinding（参考実装では`TRANSACTION_OWNER`）もラッパーが読み、transaction ownerのportとして渡します。設定はラッパーが次の値を明示的に渡します。env名はラッパー側の規約です。
 
 | 設定 | 必須 | 内容 |
 | --- | --- | --- |
@@ -90,7 +95,7 @@ providerの各呼出しは、1秒とtransactionの残り時間の短い方に制
 
 PolicySQLはbindingを検証・コピーして固定します。DOには識別情報を渡し、DO側のproviderで同じDBの資格情報を解決します。コスト観測も同じDBを使用します。
 
-validatorのcallbackだけは、ラッパーで`app.fetchCallback(request, env, context)`へ渡します。この入口はcallback専用URLしか受け付けず、ownerが保持するbindingと同じtransaction接続を使います。callback capabilityが必要で、新しいDBを選択・接続する経路はありません。逆に`app.fetch`はcallbackのrouteを処理しません。percent-encodingでcallbackのpathになるrequestも、bodyを読む前に404を返します。
+validatorのcallbackだけは、ラッパーで`worker.app.fetchCallback(request, env, context)`（`createApp`では`app.fetchCallback(request)`）へ渡します。この入口はcallback専用URLしか受け付けず、ownerが保持するbindingと同じtransaction接続を使います。callback capabilityが必要で、新しいDBを選択・接続する経路はありません。逆に`app.fetch`はcallbackのrouteを処理しません。percent-encodingでcallbackのpathになるrequestも、bodyを読む前に404を返します。
 
 ## 運用と移行
 

@@ -20,23 +20,31 @@ Any other key is rejected, so a misspelled or legacy setting cannot silently fal
 ## Where it goes
 
 ```ts
-// Lower level: build the app and the transaction owner yourself.
-const app = createApp({ getRuntime, database, config });
-const owner = new TransactionOwnerCore(state, { getRuntime, database, config });
+// Lower level: build the app and give each transaction owner its facilities yourself.
+const app = createApp({ getRuntime, database, config, transactionOwners });
+const owner = new TransactionOwnerCore(facilities, { getRuntime, database, config });
 
 // Workers: env arrives per request and in the Durable Object constructor, so the
 // wrapper supplies a function. The Worker and every Durable Object call it with their env.
 const worker = createPolicySqlWorker({
   catalog, policy, physicalSchema, schemaVersion, policyVersion, limits,
-  deployment: (env) => ({ database: registry.provider(env), config: configFromEnv(env) }),
+  deployment: (env) => ({
+    database: registry.provider(env),
+    config: configFromEnv(env),
+    transactionOwners: durableObjectTransactionOwners(env.TRANSACTION_OWNER),
+  }),
 });
-export const TransactionOwner = worker.TransactionOwner;
+export const TransactionOwner = durableObjectTransactionOwnerClass(worker.ownerDependencies);
 ```
 
-`app.fetch(request, env, executionContext, { database, session })` still takes `env`, typed
-`PlatformBindings = { TRANSACTION_OWNER }`; that binding is the only one the library reads,
-until the `TransactionOwner` port replaces it (#31). Passing the whole Workers `env` is fine.
-`DatabaseProvider.check(binding)` and `connect(binding, requestId)` receive no `env`.
+The transaction owner port is not configuration but a port next to `database`
+([ADR 0022](adr/0022-transaction-owner-port.md)); `deployment(env)` returns it because on
+Workers it is built from a binding. `TRANSACTION_OWNER` is the reference wrapper's binding
+name, not the library's: the library reads no property of `env`. `createApp`'s
+`app.fetch(request, { database, session }, background?)` takes no `env`;
+`createPolicySqlWorker().app.fetch(request, env, executionContext, context)` passes `env` only
+to `deployment(env)`. `DatabaseProvider.check(binding)` and `connect(binding, requestId)`
+receive no `env`.
 
 ## Validation and failures
 

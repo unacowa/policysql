@@ -94,6 +94,10 @@ any runtime, database, owner, or validator work. The engine reads no property of
 
 ### Platform bindings that remain
 
+Superseded by [ADR 0022](0022-transaction-owner-port.md): the wrapper now passes a
+`TransactionOwnerPort`, `app.fetch` takes no `env`, and `PlatformBindings` is removed. The
+text below records the state this ADR left.
+
 `app.fetch(request, env, executionContext, context)` and `app.fetchCallback` keep their
 `env` argument, typed `PlatformBindings = { TRANSACTION_OWNER: DurableObjectNamespace }`.
 `TRANSACTION_OWNER` is the only platform read, in one place (`src/app.ts`), until the

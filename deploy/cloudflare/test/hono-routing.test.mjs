@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { testBinding, testConfig, testProvider } from "./helpers/database.mjs";
+import { testBinding, testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { createApp } from "../src/app.ts";
 import { capabilities } from "../src/presenters.ts";
 
@@ -12,14 +12,11 @@ const runtime = {
   max_bytes_per_value: 1_024,
 };
 
-// Only the platform binding the library reads; deployment settings are `config` (ADR 0021).
-const env = { TRANSACTION_OWNER: {} };
-
 test("Hono health route preserves the public response and security headers", async () => {
-  const app = createApp({ getRuntime: () => runtime, database: testProvider(), config: testConfig() });
+  const app = createApp({ getRuntime: () => runtime, database: testProvider(), config: testConfig(), transactionOwners: testOwners() });
   // /healthz is public: it needs no session, and readiness no longer depends on any
   // identity configuration (which belongs to the wrapper).
-  const response = await app.fetch(new Request("https://worker.test/healthz"), env, {}, { database: testBinding(runtime.snapshot) });
+  const response = await app.fetch(new Request("https://worker.test/healthz"), { database: testBinding(runtime.snapshot) });
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -36,8 +33,8 @@ test("Hono not-found handler preserves the safe error contract", async () => {
   const app = createApp({ getRuntime: () => {
     runtimeCalls += 1;
     return runtime;
-  }, database: testProvider(), config: testConfig() });
-  const response = await app.fetch(new Request("https://worker.test/not-a-route"), env, {}, { database: testBinding(runtime.snapshot) });
+  }, database: testProvider(), config: testConfig(), transactionOwners: testOwners() });
+  const response = await app.fetch(new Request("https://worker.test/not-a-route"), { database: testBinding(runtime.snapshot) });
   const body = await response.json();
 
   assert.equal(response.status, 404);

@@ -4,7 +4,8 @@ import { mutationIdempotency } from "../idempotency.ts";
 import { authorize } from "../middleware/authorization.ts";
 import { runtimeContext, transactionOwner } from "../middleware/request-context.ts";
 import { explainResponse, parsedRuntimeCall } from "../presenters.ts";
-import { jsonResponse } from "../responses.ts";
+import { jsonResponse, ownerResponse } from "../responses.ts";
+import { runInBackground } from "../transaction-owner-port.ts";
 import { observeCostEnvelope } from "../cost.ts";
 import { executeSealedEnvelope } from "../turso.ts";
 import { checkDatabaseBinding, databaseTransportFactory } from "../database.ts";
@@ -49,14 +50,12 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: EngineDep
       runtime.release_execution(BigInt(compiled.executionHandle));
       const validationId = `cval_${idempotency?.keyHash.slice(0, 32) ?? crypto.randomUUID().replaceAll("-", "")}`;
       const ownerName = `tx_${validationId.slice("cval_".length)}`;
-      const owner = transactionOwner(context, ownerName);
-      const response = await owner.fetch("https://owner/atomic", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-policysql-request-id": requestId },
-        body: JSON.stringify({ validationId, auth, request: body.text, idempotency, databaseBinding, snapshot: runtime.snapshot }),
-      });
-      const executed: any = await response.clone().json();
-      if (!response.ok) return response;
+      const owner = transactionOwner(dependencies, ownerName);
+      const reply = await owner.atomic({
+        validationId, auth, request: body.text, idempotency, databaseBinding, snapshot: runtime.snapshot,
+      }, requestId);
+      if (reply.status < 200 || reply.status > 299) return ownerResponse(reply);
+      const executed: any = reply.body;
       return jsonResponse(context, {
         transactionId: executed.transactionId,
         status: "committed",
@@ -86,9 +85,10 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: EngineDep
         inputStatements: body.value.statements,
       } : null,
     );
-    const executionContext = context.executionCtx as Partial<ExecutionContext>;
-    executionContext?.waitUntil?.(
+    runInBackground(
+      context.env.background,
       observeCostEnvelope(compiled, dependencies.config.costCatalog, `${requestId}-cost`, transportFactory, maxBytesPerValue),
+      requestId,
     );
     return jsonResponse(context, {
       transactionId: executed.transactionId ?? `atomic_${requestId}`,

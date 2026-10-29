@@ -4,7 +4,7 @@ import { readJsonBody } from "../http.ts";
 import { authFingerprint, requestIdempotency, sha256, stableJson } from "../idempotency.ts";
 import { authorize } from "../middleware/authorization.ts";
 import { transactionOwner } from "../middleware/request-context.ts";
-import { jsonResponse } from "../responses.ts";
+import { ownerResponse } from "../responses.ts";
 import { POLICY_VERSION, SCHEMA_VERSION } from "../config.ts";
 import { checkDatabaseBinding } from "../database.ts";
 import type { AppEnv, EngineDependencies } from "../types.ts";
@@ -49,21 +49,18 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: Engin
     const fingerprint = await authFingerprint(auth, databaseBinding);
     // The owner still validates its start command; this digest is not a public retry key.
     const startFingerprint = idempotency?.fingerprint ?? await sha256(stableJson({ transactionId, request: body.value }));
-    const owner = transactionOwner(context, transactionId);
-    return owner.fetch("https://owner/begin", {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-policysql-request-id": context.get("requestId") },
-      body: JSON.stringify({
-        transactionId,
-        authFingerprint: fingerprint,
-        startFingerprint,
-        mode: body.value.mode,
-        auth,
-        expected: body.value.expected,
-        databaseBinding,
-        snapshot,
-      }),
-    });
+    const owner = transactionOwner(dependencies, transactionId);
+    return ownerResponse(await owner.begin({
+      transactionId,
+      authFingerprint: fingerprint,
+      startFingerprint,
+      mode: body.value.mode,
+      auth,
+      // Omitted, not undefined, when absent: the owner checks exact keys.
+      ...(body.value.expected === undefined ? {} : { expected: body.value.expected }),
+      databaseBinding,
+      snapshot,
+    }, context.get("requestId")));
   });
 
   app.post("/v1/transactions/:transactionId/:command", authorize(dependencies, "execute"), async (context) => {
@@ -77,11 +74,11 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: Engin
     const snapshot = dependencies.getRuntime().snapshot;
     const databaseBinding = await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, snapshot);
     const fingerprint = await authFingerprint(auth, databaseBinding);
-    const owner = transactionOwner(context, transactionId);
-    return owner.fetch(`https://owner/${command === "statements" ? "statement" : command}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-policysql-request-id": context.get("requestId") },
-      body: JSON.stringify({ transactionId, authFingerprint: fingerprint, command: body.value, databaseBinding, snapshot }),
-    });
+    const owner = transactionOwner(dependencies, transactionId);
+    return ownerResponse(await owner.command(
+      command === "statements" ? "statement" : command as "commit" | "rollback",
+      { transactionId, authFingerprint: fingerprint, command: body.value, databaseBinding, snapshot },
+      context.get("requestId"),
+    ));
   });
 };

@@ -1,13 +1,12 @@
 // Request-rate limiting is a wrapper responsibility (ADR 0018, #26). The library has no
 // limiter; the reference wrapper and the database-routing example limit every request,
 // client requests and commit-check callbacks in separate buckets, before the library runs.
-import { harness } from "./helpers/routing.mjs";
+import { countingOwners, harness } from "./helpers/routing.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createApp } from "../src/app.ts";
 import { createErrorResponse } from "../src/errors.ts";
 import { createJwtSessionVerifier } from "../src/adapters/jwt.ts";
 import { createJwtAuthentication } from "../../../examples/database-routing/auth.ts";
@@ -30,10 +29,11 @@ const limiter = (success) => {
 
 // The wrapper's binding() reads getRuntime().snapshot, which is where WASM is compiled and
 // the runtime constructed. Count runtime factory calls as the WASM-compile probe.
-const lazyApp = (h) => {
+const lazyApp = (h, ports) => {
   let runtimeCalls = 0;
   const getRuntime = () => { runtimeCalls++; return h.runtime; };
-  const app = createApp({ getRuntime, database: h.database, config: h.config, publicConfig: { schemaVersion, policyVersion, limits } });
+  // The Worker-shaped entry point the wrappers call (createPolicySqlWorker's `app`).
+  const app = h.workerApp(getRuntime, ports);
   const binding = () => { getRuntime(); return h.binding("a"); };
   return { app, binding, runtimeCalls: () => runtimeCalls };
 };
@@ -102,24 +102,24 @@ test("the library ignores a limiter binding left in env", async (t) => {
 
 test("the commit-check route is served only by fetchCallback, never by fetch", async (t) => {
   const h = await harness(t);
-  const owners = countingOwners(h.env);
-  const env = { ...h.env, TRANSACTION_OWNER: owners.TRANSACTION_OWNER };
+  const owners = countingOwners(h.transactionOwners);
+  const app = h.appWith(owners.port);
   const id = "0".repeat(32);
   const post = (path) => new Request(`https://worker.test${path}`, {
     method: "POST", headers: { authorization: "Bearer cap", "content-type": "application/json" },
     body: JSON.stringify({ sequence: 1, ...read }),
   });
   for (const path of [`/v1/commit-checks/cval_${id}/query`, `/v1/commit%2Dchecks/cval_${id}/query`, `/v%31/commit-checks/cval_${id}/query`]) {
-    const viaFetch = await h.app.fetch(post(path), env, h.ctx, { database: h.binding("a"), session: h.session("a") });
+    const viaFetch = await app.fetch(post(path), { database: h.binding("a"), session: h.session("a") }, h.background);
     assert.equal(viaFetch.status, 404, path);
     assert.equal((await viaFetch.json()).error.code, "POLICYSQL_NOT_FOUND");
   }
   for (const path of [`/v1/commit%2Dchecks/cval_${id}/query`, `/v%31/commit-checks/cval_${id}/query`]) {
-    assert.equal((await h.app.fetchCallback(post(path), env, h.ctx)).status, 404, path);
+    assert.equal((await app.fetchCallback(post(path))).status, 404, path);
   }
   assert.equal(owners.counts.lookups, 0);
   // The canonical path through fetchCallback still reaches the owner.
-  await h.app.fetchCallback(post(`/v1/commit-checks/cval_${id}/query`), env, h.ctx);
+  await app.fetchCallback(post(`/v1/commit-checks/cval_${id}/query`));
   assert.ok(owners.counts.lookups > 0);
 });
 
@@ -168,19 +168,6 @@ const VALIDATOR_IP = "198.51.100.7";
 const callbackPath = (id = "0".repeat(32)) => `/v1/commit-checks/cval_${id}/query`;
 const randomHex = () => crypto.randomUUID().replaceAll("-", "");
 
-// Count every Durable Object lookup the library would make for a callback.
-const countingOwners = (env) => {
-  const counts = { lookups: 0 };
-  const owners = env.TRANSACTION_OWNER;
-  return {
-    counts,
-    TRANSACTION_OWNER: {
-      idFromName(name) { counts.lookups++; return owners.idFromName(name); },
-      get(id) { counts.lookups++; return owners.get(id); },
-    },
-  };
-};
-
 // JSONC: drop comments outside strings and trailing commas, then parse.
 const readJsonc = (relative) => JSON.parse(readFileSync(new URL(relative, import.meta.url), "utf8")
   .replace(/("(?:\\.|[^"\\])*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (_match, string) => string ?? "")
@@ -189,10 +176,11 @@ const readJsonc = (relative) => JSON.parse(readFileSync(new URL(relative, import
 for (const wrapper of wrappers) {
   const setup = async (t, { client = limiter(true), callback = limiter(true) } = {}) => {
     const h = await harness(t);
-    const lazy = lazyApp(h);
-    const owners = countingOwners(h.env);
+    // Count every owner lookup the library would make, for clients and callbacks.
+    const owners = countingOwners(h.transactionOwners);
+    const lazy = lazyApp(h, owners.port);
     const env = {
-      ...h.env, APPLICATION_DATABASE_ID: "db_a", TRANSACTION_OWNER: owners.TRANSACTION_OWNER,
+      ...h.env, APPLICATION_DATABASE_ID: "db_a",
       RATE_LIMITER: client, CALLBACK_RATE_LIMITER: callback,
     };
     return { h, env, fetch: wrapper.create(lazy.app, lazy.binding), runtimeCalls: lazy.runtimeCalls, owners: owners.counts };

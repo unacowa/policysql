@@ -67,8 +67,20 @@
 - serializes client operations, commit-check queries, and final decisions;
 - issues and revokes opaque callback capabilities;
 - routes callback SELECT statements to the original transaction;
-- exposes a platform-neutral core interface;
-- uses Durable Objects in the first Cloudflare Workers adapter without making core policy/compiler code depend on Cloudflare APIs.
+- is reached only through the `TransactionOwner` port
+  (`deploy/cloudflare/src/transaction-owner-port.ts`,
+  [ADR 0022](adr/0022-transaction-owner-port.md)). Routing: `route(name)` returns a typed
+  handle (`begin`, `atomic`, `command`, `callbackQuery`) to the single owner of a transaction
+  or validation id. Owner side: `TransactionOwnerCore(facilities, dependencies)` receives a
+  durable `store`, one `timer`, and `BackgroundTasks` from the adapter. Routes and the core
+  name no platform type;
+- the port's contract is at most one live owner per name, every call for the name delivered
+  to it, and owner loss visible as a successor with the same store but no memory, which the
+  core fails closed (ADR 0007). One conformance suite checks it for every adapter;
+- on Cloudflare Workers the wrapper supplies the Durable Objects adapter
+  (`src/adapters/durable-objects.ts`: namespace routing, object storage, alarm, `waitUntil`),
+  the only library module that names Durable Objects. Tests also run on an in-memory adapter
+  that is a test helper, not a shipped part.
 
 ## Compile flow
 

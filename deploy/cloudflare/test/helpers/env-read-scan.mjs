@@ -8,14 +8,15 @@ import ts from "typescript";
 //
 // - a parameter declaration (including a binding element of a destructured parameter);
 // - an argument passed directly to a known sink: the wrapper's `deployment(env)`, the
-//   library's own `build(env)`, `appFor(env)`, `platformTransactionOwner(env)`, the app's
+//   library's own `build(env)`, `appFor(env)`, the app's
 //   `.fetch(request, env, ...)` / `.fetchCallback(request, env, ...)` (second argument
 //   only), or the env-keyed cache
 //   `apps.get(env)` / `apps.set(env, app)`;
 // - a presence check that reads nothing: `typeof env`, `env === null` / `undefined`;
-// - the callee of `deployment(env)` (calling the wrapper's function);
-// - the object of `env.TRANSACTION_OWNER`, reported as an "env-read" finding so the test can
-//   assert that it is the single documented exception (#31).
+// - the callee of `deployment(env)` (calling the wrapper's function).
+//
+// There is no exception for any member: since the TransactionOwner port (#31, ADR 0022)
+// `env.TRANSACTION_OWNER` is a finding like every other read.
 //
 // Anything else is a finding ("env-reference"): aliasing (`const e = env`), spreading
 // (`{ ...env }`), `Reflect.get(env, ...)`, `Object.entries(env)`, `JSON.stringify(env)`,
@@ -28,8 +29,8 @@ import ts from "typescript";
 // findings. An import from `cloudflare:workers` (the platform env as a module export) is a
 // "platform-import" finding.
 const NAMES = new Set(["env", "deployment"]);
-export const HONO_BINDINGS = new Set(["transactionOwner", "databaseBinding", "session", "requestId", "callback"]);
-const SINK_FUNCTIONS = new Set(["deployment", "build", "appFor", "platformTransactionOwner"]);
+export const HONO_BINDINGS = new Set(["databaseBinding", "background", "session", "requestId", "callback"]);
+const SINK_FUNCTIONS = new Set(["deployment", "build", "appFor"]);
 const SINK_METHODS = new Set(["fetch", "fetchCallback"]);
 const CACHE_METHODS = { apps: new Set(["get", "set"]) };
 
@@ -113,9 +114,6 @@ export const scanEnvReads = (file, text) => {
         if (!inParameter(parent)) report("env-reference", parent);
       } else if (isNameSlot(node)) {
         // Member names are handled below.
-      } else if (ts.isPropertyAccessExpression(parent) && parent.expression === node
-        && node.text === "env" && parent.name.text === "TRANSACTION_OWNER") {
-        report("env-read", parent);
       } else if (!allowedReference(node)) {
         report("env-reference", node);
       }

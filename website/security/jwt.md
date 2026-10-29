@@ -23,7 +23,7 @@ JWTがない、検証できない、期限切れのrequestは、wrapperがPolicy
 2. clientがJWTを`Authorization: Bearer <JWT>`でdeploymentへ送る
 3. wrapperがrate limitの後、JWT identity adapterで署名、algorithm、issuer、audience、有効期間を検証する
 4. adapterが標準`sub`と`policysql` claimからtrusted sessionを作る
-5. wrapperが`app.fetch(request, env, ctx, { database, session })`でPolicySQLを呼ぶ
+5. wrapperが`worker.app.fetch(request, env, ctx, { database, session })`（`createPolicySqlWorker`の`app`）でPolicySQLを呼ぶ。`createApp`を直接使う場合は`app.fetch(request, { database, session }, background?)`で、`env`と`ExecutionContext`は渡さない（ADR 0022）
 6. PolicySQLのcore（Rust）がsessionを検証し、roleを選択し、endpointのaccessを確認する
 7. 選択されたroleのpolicyをSQLへ適用する
 
@@ -195,7 +195,8 @@ try {
   }
   throw error;
 }
-return app.fetch(request, env, ctx, { database, session });
+// worker = createPolicySqlWorker(...)。createAppの場合は app.fetch(request, { database, session }, background)
+return worker.app.fetch(request, env, ctx, { database, session });
 ```
 
 adapterはRS256とES256だけを受け付け、shared secretを使うHMAC algorithmと`none`を拒否します。clock toleranceは5秒です。`jwks`と`jwksUrl`はどちらか一方だけを指定します。設定が不正な場合は構築時に`TypeError`になります。remote JWKSは1.5秒のtimeout、30秒のcooldown、5分のcacheで取得します（鍵をJWKSから外した失効は最大5分遅れます）。

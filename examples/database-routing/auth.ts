@@ -1,12 +1,12 @@
 import type {
-  createErrorResponse, createJwtSessionVerifier, PlatformBindings, TrustedSession,
+  createErrorResponse, createJwtSessionVerifier, TrustedSession,
 } from "@unacowa/policysql/cloudflare";
 
 // Application-owned authentication. PolicySQL never sees a credential (ADR 0019): this
 // wrapper verifies the JWT with the library's optional identity adapter, reading its own
 // configuration names, and passes the resulting trusted session to `app.fetch`.
 
-export type JwtEnv = PlatformBindings & {
+export type JwtEnv = {
   POLICYSQL_JWKS_JSON?: string;
   POLICYSQL_JWKS_URL?: string;
   POLICYSQL_JWT_ISSUER?: string;

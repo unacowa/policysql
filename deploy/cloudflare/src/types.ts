@@ -39,18 +39,6 @@ export type AuthContext = {
   session: Record<string, string>;
 };
 
-/**
- * The platform bindings `app.fetch` and `app.fetchCallback` still take. Deployment settings
- * are not here: they are the explicit `PolicySqlConfig` (ADR 0021). A wrapper may pass its
- * whole Workers `env`; the library reads only `TRANSACTION_OWNER`.
- *
- * `TRANSACTION_OWNER` is the one remaining platform read, kept until the `TransactionOwner`
- * port replaces the Durable Object namespace (#31).
- */
-export type PlatformBindings = {
-  TRANSACTION_OWNER: DurableObjectNamespace;
-};
-
 export type ExecutionTraceParameter = {
   name: string;
   source: "client" | "server";
@@ -85,8 +73,9 @@ export type AppVariables = {
 export type AppEnv = {
   // Hono bindings built by `app.fetch` itself; never the platform `env` object.
   Bindings: {
-    transactionOwner?: DurableObjectNamespace;
     databaseBinding?: import("./database.ts").DatabaseBinding;
+    /** The wrapper's per-request background tasks (ADR 0022), if it supplied any. */
+    background?: import("./transaction-owner-port.ts").BackgroundTasks;
     /** The wrapper's trusted session, unvalidated until the authorization middleware runs. */
     session?: unknown;
     requestId?: string;
@@ -101,6 +90,11 @@ export type AppDependencies = {
   database: import("./database.ts").DatabaseProvider;
   /** Deployment settings, validated at construction (ADR 0021). */
   config: import("./engine-config.ts").PolicySqlConfig;
+  /**
+   * Routing to transaction owners (ADR 0022). On Workers the wrapper passes
+   * `durableObjectTransactionOwners(<the wrapper's namespace binding>)`.
+   */
+  transactionOwners: import("./transaction-owner-port.ts").TransactionOwnerPort;
   executionTrace?: {
     enabled: boolean;
     sink?: ExecutionTraceSink;

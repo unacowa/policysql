@@ -5,14 +5,15 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { scanEnvReads } from "./helpers/env-read-scan.mjs";
 
-// Regression guard (#32, ADR 0021): library code takes deployment settings only from the
-// explicit `PolicySqlConfig`. It reads nothing from the platform env object, except
-// `TRANSACTION_OWNER` in src/app.ts until the TransactionOwner port replaces it (#31).
-// The identity adapter (src/adapters/) is wrapper-side and outside the engine.
+// Regression guard (#32, ADR 0021, #31, ADR 0022): library code takes deployment settings
+// only from the explicit `PolicySqlConfig` and transaction owners only from the
+// TransactionOwner port. It reads nothing from the platform env object, with no exception:
+// the wrapper reads its Durable Object binding and hands the port to the library. The
+// Durable Objects adapter is scanned too; it only passes an object's env to the wrapper's
+// deployment function. The JWT identity adapter is wrapper-side and outside the engine.
 const repository = fileURLToPath(new URL("../../../", import.meta.url));
 const library = "deploy/cloudflare/src";
-const excluded = ["deploy/cloudflare/src/adapters/"];
-const EXCEPTION = { kind: "env-read", file: "deploy/cloudflare/src/app.ts", text: "env.TRANSACTION_OWNER" };
+const excluded = ["deploy/cloudflare/src/adapters/jwt.ts"];
 
 const sources = (directory) => readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
   const path = join(directory, entry.name);
@@ -24,16 +25,19 @@ const files = sources(join(repository, library))
   .map((path) => relative(repository, path))
   .filter((file) => !excluded.some((prefix) => file.startsWith(prefix)));
 
-test("library code reads no platform env property except the documented TRANSACTION_OWNER", () => {
+test("library code reads no platform env property, TRANSACTION_OWNER included", () => {
   for (const required of ["app.ts", "routes/system.ts", "routes/execute.ts", "commit-checks.ts", "cost.ts",
-    "transaction-owner.ts", "worker.ts", "package.ts", "engine-config.ts"]) {
+    "transaction-owner.ts", "transaction-owner-port.ts", "worker.ts", "package.ts", "engine-config.ts",
+    "adapters/durable-objects.ts"]) {
     assert.ok(files.includes(`${library}/${required}`), `the scan covers ${required}`);
   }
   const findings = files.flatMap((file) => scanEnvReads(file, readFileSync(join(repository, file), "utf8")));
-  const unexpected = findings.filter((finding) =>
-    !(finding.kind === EXCEPTION.kind && finding.file === EXCEPTION.file && finding.text === EXCEPTION.text));
-  assert.deepEqual(unexpected, [], "take deployment settings from PolicySqlConfig (src/engine-config.ts)");
-  assert.equal(findings.length - unexpected.length, 1, "TRANSACTION_OWNER is read in exactly one place");
+  assert.deepEqual(findings, [],
+    "take deployment settings from PolicySqlConfig (src/engine-config.ts) and owners from the TransactionOwner port");
+  for (const file of files) {
+    assert.equal(readFileSync(join(repository, file), "utf8").includes("TRANSACTION_OWNER"), false,
+      `${file} names the wrapper's Durable Object binding`);
+  }
 });
 
 test("library source names none of the wrapper's env settings", () => {
@@ -47,7 +51,7 @@ test("library source names none of the wrapper's env settings", () => {
 });
 
 // The guard is an allowlist: any reference to `env` / `deployment` that is not a parameter,
-// a known sink argument, a presence check, or the one TRANSACTION_OWNER read is a finding,
+// a known sink argument, or a presence check is a finding,
 // however the read is spelled. These samples pin the evasions found in review (PR #43).
 test("the scan rejects every env use outside the allowlist", () => {
   const caught = [
@@ -95,22 +99,27 @@ test("the scan rejects every env use outside the allowlist", () => {
   for (const text of caught) {
     assert.notDeepEqual(scanEnvReads("sample.ts", text), [], text);
   }
-  // The documented exception is reported (and counted by the guard above), never silent.
-  assert.deepEqual(scanEnvReads("sample.ts", "const owner = (env) => env.TRANSACTION_OWNER;").map(({ kind, text }) => [kind, text]),
-    [["env-read", "env.TRANSACTION_OWNER"]]);
+  // The former TRANSACTION_OWNER exception (#32) is an ordinary finding now (#31), however
+  // it is reached.
+  for (const text of [
+    "const owner = (env) => env.TRANSACTION_OWNER;",
+    "const owner = (env) => env['TRANSACTION_OWNER'];",
+    "const { TRANSACTION_OWNER } = env;",
+    "const a = context.env.transactionOwner;",
+  ]) assert.notDeepEqual(scanEnvReads("sample.ts", text), [], text);
   const allowed = [
     "// env.POLICYSQL_PUBLIC_BASE_URL is not read here",
     'const name = "env.POLICYSQL_ENVIRONMENT";',
     "const a = context.env.requestId ?? context.env.session;",
     "const a = context.env.callback === true && context.env.databaseBinding;",
-    "const a = context.env.transactionOwner;",
+    "const a = context.env.background;",
+    "const C = (deployment) => class { constructor(state, env) { this.core = make(state, deployment(env)); } };",
     "const a = config.environment; const b = dependencies.config.publicBaseUrl;",
     "const f = (env, { deployment }) => deployment(env);",
     "const f = (request, env, context) => app.fetch(request, env, context);",
     "const f = (request, env) => built.fetchCallback(request, env, undefined);",
     "const f = (env) => (env === null || typeof env !== 'object' ? undefined : build(env));",
     "const f = (env) => apps.get(env) ?? apps.set(env, appFor(env));",
-    "const f = (env) => platformTransactionOwner(env);",
     "type T = { deployment: (env: Env) => void }; const x = configuration.deployment;",
     "const environment = 1; const x = { env: 1 };",
   ];

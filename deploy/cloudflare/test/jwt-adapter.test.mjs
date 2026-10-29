@@ -5,7 +5,6 @@ import { harness } from "./helpers/routing.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { createApp } from "../src/app.ts";
 import { createErrorResponse } from "../src/errors.ts";
 import { createJwtSessionVerifier, JwtAuthenticationError } from "../src/adapters/jwt.ts";
 import { createWrapperFetch } from "../wrapper/fetch.ts";
@@ -133,7 +132,7 @@ for (const wrapper of wrappers) {
     const h = await harness(t, { hooks: false });
     let runtimeCalls = 0;
     const getRuntime = () => { runtimeCalls++; return h.runtime; };
-    const app = createApp({ getRuntime, database: h.database, config: h.config, publicConfig: { schemaVersion: "schema_routing_1", policyVersion: "policy_routing_1", limits: { maxRows: 100, maxResultBytes: 64_000, timeoutMs: 1_000, maxStatements: 8 } } });
+    const app = h.workerApp(getRuntime);
     const fetch = wrapper.create(app, () => { getRuntime(); return h.binding("a"); });
     const env = { ...h.env, APPLICATION_DATABASE_ID: "db_a", RATE_LIMITER: limiter(), CALLBACK_RATE_LIMITER: limiter() };
     const call = async (path, body, token, headers = {}) => {

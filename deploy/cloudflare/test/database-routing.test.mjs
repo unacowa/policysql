@@ -4,6 +4,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { createApp } from "../src/app.ts";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
+import { createMemoryTransactionOwners } from "./helpers/memory-owner.mjs";
 import { validateDatabaseBinding, databaseTransportFactory } from "../src/database.ts";
 import { requestIdempotency, authFingerprint } from "../src/idempotency.ts";
 
@@ -64,7 +65,7 @@ test("a missing request database is detected even when legacy Turso env credenti
   const h = await harness(t);
   const env = { ...h.env, TURSO_DATABASE_URL: "https://a.test", TURSO_AUTH_TOKEN: "token_a" };
   for (const context of [undefined, null, { session: h.session("a") }, { database: null, session: h.session("a") }, h.binding("a")]) {
-    const response = await h.app.fetch(new Request("https://worker.test/v1/transactions:execute", {
+    const response = await h.workerApp().fetch(new Request("https://worker.test/v1/transactions:execute", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify(envelope(read)),
     }), env, h.ctx, context);
@@ -89,21 +90,21 @@ test("DB injection is independent of JWT database claims, including absent or co
 test("the callback entrypoint cannot be used to bypass required DB injection", async (t) => {
   const h = await harness(t);
   for (const path of ["/v1/transactions:execute", "/v1/catalog", "/healthz"]) {
-    const response = await h.app.fetchCallback(new Request(`https://worker.test${path}`, { method: "POST" }), h.env, h.ctx);
+    const response = await h.app.fetchCallback(new Request(`https://worker.test${path}`, { method: "POST" }));
     assert.equal(response.status, 404);
   }
   assert.equal(h.counts().connects, 0);
 });
 
-test("missing DB binding in an internal DO request fails before a connection is opened", async (t) => {
+test("missing DB binding in an internal owner command fails before a connection is opened", async (t) => {
   const h = await harness(t);
-  const owner = new TransactionOwnerCore({ storage: {} }, { getRuntime: () => h.runtime, database: h.database, config: h.config });
-  const response = await owner.fetch(new Request("https://owner/begin", { method: "POST", body: JSON.stringify({
+  const owner = h.transactionOwners.route(`tx_${"a".repeat(32)}`);
+  const reply = await owner.begin({
     transactionId: `tx_${"a".repeat(32)}`, authFingerprint: "b".repeat(64), startFingerprint: "c".repeat(64),
     mode: "read", auth: {}, snapshot: h.runtime.snapshot,
-  }) }));
-  assert.equal(response.status, 500);
-  assert.equal((await response.json()).error.code, "POLICYSQL_DATABASE_REQUIRED");
+  }, "req");
+  assert.equal(reply.status, 500);
+  assert.equal(reply.body.error.code, "POLICYSQL_DATABASE_REQUIRED");
   assert.equal(h.counts().connects, 0);
 });
 
@@ -160,7 +161,7 @@ for (const hooks of [false, true]) {
       assert.equal(h.events.filter(({ sql }) => sql.startsWith("UPDATE")).length, 2);
       assert.equal(h.events.some(({ sql }) => /policysql_idempotency/i.test(sql)), false);
       if (hooks) {
-        assert.equal(h.owners.size, 4);
+        assert.equal(h.ownerNames().length, 4);
         assert.equal(h.hooksSeen.length, 4);
         assert.equal(new Set(h.hooksSeen.map(({ hook }) => hook.query.url)).size, 4);
         for (const { result, status } of h.hooksSeen) assert.equal(status, 200, JSON.stringify(result));
@@ -261,7 +262,7 @@ test("explicit invalid keys remain errors before database execution", async (t) 
     }
   }
   assert.equal(h.events.length, 0);
-  assert.equal(h.owners.size, 0);
+  assert.equal(h.ownerNames().length, 0);
 });
 
 test("DO atomic callbacks see uncommitted rows on the initiating database and replay without another hook", async (t) => {
@@ -278,7 +279,7 @@ test("DO atomic callbacks see uncommitted rows on the initiating database and re
   await h.flush();
   assert.equal((await h.request("a", "/v1/transactions:execute", envelope(insert("pending")))).status, 200);
   assert.equal(h.hooksSeen.length, 2);
-  for (const entry of h.owners.values()) assert.equal(JSON.stringify(await entry.state.storage.get("transaction")).includes("token_"), false);
+  for (const name of h.ownerNames()) assert.equal(JSON.stringify(await h.ownerRecord(name)).includes("token_"), false);
 });
 
 test("interactive transactions pin DB and snapshot, reject cross-tenant commands, and preserve commit/rollback replay", async (t) => {
@@ -305,7 +306,7 @@ test("owner replacement never reconnects or resumes an interactive transaction",
   const h = await harness(t);
   const start = await h.request("a", "/v1/transactions", { mode: "read" });
   assert.equal(start.status, 201);
-  h.replaceOwner(start.body.transactionId);
+  h.loseOwner(start.body.transactionId);
   const connects = h.counts().connects;
   const response = await h.request("a", `/v1/transactions/${start.body.transactionId}/statements`, { sequence: 1, ...read });
   assert.equal(response.status, 409);
@@ -368,7 +369,7 @@ test("a changed runtime snapshot fails before another statement and rolls back",
   const start = await h.request("a", "/v1/transactions", { mode: "write" });
   const id = start.body.transactionId;
   assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("stale") })).status, 200);
-  h.owners.get(id).owner.getRuntime = () => ({ snapshot: "new_snapshot" });
+  h.ownerCore(id).getRuntime = () => ({ snapshot: "new_snapshot" });
   assert.equal((await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 })).status, 409);
   assert.equal(h.rows("a").some((row) => row.id === "stale"), false);
 });
@@ -376,17 +377,17 @@ test("a changed runtime snapshot fails before another statement and rolls back",
 test("Worker/DO provider configuration mismatch fails before connecting", async (t) => {
   const h = await harness(t);
   const start = await h.request("a", "/v1/transactions", { mode: "read" });
-  const entry = h.owners.get(start.body.transactionId);
-  const message = await entry.state.storage.get("transaction");
-  const ownerWithoutProvider = new TransactionOwnerCore(entry.state, { getRuntime: () => h.runtime, config: h.config, database: {
+  const message = await h.ownerRecord(start.body.transactionId);
+  // An owner whose deployment registers no such database checks the binding first.
+  const ownerWithoutProvider = createMemoryTransactionOwners(() => ({ getRuntime: () => h.runtime, config: h.config, database: {
     check: () => false,
     connect: () => { assert.fail("No default database is available"); },
-  } });
-  const response = await ownerWithoutProvider.fetch(new Request("https://owner/begin", { method: "POST", body: JSON.stringify({
+  } })).port.route(start.body.transactionId);
+  const reply = await ownerWithoutProvider.begin({
     transactionId: message.transactionId, authFingerprint: message.authFingerprint, startFingerprint: message.startFingerprint,
     mode: "read", auth: message.auth, databaseBinding: message.databaseBinding, snapshot: message.snapshot,
-  }) }));
-  assert.equal(response.status, 403);
+  }, "req");
+  assert.equal(reply.status, 403);
 });
 
 for (const hooks of [false, true]) {
@@ -438,7 +439,7 @@ test("revoking an active connection credential fails without reconnecting", asyn
   assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 2, ...read })).status, 503);
   assert.equal(h.counts().connects, connects);
   assert.equal(h.rows("a").some((row) => row.id === "uncommitted"), false);
-  assert.equal((await h.owners.get(id).state.storage.get("transaction")).status, "failed");
+  assert.equal((await h.ownerRecord(id)).status, "failed");
 });
 
 test("DO atomic SQL failure rolls back every preceding item on the selected database", async (t) => {
