@@ -26,6 +26,7 @@
           "sql": { "type": "string", "minLength": 1 },
           "params": {
             "type": "object",
+            "description": "Values are validated against compiler-proven types. Bytes use canonical padded standard base64 strings; empty bytes use an empty string. JSON null is rejected for a bytes parameter. Arrays and driver objects are not bytes encodings. Decoded sizes must satisfy Capabilities limits.maxBytesPerValue in addition to request/result limits.",
             "additionalProperties": true
           },
           "expect": {

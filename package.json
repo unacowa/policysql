@@ -42,7 +42,8 @@
     "docs:search:test": "node scripts/verify-docs-search.mjs",
     "spec:validate": "node scripts/validate-policy-spec.mjs",
     "test:clients": "node --test packages/*/*.test.mjs",
-    "check:clients": "tsc -p packages/tsconfig.json"
+    "check:clients": "tsc -p packages/tsconfig.json",
+    "check:package": "node scripts/check-package.mjs"
   },
   "dependencies": {
     "@tursodatabase/serverless": "1.4.0",

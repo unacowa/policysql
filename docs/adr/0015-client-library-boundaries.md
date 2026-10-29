@@ -10,6 +10,23 @@ versions. These settings, and the HTTP helper's endpoint and fetch function, are
 for each instance at runtime and in TypeScript. Different configurations use different
 instances. Applications keep the logical destination/DB fixed inside injected functions.
 
+The Client, HTTP helper, Kysely adapter and generator depend on the public PolicySQL
+protocol and published descriptors. Their interfaces and generated types are independent
+of the gateway's hosting platform. Cloudflare Workers, Durable Objects, the private WASM
+ABI and database-driver wire formats belong to server adapters. Clients treat transaction
+identifiers as protocol values and do not implement owner routing. Hosting-specific limits
+must not become hard-coded Client limits; supported SQL and limits follow the configured
+backend profile and published Capabilities as described in ADR 0011.
+
+For bytes support (issue #17), `bytes / string / base64` is a common PolicySQL JSON
+contract for parameters and results, including SELECT and mutation RETURNING. A Client
+must not choose a representation based on whether the server runs on Cloudflare. Any
+optional application-side binary codec uses the public descriptor and produces the same
+JSON contract through any Transport. Conversion to WASM values, driver-native buffers
+and database protocol values is server-adapter work. Public Client packages must not
+import deployment modules to perform it. ADR 0016 defines the encoding, validation,
+limits and adapter conformance requirements for this contract.
+
 The Transport receives a kind, a serialized JSON body where applicable, role and protocol
 identifiers. It performs at most one attempt and returns status and JSON body. The HTTP
 helper maps fixed routes, enforces HTTPS (localhost HTTP is allowed), rejects redirects,

@@ -35,6 +35,8 @@ insert:
 
 clientがpreset columnを明示した場合は、値が同じでも拒否されます。
 
+bytes型のcolumnには、INSERT／UPDATEとも固定base64 literalをpresetにできます。例えば`seed: { literal: "AAEC/w==" }`は`00 01 02 ff`のBLOBになります。policy読込み時にencodingと復号後サイズを検証し、server-owned parameterとしてbindします。session文字列のbytesへの暗黙変換、NULL preset、bytes literalを使ったpolicy比較は追加しません。
+
 ## UPDATE
 
 UPDATE policyは、変更対象rowと変更可能columnを別々に制限します。

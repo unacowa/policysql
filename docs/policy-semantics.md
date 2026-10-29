@@ -75,6 +75,12 @@ Semantics:
 - every changed row must evaluate the check to TRUE; FALSE and UNKNOWN fail, while zero changed rows pass vacuously;
 - unsupported atomic check behavior means reject, not best-effort execution.
 
+For a bytes column, INSERT and UPDATE presets may use a fixed canonical base64
+literal, for example `seed: { literal: "AAEC/w==" }`. Policy activation validates
+the encoding and decoded size; the emitter binds the value as a server-owned BLOB
+parameter. This does not add bytes session coercion or bytes literal comparisons
+to the policy predicate language. See [ADR 0016](adr/0016-bytes-wire-contract.md).
+
 ## Update policy
 
 ```yaml

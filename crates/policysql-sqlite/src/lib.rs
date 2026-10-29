@@ -2365,7 +2365,7 @@ fn collect_expression_parameter_types(
     Ok(())
 }
 
-const fn logical_value_matches(value: &LogicalValue, expected: LogicalType) -> bool {
+fn logical_value_matches(value: &LogicalValue, expected: LogicalType) -> bool {
     match (value, expected) {
         (
             LogicalValue::String(_),
@@ -2374,8 +2374,10 @@ const fn logical_value_matches(value: &LogicalValue, expected: LogicalType) -> b
         | (LogicalValue::Boolean(_), LogicalType::Boolean)
         | (LogicalValue::Int64(_), LogicalType::Int64)
         | (LogicalValue::Number(_), LogicalType::Number)
-        | (LogicalValue::Bytes(_), LogicalType::Bytes)
         | (LogicalValue::Json(_), LogicalType::Json) => true,
+        (LogicalValue::Bytes(value), LogicalType::Bytes) => {
+            value.len() <= policysql_core::bytes::MAX_BYTES_PER_VALUE
+        }
         (LogicalValue::Int64(value), LogicalType::Integer) => {
             *value >= -9_007_199_254_740_991 && *value <= 9_007_199_254_740_991
         }

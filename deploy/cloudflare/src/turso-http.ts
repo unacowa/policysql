@@ -1,5 +1,6 @@
-import { HttpError } from "./errors.ts";
+import { HttpError, binaryLimitExceeded } from "./errors.ts";
 import { remainingDatabaseTime } from "./database.ts";
+import { BinaryLimitError, decodeBlob, encodeBlob } from "./binary.ts";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
 const databaseFailure = () =>
@@ -14,11 +15,20 @@ const encodeValue = (value) => {
   }
   if (typeof value === "number" && Number.isFinite(value)) return { type: "float", value };
   if (value instanceof Uint8Array) {
-    let binary = "";
-    for (const byte of value) binary += String.fromCharCode(byte);
-    return { type: "blob", base64: btoa(binary) };
+    return { type: "blob", base64: encodeBlob(value) };
   }
   throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+};
+
+// Hrana may omit padding in database BLOB responses. Keep that protocol rule
+// here; the public contract and private WASM ABI still require canonical padding.
+const decodeHranaBlob = (value: string): Uint8Array => {
+  const remainder = value.length % 4;
+  if (remainder !== 0) {
+    if (remainder === 1 || value.includes("=")) throw databaseFailure();
+    value += "=".repeat(4 - remainder);
+  }
+  return decodeBlob(value);
 };
 
 const decodeValue = (value) => {
@@ -34,9 +44,10 @@ const decodeValue = (value) => {
     return value.value;
   }
   if (value.type === "blob" && typeof value.base64 === "string") {
-    let binary;
-    try { binary = atob(value.base64); } catch { throw databaseFailure(); }
-    return Uint8Array.from(binary, (character: string) => character.charCodeAt(0));
+    try { return decodeHranaBlob(value.base64); } catch (error) {
+      if (error instanceof BinaryLimitError) throw binaryLimitExceeded();
+      throw databaseFailure();
+    }
   }
   throw databaseFailure();
 };

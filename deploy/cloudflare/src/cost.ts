@@ -1,5 +1,6 @@
 import { HttpError } from "./errors.ts";
 import { databaseRequired } from "./database.ts";
+import { driverArgs } from "./driver-values.ts";
 
 const invalidPlanner = () =>
   new HttpError(403, "POLICYSQL_COST_UNKNOWN", "The query cost could not be bounded safely.");
@@ -24,8 +25,6 @@ const parseCatalog = (env) => {
   ) throw invalidPlanner();
   return value;
 };
-
-const args = (statement) => ({ ...statement.clientParameters, ...statement.serverParameters });
 
 const details = (result) => result.rows.map((row) => {
   const index = result.columns.indexOf("detail");
@@ -89,7 +88,7 @@ export const estimateSealedOnTransaction = async (compiled, env, transaction) =>
     ? []
     : await transaction.execute(planned.map(({ statement }) => ({
         sql: statement.costExplainSql,
-        args: args(statement),
+        args: driverArgs(statement),
       })));
   return evaluate(compiled, catalog, planned, results);
 };
@@ -113,7 +112,7 @@ export const estimateSealedEnvelope = async (
       transaction = await transport.begin("read", 1_000);
       results = await transaction.execute(planned.map(({ statement }) => ({
         sql: statement.costExplainSql,
-        args: args(statement),
+        args: driverArgs(statement),
       })));
       await transaction.commit();
     }

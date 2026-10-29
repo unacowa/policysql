@@ -16,27 +16,32 @@ const schemaVersion = "schema_routing_1";
 const policyVersion = "policy_routing_1";
 const limits = { maxRows: 100, maxResultBytes: 64_000, timeoutMs: 1_000, maxStatements: 8 };
 const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
+// Match Hrana's STANDARD_NO_PAD BLOB serializer, independently of the adapter codec.
 const encode = (value) => value === null ? { type: "null" } : typeof value === "number"
-  ? { type: "integer", value: String(value) } : { type: "text", value };
+  ? { type: "integer", value: String(value) } : value instanceof Uint8Array
+    ? { type: "blob", base64: Buffer.from(value).toString("base64").replace(/=+$/, "") } : { type: "text", value };
 
 // Exercise real SQL, rollback, and transaction visibility through the real HTTP transport.
 // Only the remote HTTP server and Cloudflare storage/routing are simulated.
-export const harness = async (t, { hooks = true, idempotencyTable = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding, customizePolicy = (policy) => policy } = {}) => {
+export const harness = async (t, { hooks = true, idempotencyTable = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding, customizePolicy = (policy) => policy, fixture, runtimeLimits = limits } = {}) => {
   const directory = mkdtempSync(join(tmpdir(), "policysql-routing-"));
   const runtime = PolicySqlRuntime.newWithPhysicalSchema(
-    example("catalog.yaml"), customizePolicy(hooks ? example("policy.yaml") : example("policy.yaml").split("commit_checks:")[0]),
+    fixture?.catalog ?? example("catalog.yaml"), customizePolicy(hooks ? (fixture?.policy ?? example("policy.yaml")) : (fixture?.policy ?? example("policy.yaml")).split("commit_checks:")[0]),
     schemaVersion, policyVersion,
-    JSON.stringify({ max_rows: 100, max_result_bytes: 64_000, timeout_ms: 1_000, max_statements: 8 }),
-    example("physical-schema.json"),
+    JSON.stringify({ max_rows: runtimeLimits.maxRows, max_result_bytes: runtimeLimits.maxResultBytes, timeout_ms: runtimeLimits.timeoutMs, max_statements: runtimeLimits.maxStatements }),
+    fixture?.physicalSchema ?? example("physical-schema.json"),
   );
   const databases = new Map();
   for (const tenant of ["a", "b"]) {
     const path = join(directory, `${tenant}.sqlite`);
     const database = new DatabaseSync(path);
-    database.exec(example("schema.sql"));
+    database.exec(fixture?.schema ?? example("schema.sql"));
     if (idempotencyTable) database.exec(example("idempotency.sql"));
-    database.prepare("INSERT INTO projects VALUES (?, ?, ?)").run("seed", `tenant_${tenant}`, `database_${tenant}`);
-    database.prepare("INSERT INTO projects VALUES (?, ?, ?)").run("hidden", "another_tenant", "hidden");
+    if (fixture?.seed) fixture.seed(database, tenant);
+    else {
+      database.prepare("INSERT INTO projects VALUES (?, ?, ?)").run("seed", `tenant_${tenant}`, `database_${tenant}`);
+      database.prepare("INSERT INTO projects VALUES (?, ?, ?)").run("hidden", "another_tenant", "hidden");
+    }
     databases.set(tenant, { path, database });
   }
   const events = [];
@@ -68,11 +73,11 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
         continue;
       }
       const { sql, named_args: args } = request.stmt;
-      events.push({ tenant, sql, baton, credential: options.headers.authorization });
+      events.push({ tenant, sql, baton, args, credential: options.headers.authorization });
       try {
         const statement = connection.database.prepare(sql);
         statement.setReturnArrays(true);
-        const params = Object.fromEntries(args.map(({ name, value }) => [name, value.type === "null" ? null : value.type === "integer" ? Number(value.value) : value.value]));
+        const params = Object.fromEntries(args.map(({ name, value }) => [name, value.type === "null" ? null : value.type === "integer" ? Number(value.value) : value.type === "blob" ? Buffer.from(value.base64, "base64") : value.value]));
         const rows = args.length ? statement.all(params) : statement.all();
         const columns = statement.columns().map((column) => ({ name: column.name, decltype: column.type ?? "TEXT" }));
         const affected = /^(INSERT|UPDATE|DELETE)\b/i.test(sql)
@@ -128,7 +133,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   let validator = async (hook) => {
     const query = await app.fetchCallback(new Request(hook.query.url, {
       method: "POST", headers: { authorization: `Bearer ${hook.query.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ sequence: 1, ...read }),
+      body: JSON.stringify({ sequence: 1, ...(fixture?.callbackQuery ?? read) }),
     }), env, ctx);
     const result = await query.json();
     hooksSeen.push({ hook, result, status: query.status });
@@ -146,7 +151,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
       return { fetch: (url, options) => owners.get(name).owner.fetch(new Request(url, options)) };
     },
   };
-  app = createApp({ getRuntime: () => runtime, database, publicConfig: { schemaVersion, policyVersion, limits } });
+  app = createApp({ getRuntime: () => runtime, database, publicConfig: { schemaVersion, policyVersion, limits: runtimeLimits } });
   const token = (tenant, overrides = {}, jwt = {}) => new SignJWT({
     policysql: { roles: ["member"], default_role: "member", access: ["execute", "explain", "catalog"], session: { tenant_id: `tenant_${tenant}` } },
     ...overrides,

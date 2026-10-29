@@ -11,6 +11,12 @@ export class HttpError extends Error {
   }
 }
 
+// A well-formed BLOB over the per-value limit is a permanent limit condition, not a
+// transient database failure; both database transports use this same category.
+export const binaryLimitExceeded = () => new HttpError(
+  413, "POLICYSQL_LIMIT_EXCEEDED", "The request or result exceeded a configured limit.",
+);
+
 export const safeError = (error, requestId) => {
   const known = error instanceof HttpError;
   return {

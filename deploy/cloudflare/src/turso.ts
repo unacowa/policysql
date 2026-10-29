@@ -1,5 +1,6 @@
 import { HttpError, wasmError } from "./errors.ts";
 import { databaseRequired } from "./database.ts";
+import { driverArgs, rawDriverValue, rowValues } from "./driver-values.ts";
 import type { ExecutionTrace } from "./types.ts";
 
 const remoteFailure = (timeout = false) =>
@@ -8,14 +9,6 @@ const remoteFailure = (timeout = false) =>
     timeout ? "POLICYSQL_DATABASE_TIMEOUT" : "POLICYSQL_DATABASE_UNAVAILABLE",
     timeout ? "The database operation timed out." : "The database is temporarily unavailable.",
   );
-
-const driverArgs = (statement) => {
-  const overlap = Object.keys(statement.clientParameters).some((name) =>
-    Object.hasOwn(statement.serverParameters, name),
-  );
-  if (overlap) throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
-  return { ...statement.clientParameters, ...statement.serverParameters };
-};
 
 const executionTrace = (compiled, statements, requestId, inputStatements): ExecutionTrace => ({
   source: "turso-egress",
@@ -58,21 +51,6 @@ const publishExecutionTrace = async (trace, sink) => {
   }
 };
 
-const jsonSafeValue = (value) => {
-  if (typeof value === "bigint") {
-    const number = Number(value);
-    if (!Number.isSafeInteger(number)) {
-      throw new HttpError(422, "POLICYSQL_SCHEMA_MISMATCH", "The database result does not match the compiled logical contract.");
-    }
-    return number;
-  }
-  if (value instanceof Uint8Array) return [...value];
-  return value;
-};
-
-const rowValues = (columns, row) =>
-  columns.map((column, index) => row?.[index] ?? row?.[column] ?? null);
-
 const strictestLimit = (compiled, name) => {
   const values = compiled.statements
     .map((statement) => statement.limits?.[name])
@@ -100,9 +78,9 @@ export const enforceCumulativeLimits = (compiled, results, elapsedMs) => {
   }
 };
 
-const rawResult = (result, operation) => ({
+const rawResult = (result, operation, rows) => ({
   columns: result.columns,
-  rows: result.rows.map((row) => rowValues(result.columns, row).map(jsonSafeValue)),
+  rows: rows.map((row) => row.map(rawDriverValue)),
   affectedRows:
     operation !== "select" && result.columns.length > 0
       ? result.rows.length
@@ -124,23 +102,23 @@ const publicResultColumn = (column) => ({
 const validateDriverResults = (runtime, compiled, wasmHandle, driverResults, requestId) =>
   driverResults.map((result, index) => {
     const descriptor = compiled.statements[index];
+    // Log raw shape before validation so malformed rows remain observable. Never log cell values.
     console.log(JSON.stringify({
       event: "database_result_received",
       requestId,
       index,
       operation: descriptor.operation,
       columnCount: result.columns.length,
-      rowWidths: result.rows.map((row) => rowValues(result.columns, row).length),
-      valueTypes: result.rows.map((row) => rowValues(result.columns, row).map((value) =>
-        value === null ? "null" : typeof value,
-      )),
+      rowWidths: result.rows.map((row) => Array.isArray(row) ? row.length
+        : row && typeof row === "object" ? Object.keys(row).length : null),
       rowsAffected: Number(result.rowsAffected ?? 0),
     }));
+    const rows = result.rows.map((row) => rowValues(result.columns, row));
     const validated = JSON.parse(
       runtime.validate_result_json(
         wasmHandle,
         index,
-        JSON.stringify(rawResult(result, descriptor.operation)),
+        JSON.stringify(rawResult(result, descriptor.operation, rows)),
       ),
     );
     const error = wasmError(validated);

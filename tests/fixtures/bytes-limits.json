@@ -1,0 +1,44 @@
+[
+  {
+    "name": "oversized invalid alphabet",
+    "pattern": "!",
+    "repeat": 360000,
+    "suffix": "",
+    "tooLarge": false
+  },
+  {
+    "name": "oversized non-ASCII",
+    "pattern": "é",
+    "repeat": 180000,
+    "suffix": "",
+    "tooLarge": false
+  },
+  {
+    "name": "oversized invalid length",
+    "pattern": "A",
+    "repeat": 360001,
+    "suffix": "",
+    "tooLarge": false
+  },
+  {
+    "name": "oversized nonzero unused bits",
+    "pattern": "AAAA",
+    "repeat": 90000,
+    "suffix": "AB==",
+    "tooLarge": false
+  },
+  {
+    "name": "oversized interior padding",
+    "pattern": "AA==",
+    "repeat": 90000,
+    "suffix": "",
+    "tooLarge": false
+  },
+  {
+    "name": "oversized canonical base64",
+    "pattern": "AAAA",
+    "repeat": 90000,
+    "suffix": "",
+    "tooLarge": true
+  }
+]
