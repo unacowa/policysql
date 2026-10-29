@@ -8,6 +8,8 @@ const routes = Object.freeze({
   capabilities: ["GET", "/v1/capabilities"],
 });
 
+// Uses redirect: "error", so it targets browsers and Node and is not meant to run
+// inside a Cloudflare Worker (workerd rejects that mode with a TypeError).
 export const createHttpTransport = (options) => {
   validateOptions(options, ["endpoint", "fetchImpl"]);
   const url = new URL(required(options.endpoint, "endpoint"));
