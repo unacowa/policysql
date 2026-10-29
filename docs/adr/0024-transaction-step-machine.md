@@ -127,10 +127,12 @@ differential harness.
    `POLICYSQL_TRANSACTION_UNAVAILABLE`, which the client treats as a definite rejection of a
    commit that may have committed. Old code can also write `failed` (the catch at 200-204, the
    successor's fail-closed at 227-230) or `expired` (inconsistency 6) after COMMIT was sent, so
-   no old record's status proves that COMMIT was not sent. Core persists a `committing` record
-   before the `Commit` effect, and a successor that finds `committing` answers with
-   `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`; old records are handled under
-   [ABI impact](#abi-impact-and-rollout).
+   no old record's status proves that COMMIT was not sent. #48 fixes this in TypeScript ahead of
+   stage 4 by persisting `committing` before COMMIT and answering commit retries in the unsafe
+   windows with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. Core keeps that rule: it persists a
+   `committing` record before the `Commit` effect, and a successor that finds `committing`
+   answers with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. Records written before the switch-over,
+   #48's included, are handled under [ABI impact](#abi-impact-and-rollout).
 4. **Commit error.** `close("committed")` turns any commit error into the value
    `{ status: "failed" }` (200). A transport error during commit does not prove that nothing
    committed. Core distinguishes a definite failure from an unknown outcome (see
@@ -512,11 +514,11 @@ today.
   `packages/client/protocol.js` does not list it in `REJECTIONS`, so `sendCommand` raises
   `PolicySqlOutcomeUnknownError`, and Kysely's rollback-on-error path must not send a rollback
   that contradicts the unresolved commit (ADR 0007). Client tests assert both.
-- It is added in the first implementation pull request that can return it (pull request 0 if
-  that is taken, otherwise pull request 7): to the library table in `website/api/errors.md`, to
-  `src/http/status.ts`, to the HTTP conformance suite (`src/http/conformance.ts`), and to the
-  client tests (`packages/client`, `packages/kysely`). The ADR 0023 table test then requires
-  that the code is returned somewhere and appears in exactly one table.
+- It is added by #48, the TypeScript fix of inconsistency 3 that ships ahead of stage 4: to the
+  library table in `website/api/errors.md`, to `src/http/status.ts`, to the HTTP conformance
+  suite (`src/http/conformance.ts`), and to the client tests (`packages/client`,
+  `packages/kysely`). The ADR 0023 table test then requires that the code is returned somewhere
+  and appears in exactly one table. From pull request 7, core returns it.
 
 ### ABI impact and rollout
 
@@ -567,14 +569,16 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
 (both owner adapters), `npm run docs:build`, and the real-environment smoke
 (`deploy/cloudflare/scripts/provision-dev.mjs`) green, and is mergeable on its own.
 
-0. **Optional, ahead of stage 4: fix the ADR 0007 violation on `main` in TypeScript.** Taken
-   only if the maintainer chooses to fix inconsistency 3 before the machine lands. `terminal()`
-   persists `status: "committing"` before `transaction.commit()`. A successor, or the same owner
-   after a failed `put`, answers a commit with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` when the record
-   is `committing`, or is `committed`, `rolled_back`, `failed`, or `expired` with a `last` that
-   is not that commit's digest. The code is added as described above. Regression tests reproduce
-   both windows and the failed `put`. If this pull request is skipped, the switch-over in pull
-   request 7 is the fix.
+Ahead of stage 4, **#48** fixes inconsistency 3 in today's TypeScript owner: `terminal()`
+persists `status: "committing"` before COMMIT, and a commit retry in the unsafe windows gets
+`POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, which #48 adds to the status table, the specification, and
+the client. #48 is a separate pull request and not part of this sequence. Its records, including
+`committing`, have no `v` and are the old format at the switch-over in pull request 7, so the
+discard rule answers a commit against any of them with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. That
+is the answer #48 gives for its own `committing` record and for its unsafe windows, so clients
+see no regression at the switch-over. For a commit that #48 could still replay from a matching
+`last`, the answer becomes outcome-unknown (the one-time incompatibility above).
+
 1. **This ADR.** Design only.
 2. **Canonical JSON, hashing, and identities in core.** `policysql-transaction` with
    `stable_json`, SHA-256 (the `sha2` crate), key syntax, `keyHash`, fingerprints, digest;
@@ -599,7 +603,8 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
      mismatch is therefore an availability fault, never a wrong retry decision.
 3. **Limits into runtime configuration.** Extend `RuntimeLimits` and `createRuntimeFactory`;
    `transaction-owner.ts`, `commit-checks.ts`, `cost.ts`, and `presenters.ts` read the runtime.
-   Defaults equal today's constants. Advertised and enforced values become one source.
+   Defaults equal today's constants. `publicConfig.limits` and the `LIMITS` merge in
+   `presenters.ts` are removed, so Capabilities advertises exactly the enforced values.
 4. **The machine for interactive transactions, unused.** `TxState`, `TxEvent`, `Effect`,
    `HostFacts`, `step` for begin, statement, commit, rollback, expiry, and owner loss, without
    commit checks; `step_json` (ABI 5); property tests. A test-only `StepOwnerCore` (an effect
@@ -618,8 +623,8 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
    `cost.test.mjs` scenarios.
 7. **Switch interactive transactions.** `TransactionOwnerCore` becomes the effect executor for
    `interactive`; `engine.ts` begin and commands run the `request` kind; old-format records are
-   discarded; `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` is added unless pull request 0 added it. The
-   TypeScript decision path remains only as the harness's reference. Smoke.
+   discarded, including #48's `committing` records. The TypeScript decision path remains only as
+   the harness's reference. Smoke.
 8. **Switch atomic execution.** `engine.ts` execute and the owner's atomic input run the
    machine. Smoke.
 9. **Delete.** The TypeScript decision code: the decision parts of `transaction-owner.ts`,
@@ -708,18 +713,19 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
   `cargo fuzz` job (all approved for this stage), a WASM call per effect outcome, and durable
   writes at `committing` in addition to the terminal write.
 
-## Open questions
+## Decided during review
 
-- **`publicConfig.limits`** (undecided). Today `presenters.ts` (81) merges `publicConfig.limits`
-  over `LIMITS` for the capabilities response only. An override therefore changes the advertised
-  values (`maxStatements`, `maxRows`, `maxResultBytes`, and through them
-  `maxCallbackQueriesPerCheck` and `maxCallbackRowsPerCheck`), while the runtime enforces the
-  values it was constructed with. Once pull request 3 makes the runtime the single source,
-  either the override is removed (capabilities always report what is enforced), or it stays and
-  is checked to be no larger than the enforced value. Pull request 3 implements whichever is
-  decided; until then it keeps today's behavior.
+- **One place for limits.** `publicConfig.limits` is removed. Today `presenters.ts` (81) merges
+  it over `LIMITS` for the capabilities response only, so an override changes what is
+  advertised but not what is enforced. Limits are configured in exactly one place,
+  `RuntimeLimits`, which the wrapper still sets, so they remain configurable. The
+  interactive-transaction limits now hard-coded in `transaction-owner.ts` (4 s duration, 8
+  statements, 64,000 result bytes, 100 callback rows) become `RuntimeLimits` fields, and
+  Capabilities advertises exactly the enforced values. Pull request 3 implements this.
+- The new code `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (503), added by #48.
+- #48 fixes the ADR 0007 violation of inconsistency 3 now, ahead of stage 4.
+- A replay identity without the snapshot.
+- The `sha2`, `proptest`, and `cargo fuzz` dependencies.
+- Old-format records are discarded instead of read.
 
-Decided during review: the new code `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`; a replay identity
-without the snapshot; the `sha2`, `proptest`, and `cargo fuzz` dependencies; and discarding
-old-format records instead of reading them. Whether to take pull request 0 is the maintainer's
-choice.
+No questions remain open.
