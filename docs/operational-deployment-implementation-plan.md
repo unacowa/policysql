@@ -97,7 +97,7 @@ Turso adapterをspy化し、deny request、Explain、認証失敗でexecute call
 
 ```text
 crates/
-  policysql-cloudflare/        Rust/Wasm deployment ABI and wire DTOs
+  policysql-wasm/              host-neutral Rust/Wasm ABI and wire DTOs
   policysql-gateway/           backend-neutral request orchestration
   policysql-turso/             sealed-plan Turso validation and ports
 
@@ -144,7 +144,7 @@ ABI decodeではunknown field、duplicate key、non-canonical identifier、overs
 
 ### 実装
 
-- `policysql-cloudflare`を`cdylib`として追加する;
+- `policysql-wasm`を`cdylib`として追加する;
 - Catalog / Policy / Capabilities activation API;
 - Explain / Execute compile API;
 - sealed-plan wire DTOとraw Turso result validation API;

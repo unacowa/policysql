@@ -1,6 +1,6 @@
 [package]
-name = "policysql-cloudflare"
-description = "Versioned Rust/Wasm deployment ABI for PolicySQL on Cloudflare Workers."
+name = "policysql-wasm"
+description = "Versioned host-neutral Rust/Wasm ABI for the PolicySQL core."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

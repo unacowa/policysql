@@ -6,7 +6,7 @@ import { harness } from "./helpers/routing.mjs";
 
 // NULL named parameters in direct nullable assignments (#20), through the trusted session,
 // real WASM, the HTTP transport and SQLite. The same cases run natively in
-// crates/policysql-cloudflare/src/nullable_tests.rs.
+// crates/policysql-wasm/src/nullable_tests.rs.
 const read = name => readFileSync(new URL(`../../../tests/fixtures/nullable/${name}`, import.meta.url), "utf8");
 const cases = JSON.parse(read("cases.json"));
 const fixture = {

@@ -562,7 +562,7 @@
             <tr><td><code>policysql-executor-turso</code>（現turso）</td><td>Turso / libSQL transport、transaction、limit、error normalization</td><td>matching profileのopaque verified planだけを受け取る。</td></tr>
             <tr><td><code>*-postgres</code>（将来）</td><td>PostgreSQL frontend、backend、executor</td><td>SQLite実装を再利用せず、独立conformance suiteを要求。</td></tr>
             <tr><td><code>policysql-gateway</code></td><td>HTTP composition root、auth、session、request orchestration、audit</td><td>compilerとadapterを結合する外部境界。</td></tr>
-            <tr><td><code>policysql-cloudflare</code></td><td>versioned Rust/Wasm ABI、Catalog投影、sealed execution handle、remote result validation</td><td>Worker JavaScriptへdomain ASTを公開せず、JSON DTOだけを受け渡す。</td></tr>
+            <tr><td><code>policysql-wasm</code></td><td>versioned Rust/Wasm ABI、Catalog投影、sealed execution handle、remote result validation</td><td>Worker JavaScriptへdomain ASTを公開せず、JSON DTOだけを受け渡す。</td></tr>
             <tr><td><code>policysql-testkit</code></td><td>golden、adversarial、fuzz、profile別differential helper</td><td>各accepted nodeと新profileのpolicy preservationを独立検証。</td></tr>
           </tbody>
         </table>

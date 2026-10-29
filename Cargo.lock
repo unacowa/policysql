@@ -154,26 +154,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "policysql-cloudflare"
-version = "0.0.0"
-dependencies = [
- "policysql-catalog",
- "policysql-core",
- "policysql-execution",
- "policysql-gateway",
- "policysql-ir",
- "policysql-parser",
- "policysql-policy",
- "policysql-sqlite",
- "policysql-turso",
- "regex-lite",
- "serde",
- "serde_json",
- "serde_yaml",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "policysql-core"
 version = "0.0.0"
 dependencies = [
@@ -271,6 +251,26 @@ dependencies = [
  "policysql-ir",
  "policysql-sqlite",
  "regex-lite",
+]
+
+[[package]]
+name = "policysql-wasm"
+version = "0.0.0"
+dependencies = [
+ "policysql-catalog",
+ "policysql-core",
+ "policysql-execution",
+ "policysql-gateway",
+ "policysql-ir",
+ "policysql-parser",
+ "policysql-policy",
+ "policysql-sqlite",
+ "policysql-turso",
+ "regex-lite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "wasm-bindgen",
 ]
 
 [[package]]

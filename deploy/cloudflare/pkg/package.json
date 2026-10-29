@@ -1,7 +1,7 @@
 {
-  "name": "policysql-cloudflare",
+  "name": "policysql-wasm",
   "type": "module",
-  "description": "Versioned Rust/Wasm deployment ABI for PolicySQL on Cloudflare Workers.",
+  "description": "Versioned host-neutral Rust/Wasm ABI for the PolicySQL core.",
   "version": "0.0.0",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -9,12 +9,12 @@
     "url": "https://github.com/unacowa/policysql"
   },
   "files": [
-    "policysql_cloudflare_bg.wasm",
-    "policysql_cloudflare.js",
-    "policysql_cloudflare.d.ts"
+    "policysql_wasm_bg.wasm",
+    "policysql_wasm.js",
+    "policysql_wasm.d.ts"
   ],
-  "main": "policysql_cloudflare.js",
-  "types": "policysql_cloudflare.d.ts",
+  "main": "policysql_wasm.js",
+  "types": "policysql_wasm.d.ts",
   "sideEffects": [
     "./snippets/*"
   ]

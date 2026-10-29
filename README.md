@@ -61,6 +61,7 @@ crates/
   policysql-turso/      Turso/libSQL execution adapter boundary
   policysql-gateway/    HTTP service composition root
   policysql-testkit/    Fixtures and differential/security testing helpers
+  policysql-wasm/       Host-neutral Rust/Wasm ABI for the core (wasm-bindgen)
 
 docs/
   codex-handoff.md      Recommended implementation sequence for Codex

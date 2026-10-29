@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { initSync, PolicySqlRuntime } from "../pkg/policysql_cloudflare.js";
+import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { testBinding, testProvider } from "./helpers/database.mjs";
 import { createApp as createHandlerCore } from "../src/app.ts";
 import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
@@ -25,7 +25,7 @@ const runtimeFrom = (catalogYaml, policyYaml) => new PolicySqlRuntime(
 const ensureWasm = () => {
   if (!runtime) {
     initSync({
-      module: readFileSync(new URL("../pkg/policysql_cloudflare_bg.wasm", import.meta.url)),
+      module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)),
     });
   }
 };

@@ -11,7 +11,7 @@ members = [
   "crates/policysql-turso",
   "crates/policysql-gateway",
   "crates/policysql-testkit",
-  "crates/policysql-cloudflare",
+  "crates/policysql-wasm",
 ]
 
 [workspace.package]

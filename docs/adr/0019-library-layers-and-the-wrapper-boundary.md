@@ -45,7 +45,7 @@ PolicySQL has exactly three layers. Each boundary has a one-question rule.
 | --- | --- | --- |
 | Wrapper | Per-deployment decisions: who the caller is, which database, whether to admit the request. Assembles adapters. | Deployment, never published |
 | Engine | Executes operations: waits on I/O, persists cross-request state, keeps timers. Makes no decision whose outcome the PolicySQL specification determines. | Library (TypeScript) |
-| Core | Every decision and computation: authorization, SQL protection, result validation, session validation, transaction state transitions. Pure functions. | Library (Rust, WASM ABI crate) |
+| Core | Every decision and computation: authorization, SQL protection, result validation, session validation, transaction state transitions. Pure functions. | Library (Rust, WASM ABI crate `policysql-wasm`) |
 
 - **Engine or wrapper:** does it need knowledge only the deployment has (identity
   provider, tenancy, database registry, credentials, platform, log destinations)? Then
