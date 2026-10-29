@@ -102,9 +102,11 @@ export type PolicySqlWorkerConfiguration<Env extends PlatformBindings = Platform
    * Wrapper-owned. Builds the database provider and `PolicySqlConfig` from the Workers
    * `env` (ADR 0021). Workers delivers `env` per request and to the Durable Object
    * constructor, not at module load, so the library calls this with the `env` it was
-   * handed: once per `env` object for the Worker, and once per Durable Object instance,
-   * so both receive the same configuration. The library itself reads nothing from `env`
-   * except `TRANSACTION_OWNER`.
+   * handed. The Worker calls it at most once per `env` object; a request that arrives with
+   * a different `env` object rebuilds (and revalidates) the deployment for that object.
+   * Each Durable Object instance calls it once, in its constructor. The Worker and a Durable
+   * Object therefore share a configuration only if this is a pure function of the bindings.
+   * The library itself reads nothing from `env` except `TRANSACTION_OWNER`.
    */
   deployment: (env: Env) => PolicySqlDeployment;
 };

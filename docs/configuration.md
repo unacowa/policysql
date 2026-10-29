@@ -40,9 +40,11 @@ until the `TransactionOwner` port replaces it (#31). Passing the whole Workers `
 
 ## Validation and failures
 
-- Validated once, at construction (`createApp`, `TransactionOwnerCore`) or on the first
-  request for a given `env` (`createPolicySqlWorker`), before any runtime, database,
-  Durable Object, or validator call.
+- Validated once, at construction (`createApp`, `TransactionOwnerCore`), or with
+  `createPolicySqlWorker` at most once per `env` object, on the first request that carries
+  it (a different `env` object is built and validated again), before any runtime, database,
+  Durable Object, or validator call. `deployment(env)` should be a pure function of the
+  bindings so the Worker and each Durable Object get the same configuration.
 - `createApp` and `TransactionOwnerCore` throw `ConfigError` (a `TypeError`).
   `createPolicySqlWorker` answers every request with 500 `POLICYSQL_INTERNAL` and logs
   `deployment_config_rejected` with the setting name, or with only the error class when the

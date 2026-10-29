@@ -73,9 +73,21 @@ serve policy versions that add or remove checks.
 Workers delivers `env` per request and to the Durable Object constructor, not at module
 load. `createPolicySqlWorker` therefore takes a wrapper-owned
 `deployment: (env) => ({ database, config })` instead of a static `database`. The library
-calls it with the `env` it was handed, once per `env` object for the Worker (memoized; the
-first request builds and validates) and once per Durable Object instance, so both use the
-same provider and configuration. A function that throws, or a configuration that fails
+calls it with the `env` it was handed, and guarantees only this:
+
+- The Worker builds the deployment at most once per `env` object (a `WeakMap` keyed by
+  that object). The library does not assume the platform reuses one object: if a request
+  arrives with a different `env` object, the deployment is built and validated again for it.
+  That costs a call to `deployment(env)` and `createApp` per request, never a stale or
+  shared configuration.
+- Each Durable Object instance builds its own deployment from the `env` passed to its
+  constructor.
+- The Worker and a Durable Object use the same configuration as long as `deployment(env)`
+  returns the same values for their `env` objects, which holds when it is a pure function of
+  the deployment's bindings, as in both reference wrappers. A version rollout can briefly run
+  a Durable Object on the previous version, the same window the direct env reads had.
+
+A function that throws, or a configuration that fails
 validation, makes every request 500 `POLICYSQL_INTERNAL` with a
 `deployment_config_rejected` log carrying only the setting name or the error class, before
 any runtime, database, owner, or validator work. The engine reads no property of `env`.

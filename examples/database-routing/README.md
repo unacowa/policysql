@@ -62,9 +62,11 @@ a transaction ([ADR 0020](../../docs/adr/0020-trusted-session-input-and-jwt-iden
 5. This policy enables the `consistency` commit check. Configure `VALIDATOR_URL`,
    `VALIDATOR_SECRET`, and the deployed Worker origin in `POLICYSQL_PUBLIC_BASE_URL`;
    `config.ts` passes them as `commitChecks.consistency` (the policy names no env variable).
-   Missing values fail every request with 500 `POLICYSQL_INTERNAL` before any I/O. Implement the
-   [commit-check contract](../../docs/commit-checks.md) in the validator. To disable checks,
-   remove `commit_checks` and change `policyVersion`.
+   Missing values fail every request with 500 `POLICYSQL_INTERNAL` before any I/O.
+   Implement the [commit-check contract](../../docs/commit-checks.md) in the validator.
+   To disable checks, remove `commit_checks` from the policy, change `policyVersion`, and
+   also remove the `commitChecks.consistency` entry from `configFromEnv` in `config.ts`;
+   otherwise, without `VALIDATOR_URL` and `VALIDATOR_SECRET`, every request is 500.
 
 Build-check from the repository root:
 

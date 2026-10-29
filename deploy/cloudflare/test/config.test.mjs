@@ -162,7 +162,7 @@ test("a rejected deployment is 500 before runtime, database, owner, or validator
   }
 });
 
-test("the Worker builds its deployment once per env, and the Durable Object builds the same one", async () => {
+test("the Worker builds its deployment at most once per env object, and the Durable Object builds the same one", async () => {
   const seen = [];
   const { entry, env, counts } = workerHarness((platform, database) => {
     const config = { ...valid(), environment: "built" };
@@ -174,8 +174,14 @@ test("the Worker builds its deployment once per env, and the Durable Object buil
     assert.equal((await response.json()).environment, "built");
   }
   assert.equal(counts.deployment, 1);
-  const owner = new entry.TransactionOwner({ storage: {} }, env);
+  // Memoization is per env object only: a different object is built and validated again.
+  const other = { ...env };
+  assert.equal((await entry.app.fetch(new Request("https://worker.test/healthz"), other, undefined, { database: testBinding(runtime.snapshot) })).status, 200);
   assert.equal(counts.deployment, 2);
+  await entry.app.fetch(new Request("https://worker.test/healthz"), env, undefined, { database: testBinding(runtime.snapshot) });
+  assert.equal(counts.deployment, 2, "the first env object keeps its build");
+  const owner = new entry.TransactionOwner({ storage: {} }, env);
+  assert.equal(counts.deployment, 3);
   assert.equal(owner.config.environment, "built");
   assert.deepEqual(owner.config.commitCheck("consistency"), seen[0].commitChecks.consistency);
 });

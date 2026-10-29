@@ -46,27 +46,58 @@ test("library source names none of the wrapper's env settings", () => {
   }
 });
 
-test("the scan catches every spelling of an env read", () => {
+// The guard is an allowlist: any reference to `env` / `deployment` that is not a parameter,
+// a known sink argument, a presence check, or the one TRANSACTION_OWNER read is a finding,
+// however the read is spelled. These samples pin the evasions found in review (PR #43).
+test("the scan rejects every env use outside the allowlist", () => {
   const caught = [
-    ["env-read", "const a = env.POLICYSQL_PUBLIC_BASE_URL;"],
-    ["env-read", 'const a = env["VALIDATOR_SECRET"];'],
-    ["env-read", "const a = env[check.hmacSecretEnv];"],
-    ["env-read", "const a = (env).X;"],
-    ["env-read", "const { POLICYSQL_ENVIRONMENT } = env;"],
-    ["env-read", "const a = deployment.POLICYSQL_ENVIRONMENT;"],
-    ["env-read", "const a = context.env.deployment.POLICYSQL_ENVIRONMENT;"],
-    ["env-read", "class A { f() { return this.env.X; } }"],
-    ["env-read", "class A { constructor(env) { this.env = env; } }"],
-    ["env-read", "const a = process.env.SECRET;"],
-    ["hono-binding", "const a = context.env.POLICYSQL_ENVIRONMENT;"],
-    ["hono-binding", 'const a = c.env["VALIDATOR_URL"];'],
-    ["env-read", "const { VALIDATOR_URL } = context.env;"],
-    ["platform-import", 'import { env } from "cloudflare:workers";'],
+    "const a = env.POLICYSQL_PUBLIC_BASE_URL;",
+    'const a = env["VALIDATOR_SECRET"];',
+    "const a = env[check.hmacSecretEnv];",
+    "const a = (env).X;",
+    "const a = (env as any).POLICYSQL_ENVIRONMENT;",
+    "const a = (<any>env).POLICYSQL_ENVIRONMENT;",
+    "const a = env!.X;",
+    "const { POLICYSQL_ENVIRONMENT } = env;",
+    "const e = env; e.POLICYSQL_PUBLIC_BASE_URL;",
+    "const bindings = env; bindings['VALIDATOR_SECRET'];",
+    "let e; e = env;",
+    "const copy = { ...env };",
+    "const holder = { env };",
+    "const holder = { bindings: env };",
+    "const list = [env];",
+    "Reflect.get(env, 'VALIDATOR_SECRET');",
+    "Object.entries(env);",
+    "Object.keys(env);",
+    "JSON.stringify(env);",
+    "structuredClone(env);",
+    "const read = (bindings) => bindings.POLICYSQL_ENVIRONMENT; read(env);",
+    "resolve(env);",
+    "new Resolver(env);",
+    "owner.fetch(env);",
+    "app.fetch(request, context, env);",
+    "for (const key in env) {}",
+    "const env = globalThis.bindings;",
+    "const a = deployment.POLICYSQL_ENVIRONMENT;",
+    "const d = deployment; d(env);",
+    "const a = context.env.deployment.POLICYSQL_ENVIRONMENT;",
+    "class A { f() { return this.env.X; } }",
+    "class A { constructor(env) { this.env = env; } }",
+    "const a = process.env.SECRET;",
+    "const a = context.env.POLICYSQL_ENVIRONMENT;",
+    'const a = c.env["VALIDATOR_URL"];',
+    "const { VALIDATOR_URL } = context.env;",
+    "const { env: platform } = context;",
+    "const bindings = context.env;",
+    'import { env } from "cloudflare:workers";',
+    'import { env as platform } from "cloudflare:workers";',
   ];
-  for (const [kind, text] of caught) {
-    const findings = scanEnvReads("sample.ts", text);
-    assert.ok(findings.some((finding) => finding.kind === kind), `${kind}: ${text}`);
+  for (const text of caught) {
+    assert.notDeepEqual(scanEnvReads("sample.ts", text), [], text);
   }
+  // The documented exception is reported (and counted by the guard above), never silent.
+  assert.deepEqual(scanEnvReads("sample.ts", "const owner = (env) => env.TRANSACTION_OWNER;").map(({ kind, text }) => [kind, text]),
+    [["env-read", "env.TRANSACTION_OWNER"]]);
   const allowed = [
     "// env.POLICYSQL_PUBLIC_BASE_URL is not read here",
     'const name = "env.POLICYSQL_ENVIRONMENT";',
@@ -74,9 +105,14 @@ test("the scan catches every spelling of an env read", () => {
     "const a = context.env.callback === true && context.env.databaseBinding;",
     "const a = context.env.transactionOwner;",
     "const a = config.environment; const b = dependencies.config.publicBaseUrl;",
-    "const built = deployment(env);",
-    "app.fetch(request, env, context);",
-    "const environment = 1; const x = { env: 1 }.env;",
+    "const f = (env, { deployment }) => deployment(env);",
+    "const f = (request, env, context) => app.fetch(request, env, context);",
+    "const f = (request, env) => built.fetchCallback(request, env, undefined);",
+    "const f = (env) => (env === null || typeof env !== 'object' ? undefined : build(env));",
+    "const f = (env) => apps.get(env) ?? apps.set(env, appFor(env));",
+    "const f = (env) => platformTransactionOwner(env);",
+    "type T = { deployment: (env: Env) => void }; const x = configuration.deployment;",
+    "const environment = 1; const x = { env: 1 };",
   ];
   for (const text of allowed) assert.deepEqual(scanEnvReads("sample.ts", text), [], text);
 });

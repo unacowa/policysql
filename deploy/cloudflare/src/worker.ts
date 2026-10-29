@@ -42,8 +42,9 @@ export const createWorkerEntrypoints = <Env extends PlatformBindings>({
     const built = deployment(env);
     return { getRuntime, database: built?.database, config: built?.config };
   };
-  // One app per env object: Workers passes the same object for the isolate's lifetime, so
-  // the deployment is built and validated once, on the first request that needs it.
+  // At most one app per env object, built and validated on the first request that carries
+  // it. A different env object (the platform does not promise to reuse one) gets its own
+  // build; nothing is shared across env objects.
   const apps = new WeakMap<object, PolicySqlApp>();
   const appFor = (env: Env): PolicySqlApp => {
     if (env === null || typeof env !== "object") throw new TypeError("env must be the Workers environment object");
