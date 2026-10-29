@@ -20,6 +20,11 @@ Omitting the provider fails at construction; omitting the request binding return
 `wrapper/index.ts` and `wrapper/database.ts` explicitly construct the bundled deployment
 connections from env and pass them into the library. Callback requests use `fetchCallback`
 and their existing owner binding. These wrapper files are not the public library API.
+Request-rate limiting is also wrapper-owned ([ADR 0018](../../docs/adr/0018-wrapper-owned-rate-limiting.md)):
+`wrapper/fetch.ts` runs `wrapper/rate-limit.ts` with the `RATE_LIMITER` binding before `app.fetch`,
+returns 429 `POLICYSQL_RATE_LIMITED` with `Retry-After: 60` via the exported `createErrorResponse`,
+and fails closed with 500 `POLICYSQL_INTERNAL` when the binding is missing. The library reads no
+limiter binding.
 
 Build and validate without deployment:
 

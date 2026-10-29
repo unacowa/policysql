@@ -33,6 +33,48 @@ export const safeError = (error, requestId) => {
   };
 };
 
+export type ErrorResponseOptions = {
+  /** RFC 6901 pointer into the request body, or null when no field is at fault. */
+  path?: string | null;
+  /** Correlation ID for the wrapper's logs. Defaults to a fresh UUID. */
+  requestId?: string;
+  /** Extra response headers such as `retry-after`. Cannot override the fixed JSON/cache headers. */
+  headers?: HeadersInit;
+};
+
+const ERROR_CODE = /^POLICYSQL_[A-Z0-9_]+$/u;
+
+/**
+ * Builds a response in the public PolicySQL error shape for code that runs before or
+ * around `app.fetch`, such as a wrapper's rate limiter (ADR 0018). Codes that only a
+ * wrapper emits, such as the 429 rate-limit code, never originate in the library.
+ */
+export const createErrorResponse = (
+  status: number,
+  code: string,
+  message: string,
+  options: ErrorResponseOptions = {},
+): Response => {
+  if (!Number.isInteger(status) || status < 400 || status > 599) {
+    throw new TypeError("Error response status must be an integer from 400 to 599");
+  }
+  if (typeof code !== "string" || !ERROR_CODE.test(code)) {
+    throw new TypeError("Error response code must match POLICYSQL_[A-Z0-9_]+");
+  }
+  if (typeof message !== "string" || !message) {
+    throw new TypeError("Error response message must be a non-empty string");
+  }
+  const path = options.path ?? null;
+  if (path !== null && typeof path !== "string") throw new TypeError("Error response path must be a string or null");
+  const requestId = options.requestId ?? crypto.randomUUID();
+  if (typeof requestId !== "string" || !requestId) throw new TypeError("Error response requestId must be a non-empty string");
+  const headers = new Headers(options.headers);
+  headers.set("cache-control", "no-store");
+  headers.set("content-type", "application/json; charset=utf-8");
+  headers.set("x-content-type-options", "nosniff");
+  return new Response(JSON.stringify({ error: { code, message, path, requestId } }), { status, headers });
+};
+
 export const wasmError = (body) => {
   const code = body?.error?.code;
   const statuses = {

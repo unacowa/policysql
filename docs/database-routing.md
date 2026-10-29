@@ -57,7 +57,8 @@ its transport without starting a transaction or executing SQL. PolicySQL owns BE
 verified statement execution, result validation, commit, and rollback.
 
 The wrapper owns environment/subject/tenant/DB authorization, registration, URL and
-credential management, and schema compatibility. It may use its own authorization
+credential management, schema compatibility, and request-rate limiting
+([ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)). It may use its own authorization
 service, trusted routing configuration, or verified token claims to select a DB. That
 choice is outside the injection API. Never accept an arbitrary client-supplied DB ID,
 URL, or credential reference as authorization.

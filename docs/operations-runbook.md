@@ -42,11 +42,31 @@ Configure alerts in the production account for:
 - p95 CPU above 40 ms or any CPU limit termination;
 - actual rows read above the admission upper bound, or daily Turso usage above 80% of budget;
 - any `transaction_owner_unavailable` owner-loss event, or active/terminal count mismatch;
-- JWKS, rate-limit, cost-admission, or Turso availability errors for three consecutive minutes.
+- JWKS, cost-admission, or Turso availability errors for three consecutive minutes;
+- any wrapper `rate_limiter_missing` or `rate_limiter_failed` event, and a sustained 429
+  `POLICYSQL_RATE_LIMITED` rate above the seven-day baseline.
+
+## Rate limiting
+
+Rate limiting is owned by the wrapper (`deploy/cloudflare/wrapper/rate-limit.ts`), not the
+PolicySQL library ([ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)). The wrapper calls the
+Cloudflare Rate Limiting binding `RATE_LIMITER` (declared in `wrangler.jsonc`, 100 requests per
+60 s per `cf-connecting-ip`) before `app.fetch`, so a limited request does no JWT, WASM, SQL, or
+database work. It returns 429 `POLICYSQL_RATE_LIMITED` with `Retry-After: 60`; keep that value
+equal to the binding's `period` (`RATE_LIMIT_PERIOD_SECONDS`). Commit-check callbacks are not
+limited. The library itself never sends `Retry-After`.
+
+The wrapper fails closed: if the binding is missing or throws, every non-callback request
+returns 500 `POLICYSQL_INTERNAL` and logs `rate_limiter_missing` / `rate_limiter_failed`. Restore
+the binding (or roll back) rather than deleting it; a deployment that limits at a WAF instead
+must remove the wrapper step in code. To change limits, edit `simple.limit`/`period` in
+`wrangler.jsonc` and `RATE_LIMIT_PERIOD_SECONDS` together, then redeploy.
 
 ## Incident drills
 
 - Expired/revoked JWT: expect 401 before compilation or database access.
+- Rate limit exhausted: expect 429 `POLICYSQL_RATE_LIMITED` with `Retry-After` from the wrapper,
+  with no JWT verification, compilation, or database call.
 - Turso outage/token revocation: expect normalized 503/504 and rollback, with no raw error exposed.
 - Durable Object replacement: stored `active` state without its in-memory baton becomes `failed`;
   Turso expires and rolls back the orphaned transaction. It is never reconstructed as active.

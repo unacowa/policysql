@@ -23,7 +23,7 @@ Workersと実Turso Databaseへ安全に接続し、認証されたクライア�
 7. row、result byte、SQL size、parameter、statement、join、depth、timeout、Turso usage budgetが強制される;
 8. Tursoの`rows_read`、`rows_written`、`query_duration_ms`を取得し、request IDと関連付けて記録する;
 9. interactive transactionとcommit checkをadvertiseする場合、Durable Object owner-loss suiteを通る;
-10. safe error、rate limit、audit、metrics、rollback手順が動作する;
+10. safe error、wrapperのrate limit（[ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)。ライブラリは持たない）、audit、metrics、rollback手順が動作する;
 11. clean environmentから再現可能なdeploy commandとrollback commandがある;
 12. 下記のrelease curl suiteが実URLに対して成功し、deny/bypass caseではDB callが0である。
 
@@ -314,7 +314,7 @@ ABI decodeではunknown field、duplicate key、non-canonical identifier、overs
 - structured audit event、request / transaction correlation ID;
 - endpoint、outcome、safe error、CPU、wall、Turso duration、rows read/write metrics;
 - credential、SQL parameter、hidden schema、policy predicate、raw DB errorのredaction;
-- per-IP / issuer / subject / tenant rate limiting;
+- wrapperによるrate limiting（`app.fetch`より前。キーはwrapperが決める。参考wrapperはper-IP。ライブラリは持たない。[ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)）;
 - request deadline、concurrency、memory、result serialization limit;
 - alert: auth anomaly、deny spike、CPU、Turso usage、cost misestimate、transaction leak;
 - dependency inventory、SBOM、secret rotation、incident response;
@@ -329,7 +329,7 @@ ABI decodeではunknown field、duplicate key、non-canonical identifier、overs
 ### Exit gate
 
 - secretを含まないlog snapshot testが通る;
-- rate limitとusage budgetが実Workerで作動する;
+- wrapperのrate limit（429と`Retry-After`）とライブラリのusage budgetが実Workerで作動する;
 - previous Worker versionへのrollback drillが成功する;
 - expired/revoked token、Turso outage、JWKS outage、DO resetのrunbook drillが成功する。
 

@@ -17,7 +17,6 @@ export type WorkerBindings = {
   POLICYSQL_PUBLIC_BASE_URL?: string;
   POLICYSQL_COST_CATALOG_JSON?: string;
   POLICYSQL_IDEMPOTENCY_SECRET?: string;
-  POLICYSQL_RATE_LIMITER: { limit(input: { key: string }): Promise<{ success: boolean }> };
   TRANSACTION_OWNER: DurableObjectNamespace;
   [key: string]: unknown;
 };

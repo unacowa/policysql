@@ -48,4 +48,6 @@ public SQL execution paths or change backend profiles per request.
   transport. Registration and conformance are wrapper obligations.
 - Real Cloudflare/Turso acceptance remains a separate release gate.
 
-See [the complete contract](../database-routing.md).
+See [the complete contract](../database-routing.md). Request-rate limiting follows the same
+boundary and is also a wrapper responsibility
+([ADR 0018](0018-wrapper-owned-rate-limiting.md)).

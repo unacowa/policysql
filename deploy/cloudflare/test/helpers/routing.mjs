@@ -109,7 +109,6 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     POLICYSQL_ENVIRONMENT: "test",
     POLICYSQL_JWT_ISSUER: "https://issuer.test", POLICYSQL_JWT_AUDIENCE: "routing",
     POLICYSQL_JWKS_JSON: JSON.stringify({ keys: [jwk] }),
-    POLICYSQL_RATE_LIMITER: { limit: async () => ({ success: true }) },
     POLICYSQL_PUBLIC_BASE_URL: "https://worker.test",
     POLICYSQL_COST_CATALOG_JSON: JSON.stringify({ maxEstimatedRowsRead: 1000, maxEstimatedRowsWritten: 1000, resources: { 1: { upperRows: 100 } } }),
     TENANT_A_TOKEN: "token_a", TENANT_B_TOKEN: "token_b", TENANT_A_ENABLED: "true", TENANT_B_ENABLED: "true",

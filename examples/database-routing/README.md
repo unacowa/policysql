@@ -39,6 +39,13 @@ claims and still exercise real policy-session authentication.
    object; the policy uses `session.tenant_id`. It has no DB routing claim requirement.
 4. Choose `APPLICATION_DATABASE_ID` in this wrapper's `wrangler.jsonc` and review the
    environment, enabled flags, DO migration, rate limit, and shared conservative cost bounds.
+   Rate limiting is this wrapper's job, not the library's ([ADR 0018](../../docs/adr/0018-wrapper-owned-rate-limiting.md)).
+   `worker.ts` calls `withRateLimit` from `rate-limit.ts` before `app.fetch`, keyed on the
+   selected DB ID and `cf-connecting-ip`, using the `RATE_LIMITER` binding. Over the limit it
+   returns 429 `POLICYSQL_RATE_LIMITED` with `Retry-After: 60` built by `createErrorResponse`,
+   without touching WASM or a DB. A missing or failing binding returns 500 `POLICYSQL_INTERNAL`
+   (fail closed). Commit-check callbacks are not limited. Replace the key or the limiter as
+   your deployment requires.
 5. This policy enables commit checks. Configure `VALIDATOR_URL`, `VALIDATOR_SECRET`,
    and the deployed Worker origin in `POLICYSQL_PUBLIC_BASE_URL`. Implement the
    [commit-check contract](../../docs/commit-checks.md) in the validator. To disable checks,

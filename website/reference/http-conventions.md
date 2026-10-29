@@ -21,7 +21,7 @@ requestとresponseのmedia typeは`application/json`です。request bodyはUTF-
 | `Traceparent` | request | 任意のW3C trace context。認可情報には使用しない |
 | `PolicySQL-Request-Id` | response | serverが生成した問い合わせ識別子 |
 | `ETag` | response | CatalogまたはCapabilities representationのcache validator |
-| `Retry-After` | response | `429`または一時的な`503`で再送可能になる目安 |
+| `Retry-After` | response | ラッパーが返す`429`で、再送まで待つ秒数。ライブラリはどのresponseにも付けない |
 
 同名security headerが複数あるrequest、comma結合されたroleやbearer token、改行を含む値は拒否します。request IDはserverが生成し、client指定値を監査上の識別子として信用しません。
 
@@ -90,10 +90,12 @@ transaction開始後はsnapshotが固定され、statementごとの`expected`は
 | `409` | stale snapshot、idempotency conflict、transaction state conflict、commit conflict |
 | `413` | request bodyまたはSQL textが上限超過 |
 | `422` | type、format、constraint、operation check、expectationの不成立 |
-| `429` | rate limit |
+| `429` | ラッパーのrate limit（`POLICYSQL_RATE_LIMITED`）、ライブラリのusage budget・transaction上限 |
 | `500` | 安全に公開できない内部失敗 |
 | `503` | database、transaction owner、commit-check serviceなど一時的な依存先障害 |
 | `504` | compile、database、hookのtimeout |
+
+request rateの制限はラッパーの責務です。ライブラリは`POLICYSQL_RATE_LIMITED`を返さず、limiterのbindingも必要としません。ラッパーは`app.fetch`より前に制限し、`createErrorResponse`で同じerror形式の429を返します。参考実装の429には`Retry-After: 60`が付きます。詳細は[エラー](../api/errors#ラッパーが返すエラー)を参照してください。
 
 認可対象の存在を秘匿する必要がある場合、`403`と`404`を同じ公開errorへ正規化できます。clientはHTTP statusだけでなく安定したerror `code`を使用します。
 

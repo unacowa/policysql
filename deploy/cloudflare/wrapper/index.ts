@@ -7,6 +7,7 @@ import { createApp } from "../src/app.ts";
 import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { createDeploymentDatabase } from "./database.ts";
+import { createWrapperFetch } from "./fetch.ts";
 
 const ABI_VERSION = 1;
 
@@ -35,14 +36,8 @@ const deploymentDatabase = createDeploymentDatabase(() => getRuntime().snapshot)
 export const createHandler = (options = {}) => createApp({ getRuntime, database: deploymentDatabase.provider, ...options });
 
 const app = createHandler();
-export default {
-  fetch(request, env, context) {
-    if (new URL(request.url).pathname.startsWith("/v1/commit-checks/")) {
-      return app.fetchCallback(request, env, context);
-    }
-    return app.fetch(request, env, context, deploymentDatabase.binding(env));
-  },
-};
+// Rate limiting runs here, before app.fetch and before binding() initializes WASM (ADR 0018).
+export default { fetch: createWrapperFetch(app, (env) => deploymentDatabase.binding(env)) };
 export { ABI_VERSION };
 
 export class TransactionOwner extends TransactionOwnerCore {

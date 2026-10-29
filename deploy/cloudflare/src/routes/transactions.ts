@@ -14,7 +14,7 @@ const invalidRequest = () =>
   new HttpError(400, "POLICYSQL_INVALID_REQUEST", "The request is invalid.");
 
 export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDependencies) => {
-  app.post("/v1/transactions", authorize("execute", "interactive"), async (context) => {
+  app.post("/v1/transactions", authorize("execute"), async (context) => {
     const auth = context.get("auth");
     const body = await readJsonBody(context.req.raw);
     const keys = body.value && typeof body.value === "object" && !Array.isArray(body.value)
@@ -66,7 +66,7 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDe
     });
   });
 
-  app.post("/v1/transactions/:transactionId/:command", authorize("execute", "interactive"), async (context) => {
+  app.post("/v1/transactions/:transactionId/:command", authorize("execute"), async (context) => {
     const transactionId = context.req.param("transactionId");
     const command = context.req.param("command");
     if (!TRANSACTION_ID.test(transactionId) || !["statements", "commit", "rollback"].includes(command)) {

@@ -12,7 +12,7 @@ import { runtimeBytesLimit } from "../binary.ts";
 import type { AppDependencies, AppEnv } from "../types.ts";
 
 export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDependencies) => {
-  app.post("/v1/transactions:explain", authorize("explain", "explain"), runtimeContext(dependencies), async (context) => {
+  app.post("/v1/transactions:explain", authorize("explain"), runtimeContext(dependencies), async (context) => {
     const runtime = context.get("runtime");
     const auth = context.get("auth");
     await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, runtime.snapshot);
@@ -21,7 +21,7 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDepend
     return jsonResponse(context, explainResponse(compiled, auth, context.get("requestId")));
   });
 
-  app.post("/v1/transactions:execute", authorize("execute", "execute"), runtimeContext(dependencies), async (context) => {
+  app.post("/v1/transactions:execute", authorize("execute"), runtimeContext(dependencies), async (context) => {
     const runtime = context.get("runtime");
     const auth = context.get("auth");
     const requestId = context.get("requestId");
