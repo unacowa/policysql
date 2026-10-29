@@ -300,9 +300,12 @@ components:
   responses:
     Error:
       description: >-
-        Request failed without exposing protected SQL or hidden metadata. Request-rate
-        limiting is a wrapper responsibility: the wrapper in front of the library may
-        answer 429 POLICYSQL_RATE_LIMITED in this same shape before the library runs.
+        Request failed without exposing protected SQL or hidden metadata. Each error code
+        has exactly one HTTP status; the table in website/api/errors.md is canonical and the
+        library's HTTP adapter implements exactly that table (ADR 0023). A code outside it is
+        served as 500. Request-rate limiting is a wrapper responsibility: the wrapper in front
+        of the library may answer 429 POLICYSQL_RATE_LIMITED in this same shape before the
+        library runs.
       headers:
         PolicySQL-Request-Id: { schema: { type: string } }
         Retry-After:

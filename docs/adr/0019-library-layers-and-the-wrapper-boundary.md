@@ -163,7 +163,9 @@ Each stage is useful on its own and ships as its own pull requests.
    the `TransactionOwner` port and the Durable Objects adapter that removed that read are
    [ADR 0022](0022-transaction-owner-port.md)).
 3. **Operations API and the HTTP adapter (#34).** Expose engine operations, move HTTP into
-   the inbound adapter, make the status table single-sourced and exhaustively tested.
+   the inbound adapter, make the status table single-sourced and exhaustively tested (done in
+   [ADR 0023](0023-operations-api-and-http-adapter.md): `createEngine`, `createHttpAdapter`,
+   the status table specified in `website/api/errors.md`, and the HTTP conformance suite).
 4. **Transaction decisions into core (#35).** Design the `step` ABI in its own ADR and
    replace the TypeScript decisions.
 

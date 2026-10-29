@@ -3,14 +3,19 @@
 This package is the versioned Cloudflare deployment adapter for the Rust policy compiler.
 It must never pass caller SQL directly to Turso.
 
-The public HTTP adapter is implemented in TypeScript with Hono. `src/app.ts` composes the app,
-`src/routes/` owns endpoint handlers, and `src/middleware/` owns request context and endpoint access
-checks. Transport, idempotency, and the transaction owner state machine remain
-framework-independent. Routes reach transaction owners only through the `TransactionOwner`
+The engine exposes operations, not HTTP (`src/engine.ts`,
+[ADR 0023](../../docs/adr/0023-operations-api-and-http-adapter.md)): `execute`, `explain`,
+`begin`, `statement`, `commit`, `rollback`, `catalog`, `capabilities`, `callbackQuery`, and
+`health`, each returning a value or `{ code, message, path }`. `src/http/` is the HTTP inbound
+adapter (Hono): routes, headers, body framing, the only code-to-status table
+(`src/http/status.ts`, specified in `website/api/errors.md`), fixed headers, and ETag / 304;
+`src/http/conformance.ts` is the conformance suite a custom HTTP mapping must pass.
+`src/app.ts` composes the engine and the adapter. A structural test keeps HTTP statuses,
+`Request` / `Response`, header names, and routes out of engine modules. The engine reaches transaction owners only through the `TransactionOwner`
 port (`src/transaction-owner-port.ts`, [ADR 0022](../../docs/adr/0022-transaction-owner-port.md));
 `src/adapters/durable-objects.ts` is its Durable Objects adapter and the only module that
-names Durable Objects, their storage and alarm, or `waitUntil`. Interactive routes obtain the
-runtime snapshot in the outer Worker before delegating to the owner; callback routes forward
+names Durable Objects, their storage and alarm, or `waitUntil`. Interactive operations obtain the
+runtime snapshot in the outer Worker before delegating to the owner; callback queries forward
 the opaque capability to its owner.
 
 Applications must inject a `database` provider and the explicit `PolicySqlConfig`
