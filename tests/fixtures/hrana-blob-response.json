@@ -1,0 +1,18 @@
+{
+  "valid": [
+    { "base64": "", "bytes": [] },
+    { "base64": "AA", "bytes": [0] },
+    { "base64": "AA==", "bytes": [0] },
+    { "base64": "/w", "bytes": [255] },
+    { "base64": "/w==", "bytes": [255] },
+    { "base64": "AP8", "bytes": [0, 255] },
+    { "base64": "AP8=", "bytes": [0, 255] },
+    { "base64": "+/8", "bytes": [251, 255] },
+    { "base64": "+/8=", "bytes": [251, 255] },
+    { "base64": "AAEC", "bytes": [0, 1, 2] },
+    { "base64": "AAEC/w", "bytes": [0, 1, 2, 255] },
+    { "base64": "AAEC/w==", "bytes": [0, 1, 2, 255] }
+  ],
+  "invalid": ["A", "/w=", "AP8==", "AAEC/w=", "AAEC/w===", "A===", "====", "AA===", "AA==AA==", "AB", "AB==", "AAB", "AAB=", "_w", "_w==", "-w", "-w==", " /w", "/w\n", "/w==\n", "AA\t==", "AA\r\nEC", "ＡＡ", "AA\u0000"],
+  "wrongTypes": [null, false, 0, [0, 255], { "base64": "/w" }]
+}

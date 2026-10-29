@@ -31,6 +31,7 @@ adapter, and relevant HTTP response are backed by regression evidence.
 | Generated TypeScript and Kysely boundary | `policysql generate` uses Catalog/Capabilities/Explain, pins snapshots and hashes, atomically replaces artifacts, and the client/Kysely packages route named SQL only through the gateway without database credentials |
 | Development deployment SQL surface | The deployed Catalog and physical Turso schema contain the documented author/post/comment/archive resources; compile regression covers every advertised SQL family and the release gate executes fourteen read statements plus a seven-statement mutation/expectation rollback batch, then proves the probe row is absent |
 | Deployment-independent bytes contract (#17, ADR 0016) | Shared canonical base64 vectors, Rust input/result/preset tests, platform-independent Client/Kysely/generator tests, and real-WASM/JWT/Turso-HTTP/file-SQLite tests cover client and preset BLOB binding, physical type/hash equality, NULL and empty bytes, policy denial/redaction, malformed input, size limits, callback/interactive execution, rollback and replay. |
+| Turso/Hrana bytes response normalization | HTTP transport fixtures cover padded and unpadded database BLOB responses, malformed encodings and decoded size boundaries. The SQLite-backed HTTP harness emits unpadded BLOBs; SELECT results can be submitted unchanged as bytes parameters, while unpadded public inputs are still rejected. |
 
 ## Remaining externally visible differences
 

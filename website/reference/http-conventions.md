@@ -46,6 +46,8 @@ bytesは配備先に依存しないPolicySQL共通のJSON契約です。INSERT�
 
 `state`がbytesなら`00 01 02 ff`の物理BLOBとして保存され、結果も`"AAEC/w=="`です。同じ文字列をstring列へ渡すとTEXTとして保存します。DBがbytes列の値としてTEXTを返した場合は、base64として正しくてもschema mismatchで拒否します。
 
+SELECT／RETURNINGが返すbytes値も必ずこのcanonical base64表現なので、取得した値をbytes parameterへそのまま再送できます。DB通信でpaddingが省略されていても、公開APIからは必要なpaddingを付けて返します。
+
 復号後の1値の上限はCapabilitiesの`limits.maxBytesPerValue`で確認します。初期profileは262,144 byte（256 KiB）です。request body、結果、transactionの上限も個別に適用します。base64は`4 × ceil(byte数 / 3)`文字になるため、既定の結果上限64,000 byteではJSONの分を差し引いて合計48,000 byte未満の生bytesを返せます。書き込めるサイズでもRETURNINGの上限を超える場合があり、その場合はcommit前にrollbackします。
 
 不正encoding／誤型は400 `POLICYSQL_INVALID_PARAMETER`、復号後サイズ超過は413 `POLICYSQL_LIMIT_EXCEEDED`です。ClientへCloudflareの上限を固定せず、接続先のCapabilitiesを使用してください。row／column policy、RETURNING permission、transaction／replayの規則は通常のSQLと共通です。

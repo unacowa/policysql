@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { TursoHttpTransport } from "../src/turso-http.ts";
+import { MAX_BYTES_PER_VALUE } from "../src/binary.ts";
 
 const result = (columns, rows, usage = {}) => ({
   type: "ok",
@@ -15,6 +17,55 @@ const result = (columns, rows, usage = {}) => ({
       query_duration_ms: usage.queryDurationMs ?? 1,
     },
   },
+});
+
+const blobCases = JSON.parse(readFileSync(new URL("../../../tests/fixtures/hrana-blob-response.json", import.meta.url), "utf8"));
+const readBlob = async base64 => {
+  const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "blob-response", async (_url, init) => {
+    const { requests } = JSON.parse(init.body);
+    return Response.json({ baton: "blob-baton", results: requests.map(request => {
+      if (request.stmt.sql.startsWith("BEGIN")) return result([], []);
+      const response = result(["state"], [[null]]);
+      response.response.result.cols[0].decltype = "BLOB";
+      response.response.result.rows = [[{ type: "blob", base64 }]];
+      return response;
+    }) });
+  });
+  const transaction = await transport.begin("read", 1000);
+  return (await transaction.execute([{ sql: "SELECT state FROM projects" }]))[0].rows[0][0];
+};
+
+test("decodes padded and unpadded Hrana BLOB responses without changing their bytes", async () => {
+  for (const { base64, bytes } of blobCases.valid) {
+    const output = await readBlob(base64);
+    assert.ok(output instanceof Uint8Array);
+    assert.deepEqual([...output], bytes, JSON.stringify(base64));
+  }
+});
+
+test("rejects malformed typed Hrana BLOB responses", async () => {
+  for (const base64 of [...blobCases.invalid, ...blobCases.wrongTypes]) {
+    await assert.rejects(readBlob(base64), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" }, JSON.stringify(base64));
+  }
+});
+
+test("bounds padded and unpadded Hrana BLOB responses before decoding", async t => {
+  const decode = t.mock.method(globalThis, "atob");
+  for (const length of [MAX_BYTES_PER_VALUE - 2, MAX_BYTES_PER_VALUE - 1, MAX_BYTES_PER_VALUE]) {
+    const bytes = Buffer.alloc(length, 255);
+    const padded = bytes.toString("base64");
+    for (const base64 of new Set([padded, padded.replace(/=+$/, "")])) {
+      assert.deepEqual(Buffer.from(await readBlob(base64)), bytes);
+    }
+  }
+  const calls = decode.mock.callCount();
+  for (const length of [MAX_BYTES_PER_VALUE + 1, MAX_BYTES_PER_VALUE + 2, MAX_BYTES_PER_VALUE + 3]) {
+    const padded = Buffer.alloc(length).toString("base64");
+    for (const base64 of new Set([padded, padded.replace(/=+$/, "")])) {
+      await assert.rejects(readBlob(base64), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" });
+      assert.equal(decode.mock.callCount(), calls, "oversized values are rejected before decode allocation");
+    }
+  }
 });
 
 test("decodes exact usage metrics while preserving transaction ownership", async () => {

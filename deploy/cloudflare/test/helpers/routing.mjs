@@ -16,9 +16,10 @@ const schemaVersion = "schema_routing_1";
 const policyVersion = "policy_routing_1";
 const limits = { maxRows: 100, maxResultBytes: 64_000, timeoutMs: 1_000, maxStatements: 8 };
 const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
+// Match Hrana's STANDARD_NO_PAD BLOB serializer, independently of the adapter codec.
 const encode = (value) => value === null ? { type: "null" } : typeof value === "number"
   ? { type: "integer", value: String(value) } : value instanceof Uint8Array
-    ? { type: "blob", base64: Buffer.from(value).toString("base64") } : { type: "text", value };
+    ? { type: "blob", base64: Buffer.from(value).toString("base64").replace(/=+$/, "") } : { type: "text", value };
 
 // Exercise real SQL, rollback, and transaction visibility through the real HTTP transport.
 // Only the remote HTTP server and Cloudflare storage/routing are simulated.

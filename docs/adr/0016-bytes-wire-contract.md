@@ -63,6 +63,16 @@ server values, including cost queries, and tags only actual binary driver result
 Rust performs result-contract validation before public encoding. This private
 format is not an extension of the public parameter schema.
 
+The Turso HTTP adapter accepts either canonical padded base64 or its fully unpadded
+form in a typed database BLOB response. Hrana's
+[BLOB serializer](https://github.com/tursodatabase/libsql/blob/d8bc862d20bedc72945a1da27c8b7045414c0261/libsql-hrana/src/proto.rs#L641-L649)
+uses the unpadded form. The adapter bounds the encoded length before adding missing
+padding, then validates the standard alphabet, zero unused bits and decoded limit.
+Partial or excessive padding, whitespace and base64url remain invalid. This exception
+is confined to database responses; public inputs and the private WASM ABI remain
+strictly canonical. Public SELECT/RETURNING cells always use canonical padded base64,
+so a returned bytes value can be submitted unchanged as a bytes parameter.
+
 WASM and its adapter are distributed together. The ABI version participates in the
 snapshot, so active transactions and bindings from ABI 1 must be recreated. No new
 public API version or alternate Client mode is introduced.

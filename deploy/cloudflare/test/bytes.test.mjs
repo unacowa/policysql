@@ -76,6 +76,21 @@ for (const hooks of [false, true]) test(`bytes round-trip with JWT, real WASM, H
   assert.equal(writes(), before);
   assert.equal((await execute(h, [insert("changed", "AA==")], "bytes-roundtrip-123456")).status, 409);
 
+  const fetched = await execute(h, values.map((_value, i) => ({
+    sql: "SELECT state FROM projects WHERE id=:id", params: { id: `bytes_${i}` },
+  })));
+  assert.equal(fetched.status, 200, JSON.stringify(fetched.body));
+  const fetchedValues = fetched.body.results.map(result => result.rows[0].state);
+  assert.deepEqual(fetchedValues, values, "unpadded DB responses produce canonical public bytes, empty bytes and NULL");
+  const copied = await execute(h, fetchedValues.map((value, i) => insert(`copy_${i}`, value)));
+  assert.equal(copied.status, 200, JSON.stringify(copied.body));
+  assert.deepEqual(copied.body.results.map(result => result.rows[0].state), values, "public results can be resubmitted unchanged");
+  for (const [i, value] of values.entries()) {
+    const stored = physical(h, `copy_${i}`);
+    assert.equal(stored.storage, value === null ? "null" : "blob");
+    if (value !== null) assert.equal(hash(stored.state), hash(Buffer.from(value, "base64")));
+  }
+
   const updated = await execute(h, [{ sql: "UPDATE projects SET state=:state WHERE id=:id RETURNING state,seed", params: { state: "/wA=", id: "bytes_0" } }]);
   assert.equal(updated.status, 200, JSON.stringify(updated.body));
   assert.deepEqual(updated.body.results[0].rows, [{ state: "/wA=", seed: "/wA=" }]);
