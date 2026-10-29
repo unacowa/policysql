@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
+import { redirectResponses } from "./helpers/redirects.mjs";
 
 const result = (columns, rows, usage = {}) => ({
   type: "ok",
@@ -219,4 +220,32 @@ test("HTTP operations share an absolute deadline while rollback retains its clea
   assert.equal(requests.at(-1), "ROLLBACK");
   assert.equal(budgets.at(-1), 1000);
   assert.equal(second.open, false);
+});
+
+// Regression (#36): workerd throws on `redirect: "error"`, which turned every Turso
+// request on the real Worker into a 503. The transport now asks for "manual" and
+// rejects the redirect itself, without following it or reading its body.
+test("requests manual redirects and rejects 3xx and opaqueredirect responses unread", async () => {
+  const success = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "redirect", async (_url, init) => {
+    assert.equal(init.redirect, "manual");
+    return Response.json({ baton: "b", results: [result([], [])] });
+  });
+  await success.begin("read", 1000, undefined, runtimeLimit);
+
+  for (const { label, response, state } of redirectResponses()) {
+    const urls = [];
+    const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "redirect", async (url, init) => {
+      urls.push(String(url));
+      assert.equal(init.redirect, "manual");
+      return response;
+    });
+    await assert.rejects(
+      transport.begin("read", 1000, undefined, runtimeLimit),
+      { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" },
+      label,
+    );
+    assert.deepEqual(urls, ["https://db.test/v2/pipeline"], `${label}: the redirect is not followed`);
+    assert.equal(state.read, false, `${label}: the redirect body is not read`);
+    assert.equal(state.cancelled, true, `${label}: the redirect body is released`);
+  }
 });

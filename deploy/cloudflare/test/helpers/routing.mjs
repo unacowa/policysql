@@ -63,7 +63,8 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     if (!acceptedTokens.get(tenant).has(options.headers.authorization.replace(/^Bearer /, ""))) {
       return Response.json({ error: "Credential rejected" }, { status: 401 });
     }
-    assert.equal(options.redirect, "error");
+    // workerd supports only "follow" and "manual" (#36); redirects are rejected by the transport.
+    assert.equal(options.redirect, "manual");
     const input = JSON.parse(options.body);
     let baton = input.baton;
     if (!baton) {

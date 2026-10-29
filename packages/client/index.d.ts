@@ -9,7 +9,10 @@ export interface SignalOptions { readonly signal?: AbortSignal }
 /** One attempt. Preserve the request, honor cancellation and keep the logical endpoint/DB fixed. */
 export type PolicySqlTransport = (request: TransportRequest, options?: SignalOptions) => Promise<TransportResponse>
 export interface HttpTransportOptions { readonly endpoint: string; readonly fetchImpl?: typeof fetch }
-/** Uses fetch once, with redirect:error and credentials:omit. No authentication, timers or retries. */
+/**
+ * Uses fetch once, with redirect:error and credentials:omit. No authentication, timers or retries.
+ * Not meant to run inside a Cloudflare Worker: workerd rejects redirect:error with a TypeError.
+ */
 export function createHttpTransport(options: HttpTransportOptions): PolicySqlTransport
 export type SnapshotOptions =
   | { readonly schemaVersion?: undefined; readonly policyVersion?: undefined }

@@ -2,6 +2,8 @@ import { HttpError, binaryLimitExceeded } from "./errors.ts";
 import { remainingDatabaseTime } from "./database.ts";
 import type { DatabaseTransportOptions } from "./database.ts";
 import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.ts";
+import { discardBody, fetchNoFollow } from "./redirects.ts";
+import type { OutboundFetch } from "./redirects.ts";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
 const databaseFailure = () =>
@@ -106,9 +108,9 @@ export class TursoHttpTransport {
   readonly url: string;
   readonly token: string;
   readonly requestId: string;
-  readonly fetchImpl: typeof fetch;
+  readonly fetchImpl?: OutboundFetch;
 
-  constructor(connection: { url: string; authToken: string }, requestId, fetchImpl = undefined) {
+  constructor(connection: { url: string; authToken: string }, requestId, fetchImpl: OutboundFetch | undefined = undefined) {
     if (!connection?.url || !connection?.authToken) throw databaseFailure();
     const url = new URL(connection.url);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
@@ -117,10 +119,8 @@ export class TursoHttpTransport {
     this.url = new URL("/v2/pipeline", url).toString();
     this.token = connection.authToken;
     this.requestId = requestId;
-    // Cloudflare requires its host fetch receiver; test adapters remain ordinary functions.
-    this.fetchImpl = fetchImpl
-      ? (input, init) => fetchImpl(input, init)
-      : (input, init) => globalThis.fetch(input, init);
+    // Omitted: fetchNoFollow uses the host fetch with its required receiver.
+    this.fetchImpl = fetchImpl;
   }
 
   // `oversized` classifies a successful response over MAX_RESPONSE_BYTES. Statement
@@ -129,9 +129,10 @@ export class TursoHttpTransport {
   // COMMIT/ROLLBACK keep the 503 default, because an oversized control response is
   // a transport anomaly and a COMMIT outcome must not be reported as a limit error.
   async pipeline(requests, baton = undefined, timeoutMs = 1_000, oversized = databaseFailure) {
-    const response = await this.fetchImpl(this.url, {
+    // fetchNoFollow never follows a redirect (it would forward the bearer token) and
+    // rejects one unread; that rejection is a 503 like any other transport failure.
+    const response = await fetchNoFollow(this.url, {
       method: "POST",
-      redirect: "error",
       headers: {
         authorization: `Bearer ${this.token}`,
         "content-type": "application/json",
@@ -139,19 +140,19 @@ export class TursoHttpTransport {
       },
       body: JSON.stringify({ ...(baton ? { baton } : {}), requests }),
       signal: AbortSignal.timeout(timeoutMs),
-    }).catch((error) => {
+    }, this.fetchImpl).catch((error) => {
       if (error?.name === "TimeoutError" || error?.name === "AbortError") {
         throw new HttpError(504, "POLICYSQL_DATABASE_TIMEOUT", "The database operation timed out.");
       }
       throw databaseFailure();
     });
     if (!response.ok) {
-      try { await response.body?.cancel(); } catch { /* the failure is already terminal */ }
+      await discardBody(response);
       throw databaseFailure();
     }
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
-      try { await response.body?.cancel(); } catch { /* the failure is already terminal */ }
+      await discardBody(response);
       throw oversized();
     }
     const text = await response.text();

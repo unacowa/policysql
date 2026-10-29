@@ -6,6 +6,7 @@ import { enforceCumulativeLimits } from "./turso.ts";
 import { runCommitChecks, verifyCapabilityToken } from "./commit-checks.ts";
 import { checkDatabaseBinding, databaseTransportFactory, sameDatabaseBinding, validateDatabaseProvider } from "./database.ts";
 import type { DatabaseProvider } from "./database.ts";
+import type { OutboundFetch } from "./redirects.ts";
 import { runtimeBytesLimit } from "./binary.ts";
 
 const MAX_TRANSACTION_MS = 4_000;
@@ -54,7 +55,7 @@ export class TransactionOwnerCore {
   state: any;
   env: any;
   getRuntime: any;
-  fetchImpl: typeof fetch;
+  fetchImpl?: OutboundFetch;
   transaction: any;
   validation: any;
   queue: Promise<any>;
@@ -66,7 +67,8 @@ export class TransactionOwnerCore {
     env,
     getRuntime,
     database: DatabaseProvider,
-    fetchImpl = fetch,
+    // Omitted: commit-check calls use the host fetch through fetchNoFollow.
+    fetchImpl: OutboundFetch | undefined = undefined,
   ) {
     validateDatabaseProvider(database);
     this.state = state;

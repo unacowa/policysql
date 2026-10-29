@@ -1,5 +1,7 @@
 import { HttpError } from "./errors.ts";
 import { sha256 } from "./idempotency.ts";
+import { fetchNoFollow } from "./redirects.ts";
+import type { OutboundFetch } from "./redirects.ts";
 
 const rejected = () => new HttpError(
   409,
@@ -75,7 +77,8 @@ export const runCommitChecks = async ({
   validationId,
   activate,
   deactivate,
-  fetchImpl = fetch,
+  // Omitted: fetchNoFollow uses the host fetch.
+  fetchImpl = undefined as OutboundFetch | undefined,
   deadlineMs = Number.POSITIVE_INFINITY,
 }) => {
   const { changed, checks } = triggeredCommitChecks(compiled, results);
@@ -123,9 +126,10 @@ export const runCommitChecks = async ({
     const timestamp = Math.floor(Date.now() / 1000).toString();
     let response;
     try {
-      response = await fetchImpl(url, {
+      // fetchNoFollow never follows a redirect (it would forward the signed body) and
+      // rejects one unread; that rejection revokes the capability like any failure.
+      response = await fetchNoFollow(url, {
         method: "POST",
-        redirect: "error",
         signal: AbortSignal.timeout(remainingMs),
         headers: {
           "content-type": "application/json",
@@ -134,7 +138,7 @@ export const runCommitChecks = async ({
           "policysql-hook-signature": await signature(secret, timestamp, body),
         },
         body,
-      });
+      }, fetchImpl);
     } catch {
       await deactivate();
       throw rejected();
