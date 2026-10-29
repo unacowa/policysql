@@ -32,7 +32,7 @@ After rate limiting, `wrapper/auth.ts` verifies the development JWT with the lib
 adapter (`createJwtSessionVerifier`), reading `POLICYSQL_JWKS_JSON` or `POLICYSQL_JWKS_URL`,
 `POLICYSQL_JWT_ISSUER`, and `POLICYSQL_JWT_AUDIENCE`. It authenticates every client request
 except `/healthz`, including every interactive command and commit, and returns 401
-`POLICYSQL_UNAUTHENTICATED` itself; missing configuration is 500. `principal` is `issuer:sub`.
+`POLICYSQL_UNAUTHENTICATED` itself; missing configuration is 500. `principal` is `JSON.stringify([issuer, sub])`.
 
 Build and validate without deployment:
 

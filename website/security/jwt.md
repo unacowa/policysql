@@ -35,7 +35,7 @@ wrapperがrequestごとに渡す値です。JWT以外の方式（mTLS、session 
 
 ```ts
 type TrustedSession = {
-  principal: string;      // wrapperが名前空間を付けた安定した識別子（例: `issuer:sub`）
+  principal: string;      // wrapperが名前空間を付けた、曖昧さのない安定した識別子
   subject: string;        // 予約済みsession key `subject_id`になる
   roles: string[];
   defaultRole: string;
@@ -43,6 +43,8 @@ type TrustedSession = {
   session: Record<string, string>;
 };
 ```
+
+参考adapterは`principal`を`JSON.stringify([iss, sub])`で作ります。issuerは通常`:`を含むため、`iss:sub`のような単純な連結は曖昧です（issuer `https://a.test`とsub `x:y`、issuer `https://a.test:x`とsub `y`が同じ値になる）。独自のwrapperも、区切りを一意に復元できる形で`principal`を作ってください。
 
 `principal`は冪等性keyの識別子と対話型transactionのfingerprintに使われます。別のprincipalは、subject、role、sessionが同じでも、他のprincipalのidempotency keyを再生したり、transactionを継続したりできません。
 
@@ -82,7 +84,7 @@ adapterのprofileでは、PolicySQL固有の値を`policysql` objectに格納し
 | --- | --- |
 | `iss` | JWTを発行した認証service |
 | `aud` | tokenの利用先。PolicySQL用audienceを含む必要がある |
-| `sub` | 認証された主体の安定したID。`subject`になり、`principal`は`iss:sub` |
+| `sub` | 認証された主体の安定したID。`subject`になり、`principal`は`JSON.stringify([iss, sub])` |
 | `iat` | tokenの発行時刻 |
 | `exp` | tokenの有効期限 |
 | `policysql.roles` | 利用者が選択できるroleの配列（`roles`） |
@@ -196,7 +198,9 @@ try {
 return app.fetch(request, env, ctx, { database, session });
 ```
 
-adapterはRS256とES256だけを受け付け、shared secretを使うHMAC algorithmと`none`を拒否します。clock toleranceは5秒です。`jwks`と`jwksUrl`はどちらか一方だけを指定します。設定が不正な場合は構築時に`TypeError`になります。remote JWKSは1.5秒のtimeout、30秒のcooldown、5分のcacheで取得します。JWKS URLは管理者設定からだけ読み込み、JWT claimやrequest parameterから構築しません。
+adapterはRS256とES256だけを受け付け、shared secretを使うHMAC algorithmと`none`を拒否します。clock toleranceは5秒です。`jwks`と`jwksUrl`はどちらか一方だけを指定します。設定が不正な場合は構築時に`TypeError`になります。remote JWKSは1.5秒のtimeout、30秒のcooldown、5分のcacheで取得します（鍵をJWKSから外した失効は最大5分遅れます）。
+
+`jwksUrl`は`https:`でなければならず、それ以外のschemeは構築時に`TypeError`です。平文で取得した公開鍵は途中で差し替えられ、任意のtokenが検証を通るためです。JWKS URLは管理者設定からだけ読み込み、JWT claimやrequest parameterから構築しません。redirect先とresponse sizeを制限し、private address、redirect、DNS再解決の許可方針をdeploymentで固定して、JWKS fetchをSSRF経路にしないでください（JWKSの取得と鍵の選択は`jose`の`createRemoteJWKSet`が行います）。
 
 参考wrapper（`deploy/cloudflare/wrapper/`）とdatabase-routing exampleは、`POLICYSQL_JWKS_JSON`または`POLICYSQL_JWKS_URL`、`POLICYSQL_JWT_ISSUER`、`POLICYSQL_JWT_AUDIENCE`を読みます。これらはwrapperの設定で、PolicySQL本体は読みません。設定がない場合、wrapperは`500`を返します。`/healthz`は公開endpointで、identity設定の有無を報告しません。
 
@@ -205,7 +209,7 @@ adapterはRS256とES256だけを受け付け、shared secretを使うHMAC algori
 ## Wrapperの義務
 
 - 対話型transactionのcommandとcommitを含め、すべてのclient requestを認証する。PolicySQLはcredentialを保持しないため、token失効や期限切れでtransactionを止めるのはwrapperの責務
-- `principal`に名前空間を付け、identity providerやtenant間で衝突させない
+- `principal`を曖昧さのない形（例: 構成要素のJSON配列）で作り、名前空間を付けてidentity providerやtenant間で衝突させない
 - `trusted_session_rejected`のlogを伴う`500`は、wrapperまたは認証設定の不具合として扱う
 
 ## Security requirements

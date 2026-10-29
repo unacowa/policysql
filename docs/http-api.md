@@ -13,8 +13,10 @@ profile and published Capabilities.
 Authentication is deployment-defined. The deployment's wrapper authenticates every client
 request, including every interactive command and commit, and passes the resulting trusted
 session to PolicySQL as data; PolicySQL never sees the credential and never returns 401.
-A wrapper returns 401 (`POLICYSQL_UNAUTHENTICATED` or `POLICYSQL_AUTHENTICATION_FAILED`)
-itself. PolicySQL checks the endpoint's required access and the optional `PolicySQL-Role`
+A wrapper returns 401 itself: `POLICYSQL_UNAUTHENTICATED` for a missing or invalid
+credential (the reference wrapper's only code), or the reserved
+`POLICYSQL_AUTHENTICATION_FAILED` that a custom wrapper may use when a present credential
+failed verification. Clients treat both as not executed. PolicySQL checks the endpoint's required access and the optional `PolicySQL-Role`
 header against the trusted session (403 `POLICYSQL_FORBIDDEN_ACCESS`; a repeated role
 header is 400 `POLICYSQL_INVALID_REQUEST`). A malformed session from the wrapper is a
 deployment fault (500 `POLICYSQL_INTERNAL`). Stopping an interactive transaction after

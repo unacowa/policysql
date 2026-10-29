@@ -34,7 +34,15 @@ const keySet = (options: JwtSessionVerifierOptions) => {
     throw new TypeError("Exactly one of jwks and jwksUrl is required");
   }
   if (options.jwksUrl !== undefined) {
-    return createRemoteJWKSet(new URL(options.jwksUrl), {
+    let url: URL;
+    try {
+      url = new URL(options.jwksUrl);
+    } catch {
+      throw new TypeError("jwksUrl must be a valid URL");
+    }
+    // Keys fetched over plaintext could be replaced in transit, which would let any token verify.
+    if (url.protocol !== "https:") throw new TypeError("jwksUrl must use https:");
+    return createRemoteJWKSet(url, {
       timeoutDuration: 1_500,
       cooldownDuration: 30_000,
       cacheMaxAge: 300_000,
@@ -60,7 +68,8 @@ const keySet = (options: JwtSessionVerifierOptions) => {
  *
  * Profile: algorithms RS256/ES256, 5 s clock tolerance, required `sub`, `iat`, `exp` and a
  * `policysql` object claim `{ roles, default_role, access, session? }`. `principal` is
- * `issuer:sub`; `sub` becomes `subject`.
+ * `JSON.stringify([issuer, sub])`, which is unambiguous even when either part contains
+ * `:`; `sub` becomes `subject`. `jwksUrl` must use `https:`.
  */
 export const createJwtSessionVerifier = (options: JwtSessionVerifierOptions) => {
   if (!nonEmpty(options?.issuer) || !nonEmpty(options?.audience)) {
@@ -92,7 +101,7 @@ export const createJwtSessionVerifier = (options: JwtSessionVerifierOptions) => 
     }
     // Translation only. Core validates every field and rejects a malformed session.
     return {
-      principal: `${issuer}:${payload.sub}`,
+      principal: JSON.stringify([issuer, payload.sub]),
       subject: payload.sub,
       roles: claims.roles as TrustedSession["roles"],
       defaultRole: claims.default_role as string,

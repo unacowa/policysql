@@ -24,7 +24,7 @@ The wrapper authenticates the caller and passes the result per request:
 app.fetch(request, env, executionContext, { database, session, requestId? })
 
 type TrustedSession = {
-  principal: string;   // opaque, wrapper-namespaced stable identity, e.g. `issuer:sub`
+  principal: string;   // opaque, wrapper-namespaced, unambiguous stable identity
   subject: string;     // becomes the reserved `subject_id` session value
   roles: string[];
   defaultRole: string;
@@ -60,8 +60,15 @@ up a transaction owner, or checks or connects to a database.
 | `PolicySQL-Role` not in `roles`, or required access missing | 403 `POLICYSQL_FORBIDDEN_ACCESS` (client-caused) |
 | Credential missing, invalid, expired, or revoked | Returned by the wrapper, typically 401 `POLICYSQL_UNAUTHENTICATED`; the library never returns 401 |
 
-`POLICYSQL_UNAUTHENTICATED` and `POLICYSQL_AUTHENTICATION_FAILED` stay in the public
-contract as wrapper-returned codes, built with `createErrorResponse`.
+Both 401 codes are wrapper-returned and built with `createErrorResponse`; the library emits
+neither. `POLICYSQL_UNAUTHENTICATED` is the wrapper's 401 for a missing or invalid
+credential, and the only 401 code the reference wrapper and the JWT adapter use.
+`POLICYSQL_AUTHENTICATION_FAILED` is reserved: no shipped code emits it. It stays in the
+public contract (and in the client's 401 rejection table, which treats both codes the same:
+the request was not executed) so that a custom wrapper may use it for a credential that is
+present but failed verification (bad signature, expired, revoked), to distinguish it from a
+missing credential.
+Clients must handle both codes identically.
 
 ### Identity in idempotency and transactions
 
@@ -80,7 +87,13 @@ of `jwks` (object or JSON text) and `jwksUrl` is required; invalid configuration
 `TypeError` at construction. The profile is unchanged from ADR 0005: one issuer and
 audience, RS256/ES256, 5 s clock tolerance, required `sub`, `iat`, `exp`, and a
 `policysql` object claim `{ roles, default_role, access, session? }`. A single
-`Authorization: Bearer` header is required. `principal` is `issuer:sub`. The adapter only
+`Authorization: Bearer` header is required. `principal` is `JSON.stringify([iss, sub])`: a
+plain `iss:sub` join would be ambiguous because issuers usually contain `:` (issuer
+`https://a.test` with sub `x:y` and issuer `https://a.test:x` with sub `y` would collide),
+whereas the JSON array encoding is injective. `jwksUrl` must use `https:`; any other scheme
+is a `TypeError` at construction, because keys fetched in plaintext could be replaced in
+transit. Remote key sets use a 1.5 s timeout, a 30 s cooldown, and a 5 min cache, so key
+removal takes effect within the cache age. The adapter only
 translates claims; core validates the result, so a verified token whose claims break the
 session rules is a 500 deployment fault rather than a 401.
 
@@ -95,7 +108,8 @@ after rate limiting and before `app.fetch`, and return 401 through `createErrorR
 - Authenticate every client request, including every interactive command and commit. The
   library stores the session fingerprint, not the credential, so stopping a transaction
   after token expiry or revocation is the wrapper's job.
-- Namespace `principal` so it cannot collide across identity providers or tenants.
+- Encode `principal` unambiguously and namespace it so it cannot collide across identity
+  providers or tenants (for example a JSON array of its parts, never a plain `:` join).
 - Treat a 500 `POLICYSQL_INTERNAL` with a `trusted_session_rejected` log as a wrapper or
   identity-provider configuration bug.
 

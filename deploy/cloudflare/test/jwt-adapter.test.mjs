@@ -36,7 +36,7 @@ test("adapter verifies the signature and translates the JWT profile into a trust
   for (const jwks of [key.jwks, JSON.stringify(key.jwks)]) {
     const verify = createJwtSessionVerifier({ jwks, issuer, audience });
     assert.deepEqual(await verify(bearer(await sign(key))), {
-      principal: "https://issuer.test:user_1",
+      principal: '["https://issuer.test","user_1"]',
       subject: "user_1",
       roles: ["member"],
       defaultRole: "member",
@@ -47,6 +47,22 @@ test("adapter verifies the signature and translates the JWT profile into a trust
   const verify = createJwtSessionVerifier({ jwks: key.jwks, issuer, audience });
   const { session } = await verify(bearer(await sign(key, { policysql: { roles: ["member"], default_role: "member", access: ["execute"] } })));
   assert.deepEqual(session, {}, "an absent session claim is an empty session");
+});
+
+test("principal is unambiguous even when the issuer or subject contains ':'", async () => {
+  const key = await keyPair();
+  // A plain `iss:sub` join maps both pairs to "https://a.test:x:y".
+  const pairs = [["https://a.test", "x:y"], ["https://a.test:x", "y"]];
+  const principals = [];
+  for (const [iss, sub] of pairs) {
+    const verify = createJwtSessionVerifier({ jwks: key.jwks, issuer: iss, audience });
+    const session = await verify(bearer(await sign(key, { iss, sub })));
+    assert.equal(session.subject, sub);
+    assert.deepEqual(JSON.parse(session.principal), [iss, sub], "principal decodes back to its parts");
+    principals.push(session.principal);
+  }
+  assert.equal(`${pairs[0][0]}:${pairs[0][1]}`, `${pairs[1][0]}:${pairs[1][1]}`, "the naive join collides");
+  assert.notEqual(principals[0], principals[1]);
 });
 
 test("adapter rejects every unverifiable credential with JwtAuthenticationError", async () => {
@@ -89,6 +105,11 @@ test("adapter configuration is validated at construction", async () => {
     { jwks: key.jwks, jwksUrl: "https://issuer.test/jwks", issuer, audience },
     { jwks: "{", issuer, audience },
     { jwks: { keys: [] }, issuer, audience },
+    // Remote keys must be fetched over TLS; no plaintext exception, even for localhost.
+    { jwksUrl: "http://issuer.test/jwks", issuer, audience },
+    { jwksUrl: "http://localhost:8787/jwks", issuer, audience },
+    { jwksUrl: "file:///etc/jwks.json", issuer, audience },
+    { jwksUrl: "not a url", issuer, audience },
   ]) {
     assert.throws(() => createJwtSessionVerifier(options), TypeError, JSON.stringify(options));
   }

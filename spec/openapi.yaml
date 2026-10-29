@@ -250,8 +250,11 @@ components:
         Deployment-defined authentication. The deployment's wrapper authenticates every
         client request, including every interactive command and commit, and passes the
         resulting trusted session to PolicySQL; PolicySQL never sees the credential.
-        Credential failures are returned by the wrapper (401 POLICYSQL_UNAUTHENTICATED or
-        POLICYSQL_AUTHENTICATION_FAILED), never by PolicySQL. Required access and
+        Credential failures are returned by the wrapper, never by PolicySQL: 401
+        POLICYSQL_UNAUTHENTICATED for a missing or invalid credential (the only code the
+        reference wrapper uses), or the reserved 401 POLICYSQL_AUTHENTICATION_FAILED, which a
+        custom wrapper may use when a present credential failed verification. Clients treat
+        both as not executed. Required access and
         PolicySQL-Role selection are checked by PolicySQL against the trusted session
         (403 POLICYSQL_FORBIDDEN_ACCESS). The reference wrapper uses a bearer JWT with
         the PolicySQL JWT profile (ADR 0020); other deployments may use any scheme.

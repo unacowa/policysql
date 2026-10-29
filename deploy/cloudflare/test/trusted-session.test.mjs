@@ -76,6 +76,20 @@ const malformed = (h) => {
   ];
 };
 
+test("positive control: the probe observes a body read and an owner lookup for a valid session", async (t) => {
+  // Guards the probes below against passing vacuously if body or owner access changes shape.
+  const h = await harness(t);
+  const { counts, send } = probe(h);
+  const started = await send("POST", "/v1/transactions", { mode: "write" }, h.session("a"));
+  assert.equal(started.status, 201, JSON.stringify(started.body));
+  assert.equal(started.pulled, true, "the body stream was pulled");
+  assert.ok(counts.lookups > 0, "the transaction owner was looked up");
+  assert.ok(h.counts().checks > 0, "the database binding was checked");
+  const executed = await send("POST", "/v1/transactions:execute", envelope(read), h.session("a"));
+  assert.equal(executed.status, 200, JSON.stringify(executed.body));
+  assert.equal(executed.pulled, true);
+});
+
 test("a malformed trusted session is a wrapper fault: 500 before any body read, owner lookup, or database work", async (t) => {
   const h = await harness(t);
   const { counts, send } = probe(h);

@@ -25,7 +25,7 @@ An interactive transaction stores a fingerprint of principal, subject, selected 
 
 ### JWT profile (identity adapter, superseded in place by ADR 0020)
 
-The JWT profile is now implemented by the optional identity adapter that wrappers call, not by the library: a signed JWT access token verified against one configured issuer, audience, algorithm allowlist, and JWKS source, with the canonical claims object `policysql` containing `roles`, `default_role`, `access`, and optional `session`. Standard JWT `sub` becomes `subject`, and `principal` is `issuer:sub`. A deployment may locate the claims object with one JSON Pointer or construct it with an explicit claim map in its own wrapper; it never merges multiple claim objects.
+The JWT profile is now implemented by the optional identity adapter that wrappers call, not by the library: a signed JWT access token verified against one configured issuer, audience, algorithm allowlist, and JWKS source, with the canonical claims object `policysql` containing `roles`, `default_role`, `access`, and optional `session`. Standard JWT `sub` becomes `subject`, and `principal` is `JSON.stringify([iss, sub])`. A deployment may locate the claims object with one JSON Pointer or construct it with an explicit claim map in its own wrapper; it never merges multiple claim objects.
 
 ## Consequences
 
