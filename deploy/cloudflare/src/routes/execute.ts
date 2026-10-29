@@ -8,6 +8,7 @@ import { jsonResponse } from "../responses.ts";
 import { observeCostEnvelope } from "../cost.ts";
 import { executeSealedEnvelope } from "../turso.ts";
 import { checkDatabaseBinding, databaseTransportFactory } from "../database.ts";
+import { runtimeBytesLimit } from "../binary.ts";
 import type { AppDependencies, AppEnv } from "../types.ts";
 
 export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDependencies) => {
@@ -25,7 +26,8 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDepend
     const auth = context.get("auth");
     const requestId = context.get("requestId");
     const databaseBinding = await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, runtime.snapshot);
-    const transportFactory = databaseTransportFactory(dependencies.database, databaseBinding);
+    const maxBytesPerValue = runtimeBytesLimit(runtime);
+    const transportFactory = databaseTransportFactory(dependencies.database, databaseBinding, maxBytesPerValue);
     const body = await readJsonBody(context.req.raw);
     const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body.text, "execute"));
     const debugAuthorized = dependencies.executionTrace?.enabled === true && auth.access.includes("debug");
@@ -87,7 +89,7 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDepend
     );
     const executionContext = context.executionCtx as Partial<ExecutionContext>;
     executionContext?.waitUntil?.(
-      observeCostEnvelope(compiled, context.env.deployment, `${requestId}-cost`, transportFactory),
+      observeCostEnvelope(compiled, context.env.deployment, `${requestId}-cost`, transportFactory, maxBytesPerValue),
     );
     return jsonResponse(context, {
       transactionId: executed.transactionId ?? `atomic_${requestId}`,

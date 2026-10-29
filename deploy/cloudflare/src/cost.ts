@@ -1,6 +1,7 @@
 import { HttpError } from "./errors.ts";
 import { databaseRequired } from "./database.ts";
 import { driverArgs } from "./driver-values.ts";
+import { bytesLimit } from "./binary.ts";
 
 const invalidPlanner = () =>
   new HttpError(403, "POLICYSQL_COST_UNKNOWN", "The query cost could not be bounded safely.");
@@ -79,7 +80,8 @@ const evaluate = (compiled, catalog, planned, results) => {
   return output;
 };
 
-export const estimateSealedOnTransaction = async (compiled, env, transaction) => {
+// `maxBytes` is the runtime's max_bytes_per_value; cost queries bind the same values.
+export const estimateSealedOnTransaction = async (compiled, env, transaction, maxBytes: number) => {
   const catalog = parseCatalog(env);
   const planned = compiled.statements
     .map((statement, index) => ({ statement, index }))
@@ -88,7 +90,7 @@ export const estimateSealedOnTransaction = async (compiled, env, transaction) =>
     ? []
     : await transaction.execute(planned.map(({ statement }) => ({
         sql: statement.costExplainSql,
-        args: driverArgs(statement),
+        args: driverArgs(statement, maxBytes),
       })));
   return evaluate(compiled, catalog, planned, results);
 };
@@ -98,8 +100,11 @@ export const estimateSealedEnvelope = async (
   env,
   requestId,
   transportFactory: (...args: any[]) => any,
+  maxBytes: number,
 ) => {
   if (typeof transportFactory !== "function") throw databaseRequired();
+  // A malformed injected limit is a wiring defect: fail before BEGIN, not as a 503.
+  bytesLimit(maxBytes);
   const catalog = parseCatalog(env);
   let transaction;
   try {
@@ -112,7 +117,7 @@ export const estimateSealedEnvelope = async (
       transaction = await transport.begin("read", 1_000);
       results = await transaction.execute(planned.map(({ statement }) => ({
         sql: statement.costExplainSql,
-        args: driverArgs(statement),
+        args: driverArgs(statement, maxBytes),
       })));
       await transaction.commit();
     }
@@ -149,9 +154,10 @@ export const observeCostEnvelope = async (
   env,
   requestId,
   transportFactory: (...args: any[]) => any,
+  maxBytes: number,
 ) => {
   try {
-    const observation = await estimateSealedEnvelope(compiled, env, requestId, transportFactory);
+    const observation = await estimateSealedEnvelope(compiled, env, requestId, transportFactory, maxBytes);
     console.log(JSON.stringify({
       event: "cost_observation",
       requestId,

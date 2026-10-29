@@ -1,6 +1,7 @@
 import { HttpError, wasmError } from "./errors.ts";
 import { databaseRequired } from "./database.ts";
 import { driverArgs, rawDriverValue, rowValues } from "./driver-values.ts";
+import { runtimeBytesLimit } from "./binary.ts";
 import type { ExecutionTrace } from "./types.ts";
 
 const remoteFailure = (timeout = false) =>
@@ -78,9 +79,9 @@ export const enforceCumulativeLimits = (compiled, results, elapsedMs) => {
   }
 };
 
-const rawResult = (result, operation, rows) => ({
+const rawResult = (result, operation, rows, maxBytes: number) => ({
   columns: result.columns,
-  rows: rows.map((row) => row.map(rawDriverValue)),
+  rows: rows.map((row) => row.map((value) => rawDriverValue(value, maxBytes))),
   affectedRows:
     operation !== "select" && result.columns.length > 0
       ? result.rows.length
@@ -99,7 +100,7 @@ const publicResultColumn = (column) => ({
   ...(column.jsonSchema ? { jsonSchema: column.jsonSchema } : {}),
 });
 
-const validateDriverResults = (runtime, compiled, wasmHandle, driverResults, requestId) =>
+const validateDriverResults = (runtime, compiled, wasmHandle, driverResults, requestId, maxBytes: number) =>
   driverResults.map((result, index) => {
     const descriptor = compiled.statements[index];
     // Log raw shape before validation so malformed rows remain observable. Never log cell values.
@@ -118,7 +119,7 @@ const validateDriverResults = (runtime, compiled, wasmHandle, driverResults, req
       runtime.validate_result_json(
         wasmHandle,
         index,
-        JSON.stringify(rawResult(result, descriptor.operation, rows)),
+        JSON.stringify(rawResult(result, descriptor.operation, rows, maxBytes)),
       ),
     );
     const error = wasmError(validated);
@@ -164,14 +165,16 @@ export const executeSealedOnTransaction = async (
   }
   const handle = BigInt(compiled.executionHandle);
   try {
+    // Read the runtime limit once, before any statement reaches the database.
+    const maxBytes = runtimeBytesLimit(runtime);
     const driverResults = await transaction.execute(
       compiled.statements.map((statement) => ({
         sql: statement.protectedSql,
-        args: driverArgs(statement),
+        args: driverArgs(statement, maxBytes),
       })),
     );
     return {
-      results: validateDriverResults(runtime, compiled, handle, driverResults, requestId),
+      results: validateDriverResults(runtime, compiled, handle, driverResults, requestId, maxBytes),
       usage: {
         rowsRead: driverResults.reduce((sum, result) => sum + result.usage.rowsRead, 0),
         rowsWritten: driverResults.reduce((sum, result) => sum + result.usage.rowsWritten, 0),
@@ -199,6 +202,15 @@ export const executeSealedEnvelope = async (
     throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
   }
   const wasmHandle = BigInt(compiled.executionHandle);
+  // A misconfigured runtime is a 500 raised before BEGIN, never a retryable 503
+  // after opening and rolling back a database transaction.
+  let maxBytes: number;
+  try {
+    maxBytes = runtimeBytesLimit(runtime);
+  } catch (error) {
+    runtime.release_execution(wasmHandle);
+    throw error;
+  }
   const started = performance.now();
   let transaction;
   try {
@@ -209,7 +221,7 @@ export const executeSealedEnvelope = async (
     transaction = await transport.begin(compiled.transactionMode, timeoutMs);
     const statements = compiled.statements.map((statement) => ({
       sql: statement.protectedSql,
-      args: driverArgs(statement),
+      args: driverArgs(statement, maxBytes),
     }));
     if (compiled.transactionMode === "write" && idempotency) {
       const [existingResult] = await transaction.execute([
@@ -275,6 +287,7 @@ export const executeSealedEnvelope = async (
       wasmHandle,
       driverResults,
       requestId,
+      maxBytes,
     );
     enforceCumulativeLimits(compiled, results, performance.now() - started);
     const policyUsage = {

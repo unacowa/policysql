@@ -2,9 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { harness } from "./helpers/routing.mjs";
-import { BinaryLimitError, MAX_BYTES_PER_VALUE, decodeBlob, encodeBlob } from "../src/binary.ts";
-import { driverArgs, rawDriverValue, rowValues } from "../src/driver-values.ts";
+import { MAX_BYTES_PER_VALUE, harness } from "./helpers/routing.mjs";
+import { BinaryLimitError, bytesLimit, decodeBlob as decodeWithLimit, encodeBlob as encodeWithLimit, runtimeBytesLimit } from "../src/binary.ts";
+import { capabilities } from "../src/presenters.ts";
+import { driverArgs as driverArgsWithLimit, rawDriverValue as rawWithLimit, rowValues } from "../src/driver-values.ts";
+
+// Every codec call takes the runtime's limit; these bind the real WASM value.
+const decodeBlob = value => decodeWithLimit(value, MAX_BYTES_PER_VALUE);
+const encodeBlob = value => encodeWithLimit(value, MAX_BYTES_PER_VALUE);
+const driverArgs = statement => driverArgsWithLimit(statement, MAX_BYTES_PER_VALUE);
+const rawDriverValue = value => rawWithLimit(value, MAX_BYTES_PER_VALUE);
 
 const read = name => readFileSync(new URL(`../../../tests/fixtures/${name}`, import.meta.url), "utf8");
 const cases = JSON.parse(read("bytes-contract.json"));
@@ -57,6 +64,62 @@ test("private binary adapters share strict vectors and preserve physical value i
     assert.throws(() => rowValues(["state"], row), { code: "POLICYSQL_SCHEMA_MISMATCH" });
   }
   assert.deepEqual(rowValues(["state"], { 0: null, state: "must not replace NULL" }), [null]);
+});
+
+// Regression (#22): the adapter has no second copy of MAX_BYTES_PER_VALUE. Every
+// codec and driver-value path honors the injected runtime limit, so a Rust-only
+// change (raised or lowered) cannot turn valid WASM output into a 500.
+test("binary codec honors the injected runtime limit instead of a host constant", () => {
+  const raised = MAX_BYTES_PER_VALUE * 2;
+  const above = Buffer.alloc(MAX_BYTES_PER_VALUE + 1, 7);
+  const base64 = above.toString("base64");
+  assert.deepEqual(Buffer.from(decodeWithLimit(base64, raised)), above);
+  assert.equal(encodeWithLimit(above, raised), base64);
+  assert.deepEqual(Buffer.from(driverArgsWithLimit({ clientParameters: { v: { type: "blob", base64 } }, serverParameters: {} }, raised).v), above);
+  assert.deepEqual(rawWithLimit(new Uint8Array(above), raised), { type: "blob", base64 });
+  for (const lowered of [1, 3, 16]) {
+    const fits = Buffer.alloc(lowered, 1);
+    const over = Buffer.alloc(lowered + 1, 1);
+    assert.deepEqual(Buffer.from(decodeWithLimit(fits.toString("base64"), lowered)), fits);
+    assert.throws(() => decodeWithLimit(over.toString("base64"), lowered), BinaryLimitError);
+    assert.throws(() => encodeWithLimit(over, lowered), BinaryLimitError);
+    assert.throws(() => rawWithLimit(new Uint8Array(over), lowered), { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" });
+    assert.throws(() => driverArgsWithLimit({ clientParameters: { v: { type: "blob", base64: over.toString("base64") } }, serverParameters: {} }, lowered), { status: 500, code: "POLICYSQL_INTERNAL" });
+    // Malformed input stays malformed (TypeError → 400/503/422) at any limit.
+    assert.throws(() => decodeWithLimit("A===", lowered), TypeError);
+  }
+});
+
+// Regression (PR #24 review): Infinity is not an "unbounded" escape hatch. The codec
+// and every driver-value path reject it like any other malformed limit.
+test("a missing or malformed injected limit fails closed instead of disabling the bound", () => {
+  for (const limit of [undefined, null, 0, -1, 1.5, NaN, "262144", 2 ** 53, Infinity, -Infinity]) {
+    assert.throws(() => decodeWithLimit("AA==", limit), TypeError, String(limit));
+    assert.throws(() => encodeWithLimit(new Uint8Array(1), limit), TypeError, String(limit));
+    assert.throws(() => driverArgsWithLimit({ clientParameters: {}, serverParameters: {} }, limit), TypeError, String(limit));
+    assert.throws(() => rawWithLimit("text", limit), TypeError, String(limit));
+    assert.throws(() => runtimeBytesLimit({ max_bytes_per_value: limit }), TypeError, String(limit));
+    assert.throws(() => bytesLimit(limit), TypeError, String(limit));
+  }
+  for (const runtime of [undefined, null, {}, { max_bytes_per_value: Infinity }]) {
+    assert.throws(() => runtimeBytesLimit(runtime), TypeError);
+  }
+  // An unbounded limit must not let an oversized value through any path.
+  const huge = new Uint8Array(MAX_BYTES_PER_VALUE * 4);
+  const hugeBase64 = Buffer.from(huge).toString("base64");
+  assert.throws(() => encodeWithLimit(huge, Infinity), TypeError);
+  assert.throws(() => decodeWithLimit(hugeBase64, Infinity), TypeError);
+  assert.throws(() => rawWithLimit(huge, Infinity), TypeError);
+  assert.throws(() => driverArgsWithLimit({ clientParameters: { v: { type: "blob", base64: hugeBase64 } }, serverParameters: {} }, Infinity), TypeError);
+  assert.equal(runtimeBytesLimit({ max_bytes_per_value: 512 * 1024 }), 512 * 1024);
+});
+
+test("Capabilities and the adapter take maxBytesPerValue from the same runtime value", () => {
+  for (const advertised of [16, MAX_BYTES_PER_VALUE, MAX_BYTES_PER_VALUE * 2]) {
+    const runtime = { snapshot: "s", profile: "p", abi_version: 2, commit_checks_enabled: false, max_bytes_per_value: advertised };
+    assert.equal(capabilities(runtime, { limits: { maxBytesPerValue: 1 } }).limits.maxBytesPerValue, advertised);
+    assert.equal(runtimeBytesLimit(runtime), advertised);
+  }
 });
 
 for (const hooks of [false, true]) test(`bytes round-trip with JWT, real WASM, HTTP transport, SQLite, presets and replay (hooks=${hooks})`, async t => {

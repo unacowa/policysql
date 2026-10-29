@@ -1,5 +1,6 @@
 import { wasmError } from "./errors.ts";
 import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "./config.ts";
+import { runtimeBytesLimit } from "./binary.ts";
 import type { AuthContext } from "./types.ts";
 
 export const parsedRuntimeCall = (text: string) => {
@@ -68,7 +69,7 @@ export const explainResponse = (compiled: any, auth: AuthContext, id: string) =>
 });
 
 export const capabilities = (runtime: any, publicConfig: any = {}) => {
-  const limits = { ...LIMITS, ...(publicConfig.limits ?? {}), maxBytesPerValue: runtime.max_bytes_per_value };
+  const limits = { ...LIMITS, ...(publicConfig.limits ?? {}), maxBytesPerValue: runtimeBytesLimit(runtime) };
   return ({
   id: runtime.snapshot,
   profile: runtime.profile,

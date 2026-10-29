@@ -6,6 +6,7 @@ import { enforceCumulativeLimits } from "./turso.ts";
 import { runCommitChecks, verifyCapabilityToken } from "./commit-checks.ts";
 import { checkDatabaseBinding, databaseTransportFactory, sameDatabaseBinding, validateDatabaseProvider } from "./database.ts";
 import type { DatabaseProvider } from "./database.ts";
+import { runtimeBytesLimit } from "./binary.ts";
 
 const MAX_TRANSACTION_MS = 4_000;
 const MAX_STATEMENTS = 8;
@@ -80,7 +81,7 @@ export class TransactionOwnerCore {
   }
 
   connectionFactory(binding, deadlineMs = undefined) {
-    return databaseTransportFactory(this.database, binding, deadlineMs);
+    return databaseTransportFactory(this.database, binding, runtimeBytesLimit(this.getRuntime()), deadlineMs);
   }
 
   async checkContext(body) {
@@ -104,7 +105,7 @@ export class TransactionOwnerCore {
   }
 
   observeCost(compiled, requestId, binding) {
-    this.state.waitUntil?.(observeCostEnvelope(compiled, this.env, `${requestId}-cost`, this.connectionFactory(binding)));
+    this.state.waitUntil?.(observeCostEnvelope(compiled, this.env, `${requestId}-cost`, this.connectionFactory(binding), runtimeBytesLimit(this.getRuntime())));
   }
 
   fetch(request) {

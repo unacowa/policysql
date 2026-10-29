@@ -1,5 +1,6 @@
 import { HttpError } from "./errors.ts";
 import { stableJson } from "./idempotency.ts";
+import { bytesLimit } from "./binary.ts";
 import type { WorkerBindings } from "./types.ts";
 
 /** Server-owned identity. Never put credentials or a client-selected URL here. */
@@ -25,9 +26,20 @@ export interface DatabaseTransaction {
   commit(): Promise<void>;
   rollback(): Promise<void>;
 }
+/** Limits PolicySQL supplies from its loaded runtime; transports must not hard-code them. */
+export type DatabaseTransportOptions = Readonly<{
+  /** The runtime's decoded per-value BLOB limit (`runtime.max_bytes_per_value`). */
+  maxBytesPerValue: number;
+}>;
 export interface DatabaseTransport {
-  /** Bound each operation by timeoutMs and the shared absolute deadline when supplied. */
-  begin(mode: "read" | "write", timeoutMs: number, deadlineMs?: number): Promise<DatabaseTransaction>;
+  /**
+   * Bound each operation by timeoutMs and the shared absolute deadline when supplied.
+   * PolicySQL always passes `options`; a transport may use it to reject oversized
+   * BLOBs early. PolicySQL re-checks every BLOB against the same runtime limit.
+   * The bundled `TursoHttpTransport` requires `options` and rejects an omitted or
+   * malformed limit before sending any request.
+   */
+  begin(mode: "read" | "write", timeoutMs: number, deadlineMs?: number, options?: DatabaseTransportOptions): Promise<DatabaseTransaction>;
 }
 export interface DatabaseProvider {
   /** Must return exactly true. Called in the Worker and DO, including before callbacks/commit. */
@@ -99,8 +111,14 @@ export const checkDatabaseBinding = async (provider: DatabaseProvider, binding, 
   return checked;
 };
 
-export const databaseTransportFactory = (provider: DatabaseProvider, binding: DatabaseBinding, deadlineMs?: number) => {
+export const databaseTransportFactory = (
+  provider: DatabaseProvider,
+  binding: DatabaseBinding,
+  maxBytesPerValue: number,
+  deadlineMs?: number,
+) => {
   const pinned = validateDatabaseBinding(binding, binding?.snapshot);
+  const options: DatabaseTransportOptions = Object.freeze({ maxBytesPerValue: bytesLimit(maxBytesPerValue) });
   return async (env: WorkerBindings, requestId: string, executionDeadlineMs?: number): Promise<DatabaseTransport> => {
     const startedAt = Date.now();
     const deadline = deadlineMs === undefined ? executionDeadlineMs
@@ -112,7 +130,7 @@ export const databaseTransportFactory = (provider: DatabaseProvider, binding: Da
       async begin(mode, timeoutMs) {
         // Even callers without an explicit deadline count preparation toward the budget.
         const expiresAt = deadline ?? startedAt + timeoutMs;
-        const transaction = await transport.begin(mode, Math.min(timeoutMs, remainingDatabaseTime(expiresAt)), expiresAt);
+        const transaction = await transport.begin(mode, Math.min(timeoutMs, remainingDatabaseTime(expiresAt)), expiresAt, options);
         try { remainingDatabaseTime(expiresAt); } catch (error) {
           try { await transaction.rollback(); } catch { /* remote timeout is terminal */ }
           throw error;
