@@ -15,8 +15,8 @@ requestとresponseのmedia typeは`application/json`です。request bodyはUTF-
 
 | Header | Direction | 意味 |
 | --- | --- | --- |
-| `Authorization: Bearer` | request | JWT access token |
-| `PolicySQL-Role` | request | JWTで許可されたroleの選択。省略時はdefault role |
+| `Authorization: Bearer` | request | 参考ラッパーのJWT access token。認証方式はdeploymentが決める |
+| `PolicySQL-Role` | request | trusted sessionで許可されたroleの選択。省略時はdefault role |
 | `Idempotency-Key` | request | 任意。更新・対話型開始の再送識別子。指定時は16〜128文字の英数字と`._:-` |
 | `Traceparent` | request | 任意のW3C trace context。認可情報には使用しない |
 | `PolicySQL-Request-Id` | response | serverが生成した問い合わせ識別子 |
@@ -84,7 +84,7 @@ transaction開始後はsnapshotが固定され、statementごとの`expected`は
 | `200` | SQL、transaction command、Catalog、Capabilitiesの成功 |
 | `201` | 新しいinteractive transactionの開始 |
 | `400` | malformed JSON、SQL、parameter、sequenceなどrequestの不正 |
-| `401` | JWTがない、無効、期限切れ |
+| `401` | credentialがない、無効、期限切れ。ライブラリではなくラッパーが返す |
 | `403` | role、resource、operation、column、policyによる拒否 |
 | `404` | 公開可能な範囲でtransactionなどが存在しない |
 | `409` | stale snapshot、idempotency conflict、transaction state conflict、commit conflict |

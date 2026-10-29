@@ -5,7 +5,7 @@ description: 利用可能なlogical schemaとSQL capabilityを確認します。
 
 # CatalogとCapabilities
 
-両endpointの取得にはJWTの`catalog` accessが必要です。
+両endpointの取得にはtrusted sessionの`catalog` accessが必要です。
 
 Catalogは利用可能なlogical schemaを、Capabilitiesはdeploymentが安全に処理できるSQL機能とlimitを表します。
 
@@ -138,7 +138,7 @@ Catalogはroleとpolicyに依存します。clientがCatalogや生成型をcache
     "mutationsRequired": false,
     "interactiveStartRequired": false,
     "persistent": true,
-    "binding": ["issuer", "subject", "role", "session", "endpoint", "payload"]
+    "binding": ["principal", "subject", "role", "session", "endpoint", "payload"]
   }
 }
 ```

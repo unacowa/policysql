@@ -7,13 +7,13 @@ description: 途中結果から次のSQLを決めるための短時間transactio
 
 通常の単一・複数statementは[Atomic Execute API](./execute)を使用します。対話型transactionは、直前のresultをapplicationで確認しなければ次のstatementを構築できない場合だけ使用します。
 
-開始、statement、commit、rollbackのすべてでJWTの`execute` accessが必要です。
+開始、statement、commit、rollbackのすべてでtrusted sessionの`execute` accessが必要です。ラッパーはこれらのrequestを毎回認証します。
 
 database connectionをrequest間で保持するため、有効期限は短く、同じtransactionへのcommandは直列です。clientが`BEGIN`、`COMMIT`、`ROLLBACK`、`SAVEPOINT`をSQLとして送ることはできません。
 
 ## 共通保証
 
-- transaction全体でJWT subject、role、trusted session、policy/schema snapshotを固定する
+- transaction全体でprincipal、subject、role、trusted session、policy/schema snapshotを固定する
 - statementごとにparse、bind、policy適用、protected SQL再検証を行う
 - 以前のstatementによる未commit変更を後続statementから読める
 - SQL、policy、check、expect、limitの失敗時はtransaction全体をrollbackする
@@ -56,7 +56,7 @@ Content-Type: application/json
 }
 ```
 
-`transactionId`だけでは認証情報になりません。後続requestでも同じJWTとroleが必要で、開始時のsession fingerprintと一致しなければ拒否されます。
+`transactionId`だけでは認証情報になりません。後続requestでも同じprincipal、subject、role、sessionが必要で、開始時のsession fingerprintと一致しなければ拒否されます。token失効や期限切れの後にcommandとcommitを止めるのはラッパーの責務です（参考ラッパーは毎回JWTを検証し、失敗すれば401を返します）。
 
 ## Statement
 
@@ -150,7 +150,7 @@ validation中は`validating`状態です。この間はcommit-check validatorの
 
 ## Idempotencyと再送
 
-Atomic Executeでmutationを含むrequestと、対話型transaction開始の`Idempotency-Key`は任意です。指定したkeyは検証済みissuer、subject、role、session、endpoint、DB識別子へ束縛し、canonical request hashにはDB bindingも含めます。保存済みの結果がある場合、同一要求へその結果を返します。
+Atomic Executeでmutationを含むrequestと、対話型transaction開始の`Idempotency-Key`は任意です。指定したkeyはtrusted sessionのprincipal、subject、role、session、endpoint、DB識別子へ束縛し、canonical request hashにはDB bindingも含めます。保存済みの結果がある場合、同一要求へその結果を返します。
 
 - 同じkey、同じpayload、完了済み: 保存済みstatusとbody
 - 同じkey、異なるpayloadまたは経路世代: HTTP 409（通常atomicは`POLICYSQL_IDEMPOTENCY_CONFLICT`、DOは`POLICYSQL_TRANSACTION_CONFLICT`）

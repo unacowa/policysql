@@ -13,8 +13,10 @@ boundary requires the application to supply the database explicitly.
 The wrapper owns database selection/authorization, registration, credentials, and
 connection creation. `createApp` and `createPolicySqlWorker` require a `DatabaseProvider`
 with `check` and `connect`. Each `app.fetch` call requires an already-selected
-`DatabaseBinding` as its fourth argument. No selection callback or JWT routing claims
-exist in this library API. Policy session authentication remains a separate gateway concern.
+`DatabaseBinding` as `database` in its fourth argument (`{ database, session }` since
+[ADR 0020](0020-trusted-session-input-and-jwt-identity-adapter.md)). No selection callback or
+JWT routing claims exist in this library API. Authentication is also a wrapper concern; the
+wrapper passes the trusted session next to the database.
 
 Missing providers fail at construction. Missing per-request bindings fail with
 `POLICYSQL_DATABASE_REQUIRED` before any database work. Fixed-env fallback is removed;

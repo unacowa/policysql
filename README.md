@@ -87,8 +87,28 @@ examples/basic/         Example schema, SQL, and expected transformation
 
 ## Start here
 
-Cloudflare embedders can supply request-scoped database connections from their own
-wrapper. See the [database binding API](docs/database-routing.md) and the
+Cloudflare embedders authenticate the caller and select the database in their own
+wrapper, then pass both to the library as data on each request:
+
+```ts
+import { createErrorResponse, createJwtSessionVerifier, JwtAuthenticationError } from "@unacowa/policysql/cloudflare";
+
+const verify = createJwtSessionVerifier({ jwksUrl, issuer, audience }); // optional JWT identity adapter
+let session;
+try {
+  session = await verify(request);
+} catch (error) {
+  if (error instanceof JwtAuthenticationError) return createErrorResponse(401, error.code, error.message);
+  throw error;
+}
+return worker.app.fetch(request, env, context, { database, session });
+```
+
+The library never sees a credential and never returns 401; it validates the trusted session
+(`principal`, `subject`, `roles`, `defaultRole`, `access`, `session`) in Rust and applies
+`PolicySQL-Role` and endpoint access. See
+[ADR 0020](docs/adr/0020-trusted-session-input-and-jwt-identity-adapter.md), the
+[database binding API](docs/database-routing.md), and the
 [two-tenant Worker/DO example](examples/database-routing/README.md).
 
 TypeScript applications can use standard Kysely CRUD and interactive transactions through

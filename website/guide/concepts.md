@@ -25,7 +25,7 @@ physical database上の名前をそのまま外部へ公開する必要はあり
 
 ## Session
 
-検証済みJWTの標準claimとPolicySQL claimsからgatewayが構築する、信頼済みのrequest contextです。
+ラッパーが利用者を認証して渡し、PolicySQLが検証する信頼済みのrequest contextです。参考ラッパーは検証済みJWTの標準claimとPolicySQL claimsから作ります。
 
 ```json
 {
@@ -36,7 +36,7 @@ physical database上の名前をそのまま外部へ公開する必要はあり
 }
 ```
 
-session値はclientのSQL parameterとは別に管理されます。request bodyや任意のsession headerを追加しても、JWTから作られた値を上書きできません。詳しくは[JWT認証](../security/jwt)を参照してください。
+session値はclientのSQL parameterとは別に管理されます。request bodyや任意のsession headerを追加しても、ラッパーが渡した値を上書きできません。詳しくは[JWT認証](../security/jwt)を参照してください。
 
 ## Policy
 

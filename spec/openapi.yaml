@@ -16,12 +16,12 @@ info:
 servers:
   - url: https://gateway.example.com
 security:
-  - jwt: []
+  - deployment: []
 paths:
   /v1/catalog:
     get:
       operationId: getCatalog
-      description: Requires JWT access `catalog`.
+      description: Requires session access `catalog`.
       parameters:
         - $ref: '#/components/parameters/Role'
         - name: If-None-Match
@@ -44,7 +44,7 @@ paths:
   /v1/capabilities:
     get:
       operationId: getCapabilities
-      description: Requires JWT access `catalog`.
+      description: Requires session access `catalog`.
       parameters:
         - name: If-None-Match
           in: header
@@ -65,7 +65,7 @@ paths:
   /v1/transactions:execute:
     post:
       operationId: executeAtomicTransaction
-      description: Requires JWT access `execute`. Optional exact egress SQL additionally requires deployment enablement and JWT access `debug`.
+      description: Requires session access `execute`. Optional exact egress SQL additionally requires deployment enablement and session access `debug`.
       parameters:
         - $ref: '#/components/parameters/Role'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -87,7 +87,7 @@ paths:
   /v1/transactions:explain:
     post:
       operationId: explainAtomicTransaction
-      description: Requires JWT access `explain`. Compiles statements and infers parameter and result types without execution.
+      description: Requires session access `explain`. Compiles statements and infers parameter and result types without execution.
       parameters:
         - $ref: '#/components/parameters/Role'
       requestBody:
@@ -108,7 +108,7 @@ paths:
   /v1/transactions:
     post:
       operationId: beginTransaction
-      description: Requires JWT access `execute`.
+      description: Requires session access `execute`.
       parameters:
         - $ref: '#/components/parameters/Role'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -130,7 +130,7 @@ paths:
   /v1/transactions/{transactionId}/statements:
     post:
       operationId: executeTransactionStatement
-      description: Requires JWT access `execute` and the transaction's immutable session fingerprint.
+      description: Requires session access `execute` and the transaction's immutable session fingerprint.
       parameters:
         - $ref: '#/components/parameters/TransactionId'
         - $ref: '#/components/parameters/Role'
@@ -152,7 +152,7 @@ paths:
   /v1/transactions/{transactionId}/commit:
     post:
       operationId: commitTransaction
-      description: Requires JWT access `execute` and the transaction's immutable session fingerprint.
+      description: Requires session access `execute` and the transaction's immutable session fingerprint.
       parameters:
         - $ref: '#/components/parameters/TransactionId'
         - $ref: '#/components/parameters/Role'
@@ -170,7 +170,7 @@ paths:
   /v1/transactions/{transactionId}/rollback:
     post:
       operationId: rollbackTransaction
-      description: Requires JWT access `execute` and the transaction's immutable session fingerprint.
+      description: Requires session access `execute` and the transaction's immutable session fingerprint.
       parameters:
         - $ref: '#/components/parameters/TransactionId'
         - $ref: '#/components/parameters/Role'
@@ -243,10 +243,18 @@ webhooks:
                 $ref: '#/components/schemas/CommitCheckDecision'
 components:
   securitySchemes:
-    jwt:
+    deployment:
       type: http
       scheme: bearer
-      bearerFormat: JWT
+      description: >-
+        Deployment-defined authentication. The deployment's wrapper authenticates every
+        client request, including every interactive command and commit, and passes the
+        resulting trusted session to PolicySQL; PolicySQL never sees the credential.
+        Credential failures are returned by the wrapper (401 POLICYSQL_UNAUTHENTICATED or
+        POLICYSQL_AUTHENTICATION_FAILED), never by PolicySQL. Required access and
+        PolicySQL-Role selection are checked by PolicySQL against the trusted session
+        (403 POLICYSQL_FORBIDDEN_ACCESS). The reference wrapper uses a bearer JWT with
+        the PolicySQL JWT profile (ADR 0020); other deployments may use any scheme.
     callbackCapability:
       type: http
       scheme: bearer
