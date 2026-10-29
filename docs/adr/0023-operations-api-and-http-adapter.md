@@ -134,9 +134,15 @@ capability crosses the wire as `authorization: Bearer <capability>`, as before.
   wrapper-context errors, has the three fixed headers (owner-routed responses lacked
   `x-content-type-options`, context errors used `application/json` without a charset);
   (2) a `fetchCallback` 404 has the full error shape (`path`, `requestId`); (3) a transaction
-  route with a malformed id or unknown command is 404 before the session is checked, and `begin`, `statement`, `commit`, and `rollback` check the database binding before
-  the body (a rejected binding now wins over a body error, as for the other routes);
-  (4) the request id is the wrapper's or a fresh UUID, never read from `cf-ray` by the library
+  route with a malformed id or unknown command is 404 before the session is checked;
+  (4) `begin`, `statement`, `commit`, and `rollback` check the database binding before the
+  body, as the other routes did. `checkDatabaseBinding` fails with 403
+  `POLICYSQL_DATABASE_BINDING_REJECTED` or 409 `POLICYSQL_STALE_OPERATION` (binding snapshot
+  differs from the runtime's), and either now precedes every body error (415, 413, 400). For
+  `begin` the order was body keys, then the `expected` check (409 `POLICYSQL_STALE_OPERATION`),
+  then the binding; it is now binding, then body, then `expected`, so a request with a rejected
+  binding and a stale `expected` gets 403 instead of 409;
+  (5) the request id is the wrapper's or a fresh UUID, never read from `cf-ray` by the library
   (the reference wrappers pass `cf-ray`, so their responses are unchanged).
 - Breaking (beta, no compatibility layer): `HttpError` is replaced by `EngineError` without a
   status; `createErrorResponse` moved to `src/http/responses.ts` (same export); `OwnerReply` and

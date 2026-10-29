@@ -326,6 +326,31 @@ test("durable-objects: an earlier Worker forwarding this object's replies shows 
   // main's Worker: `{ status: response.status, body: await response.json() }`, then
   // `ownerResponse(reply)`; for an atomic execute only a non-2xx reply was forwarded.
   const earlierWorker = (entry) => ({ status: entry.status, body: entry.body });
+  // main's 2xx atomic reshaping, transcribed from deploy/cloudflare/src/routes/execute.ts at
+  // a29dee9 (origin/main before #34). The values that come from the Worker rather than the
+  // owner are this harness's: the compiled versions, the session's role, and no debug access
+  // (the harness enables no execution trace). The Worker's own request id was only a fallback
+  // for a missing `originalRequestId`, which the owner always sets (asserted below).
+  const earlierAtomic = (executed, worker = {
+    requestId: undefined, policyVersion: "policy_routing_1", schemaVersion: "schema_routing_1", role: "member", debugAuthorized: false,
+  }) => ({
+    status: 200,
+    body: {
+      transactionId: executed.transactionId,
+      status: "committed",
+      results: executed.results,
+      meta: {
+        requestId: executed.originalRequestId ?? worker.requestId,
+        policyVersion: worker.policyVersion,
+        schemaVersion: worker.schemaVersion,
+        role: worker.role,
+        commitChecks: executed.commitChecks,
+      },
+      ...(worker.debugAuthorized && executed.executionTrace
+        ? { debug: { executionTrace: executed.executionTrace } }
+        : {}),
+    },
+  });
   const forwarded = async (label, ownerPath, send, { atomic = false } = {}) => {
     const from = wire.length;
     const current = await send();
@@ -333,7 +358,8 @@ test("durable-objects: an earlier Worker forwarding this object's replies shows 
     assert.equal(replies.length, 1, `${label}: one ${ownerPath} reply`);
     if (atomic && replies[0].status >= 200 && replies[0].status <= 299) {
       assert.equal(replies[0].status, 200, `${label}: an earlier Worker reshapes a 2xx atomic reply`);
-      assert.equal(current.status, 200, label);
+      assert.equal(typeof replies[0].body.originalRequestId, "string", `${label}: the owner names the request`);
+      assert.deepEqual(earlierAtomic(replies[0].body), current, label);
     } else {
       assert.deepEqual(earlierWorker(replies[0]), current, label);
     }
