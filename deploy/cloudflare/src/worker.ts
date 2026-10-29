@@ -5,7 +5,8 @@ import type { PolicySqlApp } from "./app.ts";
 import { executionContextTasks } from "./adapters/durable-objects.ts";
 import { ConfigError } from "./engine-config.ts";
 import type { PolicySqlConfig } from "./engine-config.ts";
-import { createErrorResponse } from "./errors.ts";
+import { createErrorResponse } from "./http/responses.ts";
+import type { PolicySqlEngine } from "./engine.ts";
 import type { TransactionOwnerDependencies } from "./transaction-owner.ts";
 import type { TransactionOwnerPort } from "./transaction-owner-port.ts";
 import type { AppDependencies, RequestContext } from "./types.ts";
@@ -23,7 +24,9 @@ export type PolicySqlDeployment = {
 
 export type PolicySqlWorkerApp<Env extends object> = {
   fetch(request: Request, env: Env, executionContext: ExecutionContext | undefined, context: RequestContext): Promise<Response>;
-  fetchCallback(request: Request, env: Env, executionContext: ExecutionContext | undefined): Promise<Response>;
+  fetchCallback(
+    request: Request, env: Env, executionContext: ExecutionContext | undefined, context?: { requestId?: string },
+  ): Promise<Response>;
 };
 
 // A rejected deployment is a wrapper fault: 500 before any database, owner, or validator
@@ -68,12 +71,18 @@ export const createWorkerEntrypoints = <Env extends object>({
       try { built = appFor(env); } catch (error) { return Promise.resolve(deploymentRejected(error)); }
       return built.fetch(request, context, executionContextTasks(executionContext));
     },
-    fetchCallback(request, env) {
+    fetchCallback(request, env, _executionContext, context) {
       let built: PolicySqlApp;
       try { built = appFor(env); } catch (error) { return Promise.resolve(deploymentRejected(error)); }
-      return built.fetchCallback(request);
+      return built.fetchCallback(request, context);
     },
   };
+  /**
+   * The engine operations for `env`, without HTTP: the same engine `app` serves, for a
+   * service-binding or in-process entry point (ADR 0023). Throws when the deployment is
+   * rejected, since there is no HTTP response to report it in.
+   */
+  const engine = (env: Env): PolicySqlEngine => appFor(env).engine;
   /**
    * The transaction owner's ports, built from an owner's own `env` with the same
    * `deployment(env)`. The owner adapter calls it once per owner instance, for example
@@ -83,5 +92,5 @@ export const createWorkerEntrypoints = <Env extends object>({
     const { getRuntime: runtime, database, config } = build(env);
     return { getRuntime: runtime, database, config };
   };
-  return { getRuntime, app, ownerDependencies };
+  return { getRuntime, app, engine, ownerDependencies };
 };

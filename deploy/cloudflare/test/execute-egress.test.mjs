@@ -101,16 +101,16 @@ test("Explain exposes role-visible resource names instead of internal identities
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "cf-ray": "req_explain",
       },
       body: JSON.stringify({
         statements: [{ sql: "SELECT id FROM projects", params: {} }],
       }),
     }),
-    { database: testBinding(getRuntime().snapshot), session },
+    { database: testBinding(getRuntime().snapshot), session, requestId: "req_explain" },
   );
   const body = await response.json();
   assert.equal(response.status, 200);
+  assert.equal(body.meta.requestId, "req_explain");
   assert.deepEqual(body.statements[0].resources, [{
     name: "projects",
     columns: ["id"],
@@ -141,12 +141,11 @@ const executeRequest = async ({
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "cf-ray": requestId,
         ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
       },
       body: JSON.stringify(body),
     }),
-    { database: testBinding(runtime.snapshot), session },
+    { database: testBinding(runtime.snapshot), session, requestId },
   );
 };
 
@@ -365,9 +364,7 @@ const selectVariations = [
 
 for (const variation of selectVariations) {
   test(variation.name, async () => {
-    const expectedProtectedSql = variation.unsupported
-      ? null
-      : readFixture(variation.fixture, "expected/protected.sql");
+    const expectedProtectedSql = readFixture(variation.fixture, "expected/protected.sql");
     const inputSql = readFixture(variation.fixture, "input.sql");
     const clientParams = JSON.parse(readFixture(variation.fixture, "client-params.json"));
     const session = sessionFixture();
@@ -396,13 +393,6 @@ for (const variation of selectVariations) {
       fetchImpl,
       body: { statements: [{ sql: inputSql, params: clientParams }] },
     });
-    if (variation.unsupported) {
-      const body = await response.json();
-      assert.equal(response.status, 403);
-      assert.equal(body.error.code, "POLICYSQL_STATEMENT_REJECTED");
-      assert.equal(pipelineBodies.length, 0);
-      return;
-    }
     assert.equal(response.status, 200);
     await response.json();
     assert.equal(pipelineBodies.length, 3);

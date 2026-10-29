@@ -2,7 +2,7 @@
 // The wrapper runs this before `app.fetch` / `app.fetchCallback`, so a rejected request
 // never authenticates, compiles SQL, initializes WASM, reaches a Durable Object, selects a
 // database, or reaches a database.
-import { createErrorResponse } from "../src/errors.ts";
+import { createErrorResponse } from "../src/http/responses.ts";
 import type { JwtBindings } from "./auth.ts";
 
 /** Cloudflare Rate Limiting binding (`ratelimits` in wrangler.jsonc). */

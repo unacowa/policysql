@@ -2,7 +2,7 @@
 // This wrapper uses the library's JWT identity adapter with the development JWT profile
 // and reads its configuration from these env names; the library itself reads none of them.
 import { createJwtSessionVerifier, JwtAuthenticationError } from "../src/adapters/jwt.ts";
-import { createErrorResponse } from "../src/errors.ts";
+import { createErrorResponse } from "../src/http/responses.ts";
 import type { TrustedSession } from "../src/types.ts";
 import type { WrapperBindings } from "./config.ts";
 

@@ -10,7 +10,7 @@ import { createWorkerEntrypoints } from "../../src/worker.ts";
 import { createMemoryTransactionOwners } from "./memory-owner.mjs";
 import { createSimulatedDurableObjects } from "./durable-object-owner.mjs";
 import { TursoHttpTransport } from "../../src/turso-http.ts";
-import { createErrorResponse } from "../../src/errors.ts";
+import { createErrorResponse } from "../../src/http/responses.ts";
 import { createJwtSessionVerifier } from "../../src/adapters/jwt.ts";
 import { createDatabaseRegistry } from "../../../../examples/database-routing/provider.ts";
 import { authenticateRequest, createJwtAuthentication } from "../../../../examples/database-routing/auth.ts";
