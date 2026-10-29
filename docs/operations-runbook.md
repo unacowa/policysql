@@ -44,23 +44,37 @@ Configure alerts in the production account for:
 - any `transaction_owner_unavailable` owner-loss event, or active/terminal count mismatch;
 - JWKS, cost-admission, or Turso availability errors for three consecutive minutes;
 - any wrapper `rate_limiter_missing` or `rate_limiter_failed` event, and a sustained 429
-  `POLICYSQL_RATE_LIMITED` rate above the seven-day baseline.
+  `POLICYSQL_RATE_LIMITED` rate above the seven-day baseline (separately for the client
+  and callback routes; callback 429s also surface as commit-check failures).
 
 ## Rate limiting
 
 Rate limiting is owned by the wrapper (`deploy/cloudflare/wrapper/rate-limit.ts`), not the
-PolicySQL library ([ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)). The wrapper calls the
-Cloudflare Rate Limiting binding `RATE_LIMITER` (declared in `wrangler.jsonc`, 100 requests per
-60 s per `cf-connecting-ip`) before `app.fetch`, so a limited request does no JWT, WASM, SQL, or
-database work. It returns 429 `POLICYSQL_RATE_LIMITED` with `Retry-After: 60`; keep that value
-equal to the binding's `period` (`RATE_LIMIT_PERIOD_SECONDS`). Commit-check callbacks are not
-limited. The library itself never sends `Retry-After`.
+PolicySQL library ([ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)). Every request is limited
+before it reaches the library, by one of two Cloudflare Rate Limiting bindings declared in
+`wrangler.jsonc`:
 
-The wrapper fails closed: if the binding is missing or throws, every non-callback request
-returns 500 `POLICYSQL_INTERNAL` and logs `rate_limiter_missing` / `rate_limiter_failed`. Restore
-the binding (or roll back) rather than deleting it; a deployment that limits at a WAF instead
-must remove the wrapper step in code. To change limits, edit `simple.limit`/`period` in
-`wrangler.jsonc` and `RATE_LIMIT_PERIOD_SECONDS` together, then redeploy.
+| Binding | Requests | Key | Default |
+| --- | --- | --- | --- |
+| `RATE_LIMITER` | client API, `/healthz`, unknown paths | `ip:<cf-connecting-ip>` | 100 per 60 s |
+| `CALLBACK_RATE_LIMITER` | `/v1/commit-checks/...` validator callbacks | `callback:<cf-connecting-ip>` | 1000 per 60 s |
+
+A limited client request does no JWT, WASM, SQL, or database work. A limited callback does no
+body parse and no Durable Object lookup or storage read. The callback capability is checked only
+inside the owner, so this limit, not the capability, bounds what unauthenticated callback spam
+can cost. The separate bucket keeps client traffic from starving the validator. Size the callback
+limit for peak commit-check traffic from the validator's addresses.
+
+Both return 429 `POLICYSQL_RATE_LIMITED` with `Retry-After: 60`, which equals each binding's
+`period` (`CLIENT_RATE_LIMIT` / `CALLBACK_RATE_LIMIT` in code; `rate-limit.test.mjs` fails if
+`wrangler.jsonc` and the code disagree). The library itself never sends `Retry-After`.
+
+The wrapper fails closed: if a binding is missing or throws, the requests it covers return 500
+`POLICYSQL_INTERNAL` and log `rate_limiter_missing` / `rate_limiter_failed` with the binding
+name. A missing callback binding makes commits with commit checks fail closed. Restore the
+binding (or roll back) rather than deleting it; a deployment that limits at a WAF instead must
+remove the wrapper step in code. To change limits, edit `simple.limit`/`period` in
+`wrangler.jsonc` and the matching constant together, then redeploy.
 
 ## Incident drills
 

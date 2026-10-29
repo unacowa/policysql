@@ -104,7 +104,9 @@ return createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", 
 | `requestId` | 任意。省略時はUUIDを生成 |
 | `headers` | 任意の追加header。`cache-control: no-store`、JSONの`content-type`、`x-content-type-options: nosniff`は上書きできない |
 
-不正な引数は`TypeError`になります。参考実装（`deploy/cloudflare/wrapper/`、`examples/database-routing/`）は、Cloudflare Rate Limiting binding `RATE_LIMITER`を使い、上限超過時に`Retry-After: 60`（bindingの`period`秒）を付けて429を返します。このとき、JWT検証、WASMの初期化、SQL compile、DB接続は行いません。bindingがない、またはbindingが例外を投げた場合は、`app.fetch`を呼ばずにHTTP 500 `POLICYSQL_INTERNAL`を返します（fail closed）。
+不正な引数は`TypeError`になります。参考実装（`deploy/cloudflare/wrapper/`、`examples/database-routing/`）は、すべてのrequestをライブラリより前に制限します。clientのrequestはCloudflare Rate Limiting binding `RATE_LIMITER`、commit checkのcallbackは別のbinding `CALLBACK_RATE_LIMITER`（別のkey）で数えます。callbackのcapabilityはtransaction ownerの中でしか検証されません。そのため制限しないと、認証なしでbodyの読み込み、Durable Objectの参照、storageの読み込みを繰り返し実行させられます。bucketを分けているので、clientのrequestが多くてもvalidatorのcallbackは制限されません。
+
+上限超過時は`Retry-After: 60`（bindingの`period`秒）を付けて429を返します。このとき、JWT検証、WASMの初期化、SQL compile、Durable Object、DB接続は行いません。bindingがない、またはbindingが例外を投げた場合は、ライブラリを呼ばずにHTTP 500 `POLICYSQL_INTERNAL`を返します（fail closed）。
 
 ## 情報を公開しないエラー
 

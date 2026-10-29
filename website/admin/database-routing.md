@@ -83,7 +83,7 @@ validatorのcallbackだけは、ラッパーで`app.fetchCallback(request, env, 
 - 各DBの実schemaは登録時に管理者が検証・準備します。`Idempotency-Key`付きAtomic Executeを使う場合だけ、`policysql_idempotency`も必要です。キーなしの更新と対話型transactionはこのテーブルを必要としません。
 - 固定envを暗黙に使う旧APIからは移行が必要です。未解決の再送を残したまま切り替えないでください。
 
-レート制限もDB選択と同じくラッパーの責務です。サンプルのWorkerは`app.fetch`より前にCloudflare Rate Limiting bindingで制限し、上限超過時は`createErrorResponse`で429 `POLICYSQL_RATE_LIMITED`を返します（[エラー](../api/errors#ラッパーが返すエラー)）。
+レート制限もDB選択と同じくラッパーの責務です。サンプルのWorkerは、clientのrequestを`app.fetch`より前に、validatorのcallbackを別のbucketで`app.fetchCallback`より前に、Cloudflare Rate Limiting bindingで制限します。上限超過時は`createErrorResponse`で429 `POLICYSQL_RATE_LIMITED`を返します（[エラー](../api/errors#ラッパーが返すエラー)）。
 
 リポジトリの`examples/database-routing/`にJWTから独立したregistryとWorker/DOサンプルがあります。既存の固定DB配備コードは`deploy/cloudflare/wrapper/`に移し、そこから明示的にDBを注入しています。
 

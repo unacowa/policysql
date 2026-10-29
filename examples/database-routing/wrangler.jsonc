@@ -4,7 +4,10 @@
   "compatibility_date": "2026-08-05",
   "durable_objects": { "bindings": [{ "name": "TRANSACTION_OWNER", "class_name": "TransactionOwner" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TransactionOwner"] }],
-  "ratelimits": [{ "name": "RATE_LIMITER", "namespace_id": "73002", "simple": { "limit": 100, "period": 60 } }],
+  "ratelimits": [
+    { "name": "RATE_LIMITER", "namespace_id": "73002", "simple": { "limit": 100, "period": 60 } },
+    { "name": "CALLBACK_RATE_LIMITER", "namespace_id": "73004", "simple": { "limit": 1000, "period": 60 } }
+  ],
   "rules": [{ "type": "Text", "globs": ["**/*.yaml"], "fallthrough": true }],
   "vars": {
     "POLICYSQL_ENVIRONMENT": "development",
