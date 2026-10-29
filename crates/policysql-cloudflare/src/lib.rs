@@ -575,8 +575,10 @@ impl PolicySqlRuntime {
         index: usize,
         raw_result_json: &str,
     ) -> Result<ValidatedExecuteResult, RuntimeError> {
+        // The raw result is database output, not a client envelope: exceeding the
+        // private ABI bound is a result-size limit (413), never an invalid request.
         if raw_result_json.len() > MAX_REQUEST_BYTES {
-            return Err(RuntimeError::Envelope);
+            return Err(RuntimeError::Rejected(RejectionKind::LimitExceeded));
         }
         let raw: RawExecuteResult =
             serde_json::from_str(raw_result_json).map_err(|_| RuntimeError::RemoteResult)?;

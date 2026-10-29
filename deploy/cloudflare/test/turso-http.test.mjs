@@ -76,6 +76,34 @@ test("bounds padded and unpadded Hrana BLOB responses before decoding", async t 
   }
 });
 
+// Regression (PR #23 review): a BLOB large enough to push the Hrana response past
+// the transport bound is the same permanent limit condition as a per-value overflow
+// (413), not a retryable 503. Control responses and HTTP failures stay 503.
+test("classifies oversized Hrana statement responses as result limit errors", async () => {
+  const huge = Buffer.alloc(2 * 1024 * 1024).toString("base64");
+  const run = async ({ declare = false, failBegin = false, status = 200 } = {}) => {
+    const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "oversized", async (_url, init) => {
+      const { requests } = JSON.parse(init.body);
+      const begin = requests[0].stmt?.sql.startsWith("BEGIN");
+      if (begin && !failBegin) return Response.json({ baton: "b", results: [result([], [])] });
+      const response = result(["state"], [[null]]);
+      response.response.result.rows = [[{ type: "blob", base64: huge }]];
+      const text = JSON.stringify({ baton: "b", results: [response] });
+      return new Response(declare ? "{}" : text, {
+        status,
+        headers: declare ? { "content-length": String(text.length) } : {},
+      });
+    });
+    const transaction = await transport.begin("read", 1000);
+    return transaction.execute([{ sql: "SELECT state FROM projects" }]);
+  };
+  for (const declare of [false, true]) {
+    await assert.rejects(run({ declare }), { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" }, `declare=${declare}`);
+    await assert.rejects(run({ declare, failBegin: true }), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" });
+  }
+  await assert.rejects(run({ status: 500 }), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" });
+});
+
 test("decodes exact usage metrics while preserving transaction ownership", async () => {
   const requests = [];
   const fetchImpl = async function (_url, init) {

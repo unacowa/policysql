@@ -53,6 +53,12 @@ result metadata in their existing cumulative budgets. The default Cloudflare res
 budget remains 64,000 bytes, so less than 48,000 raw bytes fit in one returned result
 envelope after JSON overhead. A permitted write value may be too large to RETURNING.
 Any result or cumulative-limit failure before commit rolls back the mutation.
+Fixed internal result bounds are result limits too: a statement result over the
+private WASM result ABI bound (1 MiB of raw result JSON) or a statement response
+over the Turso HTTP transport bound (2 MiB) uses `POLICYSQL_LIMIT_EXCEEDED` (413),
+even when every value is within the per-value limit. Oversized `BEGIN`, `COMMIT` or
+`ROLLBACK` responses and non-success HTTP responses remain transport failures (503),
+because they are not result data and a commit outcome is never reported as a limit.
 
 Malformed bytes parameters use `POLICYSQL_INVALID_PARAMETER` (400) regardless of
 their length; only well-formed input whose decoded size exceeds the per-value limit

@@ -119,7 +119,12 @@ export class TursoHttpTransport {
       : (input, init) => globalThis.fetch(input, init);
   }
 
-  async pipeline(requests, baton = undefined, timeoutMs = 1_000) {
+  // `oversized` classifies a successful response over MAX_RESPONSE_BYTES. Statement
+  // execution passes a 413 limit error: only result rows (for example stored BLOBs)
+  // make it that large, and retrying cannot shrink stored data. BEGIN and
+  // COMMIT/ROLLBACK keep the 503 default, because an oversized control response is
+  // a transport anomaly and a COMMIT outcome must not be reported as a limit error.
+  async pipeline(requests, baton = undefined, timeoutMs = 1_000, oversized = databaseFailure) {
     const response = await this.fetchImpl(this.url, {
       method: "POST",
       redirect: "error",
@@ -136,10 +141,17 @@ export class TursoHttpTransport {
       }
       throw databaseFailure();
     });
+    if (!response.ok) {
+      try { await response.body?.cancel(); } catch { /* the failure is already terminal */ }
+      throw databaseFailure();
+    }
     const declared = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw databaseFailure();
+    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+      try { await response.body?.cancel(); } catch { /* the failure is already terminal */ }
+      throw oversized();
+    }
     const text = await response.text();
-    if (!response.ok || text.length > MAX_RESPONSE_BYTES) throw databaseFailure();
+    if (text.length > MAX_RESPONSE_BYTES) throw oversized();
     let body;
     try { body = JSON.parse(text); } catch { throw databaseFailure(); }
     if (
@@ -186,6 +198,7 @@ class TursoHttpTransaction {
       statements.map(executeRequest),
       this.baton,
       Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
+      binaryLimitExceeded,
     );
     if (!body.baton) throw databaseFailure();
     this.baton = body.baton;

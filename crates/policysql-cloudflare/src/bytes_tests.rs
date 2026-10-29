@@ -284,3 +284,47 @@ fn oversized_physical_blob_is_a_limit_error_at_the_result_abi() {
         runtime.release_execution(handle);
     }
 }
+
+// Regression (PR #23 review): several in-limit BLOB rows can push the raw result
+// past the private ABI bound. That is a result-size limit (413), not an invalid
+// client envelope (400), on both the atomic and interactive paths.
+#[test]
+fn oversized_raw_result_of_in_limit_blobs_is_a_limit_error() {
+    let runtime = super::PolicySqlRuntime::new(
+        CATALOG,
+        POLICY,
+        "bytes_schema",
+        "bytes_policy",
+        r#"{"max_rows":100,"max_result_bytes":1000000,"timeout_ms":1000,"max_statements":8}"#,
+    )
+    .unwrap_or_else(|_| unreachable!("valid runtime"));
+    let auth = r#"{"subject":"u","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_a"}}"#;
+    let blob = json!({
+        "type": "blob",
+        "base64": policysql_core::bytes::encode(&vec![0; policysql_core::bytes::MAX_BYTES_PER_VALUE]),
+    });
+    let compiled: Value = serde_json::from_str(&runtime.compile_json(
+        auth,
+        &json!({"statements":[{"sql":"SELECT state FROM projects","params":{}}]}).to_string(),
+        "execute",
+    ))
+    .unwrap_or_else(|_| unreachable!());
+    let handle = compiled["executionHandle"]
+        .as_u64()
+        .unwrap_or_else(|| unreachable!("{compiled}"));
+    let raw = json!({
+        "columns": ["state"],
+        "rows": vec![vec![blob]; 4],
+        "affectedRows": 0
+    })
+    .to_string();
+    assert!(raw.len() > super::MAX_REQUEST_BYTES);
+    let output: Value = serde_json::from_str(&runtime.validate_result_json(handle, 0, &raw))
+        .unwrap_or_else(|_| unreachable!());
+    assert_eq!(
+        output["error"]["code"].as_str(),
+        Some("POLICYSQL_LIMIT_EXCEEDED"),
+        "{output}"
+    );
+    runtime.release_execution(handle);
+}

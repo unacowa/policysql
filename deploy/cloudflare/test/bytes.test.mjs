@@ -297,3 +297,24 @@ for (const hooks of [false, true]) test(`oversized physical BLOB returns 413 and
   assert.equal(physical(h, "undo-oversize"), undefined);
   assert.ok(h.events.some(event => event.sql === "ROLLBACK"));
 });
+
+// Regression (PR #23 review): in-limit BLOB rows whose raw result exceeds the private
+// result ABI bound, and a BLOB large enough to exceed the Hrana response bound, are
+// result-budget failures (413) that roll back, not 400 or retryable 503.
+for (const hooks of [false, true]) test(`large BLOB results are 413 at every result bound (hooks=${hooks})`, async t => {
+  const h = await harness(t, { hooks, fixture });
+  const db = h.databases.get("a").database;
+  const { tenant_id: tenant } = db.prepare("SELECT tenant_id FROM projects WHERE id='seed'").get();
+  const add = db.prepare("INSERT INTO projects(id,tenant_id,name,state,seed) VALUES(?,?,?,?,x'')");
+  // Four in-limit values: under the 2 MiB Hrana bound, over the 1 MiB result ABI bound.
+  for (const id of ["max1", "max2", "max3", "max4"]) add.run(id, tenant, "max", Buffer.alloc(MAX_BYTES_PER_VALUE, 255));
+  add.run("huge", tenant, "huge", Buffer.alloc(2 * 1024 * 1024));
+  for (const name of ["max", "huge"]) {
+    const read = { sql: "SELECT state FROM projects WHERE name=:name", params: { name } };
+    const result = await execute(h, [insert(`undo-${name}`, "AA=="), read]);
+    assert.equal(result.status, 413, `${name}: ${JSON.stringify(result.body.error ?? result.body.results?.[1]?.rowCount)}`);
+    assert.equal(result.body.error.code, "POLICYSQL_LIMIT_EXCEEDED", name);
+    assert.equal(result.body.results, undefined);
+    assert.equal(physical(h, `undo-${name}`), undefined);
+  }
+});
