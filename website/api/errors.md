@@ -73,6 +73,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_DATABASE_REQUIRED` | 500 | ラッパーが必須のDB引数を渡していない |
 | `POLICYSQL_DATABASE_UNAVAILABLE` | 503 | database adapterまたはtransaction ownerを利用できない |
 | `POLICYSQL_COST_ADMISSION_UNAVAILABLE` | 503 | cost admissionを一時的に実行できない |
+| `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` | 503 | commitを送った後に結果を確定できない（transaction ownerの喪失、ownerの記録の保存失敗、COMMIT中の通信エラー）。commit済みの可能性があるため、拒否ではなく結果不明として扱う |
 | `POLICYSQL_TIMEOUT` | 504 | database実行がtimeoutした |
 | `POLICYSQL_DATABASE_TIMEOUT` | 504 | DB接続準備・実行・commit確認の期限を超えた |
 

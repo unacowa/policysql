@@ -8,7 +8,7 @@
 import {
   durableObjectTransactionOwnerClass, durableObjectTransactionOwners,
 } from "../../src/adapters/durable-objects.ts";
-import { OwnerLostError } from "./memory-owner.mjs";
+import { OwnerLostError, faultedPut } from "./memory-owner.mjs";
 
 /**
  * `dependencies(name)` returns the ports for a new object of `name`; `env` is what the
@@ -16,12 +16,13 @@ import { OwnerLostError } from "./memory-owner.mjs";
  */
 export const createSimulatedDurableObjects = (dependencies, { background = { run() {} }, env = {} } = {}) => {
   const objects = new Map();
+  let putHook = null;
   let constructing = null;
   const ObjectClass = durableObjectTransactionOwnerClass(() => dependencies(constructing));
 
   // One DurableObjectState per incarnation over the object's persistent data, revoked when
   // the platform discards that incarnation.
-  const state = (slot) => {
+  const state = (name, slot) => {
     const life = { live: true };
     const alive = () => { if (!life.live) throw new OwnerLostError("object reset"); };
     return {
@@ -30,20 +31,30 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
         waitUntil(task) { background.run(task); },
         storage: {
           async get(key) { alive(); return structuredClone(slot.data.get(key)); },
-          async put(key, value) { alive(); slot.data.set(key, structuredClone(value)); },
+          async put(key, value) {
+            alive();
+            faultedPut(putHook, { name, key, value, write: (next) => slot.data.set(key, next), lose: () => lose(name) });
+          },
           async setAlarm(atMs) { alive(); slot.alarmAt = atMs; },
         },
       },
     };
   };
   const incarnate = (name, slot) => {
-    const objectState = state(slot);
+    const objectState = state(name, slot);
     constructing = name;
     try {
       return { life: objectState.life, object: new ObjectClass(objectState.value, env) };
     } finally {
       constructing = null;
     }
+  };
+
+  const lose = (name) => {
+    const slot = objects.get(name);
+    if (!slot) throw new Error(`no object ${name}`);
+    slot.owner.life.live = false;
+    slot.owner = incarnate(name, slot);
   };
 
   const lookups = { idFromName: 0, get: 0 };
@@ -98,12 +109,9 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
     /** The next message's body reaches the object only after `ms`. */
     delayNextBody(ms) { nextBodyDelayMs = ms; },
     /** The platform resets the object: storage and alarm survive, memory does not. */
-    lose(name) {
-      const slot = objects.get(name);
-      if (!slot) throw new Error(`no object ${name}`);
-      slot.owner.life.live = false;
-      slot.owner = incarnate(name, slot);
-    },
+    lose,
+    /** Every later storage put passes through `hook` (see `faultedPut`); null removes it. */
+    interceptPut(hook) { putHook = hook; },
     /** The platform delivers the pending alarm to the live object. */
     async fireTimer(name) {
       const slot = objects.get(name);

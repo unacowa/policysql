@@ -152,7 +152,14 @@ paths:
   /v1/transactions/{transactionId}/commit:
     post:
       operationId: commitTransaction
-      description: Requires session access `execute` and the transaction's immutable session fingerprint.
+      description: >-
+        Requires session access `execute` and the transaction's immutable session fingerprint.
+        Repeating the identical commit command replays its recorded terminal response. When
+        COMMIT may have been sent but its outcome is not recorded (the transaction owner was
+        lost, its record could not be stored, or the database connection failed during
+        COMMIT), the commit and every repetition of it answer 503
+        POLICYSQL_COMMIT_OUTCOME_UNKNOWN. That code is never a rejection: the transaction may
+        have committed. A 409 answers only a commit whose COMMIT was never sent.
       parameters:
         - $ref: '#/components/parameters/TransactionId'
         - $ref: '#/components/parameters/Role'
@@ -165,6 +172,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TransactionState'
+        '503':
+          description: >-
+            POLICYSQL_COMMIT_OUTCOME_UNKNOWN (the commit outcome is unknown and the
+            transaction may have committed), or another temporary dependency failure such as
+            POLICYSQL_DATABASE_UNAVAILABLE. Neither is a rejection of the commit.
+          headers:
+            PolicySQL-Request-Id: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         default:
           $ref: '#/components/responses/Error'
   /v1/transactions/{transactionId}/rollback:

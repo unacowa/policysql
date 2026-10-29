@@ -225,6 +225,27 @@ for (const outcome of ["unknown", "rejected"]) test(`destroy preserves an actual
   assert.equal(requests.some(r => r.path.endsWith("/rollback")), false);
 });
 
+test("a COMMIT whose outcome the owner cannot know is unknown to Kysely and never rolled back (#48)", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const h = await harness(t, { hooks: false });
+  // The remote database applies each COMMIT, and the reply to it is lost.
+  h.afterDatabaseStatement(({ sql }) => { if (sql === "COMMIT") throw new Error("connection reset"); });
+  const { db, requests } = await makeClient(t, h);
+  const unknown = (error) => error.code === "POLICYSQL_OUTCOME_UNKNOWN" && error.phase === "commit" &&
+    error.cause?.code === "POLICYSQL_COMMIT_OUTCOME_UNKNOWN" && error.cause.status === 503;
+  // Controlled transaction: the same commit is confirmed again, and stays unknown.
+  const trx = await db.startTransaction().execute();
+  await update(trx, "Controlled").execute();
+  await assert.rejects(trx.commit().execute(), unknown);
+  await assert.rejects(trx.commit().execute(), (error) => unknown(error) && error.lastError?.cause?.code === "POLICYSQL_COMMIT_OUTCOME_UNKNOWN");
+  assert.equal(trx.isCommitted, false);
+  assert.equal(h.rows("a")[0].name, "Controlled");
+  // Callback transaction: Kysely's rollback-on-error path does not reverse the commit.
+  await assert.rejects(db.transaction().execute(async (inner) => { await update(inner, "Callback").execute(); }), unknown);
+  assert.equal(h.rows("a")[0].name, "Callback");
+  assert.equal(requests.some((request) => request.path.endsWith("/rollback")), false);
+});
+
 test("interactive statement limit and revoked DB binding prevent commit", async (t) => {
   const h = await harness(t, { hooks: false });
   const { db } = await makeClient(t, h);

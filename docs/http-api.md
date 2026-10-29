@@ -239,6 +239,23 @@ POST /v1/transactions/{transactionId}/rollback
 
 Each interactive statement request is scalar and sequenced because it depends on prior results. Clients cannot send SQL transaction-control statements.
 
+Repeating the identical commit command replays its recorded terminal response. The owner
+persists a `committing` record (with the commit's sequence and payload digest) before it
+sends COMMIT, and writes the terminal record (`committed`, the next sequence, and the reply)
+in one put. When COMMIT may have been sent but its outcome is not recorded (the owner was
+lost after COMMIT, the terminal put failed, or the database connection failed during COMMIT),
+the commit and every repetition of it return 503 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`
+([ADR 0007](adr/0007-transaction-retry-and-commit-check-protocol.md), issue #48). That code
+is never a rejection: clients treat it as an unknown outcome. A commit is rejected (409) only
+when its COMMIT was never sent, for example after owner loss or expiry before the commit, or
+when a commit check rejects it. This also holds across a deployment that changes the
+snapshot: for a commit command only, the owner accepts a caller that differs from the
+transaction in nothing but the snapshot (same principal, subject, role, session, and database
+scope, id, and generation), and if that commit's COMMIT was sent it answers with the recorded
+reply or the unknown outcome.
+Another principal or database is rejected as before, and every other command requires the
+current snapshot. The order of the checks is in ADR 0007.
+
 ## Catalog and capabilities
 
 `GET /v1/catalog` returns the role-visible logical schema. `GET /v1/capabilities` advertises accepted SQL surface, transaction support, and enforced limits. Generated clients pin requests with the Catalog `schemaVersion` and `policyVersion`.
