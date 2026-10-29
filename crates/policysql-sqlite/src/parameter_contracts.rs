@@ -50,7 +50,8 @@ impl ClientParameterContract {
     }
 
     /// Catalog columns whose value contract every supplied value must satisfy
-    /// (column-adjacent comparisons, `IN` lists, and direct assignments).
+    /// (column-adjacent comparisons, `IN` lists, and direct assignments),
+    /// listed once per catalog column identity regardless of usage.
     #[must_use]
     pub fn constraining_columns(&self) -> &[BoundColumn] {
         &self.columns
@@ -428,7 +429,7 @@ impl Visitor<'_> {
         }
         contract.nullable &= nullable;
         if let Some(column) = column
-            && !contract.columns.contains(column)
+            && !contract.columns.iter().any(|known| known.id == column.id)
         {
             contract.columns.push(column.clone());
         }

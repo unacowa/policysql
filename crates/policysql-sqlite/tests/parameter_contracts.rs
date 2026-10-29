@@ -33,6 +33,7 @@ resources:
           columns: [id, name, state, note, amount]
           filter: { tenant_id: { eq: { session: tenant_id } } }
           limit: 100
+          allow_aggregations: true
         insert:
           columns: [id, name, state, note, amount]
           presets: { tenant_id: { session: tenant_id } }
@@ -46,6 +47,13 @@ resources:
         delete:
           filter: { tenant_id: { eq: { session: tenant_id } } }
           returning: { columns: [id] }
+  tasks:
+    roles:
+      member:
+        select:
+          columns: [id, project_id, name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          limit: 100
 ";
 
 fn snapshot() -> SnapshotId {
@@ -56,8 +64,36 @@ fn name(value: &str) -> ClientParameterName {
     ClientParameterName::new(value).unwrap_or_else(|_| unreachable!())
 }
 
+fn name_constraint() -> ValueConstraints {
+    ValueConstraints {
+        min_length: Some(2),
+        max_length: Some(4),
+        ..ValueConstraints::default()
+    }
+}
+
 /// `projects` column ids: 1 `id`, 2 `tenant_id`, 3 `name`, 4 `state`, 5 `note`, 6 `amount`.
+/// `tasks` columns: `id`, `tenant_id`, `project_id`, `name` (same 2..=4 contract).
 fn catalog() -> Catalog {
+    let tasks = ResourceDescriptor::new(
+        ResourceId::new(2).unwrap_or_else(|_| unreachable!()),
+        ResourceName::new("tasks").unwrap_or_else(|_| unreachable!()),
+        ["id", "tenant_id", "project_id", "name"].map(|column| {
+            (
+                ColumnName::new(column).unwrap_or_else(|_| unreachable!()),
+                ValueDescriptor {
+                    logical_type: LogicalType::String,
+                    representation: ValueRepresentation::String,
+                    nullable: false,
+                    format: None,
+                    storage: None,
+                    constraints: (column == "name").then(name_constraint),
+                    json_schema: None,
+                },
+            )
+        }),
+    )
+    .unwrap_or_else(|error| unreachable!("fixture resource: {error}"));
     let resource = ResourceDescriptor::new(
         ResourceId::new(1).unwrap_or_else(|_| unreachable!()),
         ResourceName::new("projects").unwrap_or_else(|_| unreachable!()),
@@ -79,18 +115,14 @@ fn catalog() -> Catalog {
                     nullable: matches!(column, "state" | "note" | "amount"),
                     format: None,
                     storage: None,
-                    constraints: (column == "name").then(|| ValueConstraints {
-                        min_length: Some(2),
-                        max_length: Some(4),
-                        ..ValueConstraints::default()
-                    }),
+                    constraints: (column == "name").then(name_constraint),
                     json_schema: None,
                 },
             )
         }),
     )
     .unwrap_or_else(|error| unreachable!("fixture resource: {error}"));
-    Catalog::new(snapshot(), [resource]).unwrap_or_else(|_| unreachable!())
+    Catalog::new(snapshot(), [resource, tasks]).unwrap_or_else(|_| unreachable!())
 }
 
 fn column(id: u32) -> BoundColumn {
@@ -346,7 +378,31 @@ fn analysis_reports_types_constraints_and_conflicts() {
     assert_eq!(contracts[&name("v")].logical_type(), LogicalType::String);
     assert_eq!(contracts[&name("n")].logical_type(), LogicalType::Number);
     assert_eq!(contracts[&name("v")].constraining_columns().len(), 1);
-    assert!(contracts[&name("limit")].constraining_columns().is_empty());
+    assert_eq!(
+        contracts[&name("limit")].constraining_columns(),
+        &[] as &[BoundColumn]
+    );
+
+    // One entry per column identity even when usages differ (write vs filter).
+    for (sql, expected) in [
+        ("UPDATE projects SET name=:v WHERE name=:v", 1),
+        (
+            "UPDATE projects SET name=:v WHERE name=:v OR name IN (:v)",
+            1,
+        ),
+        ("UPDATE projects SET name=:v WHERE id=:v", 2),
+    ] {
+        let statement = bind(sql, &catalog);
+        let analysis = analyze_client_parameters(&statement, &catalog);
+        let contracts = analysis.contracts().unwrap_or_else(|_| unreachable!());
+        let columns = contracts[&name("v")].constraining_columns();
+        assert_eq!(columns.len(), expected, "{sql}: {columns:?}");
+        let ids = columns
+            .iter()
+            .map(|column| column.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), columns.len(), "{sql}");
+    }
 
     let conflicting = BoundStatement::Select(Box::new(select(Some(BoundExpr::And(
         Box::new(BoundExpr::Equal(
@@ -469,6 +525,10 @@ fn acceptance_regressions_are_unchanged() {
         "UPDATE projects SET name=:v",
         "INSERT INTO projects (id, name) VALUES ('p1', :v)",
         "DELETE FROM projects WHERE name=:v",
+        "SELECT p.id FROM projects p WHERE EXISTS (SELECT 1 FROM tasks t WHERE t.project_id = p.id AND t.name = :v)",
+        "SELECT p.id FROM projects p JOIN tasks t ON t.project_id = p.id AND t.name = :v",
+        "SELECT p.id FROM projects p LEFT JOIN tasks t ON t.project_id = p.id AND :v = t.name",
+        "SELECT name, COUNT(*) AS c FROM projects GROUP BY name HAVING name = :v",
     ] {
         for (value, accepted) in [("a", false), ("abc", true), ("abcde", false)] {
             let result = compile(sql, &[("v", text(value))]);
