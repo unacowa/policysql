@@ -57,7 +57,8 @@ its transport without starting a transaction or executing SQL. PolicySQL owns BE
 verified statement execution, result validation, commit, and rollback.
 
 The wrapper owns environment/subject/tenant/DB authorization, registration, URL and
-credential management, and schema compatibility. It may use its own authorization
+credential management, schema compatibility, and request-rate limiting
+([ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)). It may use its own authorization
 service, trusted routing configuration, or verified token claims to select a DB. That
 choice is outside the injection API. Never accept an arbitrary client-supplied DB ID,
 URL, or credential reference as authorization.
@@ -139,7 +140,9 @@ The DO namespace is private trusted infrastructure, not a public forwarding endp
 
 For callback requests, the wrapper uses the separate `app.fetchCallback(request, env,
 context)` method. It accepts only POST `/v1/commit-checks/cval_<id>/query`; other routes
-return 404. The owner checks the opaque capability and its saved binding. No new DB is
+return 404. Conversely, `app.fetch` never serves the callback route, including
+percent-encoded paths that decode to it; they return 404 before the body is read
+([ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)). The owner checks the opaque capability and its saved binding. No new DB is
 chosen or connected, and this entrypoint cannot execute ordinary requests without a DB.
 Changing to a validator role never reselects the database.
 

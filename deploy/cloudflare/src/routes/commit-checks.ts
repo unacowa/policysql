@@ -7,6 +7,11 @@ const VALIDATION_ID = /^cval_[a-f0-9]{32}$/u;
 
 export const registerCommitCheckRoutes = (app: Hono<AppEnv>) => {
   app.post("/v1/commit-checks/:validationId/query", async (context) => {
+    // Only fetchCallback serves callbacks. Through fetch (for example a percent-encoded
+    // path that the router decodes to this route) it is not found, before any body read.
+    if (context.env.callback !== true) {
+      throw new HttpError(404, "POLICYSQL_NOT_FOUND", "Endpoint not found.");
+    }
     const validationId = context.req.param("validationId");
     if (!VALIDATION_ID.test(validationId)) {
       throw new HttpError(404, "POLICYSQL_NOT_FOUND", "Endpoint not found.");

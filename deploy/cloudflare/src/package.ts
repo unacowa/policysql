@@ -11,6 +11,8 @@ export { createApp } from "./app.ts";
 export type { PolicySqlApp } from "./app.ts";
 export { TransactionOwnerCore } from "./transaction-owner.ts";
 export { TursoHttpTransport } from "./turso-http.ts";
+export { createErrorResponse } from "./errors.ts";
+export type { ErrorResponseOptions } from "./errors.ts";
 export type {
   DatabaseBinding, DatabaseProvider, DatabaseTransport, DatabaseTransportOptions,
   DatabaseTransaction, DatabaseResult, DatabaseUsage,

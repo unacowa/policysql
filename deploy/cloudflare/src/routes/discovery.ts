@@ -7,7 +7,7 @@ import type { AppDependencies, AppEnv } from "../types.ts";
 import { checkDatabaseBinding } from "../database.ts";
 
 export const registerDiscoveryRoutes = (app: Hono<AppEnv>, dependencies: AppDependencies) => {
-  app.get("/v1/capabilities", authorize("catalog", "capabilities"), runtimeContext(dependencies), async (context) => {
+  app.get("/v1/capabilities", authorize("catalog"), runtimeContext(dependencies), async (context) => {
     const runtime = context.get("runtime");
     await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, runtime.snapshot);
     const headers = snapshotHeaders(runtime);
@@ -15,7 +15,7 @@ export const registerDiscoveryRoutes = (app: Hono<AppEnv>, dependencies: AppDepe
     return jsonResponse(context, capabilities(runtime, dependencies.publicConfig), 200, headers);
   });
 
-  app.get("/v1/catalog", authorize("catalog", "catalog"), runtimeContext(dependencies), async (context) => {
+  app.get("/v1/catalog", authorize("catalog"), runtimeContext(dependencies), async (context) => {
     const runtime = context.get("runtime");
     await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, runtime.snapshot);
     const headers = snapshotHeaders(runtime);

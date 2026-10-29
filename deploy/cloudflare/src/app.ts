@@ -75,7 +75,7 @@ export const createApp = (dependencies: AppDependencies): PolicySqlApp => {
       if (request.method !== "POST" || !/^\/v1\/commit-checks\/cval_[a-f0-9]{32}\/query$/.test(new URL(request.url).pathname)) {
         return Response.json({ error: { code: "POLICYSQL_NOT_FOUND", message: "Endpoint not found." } }, { status: 404 });
       }
-      return app.fetch(request, { deployment: env }, executionContext);
+      return app.fetch(request, { deployment: env, callback: true }, executionContext);
     },
   };
 };

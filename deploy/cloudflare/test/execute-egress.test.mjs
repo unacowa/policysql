@@ -133,7 +133,6 @@ test("Explain exposes role-visible resource names instead of internal identities
     }),
     {
       ...authEnv,
-      POLICYSQL_RATE_LIMITER: { async limit() { return { success: true }; } },
     },
     {},
     testBinding(getRuntime().snapshot),
@@ -179,7 +178,6 @@ const executeRequest = async ({
       ...authEnv,
       TURSO_DATABASE_URL: "https://db.test",
       TURSO_AUTH_TOKEN: "secret",
-      POLICYSQL_RATE_LIMITER: { async limit() { return { success: true }; } },
     },
     {},
     testBinding(runtime.snapshot),

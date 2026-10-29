@@ -42,11 +42,45 @@ Configure alerts in the production account for:
 - p95 CPU above 40 ms or any CPU limit termination;
 - actual rows read above the admission upper bound, or daily Turso usage above 80% of budget;
 - any `transaction_owner_unavailable` owner-loss event, or active/terminal count mismatch;
-- JWKS, rate-limit, cost-admission, or Turso availability errors for three consecutive minutes.
+- JWKS, cost-admission, or Turso availability errors for three consecutive minutes;
+- any wrapper `rate_limiter_missing` or `rate_limiter_failed` event, and a sustained 429
+  `POLICYSQL_RATE_LIMITED` rate above the seven-day baseline (separately for the client
+  and callback routes; callback 429s also surface as commit-check failures).
+
+## Rate limiting
+
+Rate limiting is owned by the wrapper (`deploy/cloudflare/wrapper/rate-limit.ts`), not the
+PolicySQL library ([ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)). Every request is limited
+before it reaches the library, by one of two Cloudflare Rate Limiting bindings declared in
+`wrangler.jsonc`:
+
+| Binding | Requests | Key | Default |
+| --- | --- | --- | --- |
+| `RATE_LIMITER` | client API, `/healthz`, unknown paths | `ip:<cf-connecting-ip>` | 100 per 60 s |
+| `CALLBACK_RATE_LIMITER` | `/v1/commit-checks/...` validator callbacks | `callback:<cf-connecting-ip>` | 1000 per 60 s |
+
+A limited client request does no JWT, WASM, SQL, or database work. A limited callback does no
+body parse and no Durable Object lookup or storage read. The callback capability is checked only
+inside the owner, so this limit, not the capability, bounds what unauthenticated callback spam
+can cost. The separate bucket keeps client traffic from starving the validator. Size the callback
+limit for peak commit-check traffic from the validator's addresses.
+
+Both return 429 `POLICYSQL_RATE_LIMITED` with `Retry-After: 60`, which equals each binding's
+`period` (`CLIENT_RATE_LIMIT` / `CALLBACK_RATE_LIMIT` in code; `rate-limit.test.mjs` fails if
+`wrangler.jsonc` and the code disagree). The library itself never sends `Retry-After`.
+
+The wrapper fails closed: if a binding is missing or throws, the requests it covers return 500
+`POLICYSQL_INTERNAL` and log `rate_limiter_missing` / `rate_limiter_failed` with the binding
+name. A missing callback binding makes commits with commit checks fail closed. Restore the
+binding (or roll back) rather than deleting it; a deployment that limits at a WAF instead must
+remove the wrapper step in code. To change limits, edit `simple.limit`/`period` in
+`wrangler.jsonc` and the matching constant together, then redeploy.
 
 ## Incident drills
 
 - Expired/revoked JWT: expect 401 before compilation or database access.
+- Rate limit exhausted: expect 429 `POLICYSQL_RATE_LIMITED` with `Retry-After` from the wrapper,
+  with no JWT verification, compilation, or database call.
 - Turso outage/token revocation: expect normalized 503/504 and rollback, with no raw error exposed.
 - Durable Object replacement: stored `active` state without its in-memory baton becomes `failed`;
   Turso expires and rolls back the orphaned transaction. It is never reconstructed as active.

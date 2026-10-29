@@ -21,7 +21,7 @@
 ## Implementation checks
 
 - Parse raw HTTP headers and JSON before framework normalization hides duplicates.
-- Apply request-size and rate limits before expensive JWT, SQL, or YAML processing where possible.
+- Apply request-size limits before expensive JWT, SQL, or YAML processing where possible. Request-rate limits belong to the wrapper, ahead of `app.fetch` and therefore ahead of JWT verification and WASM initialization ([ADR 0018](../adr/0018-wrapper-owned-rate-limiting.md)); the library has no limiter and sends no `Retry-After`.
 - Emit `Vary: Authorization, PolicySQL-Role` where an HTTP cache can observe authenticated responses, and never use shared caching for Catalog.
 - Validate OpenAPI and every JSON Schema in CI; parse every documentation JSON/YAML example.
 - Use CSP, immutable hashed assets, HTTPS, and a static host for published documentation; keep preview servers inside a trusted development network.

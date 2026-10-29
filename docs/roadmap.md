@@ -55,7 +55,7 @@
 - catalog refresh/versioning;
 - audit events;
 - metrics and tracing;
-- rate limiting;
+- rate limiting (a wrapper responsibility; see ADR 0018);
 - fuzzing and parser differential tests.
 
 ## Phase 6 — Cloudflare/Turso operational deployment
@@ -66,7 +66,7 @@
 - Turso usage estimation, admission, and actual rows read/write reconciliation;
 - Durable Object transaction ownership and owner-loss handling;
 - staging and production configuration separation;
-- observability, rate limits, runbooks, staged rollout, and rollback;
+- observability, wrapper-owned rate limits (ADR 0018), runbooks, staged rollout, and rollback;
 - persistent deployment and real-environment curl acceptance suite.
 
 This phase follows

@@ -17,7 +17,6 @@ export type WorkerBindings = {
   POLICYSQL_PUBLIC_BASE_URL?: string;
   POLICYSQL_COST_CATALOG_JSON?: string;
   POLICYSQL_IDEMPOTENCY_SECRET?: string;
-  POLICYSQL_RATE_LIMITER: { limit(input: { key: string }): Promise<{ success: boolean }> };
   TRANSACTION_OWNER: DurableObjectNamespace;
   [key: string]: unknown;
 };
@@ -54,7 +53,12 @@ export type AppVariables = {
 };
 
 export type AppEnv = {
-  Bindings: { deployment: WorkerBindings; databaseBinding?: import("./database.ts").DatabaseBinding };
+  Bindings: {
+    deployment: WorkerBindings;
+    databaseBinding?: import("./database.ts").DatabaseBinding;
+    /** Set only by `fetchCallback`; the commit-check route is not served through `fetch`. */
+    callback?: true;
+  };
   Variables: AppVariables;
 };
 

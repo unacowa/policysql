@@ -288,10 +288,18 @@ components:
               sequence: { type: integer, minimum: 1 }
   responses:
     Error:
-      description: Request failed without exposing protected SQL or hidden metadata.
+      description: >-
+        Request failed without exposing protected SQL or hidden metadata. Request-rate
+        limiting is a wrapper responsibility: the wrapper in front of the library may
+        answer 429 POLICYSQL_RATE_LIMITED in this same shape before the library runs.
       headers:
         PolicySQL-Request-Id: { schema: { type: string } }
-        Retry-After: { schema: { type: string } }
+        Retry-After:
+          description: >-
+            Never set by the PolicySQL library. A wrapper may set it on the 429
+            POLICYSQL_RATE_LIMITED responses it emits before the library runs; the
+            reference wrapper sends the rate-limit period in seconds.
+          schema: { type: string }
       content:
         application/json:
           schema:
