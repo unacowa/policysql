@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { initSync, PolicySqlRuntime } from "../pkg/policysql_cloudflare.js";
+import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
 
-initSync({ module: readFileSync(new URL("../pkg/policysql_cloudflare_bg.wasm", import.meta.url)) });
+initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 
 const runtime = PolicySqlRuntime.newWithPhysicalSchema(
   readFileSync(new URL("../config/catalog.yaml", import.meta.url), "utf8"),

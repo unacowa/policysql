@@ -5,7 +5,7 @@
   "scripts": {
     "stage:policy": "node scripts/stage-policy.mjs",
     "catalog:build": "node scripts/catalog-build.mjs",
-    "build:wasm": "npm run stage:policy && wasm-pack build ../../crates/policysql-cloudflare --release --target web --out-dir ../../deploy/cloudflare/pkg",
+    "build:wasm": "npm run stage:policy && wasm-pack build ../../crates/policysql-wasm --release --target web --out-dir ../../deploy/cloudflare/pkg",
     "check": "tsc --noEmit",
     "verify": "npm run check && npm test && npm --prefix ../.. run check:package",
     "predeploy:dry": "npm run check && npm run stage:policy",

@@ -1,4 +1,4 @@
-import type { PolicySqlRuntime } from "../pkg/policysql_cloudflare.js";
+import type { PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 
 /**
  * The trusted session a wrapper passes per request after it has authenticated the caller

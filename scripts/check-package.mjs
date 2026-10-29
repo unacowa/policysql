@@ -9,8 +9,8 @@ const included = new Set(packed.files.map(file => file.path));
 const required = [
   ...Object.values(manifest.exports).flatMap(value => typeof value === "string" ? [value] : Object.values(value)),
   ...Object.values(manifest.bin),
-  "deploy/cloudflare/pkg/policysql_cloudflare.js",
-  "deploy/cloudflare/pkg/policysql_cloudflare_bg.wasm",
+  "deploy/cloudflare/pkg/policysql_wasm.js",
+  "deploy/cloudflare/pkg/policysql_wasm_bg.wasm",
   "deploy/cloudflare/src/binary.ts",
   "deploy/cloudflare/src/driver-values.ts",
 ];

@@ -1,4 +1,4 @@
-/* @ts-self-types="./policysql_cloudflare.d.ts" */
+/* @ts-self-types="./policysql_wasm.d.ts" */
 
 export class PolicySqlRuntime {
     static __wrap(ptr) {
@@ -266,7 +266,7 @@ function __wbg_get_imports() {
     };
     return {
         __proto__: null,
-        "./policysql_cloudflare_bg.js": import0,
+        "./policysql_wasm_bg.js": import0,
     };
 }
 
@@ -440,7 +440,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('policysql_cloudflare_bg.wasm', import.meta.url);
+        module_or_path = new URL('policysql_wasm_bg.wasm', import.meta.url);
     }
     const imports = __wbg_get_imports();
 

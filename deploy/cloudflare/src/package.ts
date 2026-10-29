@@ -1,8 +1,8 @@
-import { initSync, PolicySqlRuntime } from "../pkg/policysql_cloudflare.js";
+import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 // Wrangler turns an imported Wasm module into WebAssembly.Module; wasm-pack's generated
 // declaration describes raw exports instead, so consumers need this bundler-specific override.
 // @ts-ignore
-import wasm from "../pkg/policysql_cloudflare_bg.wasm";
+import wasm from "../pkg/policysql_wasm_bg.wasm";
 import { createApp } from "./app.ts";
 import { runtimeBytesLimit } from "./binary.ts";
 import { TransactionOwnerCore } from "./transaction-owner.ts";

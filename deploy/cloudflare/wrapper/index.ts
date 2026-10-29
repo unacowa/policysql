@@ -1,5 +1,5 @@
-import { initSync, PolicySqlRuntime } from "../pkg/policysql_cloudflare.js";
-import wasm from "../pkg/policysql_cloudflare_bg.wasm";
+import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
+import wasm from "../pkg/policysql_wasm_bg.wasm";
 import catalog from "../config/catalog.yaml";
 import policy from "../config/policy.compiled.yaml";
 import physicalSchema from "../config/schema-introspection.json";

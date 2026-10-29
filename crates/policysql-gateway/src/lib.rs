@@ -49,17 +49,6 @@ impl AuthContext {
     }
 }
 
-pub trait JwtVerifier: Send + Sync {
-    type Error: std::error::Error + Send + Sync + 'static;
-
-    /// Verifies one external credential and canonicalizes its trusted session.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid, ambiguous, expired, or unauthorized credentials.
-    fn verify(&self, credential: &str) -> Result<AuthContext, Self::Error>;
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct StatementRequest {
     pub sql: String,

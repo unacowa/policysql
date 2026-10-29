@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
-import { initSync, PolicySqlRuntime } from "../../pkg/policysql_cloudflare.js";
+import { initSync, PolicySqlRuntime } from "../../pkg/policysql_wasm.js";
 import { createApp } from "../../src/app.ts";
 import { TransactionOwnerCore } from "../../src/transaction-owner.ts";
 import { TursoHttpTransport } from "../../src/turso-http.ts";
@@ -13,7 +13,7 @@ import { createJwtSessionVerifier } from "../../src/adapters/jwt.ts";
 import { createDatabaseRegistry } from "../../../../examples/database-routing/provider.ts";
 import { authenticateRequest, createJwtAuthentication } from "../../../../examples/database-routing/auth.ts";
 
-initSync({ module: readFileSync(new URL("../../pkg/policysql_cloudflare_bg.wasm", import.meta.url)) });
+initSync({ module: readFileSync(new URL("../../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 const example = (name) => readFileSync(new URL(`../../../../examples/database-routing/${name}`, import.meta.url), "utf8");
 const schemaVersion = "schema_routing_1";
 const policyVersion = "policy_routing_1";
