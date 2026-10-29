@@ -354,8 +354,15 @@ test("the gate fails closed: a core result that differs from the reference is a 
   corrupt = null;
   const retried = await statement(1, "p2");
   assert.equal(retried.ok, true, JSON.stringify(retried));
+  // The commit's digest (compared with `commitSent` on a retry, #48) goes through the gate too.
+  corrupt = "command";
+  const gated = await p.engine.commit({ transactionId, bodyText: JSON.stringify({ sequence: 2 }) }, context("req_commit_gate"));
+  assert.equal(gated.error.code, "POLICYSQL_INTERNAL");
+  corrupt = null;
   const committed = await p.engine.commit({ transactionId, bodyText: JSON.stringify({ sequence: 2 }) }, context("req_commit"));
   assert.equal(committed.ok, true, JSON.stringify(committed));
   assert.equal(rows(), before + 1);
-  assert.equal(mismatches().length, 5, "no mismatch when core and the reference agree");
+  assert.deepEqual(mismatches().slice(5), [
+    { event: "identity_mismatch", computation: "command", requestId: "req_commit_gate", core: "value", reference: "value" },
+  ], "one more for the gated commit, none when core and the reference agree");
 });
