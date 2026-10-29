@@ -10,15 +10,20 @@ import type { OutboundFetch } from "./redirects.ts";
 import { runtimeBytesLimit } from "./binary.ts";
 import { validateConfig } from "./engine-config.ts";
 import type { PolicySqlConfig, ValidatedConfig } from "./engine-config.ts";
+import { runInBackground, validateOwnerFacilities } from "./transaction-owner-port.ts";
+import type {
+  OwnerAtomicInput, OwnerBeginInput, OwnerCallbackInput, OwnerCommandInput, OwnerCommandKind,
+  OwnerFacilities, OwnerReply, TransactionOwnerHandle,
+} from "./transaction-owner-port.ts";
 
 const MAX_TRANSACTION_MS = 4_000;
 const MAX_STATEMENTS = 8;
 const MAX_RESULT_BYTES = 64_000;
 
-const json = (body, status = 200) => new Response(JSON.stringify(body), {
-  status,
-  headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
-});
+const COMMAND_KINDS: readonly OwnerCommandKind[] = ["statement", "commit", "rollback"];
+
+const replyRequestId = (requestId: unknown) =>
+  typeof requestId === "string" && requestId !== "" ? requestId : crypto.randomUUID();
 
 const invalid = () => new HttpError(400, "POLICYSQL_INVALID_REQUEST", "The request is invalid.");
 const conflict = () => new HttpError(409, "POLICYSQL_TRANSACTION_CONFLICT", "The transaction command conflicts with its current state.");
@@ -62,8 +67,15 @@ export type TransactionOwnerDependencies = {
   fetchImpl?: OutboundFetch;
 };
 
-export class TransactionOwnerCore {
-  state: any;
+/**
+ * The owner of one transaction name (ADR 0007, ADR 0022). An adapter creates one instance
+ * per live owner, injects its durable store, timer, and background tasks, and delivers every
+ * call for that name to it. The instance serializes client commands on one lane and callback
+ * queries on another, and keeps the open database transaction in memory only, so a
+ * successor after owner loss fails the transaction closed.
+ */
+export class TransactionOwnerCore implements TransactionOwnerHandle {
+  facilities: OwnerFacilities;
   config: ValidatedConfig;
   getRuntime: any;
   fetchImpl?: OutboundFetch;
@@ -74,15 +86,15 @@ export class TransactionOwnerCore {
   database: DatabaseProvider;
 
   /**
-   * The Durable Object platform `env` is not an argument: the wrapper builds the
-   * dependencies from it, the same way it builds them for `createApp`.
+   * `facilities` come from the owner adapter; `dependencies` are the same ports the wrapper
+   * gives `createApp`. No platform object is an argument.
    */
-  constructor(state, dependencies: TransactionOwnerDependencies) {
+  constructor(facilities: OwnerFacilities, dependencies: TransactionOwnerDependencies) {
     if (typeof dependencies?.getRuntime !== "function") throw new TypeError("getRuntime is required");
     validateDatabaseProvider(dependencies.database);
     // Validated before the owner can serve any request, so a bad setting never reaches I/O.
     this.config = validateConfig(dependencies.config);
-    this.state = state;
+    this.facilities = validateOwnerFacilities(facilities);
     this.getRuntime = dependencies.getRuntime;
     this.fetchImpl = dependencies.fetchImpl;
     this.database = dependencies.database;
@@ -117,43 +129,68 @@ export class TransactionOwnerCore {
   }
 
   observeCost(compiled, requestId, binding) {
-    this.state.waitUntil?.(observeCostEnvelope(compiled, this.config.costCatalog, `${requestId}-cost`, this.connectionFactory(binding), runtimeBytesLimit(this.getRuntime())));
+    runInBackground(this.facilities.background,
+      observeCostEnvelope(compiled, this.config.costCatalog, `${requestId}-cost`, this.connectionFactory(binding), runtimeBytesLimit(this.getRuntime())),
+      requestId);
   }
 
-  fetch(request) {
-    if (new URL(request.url).pathname === "/validation-query") {
-      const work = this.validationQueue.then(() => this.validationQueryRequest(request));
-      this.validationQueue = work.catch(() => undefined);
-      return work;
-    }
-    const work = this.queue.then(() => this.route(request));
-    this.queue = work.catch(() => undefined);
-    return work;
+  // Client commands: one at a time, in arrival order.
+  clientLane(requestId: string, status: number, work: () => Promise<unknown>): Promise<OwnerReply> {
+    const run = this.queue.then(async () => {
+      try {
+        return { status, body: await work() };
+      } catch (error) {
+        const response = safeError(error, requestId);
+        return { status: response.status, body: response.body };
+      }
+    });
+    this.queue = run.catch(() => undefined);
+    return run;
   }
 
-  async route(request) {
-    const requestId = request.headers.get("x-policysql-request-id") ?? crypto.randomUUID();
-    try {
-      const body = await request.json().catch(() => { throw invalid(); });
-      const action = new URL(request.url).pathname;
-      if (action === "/begin") return json(await this.begin(body, requestId), 201);
-      if (action === "/atomic") return json(await this.atomic(body, requestId));
-      if (action === "/statement") return json(await this.statement(body, requestId));
-      if (action === "/commit") return json(await this.terminal(body, requestId, "commit"));
-      if (action === "/rollback") return json(await this.terminal(body, requestId, "rollback"));
-      throw invalid();
-    } catch (error) {
-      const response = safeError(error, requestId);
-      return json(response.body, response.status);
-    }
+  begin(input: OwnerBeginInput, requestId: string): Promise<OwnerReply> {
+    const id = replyRequestId(requestId);
+    return this.clientLane(id, 201, () => this.startTransaction(input, id));
   }
 
-  async stored() {
-    return await this.state.storage.get("transaction");
+  atomic(input: OwnerAtomicInput, requestId: string): Promise<OwnerReply> {
+    const id = replyRequestId(requestId);
+    return this.clientLane(id, 200, () => this.executeAtomic(input, id));
+  }
+
+  command(kind: OwnerCommandKind, input: OwnerCommandInput, requestId: string): Promise<OwnerReply> {
+    const id = replyRequestId(requestId);
+    return this.clientLane(id, 200, async () => {
+      if (!COMMAND_KINDS.includes(kind)) throw invalid();
+      return kind === "statement" ? await this.statement(input, id) : await this.terminal(input, id, kind);
+    });
+  }
+
+  // Callback queries: one at a time on their own lane, because they arrive while a commit
+  // on the client lane waits for the validator. Any failure ends the open transaction.
+  callbackQuery(input: OwnerCallbackInput, requestId: string): Promise<OwnerReply> {
+    const id = replyRequestId(requestId);
+    const run = this.validationQueue.then(async () => {
+      try {
+        const authorization = typeof input?.authorization === "string" ? input.authorization : "";
+        return { status: 200, body: await this.validationQuery(input?.command, authorization, id) };
+      } catch (error) {
+        if (this.transaction?.open) await this.close("failed");
+        this.validation = null;
+        const response = safeError(error, id);
+        return { status: response.status, body: response.body };
+      }
+    });
+    this.validationQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  async stored(): Promise<any> {
+    return await this.facilities.store.get("transaction");
   }
 
   async persist(value) {
-    await this.state.storage.put("transaction", value);
+    await this.facilities.store.put("transaction", value);
     return value;
   }
 
@@ -195,7 +232,7 @@ export class TransactionOwnerCore {
     return current;
   }
 
-  async begin(body, requestId) {
+  async startTransaction(body, requestId) {
     if (!exactKeys(body, ["transactionId", "authFingerprint", "startFingerprint", "mode", "auth", "expected", "databaseBinding", "snapshot"], ["transactionId", "authFingerprint", "startFingerprint", "mode", "auth"]) ||
       !/^tx_[a-f0-9]{32}$/.test(body.transactionId) ||
       !/^[a-f0-9]{64}$/.test(body.authFingerprint) ||
@@ -236,7 +273,7 @@ export class TransactionOwnerCore {
       schemaVersion: null,
       policyVersion: null,
     });
-    await this.state.storage.setAlarm(expiresAtMs);
+    await this.facilities.timer.schedule(expiresAtMs);
     console.log(JSON.stringify({ event: "transaction_started", transactionId: value.transactionId, mode: value.mode, requestId }));
     return this.publicState(value, requestId);
   }
@@ -395,7 +432,11 @@ export class TransactionOwnerCore {
     return response;
   }
 
-  async alarm() {
+  /**
+   * Called by the adapter when this owner's timer fires: an open transaction expires. It is
+   * not queued behind the client lane, so expiry also ends a commit that waits on a validator.
+   */
+  async onTimer() {
     const current = await this.stored();
     if (["active", "validating"].includes(current?.status)) await this.close("expired");
   }
@@ -441,19 +482,6 @@ export class TransactionOwnerCore {
       fetchImpl: this.fetchImpl,
       deadlineMs: current.expiresAtMs,
     });
-  }
-
-  async validationQueryRequest(request) {
-    const requestId = request.headers.get("x-policysql-request-id") ?? crypto.randomUUID();
-    try {
-      const body = await request.json().catch(() => { throw invalid(); });
-      return json(await this.validationQuery(body, request.headers.get("authorization"), requestId));
-    } catch (error) {
-      if (this.transaction?.open) await this.close("failed");
-      this.validation = null;
-      const response = safeError(error, requestId);
-      return json(response.body, response.status);
-    }
   }
 
   async validationQuery(command, authorization, requestId) {
@@ -509,7 +537,7 @@ export class TransactionOwnerCore {
     return response;
   }
 
-  async atomic(body, requestId) {
+  async executeAtomic(body, requestId) {
     if (!exactKeys(body, ["validationId", "auth", "request", "idempotency", "databaseBinding", "snapshot"], ["validationId", "auth", "request"]) ||
       !/^cval_[a-f0-9]{32}$/u.test(body.validationId) || typeof body.request !== "string" ||
       (body.idempotency != null && (
@@ -549,7 +577,7 @@ export class TransactionOwnerCore {
     const started = performance.now();
     try {
       await this.persist(current);
-      await this.state.storage.setAlarm(current.expiresAtMs);
+      await this.facilities.timer.schedule(current.expiresAtMs);
       if (body.idempotency) {
         const [existing] = await this.transaction.execute([{
           sql: "SELECT fingerprint, response_json FROM policysql_idempotency WHERE key_hash = :key_hash",

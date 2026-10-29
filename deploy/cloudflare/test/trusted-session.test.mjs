@@ -1,6 +1,6 @@
 // The library receives the trusted session as data and core validates it once (ADR 0019,
 // #33). These tests pass sessions directly, as a wrapper does after authentication.
-import { harness } from "./helpers/routing.mjs";
+import { countingOwners, harness } from "./helpers/routing.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -24,14 +24,10 @@ const endpoints = [
   ["POST", `/v1/transactions/${tx}/rollback`, { sequence: 1 }],
 ];
 
-// Counts Durable Object lookups and records whether the body stream was ever read.
+// Counts transaction owner lookups and records whether the body stream was ever read.
 const probe = (h) => {
-  const counts = { lookups: 0 };
-  const owners = h.env.TRANSACTION_OWNER;
-  const env = { ...h.env, TRANSACTION_OWNER: {
-    idFromName(name) { counts.lookups++; return owners.idFromName(name); },
-    get(id) { counts.lookups++; return owners.get(id); },
-  } };
+  const { counts, port } = countingOwners(h.transactionOwners);
+  const app = h.appWith(port);
   const send = async (method, path, body, session, headers = {}) => {
     let pulled = false;
     const stream = body === undefined ? undefined : new ReadableStream({
@@ -41,7 +37,7 @@ const probe = (h) => {
       method, headers: { "content-type": "application/json", ...headers },
       ...(stream ? { body: stream, duplex: "half" } : {}),
     });
-    const response = await h.app.fetch(request, env, h.ctx, { database: h.binding("a"), session });
+    const response = await app.fetch(request, { database: h.binding("a"), session }, h.background);
     return { status: response.status, body: await response.json(), pulled };
   };
   return { counts, send };
@@ -148,9 +144,9 @@ test("a role outside roles or missing endpoint access is a client-caused 403 bef
 test("the request context accepts only database, session and requestId", async (t) => {
   const h = await harness(t);
   const request = () => new Request("https://worker.test/v1/catalog");
-  const ok = await h.app.fetch(request(), h.env, h.ctx, { database: h.binding("a"), session: h.session("a"), requestId: "req_wrapper_1" });
+  const ok = await h.app.fetch(request(), { database: h.binding("a"), session: h.session("a"), requestId: "req_wrapper_1" });
   assert.equal(ok.status, 200);
-  const denied = await h.app.fetch(request(), h.env, h.ctx, {
+  const denied = await h.app.fetch(request(), {
     database: h.binding("a"), session: h.session("a", { access: ["execute"] }), requestId: "req_wrapper_2",
   });
   assert.equal((await denied.json()).error.requestId, "req_wrapper_2");
@@ -160,7 +156,7 @@ test("the request context accepts only database, session and requestId", async (
     { database: h.binding("a"), session: h.session("a"), requestId: "has space" },
     { database: h.binding("a"), session: h.session("a"), requestId: 7 },
   ]) {
-    const response = await h.app.fetch(request(), h.env, h.ctx, context);
+    const response = await h.app.fetch(request(), context);
     assert.equal(response.status, 500);
     assert.equal((await response.json()).error.code, "POLICYSQL_INTERNAL");
   }

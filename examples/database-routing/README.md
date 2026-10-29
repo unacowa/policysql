@@ -8,8 +8,13 @@ and it verifies no credential. Its API requires:
 const worker = createPolicySqlWorker({
   ...configuration,
   // Called with the Worker's and each Durable Object's env; the library reads no env name.
-  deployment: (env) => ({ database: registry.provider(env), config: configFromEnv(env) }),
+  deployment: (env) => ({
+    database: registry.provider(env),
+    config: configFromEnv(env),
+    transactionOwners: durableObjectTransactionOwners(env.TRANSACTION_OWNER),
+  }),
 });
+export const TransactionOwner = durableObjectTransactionOwnerClass(worker.ownerDependencies);
 const session = await authenticate(request, env); // auth.ts: the JWT identity adapter
 const database = registry.binding(authorizedDatabaseId, env);
 const response = await worker.app.fetch(request, env, context, { database, session });
@@ -83,8 +88,13 @@ wrangler deploy --config examples/database-routing/wrangler.jsonc
 
 ## Callback and transaction ownership
 
-Export `worker.TransactionOwner` as the DO class. Both isolates use the same explicit
-provider; credentials are resolved locally and do not cross internal messages.
+Transaction ownership is a library port ([ADR 0022](../../docs/adr/0022-transaction-owner-port.md)),
+and this wrapper supplies its Durable Objects adapter: `deployment(env)` returns
+`transactionOwners: durableObjectTransactionOwners(env.TRANSACTION_OWNER)` (the binding name
+is this example's, in `wrangler.jsonc`), and `worker.ts` exports
+`durableObjectTransactionOwnerClass(worker.ownerDependencies)` as the DO class
+`TransactionOwner`. Both isolates use the same explicit provider; credentials are resolved
+locally and do not cross internal messages.
 
 The wrapper dispatches validator callbacks to `worker.app.fetchCallback(request, env,
 context)`. That method accepts only the callback route and uses the database already
@@ -182,7 +192,10 @@ verification, Rust/Wasm, HTTP transport,
 and two independent SQLite files. They cover missing DBs, irrelevant JWT DB claims,
 parallel reads/writes, rollback, retries, callbacks, cost observation, owner loss,
 configuration mismatch, credential rotation/revocation, and snapshot changes.
-Cloudflare storage and the remote HTTP server are simulated.
+They run on the library's Durable Objects adapter with simulated Cloudflare routing and
+storage; `npm run test:memory-owner` (in `deploy/cloudflare`) runs them on an in-memory owner
+adapter, and `test/transaction-owner-port.test.mjs` is the port conformance suite for both.
+The remote HTTP server is simulated.
 
 Real Cloudflare/Turso acceptance remains required: record the Worker version, runtime
 snapshot, DB identities, and sanitized results for concurrent A/B reads/writes, atomic

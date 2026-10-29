@@ -2,9 +2,10 @@
 // These env names are this wrapper's convention, kept from earlier releases so existing
 // deployments keep working; the library reads none of them and takes `PolicySqlConfig`.
 import type { CommitCheckEndpoint, PolicySqlConfig } from "../src/engine-config.ts";
-import type { PlatformBindings } from "../src/types.ts";
 
-export type WrapperBindings = PlatformBindings & {
+export type WrapperBindings = {
+  /** The Durable Object namespace this wrapper routes transaction owners to (wrangler.jsonc). */
+  TRANSACTION_OWNER?: DurableObjectNamespace;
   POLICYSQL_ENVIRONMENT?: string;
   POLICYSQL_PUBLIC_BASE_URL?: string;
   POLICYSQL_COST_CATALOG_JSON?: string;

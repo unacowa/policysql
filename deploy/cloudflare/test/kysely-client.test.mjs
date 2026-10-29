@@ -12,7 +12,7 @@ const makeClient = async (t, h, { tenant = "a", session, autoIdempotencyKey, plu
   const trusted = session ?? h.session(tenant);
   const fetchImpl = wrapFetch(async (url, init) => {
     requests.push({ path: new URL(url).pathname, body: JSON.parse(init.body), headers: new Headers(init.headers) });
-    return h.app.fetch(new Request(url, init), h.env, h.ctx, { database: h.binding(tenant), session: trusted });
+    return h.app.fetch(new Request(url, init), { database: h.binding(tenant), session: trusted }, h.background);
   });
   const transport = createHttpTransport({ endpoint: "https://worker.test", fetchImpl });
   const client = new PolicySqlClient({ transport, ...options });
@@ -150,14 +150,14 @@ test("lost begin response is not retried and a caller may explicitly start again
   let callbacks = 0;
   await assert.rejects(db.transaction().setAccessMode("read only").execute(async () => { callbacks++; }), { phase: "begin", code: "POLICYSQL_OUTCOME_UNKNOWN" });
   assert.equal(callbacks, 0);
-  assert.equal(h.owners.size, 1);
+  assert.equal(h.ownerNames().length, 1);
   await db.transaction().setAccessMode("read only").execute(async trx => { callbacks++; await read(trx).execute(); });
   assert.equal(callbacks, 1);
-  assert.equal(h.owners.size, 2);
-  const unused = [...h.owners.values()][0];
-  assert.equal((await unused.state.storage.get("transaction")).statementCount, 0);
-  await unused.owner.alarm();
-  assert.equal((await unused.state.storage.get("transaction")).status, "expired");
+  assert.equal(h.ownerNames().length, 2);
+  const unused = h.ownerNames()[0];
+  assert.equal((await h.ownerRecord(unused)).statementCount, 0);
+  assert.equal(await h.fireTimer(unused), true, "the unused owner's expiry timer is pending");
+  assert.equal((await h.ownerRecord(unused)).status, "expired");
   assert.ok(requests.every(r => !r.headers.has("idempotency-key")));
 });
 
@@ -220,7 +220,7 @@ for (const outcome of ["unknown", "rejected"]) test(`destroy preserves an actual
   assert.equal(callbacks, 1);
   assert.equal(h.rows("a")[0].name, outcome === "unknown" ? "Updated" : "database_a");
   assert.equal(h.events.filter(e => /^UPDATE\b/i.test(e.sql)).length, 1);
-  assert.equal(h.owners.size, 1);
+  assert.equal(h.ownerNames().length, 1);
   assert.deepEqual(requests.map(r => r.body.sequence), [undefined, 1, 2]);
   assert.equal(requests.some(r => r.path.endsWith("/rollback")), false);
 });
@@ -234,7 +234,7 @@ test("interactive statement limit and revoked DB binding prevent commit", async 
   h.env.TENANT_A_ENABLED = "false";
   await assert.rejects(trx.commit().execute());
   // Revocation is detected before forwarding; the owner still expires its uncommitted DB transaction.
-  for (const entry of h.owners.values()) await entry.owner.alarm();
+  for (const name of h.ownerNames()) await h.fireTimer(name);
   assert.equal(h.rows("a")[0].name, "database_a");
 });
 
@@ -244,7 +244,7 @@ test("snapshot change during an interactive transaction rejects commit and rolls
   const trx = await db.startTransaction().execute();
   await update(trx).execute();
   const id = requests[1].path.split("/")[3];
-  h.owners.get(id).owner.getRuntime = () => ({ snapshot: "changed" });
+  h.ownerCore(id).getRuntime = () => ({ snapshot: "changed" });
   await assert.rejects(trx.commit().execute());
   assert.equal(trx.isCommitted, false);
   assert.equal(h.rows("a")[0].name, "database_a");
@@ -259,12 +259,12 @@ test("owner loss never reconnects, replays the callback, or reports commit succe
     callbacks++;
     await read(trx).execute();
     connects = h.counts().connects;
-    h.replaceOwner([...h.owners.keys()][0]);
+    h.loseOwner(h.ownerNames()[0]);
     await read(trx).execute();
   }), { code: "POLICYSQL_TRANSACTION_UNAVAILABLE" });
   assert.equal(callbacks, 1);
   assert.equal(h.counts().connects, connects);
-  assert.equal(h.owners.size, 1);
+  assert.equal(h.ownerNames().length, 1);
 });
 
 test("interactive cumulative result bytes are bounded and roll back earlier writes", async (t) => {
@@ -285,12 +285,11 @@ test("server expiry after a statement rolls back without creating a replacement 
   const { db } = await makeClient(t, h);
   await assert.rejects(db.transaction().execute(async trx => {
     await update(trx).execute();
-    const entry = [...h.owners.values()][0];
-    await entry.owner.alarm();
+    await h.fireTimer(h.ownerNames()[0]);
     await read(trx).execute();
   }), { code: "POLICYSQL_TRANSACTION_UNAVAILABLE" });
   assert.equal(h.rows("a")[0].name, "database_a");
-  assert.equal(h.owners.size, 1);
+  assert.equal(h.ownerNames().length, 1);
 });
 
 test("raw redaction metadata retains row/column correspondence before result plugins", async (t) => {

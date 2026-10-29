@@ -8,29 +8,29 @@ import { registerExecuteRoutes } from "./routes/execute.ts";
 import { registerSystemRoutes } from "./routes/system.ts";
 import { registerTransactionRoutes } from "./routes/transactions.ts";
 import { HttpError } from "./errors.ts";
-import type { AppDependencies, AppEnv, EngineDependencies, PlatformBindings, RequestContext } from "./types.ts";
+import type { AppDependencies, AppEnv, EngineDependencies, RequestContext } from "./types.ts";
 import { validateConfig } from "./engine-config.ts";
 import { databaseRequired, validateDatabaseBinding, validateDatabaseProvider } from "./database.ts";
+import { validateBackgroundTasks, validateTransactionOwnerPort } from "./transaction-owner-port.ts";
+import type { BackgroundTasks } from "./transaction-owner-port.ts";
 
 export type PolicySqlApp = {
   /**
    * Serves one client request. The wrapper has already authenticated the caller and
    * selected the database; `context` carries both as data (ADR 0014, ADR 0019).
+   * `background` keeps post-response work (cost observation) alive; without it that work
+   * runs detached (ADR 0022).
    */
-  fetch(request: Request, env: PlatformBindings, executionContext: ExecutionContext | undefined, context: RequestContext): Promise<Response>;
+  fetch(request: Request, context: RequestContext, background?: BackgroundTasks): Promise<Response>;
   /** Callback capabilities use the database already pinned by the owner. No database selection. */
-  fetchCallback(request: Request, env: PlatformBindings, executionContext: ExecutionContext | undefined): Promise<Response>;
+  fetchCallback(request: Request): Promise<Response>;
 };
 
-// The only platform binding the library reads (ADR 0021). Deployment settings come from
-// `PolicySqlConfig`; this read remains until the TransactionOwner port replaces the Durable
-// Object namespace (#31).
-const platformTransactionOwner = (env: PlatformBindings | undefined) =>
-  env === null || typeof env !== "object" ? undefined : env.TRANSACTION_OWNER;
-
 const REQUEST_CONTEXT_KEYS = new Set(["database", "session", "requestId"]);
-// Echoed in response bodies and forwarded as a header to the transaction owner.
+// Echoed in response bodies and forwarded to the transaction owner.
 const REQUEST_ID = /^[\x21-\x7e]{1,128}$/u;
+
+const internal = () => new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
 
 export const createApp = (input: AppDependencies): PolicySqlApp => {
   if (typeof input?.getRuntime !== "function") {
@@ -40,6 +40,7 @@ export const createApp = (input: AppDependencies): PolicySqlApp => {
   if ("transportFactory" in input || "costTransportFactory" in input) {
     throw new TypeError("transportFactory overrides were removed; supply database explicitly");
   }
+  validateTransactionOwnerPort(input.transactionOwners);
   // Validated once, here, before any request can reach a database, owner, or validator.
   const dependencies: EngineDependencies = { ...input, config: validateConfig(input.config) };
 
@@ -50,7 +51,7 @@ export const createApp = (input: AppDependencies): PolicySqlApp => {
   registerDiscoveryRoutes(app, dependencies);
   registerExecuteRoutes(app, dependencies);
   registerTransactionRoutes(app, dependencies);
-  registerCommitCheckRoutes(app);
+  registerCommitCheckRoutes(app, dependencies);
 
   app.notFound((context) => jsonResponse(context, {
     error: {
@@ -78,7 +79,7 @@ export const createApp = (input: AppDependencies): PolicySqlApp => {
   });
 
   return {
-    async fetch(request, env, executionContext, context) {
+    async fetch(request, context, background) {
       try {
         const database = context === null || typeof context !== "object" ? undefined : context.database;
         if (database === undefined || database === null) throw databaseRequired();
@@ -86,22 +87,27 @@ export const createApp = (input: AppDependencies): PolicySqlApp => {
         if (unknownKey !== undefined || (context.requestId !== undefined &&
           (typeof context.requestId !== "string" || !REQUEST_ID.test(context.requestId)))) {
           console.log(JSON.stringify({ event: "request_context_rejected", field: unknownKey ?? "requestId" }));
-          throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+          throw internal();
+        }
+        let tasks: BackgroundTasks | undefined;
+        try { tasks = validateBackgroundTasks(background); } catch {
+          console.log(JSON.stringify({ event: "request_context_rejected", field: "background" }));
+          throw internal();
         }
         const databaseBinding = validateDatabaseBinding(database, database.snapshot);
         return await app.fetch(request, {
-          transactionOwner: platformTransactionOwner(env), databaseBinding, session: context.session, requestId: context.requestId,
-        }, executionContext);
+          databaseBinding, session: context.session, requestId: context.requestId, background: tasks,
+        });
       } catch (error) {
         const response = safeError(error, crypto.randomUUID());
         return Response.json(response.body, { status: response.status, headers: { "cache-control": "no-store" } });
       }
     },
-    async fetchCallback(request, env, executionContext) {
+    async fetchCallback(request) {
       if (request.method !== "POST" || !/^\/v1\/commit-checks\/cval_[a-f0-9]{32}\/query$/.test(new URL(request.url).pathname)) {
         return Response.json({ error: { code: "POLICYSQL_NOT_FOUND", message: "Endpoint not found." } }, { status: 404 });
       }
-      return app.fetch(request, { transactionOwner: platformTransactionOwner(env), callback: true }, executionContext);
+      return app.fetch(request, { callback: true });
     },
   };
 };

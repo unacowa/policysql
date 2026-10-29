@@ -253,6 +253,8 @@ PolicySQL coreは、開いたTurso transactionとvalidation sessionを一つのt
 
 通常のserver deploymentでは、process内transaction registry、sticky routing、または専用coordinatorを使用できます。
 
+ライブラリ内ではtransaction ownerを`TransactionOwner` portとして扱います（ADR 0022）。portの契約は、一つのtransaction IDに対して同時に動くownerが一つだけであること、そのIDへの要求がすべて同じownerへ届くこと、owner喪失後の後継ownerは保存状態を引き継いでも開いていたconnectionを持たないことです。
+
 Cloudflare Workersを第一サポートとするadapterでは、transactionごとにDurable Objectを割り当てます。public Workerとcallback endpointは同じobject IDへrequestを転送し、Durable ObjectがTurso transaction、opaque token、sequence、validation phaseを所有します。
 
 Durable Objectが停止または再作成され、開いていたtransaction handleを失った場合は再開せずrollback扱いにします。validation sessionをstorageから復元して別connectionへ付け替えることはしません。

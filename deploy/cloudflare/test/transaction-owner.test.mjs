@@ -3,17 +3,29 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { testBinding, testProvider } from "./helpers/database.mjs";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
+import { ownerResponse } from "../src/responses.ts";
 
+// Unit tests of the owner core through the port's owner-side facilities (ADR 0022): an
+// in-memory store, a recorded timer, and background tasks. No platform object is involved.
 const makeStorage = () => {
   const values = new Map();
-  return {
+  const facilities = {
     values,
-    alarm: null,
+    timerAt: null,
     async get(key) { return values.get(key); },
-    async put(key, value) { values.set(key, structuredClone(value)); },
-    async setAlarm(value) { this.alarm = value; },
+    store: {
+      async get(key) { return values.get(key); },
+      async put(key, value) { values.set(key, structuredClone(value)); },
+    },
+    timer: { async schedule(atMs) { facilities.timerAt = atMs; } },
+    background: { run() {} },
   };
+  return facilities;
 };
+
+// The owner's typed reply, as the HTTP response a route returns.
+const callbackQuery = async (owner, token, command, requestId = "callback_req") =>
+  ownerResponse(await owner.callbackQuery({ authorization: `Bearer ${token}`, command }, requestId));
 
 const transaction = () => ({
   open: true,
@@ -29,6 +41,14 @@ const transaction = () => ({
   async commit() { this.committed = true; this.open = false; },
   async rollback() { this.rolledBack = true; this.open = false; },
 });
+
+// The owner's own transaction is `database`. Every later connection (the post-statement cost
+// observation, which the owner hands to its background tasks) gets a separate one, as a
+// real provider would.
+const ownerProvider = (database) => {
+  let begun = 0;
+  return testProvider(() => ({ begin: async () => (begun++ === 0 ? database : transaction()) }));
+};
 
 const runtime = () => ({
   snapshot: "test-snapshot",
@@ -78,7 +98,7 @@ const auth = { principal: "test:u1", subject: "u1", role: "member", roles: ["mem
 
 test("malformed delegated idempotency cannot silently disable replay protection", async () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/optional-idempotency.json", import.meta.url), "utf8"));
-  const owner = new TransactionOwnerCore({ storage: makeStorage() }, { config, getRuntime: () => runtime(), database: {
+  const owner = new TransactionOwnerCore(makeStorage(), { config, getRuntime: () => runtime(), database: {
     check() { assert.fail("must reject before checking or opening a database"); },
     connect() { assert.fail("must not execute"); },
   } });
@@ -92,20 +112,22 @@ test("malformed delegated idempotency cannot silently disable replay protection"
   }
 });
 
-const call = (owner, action, body) => owner.fetch(new Request(`https://owner/${action}`, {
-  method: "POST",
-  headers: { "content-type": "application/json", "x-policysql-request-id": "req" },
-  body: JSON.stringify({ databaseBinding: testBinding(owner.getRuntime().snapshot), snapshot: owner.getRuntime().snapshot, ...body }),
-}));
+const call = async (owner, action, body) => {
+  const input = { databaseBinding: testBinding(owner.getRuntime().snapshot), snapshot: owner.getRuntime().snapshot, ...body };
+  const reply = action === "begin" ? await owner.begin(input, "req")
+    : action === "atomic" ? await owner.atomic(input, "req")
+      : await owner.command(action, input, "req");
+  return ownerResponse(reply);
+};
 
 const setup = async () => {
   const storage = makeStorage();
   const database = transaction();
   const compiler = runtime();
-  const owner = new TransactionOwnerCore({ storage }, {
+  const owner = new TransactionOwnerCore(storage, {
     config,
     getRuntime: () => compiler,
-    database: testProvider(() => ({ begin: async () => database })),
+    database: ownerProvider(database),
   });
   const begin = await call(owner, "begin", { transactionId: txId, authFingerprint: fingerprint, startFingerprint, mode: "read", auth });
   assert.equal(begin.status, 201);
@@ -134,7 +156,7 @@ test("rolls back on a sequence gap", async () => {
 
 test("fails closed after owner replacement and on alarm expiry", async () => {
   const { storage, database, compiler } = await setup();
-  const replacement = new TransactionOwnerCore({ storage }, {
+  const replacement = new TransactionOwnerCore(storage, {
     config, getRuntime: () => compiler, database: testProvider(() => ({ begin: async () => transaction() })),
   });
   const lost = await call(replacement, "statement", { transactionId: txId, authFingerprint: fingerprint, command: { sequence: 1, sql: "SELECT id FROM projects", params: {} } });
@@ -143,7 +165,8 @@ test("fails closed after owner replacement and on alarm expiry", async () => {
   assert.equal(database.open, true, "the remote server owns timeout rollback after eviction");
 
   const second = await setup();
-  await second.owner.alarm();
+  assert.ok(second.storage.timerAt > Date.now(), "begin scheduled the expiry timer");
+  await second.owner.onTimer();
   assert.equal(second.database.rolledBack, true);
   assert.equal((await second.storage.get("transaction")).status, "expired");
 });
@@ -206,15 +229,7 @@ test("commit check callback SELECT uses the same owner transaction before commit
   let owner;
   const hookFetch = async (_url, init) => {
     const hook = JSON.parse(init.body);
-    const callback = () => owner.fetch(new Request("https://owner/validation-query", {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${hook.query.token}`,
-          "content-type": "application/json",
-          "x-policysql-request-id": "callback_req",
-        },
-        body: JSON.stringify({ sequence: 1, sql: "SELECT id FROM projects", params: {} }),
-      }));
+    const callback = () => callbackQuery(owner, hook.query.token, { sequence: 1, sql: "SELECT id FROM projects", params: {} });
     const query = await callback();
     assert.equal(query.status, 200);
     const result = await query.json();
@@ -223,10 +238,10 @@ test("commit check callback SELECT uses the same owner transaction before commit
     assert.deepEqual(await replay.json(), result);
     return new Response(JSON.stringify({ version: "1", allowed: true }), { status: 200 });
   };
-  owner = new TransactionOwnerCore({ storage }, {
+  owner = new TransactionOwnerCore(storage, {
     config: checkedConfig,
     getRuntime: () => compiler,
-    database: testProvider(() => ({ begin: async () => database })),
+    database: ownerProvider(database),
     fetchImpl: hookFetch,
   });
   await call(owner, "begin", { transactionId: txId, authFingerprint: fingerprint, startFingerprint, mode: "write", auth });
@@ -256,10 +271,10 @@ test("commit check denial rolls back and suppresses commit", async () => {
     rowsAffected: 1,
     usage: { rowsRead: 1, rowsWritten: 1, queryDurationMs: 1 },
   }];
-  const owner = new TransactionOwnerCore({ storage }, {
+  const owner = new TransactionOwnerCore(storage, {
     config: checkedConfig,
     getRuntime: () => commitRuntime(),
-    database: testProvider(() => ({ begin: async () => database })),
+    database: ownerProvider(database),
     fetchImpl: async () => new Response(JSON.stringify({ version: "1", allowed: false }), { status: 200 }),
   });
   await call(owner, "begin", { transactionId: txId, authFingerprint: fingerprint, startFingerprint, mode: "write", auth });
@@ -302,18 +317,14 @@ test("atomic mutation runs commit check and callback query before idempotency co
   const hookFetch = async (_url, init) => {
     events.push("hook");
     const hook = JSON.parse(init.body);
-    const query = await owner.fetch(new Request("https://owner/validation-query", {
-      method: "POST",
-      headers: { authorization: `Bearer ${hook.query.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ sequence: 1, sql: "SELECT id FROM projects", params: {} }),
-    }));
+    const query = await callbackQuery(owner, hook.query.token, { sequence: 1, sql: "SELECT id FROM projects", params: {} });
     assert.equal(query.status, 200);
     return new Response(JSON.stringify({ version: "1", allowed: true }), { status: 200 });
   };
-  owner = new TransactionOwnerCore({ storage }, {
+  owner = new TransactionOwnerCore(storage, {
     config: checkedConfig,
     getRuntime: () => compiler,
-    database: testProvider(() => ({ begin: async () => database })),
+    database: ownerProvider(database),
     fetchImpl: hookFetch,
   });
   const response = await call(owner, "atomic", {
@@ -346,10 +357,10 @@ test("atomic replay rejects malformed database-owned response JSON", async () =>
     rowsAffected: 0,
     usage: { rowsRead: 1, rowsWritten: 0, queryDurationMs: 1 },
   }];
-  const owner = new TransactionOwnerCore({ storage }, {
+  const owner = new TransactionOwnerCore(storage, {
     config,
     getRuntime: () => commitRuntime(),
-    database: testProvider(() => ({ begin: async () => database })),
+    database: ownerProvider(database),
   });
   const response = await call(owner, "atomic", {
     validationId: `cval_${"d".repeat(32)}`,

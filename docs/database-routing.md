@@ -14,8 +14,9 @@ Two inputs are mandatory:
 1. Configure a `DatabaseProvider` when constructing `createApp` or `createPolicySqlWorker`
    (inside its `deployment(env)` function, next to the `PolicySqlConfig`;
    see [engine configuration](configuration.md)).
-2. Pass the selected `DatabaseBinding` as `database` in the fourth argument of `app.fetch`
-   on each request, next to the trusted session the wrapper authenticated
+2. Pass the selected `DatabaseBinding` as `database` in the request context of `app.fetch`
+   on each request (the fourth argument of `createPolicySqlWorker().app.fetch`, the second
+   of `createApp().fetch`), next to the trusted session the wrapper authenticated
    (`{ database, session, requestId? }`,
    [ADR 0020](adr/0020-trusted-session-input-and-jwt-identity-adapter.md)).
 
@@ -23,9 +24,14 @@ Two inputs are mandatory:
 const worker = createPolicySqlWorker({
   ...runtimeConfiguration,
   // Wrapper-owned; called with the Worker's and each Durable Object's env (ADR 0021).
-  deployment: (env) => ({ database: registry.provider(env), config: configFromEnv(env) }),
+  // Transaction owners are this deployment's Durable Objects (ADR 0022).
+  deployment: (env) => ({
+    database: registry.provider(env),
+    config: configFromEnv(env),
+    transactionOwners: durableObjectTransactionOwners(env.TRANSACTION_OWNER),
+  }),
 });
-export const TransactionOwner = worker.TransactionOwner;
+export const TransactionOwner = durableObjectTransactionOwnerClass(worker.ownerDependencies);
 const verify = createJwtSessionVerifier({ jwks: JWKS, issuer: ISSUER, audience: AUDIENCE });
 
 export default {
@@ -146,23 +152,28 @@ Each string is 1–256 characters from `[A-Za-z0-9_.:-]`. The library validates,
 and freezes the binding. Unknown fields and extra credential fields are rejected.
 Binding fields must not contain secrets.
 
-Use the factory's paired `TransactionOwner` export so both isolates have the same provider.
-For lower-level embedding, the constructor is
-`TransactionOwnerCore(state, { getRuntime, database, config, fetchImpl? })`, with the same
-`config` the app receives.
-It rejects an omitted provider. Internal begin/atomic messages require a binding and
-snapshot; the DO rechecks these before constructing a connection with local credentials.
-The DO namespace is private trusted infrastructure, not a public forwarding endpoint.
+Export `durableObjectTransactionOwnerClass(worker.ownerDependencies)` as the Durable Object
+class so the Worker and every object build the same provider from their own env. The
+transaction owner is a port ([ADR 0022](adr/0022-transaction-owner-port.md)): for another
+platform, implement `TransactionOwnerPort` and construct
+`TransactionOwnerCore(facilities, { getRuntime, database, config, fetchImpl? })` per live
+owner, with the same `config` the app receives and the adapter's `store`, `timer`, and
+`background`. The adapter must keep one live owner per name and make owner loss a successor
+with the same store and no memory; `test/transaction-owner-port.test.mjs` is the conformance
+suite. The core rejects an omitted provider. Internal begin/atomic commands require a
+binding and snapshot; the owner rechecks these before constructing a connection with local
+credentials. The Durable Object namespace is private trusted infrastructure, not a public
+forwarding endpoint.
 
 | Path | Database source |
 | --- | --- |
-| Execute / interactive / Catalog / Capabilities / Explain | Required `database` in the fourth argument of `app.fetch` |
+| Execute / interactive / Catalog / Capabilities / Explain | Required `database` in the request context of `app.fetch` |
 | Health / unknown paths through `fetch` | `database` still required; no session needed; no DB connection |
 | Commit-check callback | Binding and open connection already stored by its transaction owner |
 | Cost observation | Same binding as execution, on a separate connection |
 
-For callback requests, the wrapper uses the separate `app.fetchCallback(request, env,
-context)` method. It accepts only POST `/v1/commit-checks/cval_<id>/query`; other routes
+For callback requests, the wrapper uses the separate `app.fetchCallback` method
+(`(request, env, context)` on `createPolicySqlWorker().app`, `(request)` on `createApp`). It accepts only POST `/v1/commit-checks/cval_<id>/query`; other routes
 return 404. Conversely, `app.fetch` never serves the callback route, including
 percent-encoded paths that decode to it; they return 404 before the body is read
 ([ADR 0018](adr/0018-wrapper-owned-rate-limiting.md)). The owner checks the opaque capability and its saved binding. No new DB is

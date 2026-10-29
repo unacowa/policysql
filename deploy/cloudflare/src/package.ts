@@ -6,13 +6,21 @@ import wasm from "../pkg/policysql_wasm_bg.wasm";
 import { runtimeBytesLimit } from "./binary.ts";
 import { createWorkerEntrypoints } from "./worker.ts";
 import type { PolicySqlDeployment } from "./worker.ts";
-import type { PlatformBindings } from "./types.ts";
 
 export { createApp } from "./app.ts";
 export type { PolicySqlApp } from "./app.ts";
 export { TransactionOwnerCore } from "./transaction-owner.ts";
 export type { PolicySqlDeployment, PolicySqlWorkerApp } from "./worker.ts";
 export type { TransactionOwnerDependencies } from "./transaction-owner.ts";
+// The TransactionOwner port (ADR 0022) and its Cloudflare Durable Objects adapter, which
+// the wrapper assembles. A custom adapter implements the port types instead.
+export type {
+  BackgroundTasks, OwnerAtomicInput, OwnerBeginInput, OwnerCallbackInput, OwnerCommandInput, OwnerCommandKind,
+  OwnerFacilities, OwnerReply, OwnerStore, OwnerTimer, TransactionOwnerHandle, TransactionOwnerPort,
+} from "./transaction-owner-port.ts";
+export {
+  durableObjectFacilities, durableObjectTransactionOwnerClass, durableObjectTransactionOwners, executionContextTasks,
+} from "./adapters/durable-objects.ts";
 // The deployment configuration contract, in one place (ADR 0021).
 export { ConfigError, validateConfig } from "./engine-config.ts";
 export type { CommitCheckEndpoint, CostCatalog, PolicySqlConfig } from "./engine-config.ts";
@@ -36,7 +44,6 @@ export type {
   ExecutionTraceParameter,
   ExecutionTraceSink,
   ExecutionTraceStatement,
-  PlatformBindings,
 } from "./types.ts";
 
 export type RuntimeLimits = {
@@ -97,23 +104,23 @@ export const createRuntimeFactory = (configuration: RuntimeConfiguration) => {
   };
 };
 
-export type PolicySqlWorkerConfiguration<Env extends PlatformBindings = PlatformBindings> = RuntimeConfiguration & {
+export type PolicySqlWorkerConfiguration<Env extends object = Record<string, unknown>> = RuntimeConfiguration & {
   /**
-   * Wrapper-owned. Builds the database provider and `PolicySqlConfig` from the Workers
-   * `env` (ADR 0021). Workers delivers `env` per request and to the Durable Object
-   * constructor, not at module load, so the library calls this with the `env` it was
-   * handed. The Worker calls it at most once per `env` object; a request that arrives with
-   * a different `env` object rebuilds (and revalidates) the deployment for that object.
-   * Each Durable Object instance calls it once, in its constructor. The Worker and a Durable
-   * Object therefore share a configuration only if this is a pure function of the bindings.
-   * The library itself reads nothing from `env` except `TRANSACTION_OWNER`.
+   * Wrapper-owned. Builds the database provider, `PolicySqlConfig`, and the
+   * TransactionOwner port from the Workers `env` (ADR 0021, ADR 0022). Workers delivers
+   * `env` per request and to the Durable Object constructor, not at module load, so the
+   * library calls this with the `env` it was handed. The Worker calls it at most once per
+   * `env` object; a request that arrives with a different `env` object rebuilds (and
+   * revalidates) the deployment for that object. Each owner instance calls it once, through
+   * `ownerDependencies`. The Worker and an owner therefore share a configuration only if
+   * this is a pure function of the bindings. The library reads nothing from `env` itself.
    */
   deployment: (env: Env) => PolicySqlDeployment;
 };
 
-export const createPolicySqlWorker = <Env extends PlatformBindings>(configuration: PolicySqlWorkerConfiguration<Env>) => {
+export const createPolicySqlWorker = <Env extends object>(configuration: PolicySqlWorkerConfiguration<Env>) => {
   if (typeof configuration?.deployment !== "function") {
-    throw new TypeError("deployment is required: (env) => ({ database, config })");
+    throw new TypeError("deployment is required: (env) => ({ database, config, transactionOwners })");
   }
   if ("database" in configuration) {
     throw new TypeError("database moved into deployment(env); see PolicySqlDeployment");

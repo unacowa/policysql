@@ -3,7 +3,9 @@ export const testBinding = (snapshot = "test-snapshot") => ({
 });
 // The minimal explicit deployment configuration (ADR 0021).
 export const testConfig = (overrides = {}) => ({ environment: "test", ...overrides });
-export const testProvider = (connect = () => { throw new Error("Unexpected connection"); }) => ({
+// A TransactionOwner port for tests whose requests must never reach an owner (ADR 0022).
+export const testOwners = () => ({ route() { throw new Error("Unexpected transaction owner lookup"); } });
+export const testProvider =(connect = () => { throw new Error("Unexpected connection"); }) => ({
   check: (binding) => binding.scope === "test" && binding.databaseId === "test-db",
   connect,
 });

@@ -5,6 +5,7 @@ import { ConfigError, validateConfig } from "../src/engine-config.ts";
 import { createApp } from "../src/app.ts";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { createWorkerEntrypoints } from "../src/worker.ts";
+import { durableObjectTransactionOwnerClass } from "../src/adapters/durable-objects.ts";
 import { observeCostEnvelope } from "../src/cost.ts";
 import { configFromEnv as referenceConfig } from "../wrapper/config.ts";
 import { configFromEnv as exampleConfig } from "../../../examples/database-routing/config.ts";
@@ -95,37 +96,39 @@ test("createApp and the transaction owner reject bad configuration before any ru
   let calls = 0;
   const getRuntime = () => { calls++; return runtime; };
   const database = { check() { calls++; return true; }, connect() { calls++; throw new Error("no"); } };
-  const storage = new Proxy({}, { get() { calls++; return () => undefined; } });
+  // Any read of the owner facilities counts: the store, timer, and background are untouched.
+  const facilities = new Proxy({}, { get() { calls++; return () => undefined; } });
+  const transactionOwners = { route() { calls++; } };
   for (const config of [undefined, { environment: "" }, { ...valid(), commitChecks: { consistency: { url: SECRET_URL, hmacSecret: "x" } } }]) {
-    assert.throws(() => createApp({ getRuntime, database, config }), TypeError);
-    assert.throws(() => new TransactionOwnerCore({ storage }, { getRuntime, database, config }), TypeError);
+    assert.throws(() => createApp({ getRuntime, database, config, transactionOwners }), TypeError);
+    assert.throws(() => new TransactionOwnerCore(facilities, { getRuntime, database, config }), TypeError);
   }
   assert.equal(calls, 0);
-  assert.throws(() => new TransactionOwnerCore({ storage }, { database, config: valid() }), TypeError);
-});
-
-test("/healthz reports config.environment; env settings of the old contract are ignored", async () => {
-  const app = createApp({ getRuntime: () => runtime, database: testProvider(), config: { environment: "from_config" } });
-  const env = { TRANSACTION_OWNER: {}, POLICYSQL_ENVIRONMENT: "from_env" };
-  const body = await (await app.fetch(new Request("https://worker.test/healthz"), env, {}, { database: testBinding(runtime.snapshot) })).json();
-  assert.equal(body.environment, "from_config");
+  assert.throws(() => new TransactionOwnerCore(facilities, { database, config: valid() }), TypeError);
 });
 
 const workerHarness = (deployment) => {
   const counts = { runtime: 0, check: 0, connect: 0, owner: 0, deployment: 0 };
   const database = { check() { counts.check++; return true; }, connect() { counts.connect++; throw new Error("no"); } };
+  const transactionOwners = { route() { counts.owner++; throw new Error("no owner"); } };
   const entry = createWorkerEntrypoints({
     getRuntime: () => { counts.runtime++; return runtime; },
-    deployment: (env) => { counts.deployment++; return deployment(env, database); },
+    deployment: (env) => { counts.deployment++; return { transactionOwners, ...deployment(env, database) }; },
   });
-  const env = {
-    TRANSACTION_OWNER: { idFromName() { counts.owner++; }, get() { counts.owner++; } },
-    VALIDATOR_SECRET: SECRET,
-  };
-  return { entry, env, counts };
+  const env = { VALIDATOR_SECRET: SECRET };
+  // The wrapper assembles the Durable Object class from the same deployment (ADR 0022).
+  const OwnerObject = durableObjectTransactionOwnerClass(entry.ownerDependencies);
+  return { entry, env, counts, OwnerObject };
 };
 
 const session = { principal: "p", subject: "s", roles: ["member"], defaultRole: "member", access: ["execute"], session: {} };
+
+test("/healthz reports config.environment; env settings of the old contract are ignored", async () => {
+  const { entry } = workerHarness((env, database) => ({ database, config: { environment: "from_config" } }));
+  const env = { POLICYSQL_ENVIRONMENT: "from_env" };
+  const body = await (await entry.app.fetch(new Request("https://worker.test/healthz"), env, undefined, { database: testBinding(runtime.snapshot) })).json();
+  assert.equal(body.environment, "from_config");
+});
 
 test("a rejected deployment is 500 before runtime, database, owner, or validator work, and logs only the setting", async (t) => {
   const logs = [];
@@ -138,7 +141,7 @@ test("a rejected deployment is 500 before runtime, database, owner, or validator
     [() => { throw wrapperError; }, null],
   ]) {
     logs.length = 0;
-    const { entry, env, counts } = workerHarness(deployment);
+    const { entry, env, counts, OwnerObject } = workerHarness(deployment);
     const responses = [
       await entry.app.fetch(new Request("https://worker.test/v1/transactions:execute", { method: "POST", body: "{}" }), env, undefined,
         { database: testBinding(runtime.snapshot), session }),
@@ -152,7 +155,7 @@ test("a rejected deployment is 500 before runtime, database, owner, or validator
     }
     // The Durable Object fails at construction, before it can serve a request. A wrapper
     // error passes through unchanged; a library ConfigError carries no value.
-    assert.throws(() => new entry.TransactionOwner({ storage: {} }, env),
+    assert.throws(() => new OwnerObject({ storage: {} }, env),
       (error) => error === wrapperError || (error instanceof ConfigError && !leaks(error.message)));
     assert.deepEqual({ ...counts, deployment: 0 }, { runtime: 0, check: 0, connect: 0, owner: 0, deployment: 0 });
     const events = logs.map((line) => JSON.parse(line)).filter((entry) => entry.event === "deployment_config_rejected");
@@ -164,7 +167,7 @@ test("a rejected deployment is 500 before runtime, database, owner, or validator
 
 test("the Worker builds its deployment at most once per env object, and the Durable Object builds the same one", async () => {
   const seen = [];
-  const { entry, env, counts } = workerHarness((platform, database) => {
+  const { entry, env, counts, OwnerObject } = workerHarness((platform, database) => {
     const config = { ...valid(), environment: "built" };
     seen.push(config);
     return { database, config };
@@ -180,7 +183,7 @@ test("the Worker builds its deployment at most once per env object, and the Dura
   assert.equal(counts.deployment, 2);
   await entry.app.fetch(new Request("https://worker.test/healthz"), env, undefined, { database: testBinding(runtime.snapshot) });
   assert.equal(counts.deployment, 2, "the first env object keeps its build");
-  const owner = new entry.TransactionOwner({ storage: {} }, env);
+  const owner = new OwnerObject({ storage: {} }, env).core;
   assert.equal(counts.deployment, 3);
   assert.equal(owner.config.environment, "built");
   assert.deepEqual(owner.config.commitCheck("consistency"), seen[0].commitChecks.consistency);
