@@ -939,7 +939,7 @@ fn activate_insert(
         if columns.contains(&column.id) {
             return Err(PolicyError::PresetColumnOverlap);
         }
-        let operand = parse_operand(&value, resource, column.value.logical_type)?;
+        let operand = parse_preset(&value, resource, column.value.logical_type)?;
         if matches!(operand, PolicyOperand::Column(_)) {
             return Err(PolicyError::InvalidPredicate);
         }
@@ -975,7 +975,7 @@ fn activate_update(
         if columns.contains(&column.id) {
             return Err(PolicyError::PresetColumnOverlap);
         }
-        let operand = parse_operand(&value, resource, column.value.logical_type)?;
+        let operand = parse_preset(&value, resource, column.value.logical_type)?;
         if matches!(operand, PolicyOperand::Column(_)) {
             return Err(PolicyError::InvalidPredicate);
         }
@@ -1124,6 +1124,28 @@ fn parse_comparison(
             })
         }
     }
+}
+
+fn parse_preset(
+    value: &Value,
+    resource: &ResourceDescriptor,
+    expected: LogicalType,
+) -> Result<PolicyOperand, PolicyError> {
+    if expected != LogicalType::Bytes {
+        return parse_operand(value, resource, expected);
+    }
+    // Only fixed bytes literals are added. Session coercion and bytes predicate
+    // literals remain outside the closed policy language.
+    let mapping = value
+        .as_mapping()
+        .filter(|mapping| mapping.len() == 1)
+        .ok_or(PolicyError::IncompatibleOperand)?;
+    let literal = mapping_value(mapping, "literal")
+        .and_then(Value::as_str)
+        .ok_or(PolicyError::IncompatibleOperand)?;
+    policysql_core::bytes::decode(literal)
+        .map(|value| PolicyOperand::Literal(LogicalValue::Bytes(value)))
+        .map_err(|_| PolicyError::IncompatibleOperand)
 }
 
 fn parse_operand(

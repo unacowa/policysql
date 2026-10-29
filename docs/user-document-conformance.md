@@ -30,11 +30,17 @@ adapter, and relevant HTTP response are backed by regression evidence.
 | Constant `SELECT` | Resource-free numeric literal projections compile as a distinct default-safe IR, are AST-emitted/reparsed/verified, expose no fake resource or policy, and report `integer`/`number` descriptors |
 | Generated TypeScript and Kysely boundary | `policysql generate` uses Catalog/Capabilities/Explain, pins snapshots and hashes, atomically replaces artifacts, and the client/Kysely packages route named SQL only through the gateway without database credentials |
 | Development deployment SQL surface | The deployed Catalog and physical Turso schema contain the documented author/post/comment/archive resources; compile regression covers every advertised SQL family and the release gate executes fourteen read statements plus a seven-statement mutation/expectation rollback batch, then proves the probe row is absent |
+| Deployment-independent bytes contract (#17, ADR 0016) | Shared canonical base64 vectors, Rust input/result/preset tests, platform-independent Client/Kysely/generator tests, and real-WASM/JWT/Turso-HTTP/file-SQLite tests cover client and preset BLOB binding, physical type/hash equality, NULL and empty bytes, policy denial/redaction, malformed input, size limits, callback/interactive execution, rollback and replay. |
 
 ## Remaining externally visible differences
 
-None in the audited scope. Future backend profiles and newly advertised SQL leaves require their own
-conformance rows and evidence before release.
+| Contract | Outstanding implementation and evidence |
+| --- | --- |
+| Bytes real-deployment conformance | The local suite uses real WASM, authentication and HTTP transport with SQLite replacing the remote service and simulated owner storage. Actual Cloudflare/Turso deployment acceptance remains required before claiming operational completion. |
+
+Future backend profiles and newly advertised SQL leaves require their own conformance rows and
+evidence before release. Defining a shared Client contract does not establish support for another
+backend profile.
 
 ## Audit rule
 

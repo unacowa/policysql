@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod bytes;
+
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -302,6 +304,9 @@ pub enum LogicalValue {
 /// expression's logical type separately.
 #[must_use]
 pub fn value_satisfies_contract(value: &LogicalValue, descriptor: &ValueDescriptor) -> bool {
+    if matches!(value, LogicalValue::Bytes(value) if value.len() > bytes::MAX_BYTES_PER_VALUE) {
+        return false;
+    }
     if matches!(value, LogicalValue::Null) {
         return descriptor.nullable;
     }

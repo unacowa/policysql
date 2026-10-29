@@ -76,6 +76,13 @@ export class PolicySqlRuntime {
         }
     }
     /**
+     * @returns {number}
+     */
+    get max_bytes_per_value() {
+        const ret = wasm.policysqlruntime_max_bytes_per_value(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * Activates one immutable deployment snapshot.
      *
      * # Errors

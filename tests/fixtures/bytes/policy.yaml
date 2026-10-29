@@ -1,0 +1,38 @@
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns:
+            - id
+            - name
+            - state
+            - seed
+            - metadata
+            - name: private_state
+              visible_if: { name: { eq: visible } }
+              on_deny: null
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          limit: 100
+        insert:
+          columns: [id, name, state, metadata]
+          presets:
+            tenant_id: { session: tenant_id }
+            seed: { literal: "AAEC/w==" }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, name, state, seed, metadata] }
+        update:
+          columns: [name, state, metadata]
+          presets:
+            seed: { literal: "/wA=" }
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, name, state, seed, metadata] }
+commit_checks:
+  consistency:
+    triggered_by: [projects]
+    hook:
+      url_env: VALIDATOR_URL
+      timeout_ms: 1500
+      hmac_secret_env: VALIDATOR_SECRET

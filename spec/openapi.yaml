@@ -2,7 +2,12 @@ openapi: 3.1.0
 info:
   title: PolicySQL HTTP API
   version: 1.0.0
-  description: Versioned public and commit-check callback contracts for PolicySQL.
+  description: >-
+    Hosting-independent public and commit-check callback contracts for PolicySQL.
+    Bytes parameters and result cells use canonical padded standard base64 strings
+    (empty bytes are an empty string; nullable SQL NULL is JSON null). The compiler
+    determines the expected type. Arrays and database-driver objects are not bytes
+    encodings. Ordinary string and JSON values retain their own meanings.
 servers:
   - url: https://gateway.example.com
 security:
@@ -585,7 +590,14 @@ components:
       properties:
         sqlDialect: { const: sqlite }
         statements: { type: array, items: { enum: [select, insert, update, delete] } }
-        limits: { type: object }
+        limits:
+          type: object
+          additionalProperties: true
+          properties:
+            maxBytesPerValue:
+              type: integer
+              minimum: 1
+              description: Maximum decoded bytes per value; request and encoded result limits also apply. The initial profile uses 262144 bytes.
         transactions: { type: object }
         idempotency: { type: object }
     ErrorResponse:

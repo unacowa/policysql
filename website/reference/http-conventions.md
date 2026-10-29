@@ -31,6 +31,25 @@ requestとresponseのmedia typeは`application/json`です。request bodyはUTF-
 
 SQLite BLOBはtarget descriptorが`bytes / string / base64`のときにbase64 stringとして送ります。parameter値だけから型を推測せず、SQLの利用箇所とcompiled Catalogからexpected descriptorを決定します。
 
+## bytesの入出力
+
+bytesは配備先に依存しないPolicySQL共通のJSON契約です。INSERT／UPDATEのparameterとSELECT／RETURNINGの結果は、標準alphabet（`+/`）、必要なpadding、未使用bitが0のcanonical base64 stringを使用します。空白、改行、base64url、省略padding、配列、DB driver固有objectはbytes入力として拒否します。空bytesは`""`、nullable列のSQL NULLは`null`です。
+
+```json
+{
+  "statements": [{
+    "sql": "INSERT INTO blobrows(id,state) VALUES(:id,:state) RETURNING id,state",
+    "params": { "id": "bytes-1", "state": "AAEC/w==" }
+  }]
+}
+```
+
+`state`がbytesなら`00 01 02 ff`の物理BLOBとして保存され、結果も`"AAEC/w=="`です。同じ文字列をstring列へ渡すとTEXTとして保存します。DBがbytes列の値としてTEXTを返した場合は、base64として正しくてもschema mismatchで拒否します。
+
+復号後の1値の上限はCapabilitiesの`limits.maxBytesPerValue`で確認します。初期profileは262,144 byte（256 KiB）です。request body、結果、transactionの上限も個別に適用します。base64は`4 × ceil(byte数 / 3)`文字になるため、既定の結果上限64,000 byteではJSONの分を差し引いて合計48,000 byte未満の生bytesを返せます。書き込めるサイズでもRETURNINGの上限を超える場合があり、その場合はcommit前にrollbackします。
+
+不正encoding／誤型は400 `POLICYSQL_INVALID_PARAMETER`、復号後サイズ超過は413 `POLICYSQL_LIMIT_EXCEEDED`です。ClientへCloudflareの上限を固定せず、接続先のCapabilitiesを使用してください。row／column policy、RETURNING permission、transaction／replayの規則は通常のSQLと共通です。
+
 ## Snapshot precondition
 
 Atomic Execute requestとtransaction開始requestには、任意の`expected`を指定できます。Atomic Executeではrequest全体のsnapshotを固定するため、`expected`は`statements[]`の外側に置きます。

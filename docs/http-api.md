@@ -2,6 +2,26 @@
 
 This document summarizes the public HTTP contract. `spec/openapi.yaml` and the referenced JSON Schemas are canonical. Backward-incompatible changes require a new API version.
 
+The public contract is independent of the gateway hosting platform. Cloudflare ownership
+and transport details below describe that deployment's implementation; Clients use the
+same endpoints, JSON representations and transaction protocol with any conforming host.
+SQL dialect, supported features and limits remain governed by the endpoint's backend
+profile and published Capabilities.
+
+For `bytes / string / base64`, parameters and result cells use base64 JSON strings on
+every conforming host. Empty bytes use `""`; SQL NULL uses JSON `null` where allowed by
+the descriptor. Only a compiler-proven bytes parameter is decoded as bytes. Ordinary
+string and JSON parameters retain their own meanings. Server adapters preserve the
+physical result type through validation before encoding a public result; internal WASM
+values and database protocol objects are not public parameter or result formats.
+Base64 uses the standard `+/` alphabet, required padding, zero unused bits and no
+whitespace. Invalid encodings or non-string bytes inputs return
+`POLICYSQL_INVALID_PARAMETER` (400). `limits.maxBytesPerValue` in Capabilities bounds
+decoded values (262,144 bytes in the initial profile); exceeding it returns
+`POLICYSQL_LIMIT_EXCEEDED` (413) before execution. Request and encoded result limits
+also apply. See [ADR 0016](adr/0016-bytes-wire-contract.md) and the
+[conformance ledger](user-document-conformance.md) for scope and evidence.
+
 ## Atomic execute
 
 All stateless SQL execution uses one endpoint:

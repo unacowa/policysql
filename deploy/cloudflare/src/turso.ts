@@ -1,5 +1,6 @@
 import { HttpError, wasmError } from "./errors.ts";
 import { databaseRequired } from "./database.ts";
+import { driverArgs, rawDriverValue, rowValues } from "./driver-values.ts";
 import type { ExecutionTrace } from "./types.ts";
 
 const remoteFailure = (timeout = false) =>
@@ -8,14 +9,6 @@ const remoteFailure = (timeout = false) =>
     timeout ? "POLICYSQL_DATABASE_TIMEOUT" : "POLICYSQL_DATABASE_UNAVAILABLE",
     timeout ? "The database operation timed out." : "The database is temporarily unavailable.",
   );
-
-const driverArgs = (statement) => {
-  const overlap = Object.keys(statement.clientParameters).some((name) =>
-    Object.hasOwn(statement.serverParameters, name),
-  );
-  if (overlap) throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
-  return { ...statement.clientParameters, ...statement.serverParameters };
-};
 
 const executionTrace = (compiled, statements, requestId, inputStatements): ExecutionTrace => ({
   source: "turso-egress",
@@ -58,21 +51,6 @@ const publishExecutionTrace = async (trace, sink) => {
   }
 };
 
-const jsonSafeValue = (value) => {
-  if (typeof value === "bigint") {
-    const number = Number(value);
-    if (!Number.isSafeInteger(number)) {
-      throw new HttpError(422, "POLICYSQL_SCHEMA_MISMATCH", "The database result does not match the compiled logical contract.");
-    }
-    return number;
-  }
-  if (value instanceof Uint8Array) return [...value];
-  return value;
-};
-
-const rowValues = (columns, row) =>
-  columns.map((column, index) => row?.[index] ?? row?.[column] ?? null);
-
 const strictestLimit = (compiled, name) => {
   const values = compiled.statements
     .map((statement) => statement.limits?.[name])
@@ -102,7 +80,7 @@ export const enforceCumulativeLimits = (compiled, results, elapsedMs) => {
 
 const rawResult = (result, operation) => ({
   columns: result.columns,
-  rows: result.rows.map((row) => rowValues(result.columns, row).map(jsonSafeValue)),
+  rows: result.rows.map((row) => rowValues(result.columns, row).map(rawDriverValue)),
   affectedRows:
     operation !== "select" && result.columns.length > 0
       ? result.rows.length

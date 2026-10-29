@@ -1,0 +1,16 @@
+{
+  "tables": {
+    "projects": {
+      "columns": {
+        "id": { "declaredType": "TEXT", "nullable": false },
+        "tenant_id": { "declaredType": "TEXT", "nullable": false },
+        "name": { "declaredType": "TEXT", "nullable": false },
+        "state": { "declaredType": "BLOB", "nullable": true },
+        "seed": { "declaredType": "BLOB", "nullable": false },
+        "private_state": { "declaredType": "BLOB", "nullable": false },
+        "forbidden": { "declaredType": "BLOB", "nullable": false },
+        "metadata": { "declaredType": "TEXT", "nullable": false }
+      }
+    }
+  }
+}

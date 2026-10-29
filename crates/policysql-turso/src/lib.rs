@@ -360,6 +360,10 @@ fn validate_value(
     descriptor: &ValueDescriptor,
     possible_types: &[LogicalType],
 ) -> Result<(), AdapterError> {
+    if matches!(value, LogicalValue::Bytes(value) if value.len() > policysql_core::bytes::MAX_BYTES_PER_VALUE)
+    {
+        return Err(AdapterError::LimitExceeded);
+    }
     if matches!(value, LogicalValue::Null) {
         return if descriptor.nullable {
             Ok(())
