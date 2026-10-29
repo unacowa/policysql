@@ -12,6 +12,7 @@ import { createErrorResponse } from "../../src/errors.ts";
 import { createJwtSessionVerifier } from "../../src/adapters/jwt.ts";
 import { createDatabaseRegistry } from "../../../../examples/database-routing/provider.ts";
 import { authenticateRequest, createJwtAuthentication } from "../../../../examples/database-routing/auth.ts";
+import { configFromEnv } from "../../../../examples/database-routing/config.ts";
 
 initSync({ module: readFileSync(new URL("../../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 const example = (name) => readFileSync(new URL(`../../../../examples/database-routing/${name}`, import.meta.url), "utf8");
@@ -36,7 +37,7 @@ const encode = (value) => value === null ? { type: "null" } : typeof value === "
 
 // Exercise real SQL, rollback, and transaction visibility through the real HTTP transport.
 // Only the remote HTTP server and Cloudflare storage/routing are simulated.
-export const harness = async (t, { hooks = true, idempotencyTable = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding, customizePolicy = (policy) => policy, fixture, runtimeLimits = limits } = {}) => {
+export const harness = async (t, { hooks = true, idempotencyTable = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding, customizePolicy = (policy) => policy, customizeConfig = (config) => config, fixture, runtimeLimits = limits } = {}) => {
   const directory = mkdtempSync(join(tmpdir(), "policysql-routing-"));
   const runtime = PolicySqlRuntime.newWithPhysicalSchema(
     fixture?.catalog ?? example("catalog.yaml"), customizePolicy(hooks ? (fixture?.policy ?? example("policy.yaml")) : (fixture?.policy ?? example("policy.yaml")).split("commit_checks:")[0]),
@@ -124,12 +125,15 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     environment: "test", tenant: `tenant_${tenant}`, databaseId: `db_${tenant}`, generation: "1",
     url: `https://${tenant}.test`, tokenEnv: `TENANT_${tenant.toUpperCase()}_TOKEN`, enabledEnv: `TENANT_${tenant.toUpperCase()}_ENABLED`,
   })), () => runtime.snapshot, (credentials, id) => new TursoHttpTransport(credentials, id, remote));
-  const provider = registry.provider;
+  // The example wrapper's provider and configuration, built from its env the way its
+  // `deployment(env)` does (ADR 0021). The library receives neither the env nor its names.
+  const provider = registry.provider(env);
   const database = customizeProvider({
     ...provider,
-    check(binding, bindings) { checks++; return provider.check(binding, bindings); },
+    check(binding) { checks++; return provider.check(binding); },
     connect(...args) { connects++; return provider.connect(...args); },
   });
+  const config = customizeConfig(configFromEnv(env));
   const pending = [];
   const ctx = { waitUntil(promise) { pending.push(promise); } };
   const owners = new Map();
@@ -152,8 +156,10 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     hooksSeen.push({ hook, result, status: query.status });
     return query.ok;
   };
-  const makeOwner = (ownerState) => new TransactionOwnerCore(ownerState, env, () => runtime, database,
-    async (_url, options) => Response.json({ version: "1", allowed: await validator(JSON.parse(options.body)) }));
+  const makeOwner = (ownerState) => new TransactionOwnerCore(ownerState, {
+    getRuntime: () => runtime, database, config,
+    fetchImpl: async (_url, options) => Response.json({ version: "1", allowed: await validator(JSON.parse(options.body)) }),
+  });
   env.TRANSACTION_OWNER = {
     idFromName: (name) => name,
     get(name) {
@@ -164,7 +170,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
       return { fetch: (url, options) => owners.get(name).owner.fetch(new Request(url, options)) };
     },
   };
-  app = createApp({ getRuntime: () => runtime, database, publicConfig: { schemaVersion, policyVersion, limits: runtimeLimits } });
+  app = createApp({ getRuntime: () => runtime, database, config, publicConfig: { schemaVersion, policyVersion, limits: runtimeLimits } });
   const token = (tenant, overrides = {}, jwt = {}) => new SignJWT({
     policysql: { roles: ["member"], default_role: "member", access: ["execute", "explain", "catalog"], session: { tenant_id: `tenant_${tenant}` } },
     ...overrides,
@@ -213,7 +219,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     rmSync(directory, { recursive: true, force: true });
   });
   return {
-    runtime, env, app, ctx, database, databases, events, owners, hooksSeen, token, session, request, flush,
+    runtime, env, config, app, ctx, database, databases, events, owners, hooksSeen, token, session, request, flush,
     binding: (tenant) => registry.binding(`db_${tenant}`, env),
     setValidator(value) { validator = value; },
     counts: () => ({ checks, connects }),

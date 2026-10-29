@@ -3,12 +3,12 @@
 // never authenticates, compiles SQL, initializes WASM, reaches a Durable Object, selects a
 // database, or reaches a database.
 import { createErrorResponse } from "../src/errors.ts";
-import type { WorkerBindings } from "../src/types.ts";
+import type { JwtBindings } from "./auth.ts";
 
 /** Cloudflare Rate Limiting binding (`ratelimits` in wrangler.jsonc). */
 export type RateLimiter = { limit(input: { key: string }): Promise<{ success: boolean }> };
 
-export type RateLimitedBindings = WorkerBindings & {
+export type RateLimitedBindings = JwtBindings & {
   RATE_LIMITER?: RateLimiter;
   CALLBACK_RATE_LIMITER?: RateLimiter;
 };

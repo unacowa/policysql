@@ -1,8 +1,8 @@
 // Compile-only regressions: wrappers build PolicySQL-shaped errors from the public entrypoint (ADR 0018).
 import { createErrorResponse } from "../../src/package.ts";
-import type { ErrorResponseOptions, WorkerBindings } from "../../src/package.ts";
+import type { ErrorResponseOptions, PlatformBindings } from "../../src/package.ts";
 
-declare const env: WorkerBindings;
+declare const env: PlatformBindings;
 
 const checkTypes = () => {
   const options: ErrorResponseOptions = { requestId: "req_1", headers: { "retry-after": "60" } };

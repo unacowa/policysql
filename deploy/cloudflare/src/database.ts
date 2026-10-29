@@ -1,7 +1,6 @@
 import { HttpError } from "./errors.ts";
 import { stableJson } from "./idempotency.ts";
 import { bytesLimit } from "./binary.ts";
-import type { WorkerBindings } from "./types.ts";
 
 /** Server-owned identity. Never put credentials or a client-selected URL here. */
 export type DatabaseBinding = Readonly<{
@@ -41,11 +40,15 @@ export interface DatabaseTransport {
    */
   begin(mode: "read" | "write", timeoutMs: number, deadlineMs?: number, options?: DatabaseTransportOptions): Promise<DatabaseTransaction>;
 }
+/**
+ * Wrapper-owned database registry (ADR 0014). It receives no platform `env`: the wrapper
+ * builds it with whatever credentials and registry it owns (ADR 0021).
+ */
 export interface DatabaseProvider {
   /** Must return exactly true. Called in the Worker and DO, including before callbacks/commit. */
-  check(binding: DatabaseBinding, env: WorkerBindings): boolean | Promise<boolean>;
+  check(binding: DatabaseBinding): boolean | Promise<boolean>;
   /** Construct a transport only; PolicySQL owns BEGIN and the transaction lifecycle. */
-  connect(binding: DatabaseBinding, env: WorkerBindings, requestId: string): DatabaseTransport | Promise<DatabaseTransport>;
+  connect(binding: DatabaseBinding, requestId: string): DatabaseTransport | Promise<DatabaseTransport>;
 }
 
 export const databaseRequired = () => new HttpError(500, "POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
@@ -103,11 +106,11 @@ export const validateDatabaseBinding = (value: unknown, snapshot: string): Datab
 
 export const sameDatabaseBinding = (left, right) => stableJson(left ?? null) === stableJson(right ?? null);
 
-export const checkDatabaseBinding = async (provider: DatabaseProvider, binding, env, snapshot, deadlineMs?: number) => {
+export const checkDatabaseBinding = async (provider: DatabaseProvider, binding, snapshot, deadlineMs?: number) => {
   validateDatabaseProvider(provider);
   if (binding === undefined || binding === null) throw databaseRequired();
   const checked = validateDatabaseBinding(binding, snapshot);
-  if (await bounded(() => provider.check(checked, env), deadlineMs) !== true) throw denied();
+  if (await bounded(() => provider.check(checked), deadlineMs) !== true) throw denied();
   return checked;
 };
 
@@ -119,12 +122,12 @@ export const databaseTransportFactory = (
 ) => {
   const pinned = validateDatabaseBinding(binding, binding?.snapshot);
   const options: DatabaseTransportOptions = Object.freeze({ maxBytesPerValue: bytesLimit(maxBytesPerValue) });
-  return async (env: WorkerBindings, requestId: string, executionDeadlineMs?: number): Promise<DatabaseTransport> => {
+  return async (requestId: string, executionDeadlineMs?: number): Promise<DatabaseTransport> => {
     const startedAt = Date.now();
     const deadline = deadlineMs === undefined ? executionDeadlineMs
       : executionDeadlineMs === undefined ? deadlineMs : Math.min(deadlineMs, executionDeadlineMs);
-    await checkDatabaseBinding(provider, pinned, env, pinned.snapshot, deadline);
-    const transport = await bounded(() => provider.connect(pinned, env, requestId), deadline);
+    await checkDatabaseBinding(provider, pinned, pinned.snapshot, deadline);
+    const transport = await bounded(() => provider.connect(pinned, requestId), deadline);
     if (!transport || typeof transport.begin !== "function") throw unavailable();
     return {
       async begin(mode, timeoutMs) {
@@ -147,7 +150,7 @@ export const databaseTransportFactory = (
           rollback: () => transaction.rollback(),
           async commit() {
             try {
-              await checkDatabaseBinding(provider, pinned, env, pinned.snapshot, expiresAt);
+              await checkDatabaseBinding(provider, pinned, pinned.snapshot, expiresAt);
               remainingDatabaseTime(expiresAt);
             }
             catch (error) {

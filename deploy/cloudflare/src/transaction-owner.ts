@@ -8,6 +8,8 @@ import { checkDatabaseBinding, databaseTransportFactory, sameDatabaseBinding, va
 import type { DatabaseProvider } from "./database.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { runtimeBytesLimit } from "./binary.ts";
+import { validateConfig } from "./engine-config.ts";
+import type { PolicySqlConfig, ValidatedConfig } from "./engine-config.ts";
 
 const MAX_TRANSACTION_MS = 4_000;
 const MAX_STATEMENTS = 8;
@@ -51,9 +53,18 @@ const storedAtomicTerminal = (responseJson) => {
   };
 };
 
+/** What a transaction owner needs. It receives the same `config` as `createApp` (ADR 0021). */
+export type TransactionOwnerDependencies = {
+  getRuntime: () => any;
+  database: DatabaseProvider;
+  config: PolicySqlConfig;
+  /** Omitted: commit-check calls use the host fetch through fetchNoFollow. */
+  fetchImpl?: OutboundFetch;
+};
+
 export class TransactionOwnerCore {
   state: any;
-  env: any;
+  config: ValidatedConfig;
   getRuntime: any;
   fetchImpl?: OutboundFetch;
   transaction: any;
@@ -62,20 +73,19 @@ export class TransactionOwnerCore {
   validationQueue: Promise<any>;
   database: DatabaseProvider;
 
-  constructor(
-    state,
-    env,
-    getRuntime,
-    database: DatabaseProvider,
-    // Omitted: commit-check calls use the host fetch through fetchNoFollow.
-    fetchImpl: OutboundFetch | undefined = undefined,
-  ) {
-    validateDatabaseProvider(database);
+  /**
+   * The Durable Object platform `env` is not an argument: the wrapper builds the
+   * dependencies from it, the same way it builds them for `createApp`.
+   */
+  constructor(state, dependencies: TransactionOwnerDependencies) {
+    if (typeof dependencies?.getRuntime !== "function") throw new TypeError("getRuntime is required");
+    validateDatabaseProvider(dependencies.database);
+    // Validated before the owner can serve any request, so a bad setting never reaches I/O.
+    this.config = validateConfig(dependencies.config);
     this.state = state;
-    this.env = env;
-    this.getRuntime = getRuntime;
-    this.fetchImpl = fetchImpl;
-    this.database = database;
+    this.getRuntime = dependencies.getRuntime;
+    this.fetchImpl = dependencies.fetchImpl;
+    this.database = dependencies.database;
     this.transaction = null;
     this.validation = null;
     this.queue = Promise.resolve();
@@ -89,14 +99,14 @@ export class TransactionOwnerCore {
   async checkContext(body) {
     const snapshot = this.getRuntime().snapshot;
     if (body.snapshot !== snapshot) throw conflict();
-    const databaseBinding = await checkDatabaseBinding(this.database, body.databaseBinding, this.env, snapshot);
+    const databaseBinding = await checkDatabaseBinding(this.database, body.databaseBinding, snapshot);
     return { databaseBinding, snapshot };
   }
 
   async checkCurrent(current, deadlineMs = current.expiresAtMs) {
     try {
       if (current.snapshot !== this.getRuntime().snapshot) throw unavailable();
-      await checkDatabaseBinding(this.database, current.databaseBinding, this.env, current.snapshot,
+      await checkDatabaseBinding(this.database, current.databaseBinding, current.snapshot,
         ["active", "validating"].includes(current.status) ? deadlineMs : undefined);
       if (current.snapshot !== this.getRuntime().snapshot ||
         (["active", "validating"].includes(current.status) && Date.now() >= current.expiresAtMs)) throw unavailable();
@@ -107,7 +117,7 @@ export class TransactionOwnerCore {
   }
 
   observeCost(compiled, requestId, binding) {
-    this.state.waitUntil?.(observeCostEnvelope(compiled, this.env, `${requestId}-cost`, this.connectionFactory(binding), runtimeBytesLimit(this.getRuntime())));
+    this.state.waitUntil?.(observeCostEnvelope(compiled, this.config.costCatalog, `${requestId}-cost`, this.connectionFactory(binding), runtimeBytesLimit(this.getRuntime())));
   }
 
   fetch(request) {
@@ -205,7 +215,7 @@ export class TransactionOwnerCore {
       return this.publicState(previous, requestId);
     }
     const expiresAtMs = Date.now() + MAX_TRANSACTION_MS;
-    const transport = await this.connectionFactory(bindingContext.databaseBinding, expiresAtMs)(this.env, requestId);
+    const transport = await this.connectionFactory(bindingContext.databaseBinding, expiresAtMs)(requestId);
     this.transaction = await transport.begin(body.mode, 1_000);
     const value = await this.persist({
       ...bindingContext,
@@ -423,7 +433,7 @@ export class TransactionOwnerCore {
       compiled: context,
       results: outcomes,
       auth: current.auth,
-      env: this.env,
+      config: this.config,
       requestId,
       validationId: current.validationId ?? current.transactionId.replace(/^tx_/u, "cval_"),
       activate: (session) => this.activateValidation(current, session),
@@ -522,7 +532,7 @@ export class TransactionOwnerCore {
     let released = false;
     const expiresAtMs = Date.now() + MAX_TRANSACTION_MS;
     try {
-      const transport = await this.connectionFactory(bindingContext.databaseBinding, expiresAtMs)(this.env, requestId);
+      const transport = await this.connectionFactory(bindingContext.databaseBinding, expiresAtMs)(requestId);
       this.transaction = await transport.begin("write", Math.min(...compiled.statements.map((item) => item.limits.timeoutMs)));
     } catch (error) {
       runtime.release_execution(BigInt(compiled.executionHandle));

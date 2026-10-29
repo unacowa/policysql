@@ -157,7 +157,9 @@ Each stage is useful on its own and ships as its own pull requests.
    session as data, validate it once in core, ship JWT as an identity adapter.
 2. **Ports and outbound adapters (#30, #31, #32).** Rename the WASM ABI crate and remove the
    unused `JwtVerifier`; define `TransactionOwner` and move Durable Objects behind it;
-   replace `env` reads with `Config`.
+   replace `env` reads with `Config` (done in
+   [ADR 0021](0021-explicit-engine-config.md): `PolicySqlConfig`, validator endpoints per
+   commit-check id, and `TRANSACTION_OWNER` as the only remaining platform read until #31).
 3. **Operations API and the HTTP adapter (#34).** Expose engine operations, move HTTP into
    the inbound adapter, make the status table single-sourced and exhaustively tested.
 4. **Transaction decisions into core (#35).** Design the `step` ABI in its own ADR and

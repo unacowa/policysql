@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
-import { testBinding, testProvider } from "./helpers/database.mjs";
+import { testBinding, testConfig, testProvider } from "./helpers/database.mjs";
 import { createApp as createHandlerCore } from "../src/app.ts";
 import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
@@ -95,7 +95,7 @@ const sessionFixture = (access = ["execute"]) => ({
 
 test("Explain exposes role-visible resource names instead of internal identities", async () => {
   const session = sessionFixture(["explain"]);
-  const handler = createHandlerCore({ getRuntime, database: testProvider() });
+  const handler = createHandlerCore({ getRuntime, database: testProvider(), config: testConfig() });
   const response = await handler.fetch(
     new Request("https://worker.test/v1/transactions:explain", {
       method: "POST",
@@ -133,7 +133,8 @@ const executeRequest = async ({
 }) => {
   const handler = createHandlerCore({
     getRuntime: () => runtime,
-    database: testProvider((_binding, _env, id) => new TursoHttpTransport({ url: "https://db.test", authToken: "secret" }, id, fetchImpl)),
+    database: testProvider((_binding, id) => new TursoHttpTransport({ url: "https://db.test", authToken: "secret" }, id, fetchImpl)),
+    config: testConfig(),
     executionTrace,
   });
   return handler.fetch(

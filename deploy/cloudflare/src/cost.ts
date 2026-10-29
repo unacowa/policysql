@@ -2,29 +2,16 @@ import { HttpError } from "./errors.ts";
 import { databaseRequired } from "./database.ts";
 import { driverArgs } from "./driver-values.ts";
 import { bytesLimit } from "./binary.ts";
+import type { CostCatalog } from "./engine-config.ts";
 
 const invalidPlanner = () =>
   new HttpError(403, "POLICYSQL_COST_UNKNOWN", "The query cost could not be bounded safely.");
 
-const parseCatalog = (env) => {
-  let value;
-  try {
-    value = JSON.parse(env.POLICYSQL_COST_CATALOG_JSON);
-  } catch {
-    throw invalidPlanner();
-  }
-  if (
-    !value ||
-    !Number.isSafeInteger(value.maxEstimatedRowsRead) ||
-    value.maxEstimatedRowsRead <= 0 ||
-    !Number.isSafeInteger(value.maxEstimatedRowsWritten) ||
-    value.maxEstimatedRowsWritten <= 0 ||
-    !value.resources ||
-    Object.values(value.resources).some(
-      (item: any) => !Number.isSafeInteger(item?.upperRows) || item.upperRows <= 0,
-    )
-  ) throw invalidPlanner();
-  return value;
+// The wrapper supplies the catalog in `PolicySqlConfig.costCatalog`, validated at
+// construction (ADR 0021). An absent catalog means cost cannot be bounded.
+const requireCatalog = (catalog: Readonly<CostCatalog> | undefined) => {
+  if (catalog === undefined) throw invalidPlanner();
+  return catalog;
 };
 
 const details = (result) => result.rows.map((row) => {
@@ -81,8 +68,8 @@ const evaluate = (compiled, catalog, planned, results) => {
 };
 
 // `maxBytes` is the runtime's max_bytes_per_value; cost queries bind the same values.
-export const estimateSealedOnTransaction = async (compiled, env, transaction, maxBytes: number) => {
-  const catalog = parseCatalog(env);
+export const estimateSealedOnTransaction = async (compiled, costCatalog: Readonly<CostCatalog> | undefined, transaction, maxBytes: number) => {
+  const catalog = requireCatalog(costCatalog);
   const planned = compiled.statements
     .map((statement, index) => ({ statement, index }))
     .filter(({ statement }) => statement.operation !== "insert");
@@ -97,7 +84,7 @@ export const estimateSealedOnTransaction = async (compiled, env, transaction, ma
 
 export const estimateSealedEnvelope = async (
   compiled,
-  env,
+  costCatalog: Readonly<CostCatalog> | undefined,
   requestId,
   transportFactory: (...args: any[]) => any,
   maxBytes: number,
@@ -105,7 +92,7 @@ export const estimateSealedEnvelope = async (
   if (typeof transportFactory !== "function") throw databaseRequired();
   // A malformed injected limit is a wiring defect: fail before BEGIN, not as a 503.
   bytesLimit(maxBytes);
-  const catalog = parseCatalog(env);
+  const catalog = requireCatalog(costCatalog);
   let transaction;
   try {
     const planned = compiled.statements
@@ -113,7 +100,7 @@ export const estimateSealedEnvelope = async (
       .filter(({ statement }) => statement.operation !== "insert");
     let results = [];
     if (planned.length > 0) {
-      const transport = await transportFactory(env, `${requestId}-cost`, Date.now() + 1_000);
+      const transport = await transportFactory(`${requestId}-cost`, Date.now() + 1_000);
       transaction = await transport.begin("read", 1_000);
       results = await transaction.execute(planned.map(({ statement }) => ({
         sql: statement.costExplainSql,
@@ -151,13 +138,13 @@ export const estimateSealedEnvelope = async (
 
 export const observeCostEnvelope = async (
   compiled,
-  env,
+  costCatalog: Readonly<CostCatalog> | undefined,
   requestId,
   transportFactory: (...args: any[]) => any,
   maxBytes: number,
 ) => {
   try {
-    const observation = await estimateSealedEnvelope(compiled, env, requestId, transportFactory, maxBytes);
+    const observation = await estimateSealedEnvelope(compiled, costCatalog, requestId, transportFactory, maxBytes);
     console.log(JSON.stringify({
       event: "cost_observation",
       requestId,

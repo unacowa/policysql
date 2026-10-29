@@ -192,7 +192,6 @@ export const executeSealedOnTransaction = async (
 export const executeSealedEnvelope = async (
   runtime,
   compiled,
-  env,
   requestId,
   transportFactory: (...args: any[]) => any,
   idempotency = null,
@@ -217,7 +216,7 @@ export const executeSealedEnvelope = async (
     if (typeof transportFactory !== "function") throw databaseRequired();
     const timeoutMs = Math.min(...compiled.statements.map((item) => item.limits.timeoutMs));
     const deadlineMs = Date.now() + timeoutMs;
-    const transport = await transportFactory(env, requestId, deadlineMs);
+    const transport = await transportFactory(requestId, deadlineMs);
     transaction = await transport.begin(compiled.transactionMode, timeoutMs);
     const statements = compiled.statements.map((statement) => ({
       sql: statement.protectedSql,

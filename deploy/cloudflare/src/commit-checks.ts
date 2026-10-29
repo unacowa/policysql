@@ -2,6 +2,7 @@ import { HttpError } from "./errors.ts";
 import { sha256 } from "./idempotency.ts";
 import { fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
+import type { ValidatedConfig } from "./engine-config.ts";
 
 const rejected = () => new HttpError(
   409,
@@ -72,7 +73,7 @@ export const runCommitChecks = async ({
   compiled,
   results,
   auth,
-  env,
+  config,
   requestId,
   validationId,
   activate,
@@ -80,13 +81,36 @@ export const runCommitChecks = async ({
   // Omitted: fetchNoFollow uses the host fetch.
   fetchImpl = undefined as OutboundFetch | undefined,
   deadlineMs = Number.POSITIVE_INFINITY,
+}: {
+  compiled: any;
+  results: any;
+  auth: any;
+  /** Validated deployment configuration (ADR 0021); the validator endpoints live here. */
+  config: ValidatedConfig;
+  requestId: string;
+  validationId: string;
+  activate: (session: any) => Promise<unknown>;
+  deactivate: () => Promise<unknown>;
+  fetchImpl?: OutboundFetch;
+  deadlineMs?: number;
 }) => {
   const { changed, checks } = triggeredCommitChecks(compiled, results);
   if (checks.length === 0) return "not_triggered";
-  const publicBase = secureUrl(env.POLICYSQL_PUBLIC_BASE_URL);
-  for (const check of checks) {
-    const url = secureUrl(env[check.urlEnv]);
-    const secret = env[check.hmacSecretEnv];
+  // Resolve every triggered check before the first capability or hook, so a missing
+  // endpoint rejects the commit without contacting any validator.
+  const endpoints = checks.map((check) => {
+    const endpoint = config?.commitCheck(check.id);
+    if (endpoint === undefined || config.publicBaseUrl === undefined) {
+      console.log(JSON.stringify({ event: "commit_check_unconfigured", requestId, check: check.id }));
+      throw rejected();
+    }
+    return endpoint;
+  });
+  const publicBase = secureUrl(config.publicBaseUrl);
+  for (const [index, check] of checks.entries()) {
+    // Validated at construction; re-checked here because this is the outbound exit.
+    const url = secureUrl(endpoints[index].url);
+    const secret = endpoints[index].hmacSecret;
     if (typeof secret !== "string" || secret.length < 16) throw rejected();
     const token = opaqueToken();
     const expiresAtMs = Math.min(Date.now() + check.timeoutMs, deadlineMs);

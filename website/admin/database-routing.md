@@ -15,14 +15,15 @@ DBの選択と認可はラッパー側で行い、PolicySQLは渡されたDBで�
 
 `@unacowa/policysql/cloudflare`から公開するAPIには、次の二つを渡します。
 
-1. `createApp` / `createPolicySqlWorker`の`database`に接続提供処理を設定する。
+1. `createApp` / `createPolicySqlWorker`に接続提供処理（`database`）と設定（`config`）を渡す。Workersでは`deployment(env)`関数で両方を組み立てる。
 2. 各`app.fetch`の第4引数`{ database, session }`に、選択済みの`DatabaseBinding`と、ラッパーが認証したtrusted sessionを渡す（[JWT認証](../security/jwt)）。
 
 ```ts
 const worker = createPolicySqlWorker({
   catalog, policy, physicalSchema,
   schemaVersion, policyVersion, limits,
-  database: provider,
+  // ラッパー所有。WorkerとDurable Objectがそれぞれのenvで呼び出す。
+  deployment: (env) => ({ database: registry.provider(env), config: configFromEnv(env) }),
 });
 
 export const TransactionOwner = worker.TransactionOwner;
@@ -53,8 +54,23 @@ export default {
 
 | メソッド | 用途 |
 | --- | --- |
-| `check(binding, env)` | 渡されたbindingが登録済み・互換・有効なら正確に`true`を返す |
-| `connect(binding, env, requestId)` | そのDBへのtransportを生成する。transactionは開始しない |
+| `check(binding)` | 渡されたbindingが登録済み・互換・有効なら正確に`true`を返す |
+| `connect(binding, requestId)` | そのDBへのtransportを生成する。transactionは開始しない |
+
+providerはplatformの`env`を受け取りません。ラッパーが自分の認証情報とregistryから組み立てます。
+
+## 設定（`PolicySqlConfig`）
+
+ライブラリはplatformの`env`から設定を読みません（`TRANSACTION_OWNER`を除く）。ラッパーが次の値を明示的に渡します。env名はラッパー側の規約です。
+
+| 設定 | 必須 | 内容 |
+| --- | --- | --- |
+| `environment` | yes | `/healthz`が返すデプロイ名 |
+| `publicBaseUrl` | `commitChecks`がある場合 | validatorがcallbackするHTTPS origin |
+| `costCatalog` | no | cost観測の上限（JSON文字列ではなくobject） |
+| `commitChecks` | no | policyのcheck IDごとの`{ url, hmacSecret }` |
+
+不正な値は構築時（`createPolicySqlWorker`では最初の要求時）に拒否され、DB・Durable Object・validatorへのアクセス前にHTTP 500 `POLICYSQL_INTERNAL`になります。エラーとログには設定名だけが含まれ、値は含まれません。
 
 DB注入APIはJWTや認証情報を受け取りません。ラッパーは固定設定、独自の認可service、検証済みtokenなど、自分の設計で接続先を選べます。
 

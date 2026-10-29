@@ -1,5 +1,5 @@
 // Deployment-owned request entry point. Not part of the published library.
-import type { PolicySqlApp } from "../src/app.ts";
+import type { PolicySqlWorkerApp } from "../src/package.ts";
 import type { DatabaseBinding } from "../src/database.ts";
 import { authenticateJwt, authenticateRequest, type Authenticate } from "./auth.ts";
 import {
@@ -19,7 +19,7 @@ const HEALTH = "/healthz";
  *   or reaches a Durable Object; their capability is only checked inside the owner.
  */
 export const createWrapperFetch = (
-  app: PolicySqlApp,
+  app: PolicySqlWorkerApp<RateLimitedBindings>,
   binding: (env: RateLimitedBindings) => DatabaseBinding,
   authenticate: Authenticate = authenticateJwt,
 ): FetchHandler => {

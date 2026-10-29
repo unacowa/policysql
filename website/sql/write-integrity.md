@@ -142,9 +142,7 @@ commit_checks:
     triggered_by: [posts, comments]
     role: admin
     hook:
-      url_env: POST_VALIDATOR_URL
       timeout_ms: 1500
-      hmac_secret_env: POST_VALIDATOR_SECRET
 ```
 
 roleを省略するとrequest実行者のroleを引き継ぎます。明示したroleはpolicyが付与するsystem privilegeであり、実行者JWTのallowed rolesとは独立しています。
@@ -186,9 +184,7 @@ commit_checks:
     triggered_by: [posts, comments]
     role: admin
     hook:
-      url_env: POST_VALIDATOR_URL
       timeout_ms: 1500
-      hmac_secret_env: POST_VALIDATOR_SECRET
 ```
 
 presetやoperation checkが成功してもcommit checkは省略されません。各機能は異なる境界を検証し、一つの成功を別の機能の成功として扱いません。

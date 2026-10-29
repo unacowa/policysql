@@ -28,18 +28,16 @@ commit_checks:
     triggered_by: [orders, order_items]
     role: admin
     hook:
-      url_env: ORDER_VALIDATOR_URL
       timeout_ms: 1500
-      hmac_secret_env: ORDER_VALIDATOR_SECRET
 ```
 
 | Field | Required | Description |
 | --- | --- | --- |
 | `triggered_by` | yes | transactionで変更された場合にcheckを起動するresource |
 | `role` | no | callback SELECTへ適用するrole。省略時はrequest実行者のrole |
-| `hook.url_env` | yes | validator URLを保持するenvironment variable名 |
 | `hook.timeout_ms` | yes | hook開始からdecision受信までの期限 |
-| `hook.hmac_secret_env` | yes | outbound hook requestを署名するsecretのenvironment variable名 |
+
+validator URLとHMAC secretはpolicyに書きません。wrapperがcheck IDごとに`commitChecks`設定として渡します（[ADR 0021](https://github.com/unacowa/policysql/blob/main/docs/adr/0021-explicit-engine-config.md)）。
 
 transactionが`triggered_by`のいずれかを変更すると、PolicySQLは対応するcommit checkを必ず実行します。clientはcheckを省略、追加、変更できません。
 
@@ -52,9 +50,7 @@ commit_checks:
   order_consistency:
     triggered_by: [orders, order_items]
     hook:
-      url_env: ORDER_VALIDATOR_URL
       timeout_ms: 1500
-      hmac_secret_env: ORDER_VALIDATOR_SECRET
 ```
 
 `role`を明示した場合は、そのroleをcallback SELECTへ適用します。実行者JWTの`policysql.roles`に含まれている必要はありません。これはpolicyが付与するsystem privilegeであり、整合性検証のために`admin`などの特権roleを使用できます。

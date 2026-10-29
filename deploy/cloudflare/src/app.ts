@@ -8,7 +8,8 @@ import { registerExecuteRoutes } from "./routes/execute.ts";
 import { registerSystemRoutes } from "./routes/system.ts";
 import { registerTransactionRoutes } from "./routes/transactions.ts";
 import { HttpError } from "./errors.ts";
-import type { AppDependencies, AppEnv, RequestContext, WorkerBindings } from "./types.ts";
+import type { AppDependencies, AppEnv, EngineDependencies, PlatformBindings, RequestContext } from "./types.ts";
+import { validateConfig } from "./engine-config.ts";
 import { databaseRequired, validateDatabaseBinding, validateDatabaseProvider } from "./database.ts";
 
 export type PolicySqlApp = {
@@ -16,23 +17,31 @@ export type PolicySqlApp = {
    * Serves one client request. The wrapper has already authenticated the caller and
    * selected the database; `context` carries both as data (ADR 0014, ADR 0019).
    */
-  fetch(request: Request, env: WorkerBindings, executionContext: ExecutionContext | undefined, context: RequestContext): Promise<Response>;
+  fetch(request: Request, env: PlatformBindings, executionContext: ExecutionContext | undefined, context: RequestContext): Promise<Response>;
   /** Callback capabilities use the database already pinned by the owner. No database selection. */
-  fetchCallback(request: Request, env: WorkerBindings, executionContext: ExecutionContext | undefined): Promise<Response>;
+  fetchCallback(request: Request, env: PlatformBindings, executionContext: ExecutionContext | undefined): Promise<Response>;
 };
+
+// The only platform binding the library reads (ADR 0021). Deployment settings come from
+// `PolicySqlConfig`; this read remains until the TransactionOwner port replaces the Durable
+// Object namespace (#31).
+const platformTransactionOwner = (env: PlatformBindings | undefined) =>
+  env === null || typeof env !== "object" ? undefined : env.TRANSACTION_OWNER;
 
 const REQUEST_CONTEXT_KEYS = new Set(["database", "session", "requestId"]);
 // Echoed in response bodies and forwarded as a header to the transaction owner.
 const REQUEST_ID = /^[\x21-\x7e]{1,128}$/u;
 
-export const createApp = (dependencies: AppDependencies): PolicySqlApp => {
-  if (typeof dependencies?.getRuntime !== "function") {
+export const createApp = (input: AppDependencies): PolicySqlApp => {
+  if (typeof input?.getRuntime !== "function") {
     throw new TypeError("getRuntime is required");
   }
-  validateDatabaseProvider(dependencies.database);
-  if ("transportFactory" in dependencies || "costTransportFactory" in dependencies) {
+  validateDatabaseProvider(input.database);
+  if ("transportFactory" in input || "costTransportFactory" in input) {
     throw new TypeError("transportFactory overrides were removed; supply database explicitly");
   }
+  // Validated once, here, before any request can reach a database, owner, or validator.
+  const dependencies: EngineDependencies = { ...input, config: validateConfig(input.config) };
 
   const app = new Hono<AppEnv>();
   app.use("*", requestContext());
@@ -81,7 +90,7 @@ export const createApp = (dependencies: AppDependencies): PolicySqlApp => {
         }
         const databaseBinding = validateDatabaseBinding(database, database.snapshot);
         return await app.fetch(request, {
-          deployment: env, databaseBinding, session: context.session, requestId: context.requestId,
+          transactionOwner: platformTransactionOwner(env), databaseBinding, session: context.session, requestId: context.requestId,
         }, executionContext);
       } catch (error) {
         const response = safeError(error, crypto.randomUUID());
@@ -92,7 +101,7 @@ export const createApp = (dependencies: AppDependencies): PolicySqlApp => {
       if (request.method !== "POST" || !/^\/v1\/commit-checks\/cval_[a-f0-9]{32}\/query$/.test(new URL(request.url).pathname)) {
         return Response.json({ error: { code: "POLICYSQL_NOT_FOUND", message: "Endpoint not found." } }, { status: 404 });
       }
-      return app.fetch(request, { deployment: env, callback: true }, executionContext);
+      return app.fetch(request, { transactionOwner: platformTransactionOwner(env), callback: true }, executionContext);
     },
   };
 };

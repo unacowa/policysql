@@ -3,17 +3,18 @@ import { HttpError } from "../errors.ts";
 import { readJsonBody } from "../http.ts";
 import { authFingerprint, requestIdempotency, sha256, stableJson } from "../idempotency.ts";
 import { authorize } from "../middleware/authorization.ts";
+import { transactionOwner } from "../middleware/request-context.ts";
 import { jsonResponse } from "../responses.ts";
 import { POLICY_VERSION, SCHEMA_VERSION } from "../config.ts";
 import { checkDatabaseBinding } from "../database.ts";
-import type { AppDependencies, AppEnv } from "../types.ts";
+import type { AppEnv, EngineDependencies } from "../types.ts";
 
 const TRANSACTION_ID = /^tx_[a-f0-9]{32}$/u;
 
 const invalidRequest = () =>
   new HttpError(400, "POLICYSQL_INVALID_REQUEST", "The request is invalid.");
 
-export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDependencies) => {
+export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: EngineDependencies) => {
   app.post("/v1/transactions", authorize(dependencies, "execute"), async (context) => {
     const auth = context.get("auth");
     const body = await readJsonBody(context.req.raw);
@@ -36,7 +37,7 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDe
       throw new HttpError(409, "POLICYSQL_STALE_OPERATION", "The operation was compiled for a different active snapshot.");
     }
     const snapshot = dependencies.getRuntime().snapshot;
-    const databaseBinding = await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, snapshot);
+    const databaseBinding = await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, snapshot);
     const idempotency = await requestIdempotency(
       context.req.raw,
       auth,
@@ -48,7 +49,7 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDe
     const fingerprint = await authFingerprint(auth, databaseBinding);
     // The owner still validates its start command; this digest is not a public retry key.
     const startFingerprint = idempotency?.fingerprint ?? await sha256(stableJson({ transactionId, request: body.value }));
-    const owner = context.env.deployment.TRANSACTION_OWNER.get(context.env.deployment.TRANSACTION_OWNER.idFromName(transactionId));
+    const owner = transactionOwner(context, transactionId);
     return owner.fetch("https://owner/begin", {
       method: "POST",
       headers: { "content-type": "application/json", "x-policysql-request-id": context.get("requestId") },
@@ -74,9 +75,9 @@ export const registerTransactionRoutes = (app: Hono<AppEnv>, dependencies: AppDe
     const auth = context.get("auth");
     const body = await readJsonBody(context.req.raw);
     const snapshot = dependencies.getRuntime().snapshot;
-    const databaseBinding = await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, snapshot);
+    const databaseBinding = await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, snapshot);
     const fingerprint = await authFingerprint(auth, databaseBinding);
-    const owner = context.env.deployment.TRANSACTION_OWNER.get(context.env.deployment.TRANSACTION_OWNER.idFromName(transactionId));
+    const owner = transactionOwner(context, transactionId);
     return owner.fetch(`https://owner/${command === "statements" ? "statement" : command}`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-policysql-request-id": context.get("requestId") },

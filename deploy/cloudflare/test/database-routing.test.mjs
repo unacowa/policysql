@@ -97,7 +97,7 @@ test("the callback entrypoint cannot be used to bypass required DB injection", a
 
 test("missing DB binding in an internal DO request fails before a connection is opened", async (t) => {
   const h = await harness(t);
-  const owner = new TransactionOwnerCore({ storage: {} }, h.env, () => h.runtime, h.database);
+  const owner = new TransactionOwnerCore({ storage: {} }, { getRuntime: () => h.runtime, database: h.database, config: h.config });
   const response = await owner.fetch(new Request("https://owner/begin", { method: "POST", body: JSON.stringify({
     transactionId: `tx_${"a".repeat(32)}`, authFingerprint: "b".repeat(64), startFingerprint: "c".repeat(64),
     mode: "read", auth: {}, snapshot: h.runtime.snapshot,
@@ -192,6 +192,26 @@ for (const hooks of [false, true]) {
     assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
   });
 }
+
+// ADR 0021: the validator endpoint comes from the wrapper's config, keyed by check id. A
+// policy check with no configured endpoint fails closed for atomic and interactive commits.
+test("a commit check without a configured endpoint rejects the commit, rolls back, and calls no validator", async (t) => {
+  const h = await harness(t, { customizeConfig: (config) => ({ ...config, commitChecks: { another_check: config.commitChecks.consistency } }) });
+  let calls = 0;
+  h.setValidator(async () => { calls++; return true; });
+  const atomic = await h.request("a", "/v1/transactions:execute", envelope(insert("unconfigured_atomic")), null);
+  assert.equal(atomic.status, 409);
+  assert.equal(atomic.body.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
+  const start = await h.request("a", "/v1/transactions", { mode: "write" }, null);
+  const path = `/v1/transactions/${start.body.transactionId}`;
+  assert.equal((await h.request("a", `${path}/statements`, { sequence: 1, ...insert("unconfigured_tx") }, null)).status, 200);
+  const commit = await h.request("a", `${path}/commit`, { sequence: 2 }, null);
+  assert.equal(commit.status, 409);
+  assert.equal(commit.body.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
+  assert.equal(calls, 0);
+  assert.equal(h.hooksSeen.length, 0);
+  assert.equal(h.rows("a").some((row) => row.id.startsWith("unconfigured")), false);
+});
 
 test("unkeyed commit-check rejection rolls back the update", async (t) => {
   const h = await harness(t, { idempotencyTable: false });
@@ -358,10 +378,10 @@ test("Worker/DO provider configuration mismatch fails before connecting", async 
   const start = await h.request("a", "/v1/transactions", { mode: "read" });
   const entry = h.owners.get(start.body.transactionId);
   const message = await entry.state.storage.get("transaction");
-  const ownerWithoutProvider = new TransactionOwnerCore(entry.state, h.env, () => h.runtime, {
+  const ownerWithoutProvider = new TransactionOwnerCore(entry.state, { getRuntime: () => h.runtime, config: h.config, database: {
     check: () => false,
     connect: () => { assert.fail("No default database is available"); },
-  });
+  } });
   const response = await ownerWithoutProvider.fetch(new Request("https://owner/begin", { method: "POST", body: JSON.stringify({
     transactionId: message.transactionId, authFingerprint: message.authFingerprint, startFingerprint: message.startFingerprint,
     mode: "read", auth: message.auth, databaseBinding: message.databaseBinding, snapshot: message.snapshot,
@@ -373,7 +393,7 @@ for (const hooks of [false, true]) {
   test(`generation changes conflict on retry without duplicating writes (DO=${hooks})`, async (t) => {
     let generation = "1";
     const h = await harness(t, { hooks, customizeBinding: (binding) => ({ ...binding, generation }), customizeProvider: (provider) => ({
-      check: (binding, env) => provider.check({ ...binding, generation: "1" }, env),
+      check: (binding) => provider.check({ ...binding, generation: "1" }),
       connect: (binding, ...args) => provider.connect({ ...binding, generation: "1" }, ...args),
     }) });
     const body = envelope(insert("one_write"));
@@ -468,7 +488,7 @@ test("a slow commit authorization cannot extend the transaction deadline", async
       commit: async () => { committed = true; }, rollback: async () => { rolledBack = true; },
     }) }),
   };
-  const transport = await databaseTransportFactory(provider, binding, 1_024)({}, "request");
+  const transport = await databaseTransportFactory(provider, binding, 1_024)("request");
   const transaction = await transport.begin("write", 100);
   slow = true;
   await assert.rejects(transaction.commit(), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
@@ -507,13 +527,14 @@ test("binding validation rejects extra credentials and snapshots and captures an
 });
 
 test("malformed database configuration cannot enable a legacy fixed-DB fallback", () => {
+  const config = { environment: "test" };
   for (const database of [undefined, null, false, {}, { connect() {} }]) {
-    assert.throws(() => createApp({ getRuntime: () => ({}), database }), TypeError);
-    assert.throws(() => new TransactionOwnerCore({}, {}, () => ({}), database), TypeError);
+    assert.throws(() => createApp({ getRuntime: () => ({}), database, config }), TypeError);
+    assert.throws(() => new TransactionOwnerCore({}, { getRuntime: () => ({}), database, config }), TypeError);
   }
   const database = { check() {}, connect() {} };
-  assert.throws(() => createApp({ getRuntime: () => ({}), database, transportFactory() {} }), TypeError);
-  assert.throws(() => createApp({ getRuntime: () => ({}), database, costTransportFactory() {} }), TypeError);
+  assert.throws(() => createApp({ getRuntime: () => ({}), database, config, transportFactory() {} }), TypeError);
+  assert.throws(() => createApp({ getRuntime: () => ({}), database, config, costTransportFactory() {} }), TypeError);
 });
 
 test("revocation before direct commit rolls back without opening a replacement connection", async () => {
@@ -525,7 +546,7 @@ test("revocation before direct commit rolls back without opening a replacement c
     open: true, usage: [], execute: async () => [],
     commit: async () => { commits++; }, rollback: async () => { rollbacks++; },
   }) }) };
-  const transport = await databaseTransportFactory(provider, binding, 1_024)({}, "request");
+  const transport = await databaseTransportFactory(provider, binding, 1_024)("request");
   const transaction = await transport.begin("write", 1000);
   allowed = false;
   await assert.rejects(transaction.commit(), (error) => error.code === "POLICYSQL_DATABASE_BINDING_REJECTED");
