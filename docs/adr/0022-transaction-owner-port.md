@@ -41,8 +41,14 @@ Contract every adapter keeps (the conformance suite checks it):
   no resumed transaction, no commit reported. A command that was in flight fails (500); later
   commands get 409 `POLICYSQL_TRANSACTION_UNAVAILABLE`. The record becomes `failed`, or, when
   the loss happened while a commit waited on its validator, stays `validating` until the timer
-  expires it.
+  expires it. Since #48: when COMMIT may have been sent, a repeated commit gets 503
+  `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, never 409. The record status that implements this is
+  specified by #48 (ADR 0007) and by [ADR 0024](0024-transaction-step-machine.md).
 - Inputs and replies cross a data boundary; the owner validates every input as untrusted.
+- The store is private to its owner: only the live owner of a name reads or writes that name's
+  store, through the adapter. No conformance test can observe this, so it is stated as an
+  obligation; [ADR 0024](0024-transaction-step-machine.md) relies on it instead of
+  authenticating the stored state.
 
 Serialization stays in the core: client commands run one at a time in the order they reach
 the owner, callback queries likewise on a second lane (they arrive while a commit on the first
