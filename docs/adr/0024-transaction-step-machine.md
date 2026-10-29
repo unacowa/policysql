@@ -334,6 +334,8 @@ enum Effect {
     Respond { lane, reply },                         // OwnerReply or operation result
     Observe { statements, context },                 // background cost observation
     Log { record },                                  // a structured log record decided by core
+    Reset,                                           // drop in-memory state; the next event starts
+                                                     // from the store with no volatile part
 }
 ```
 
@@ -373,7 +375,10 @@ the connection at a time.
 
   The cost is that a commit retry against a transaction that really rolled back also gets
   outcome-unknown; the client then resolves it by its own means.
-- **Invalid volatile state** is an engine fault: the same as above, and the engine discards it.
+- **Invalid volatile state** is an engine fault. If the durable state is readable, core handles
+  it exactly as `Abandon` (below) applied to that durable state, so an interactive transaction in
+  `committing` becomes `commit_unknown` (persisted). If the durable state is unreadable too, the
+  rule above applies (`discarded`). In both cases the engine discards the volatile state.
 - **Invalid host facts** (`step_json` cannot read them) return `{"error": POLICYSQL_INTERNAL}`
   and no state; the engine replies 500 and sends `Abandon` with the previous state.
 - **`Abandon`** releases every handle in volatile state, drops its pending effects, and moves
@@ -395,13 +400,28 @@ the connection at a time.
   invalid volatile state, an outcome that is not pending, an invariant violation, `Abandon`)
   moves an interactive transaction in phase `committing` to `commit_unknown` (persisted), so a
   commit retry gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. It reaches `failed`, `expired`, or
-  `rolled_back` only through the deadline check of the step that consumes `Persisted` for
-  `committing`, before `Commit` is emitted (see [Effect contract](#effect-execution-contract)),
-  or through `CommitFailed { class: not_committed }`.
+  `rolled_back` only in three ways, each before `Commit` is emitted or after the adapter proved
+  that COMMIT did not apply:
+  - the deadline check of the step that consumes `Persisted` for `committing`;
+  - a `PersistFailed` for `committing` (see [Effect contract](#effect-execution-contract));
+  - `CommitFailed { class: not_committed }`.
+
+  Even then the new phase becomes current, and is answered to anyone, only after it has been
+  persisted.
+- **Phases change in memory only after they are persisted, when the change is a rejection.**
+  When core moves a transaction to `failed`, `expired`, or `rolled_back` after it emitted
+  `Persist(committing)`, it emits `Persist` for the new phase and replies only on `Persisted`. If that `Persist`
+  fails too, core emits `Reset` (below): the owner replies `POLICYSQL_INTERNAL`, drops its
+  in-memory state, and answers the next event from the store as a successor would. The store
+  then holds either the previous phase or `committing`. Either way, a same-owner retry and a
+  successor give the same answer, and that answer is never a definite rejection of a COMMIT that
+  may have been sent.
 - **A client or validator event that is invalid** gets the client-facing codes of today, and
   ADR 0007's rule that a conflicting command fails and rolls back an active transaction.
-- **A Rust invariant violation inside a transition** is reported as an invalid durable state.
-  Clippy already denies `panic`, `unwrap`, and `expect`.
+- **A Rust invariant violation inside a transition** is handled like invalid volatile state: as
+  `Abandon` applied to the readable durable state (`committing` becomes `commit_unknown`), or
+  as `discarded` when the durable state itself fails validation. Clippy already denies `panic`,
+  `unwrap`, and `expect`.
 
 ### Plans across requests
 
@@ -498,14 +518,18 @@ become effect executors:
    flight together.
 5. Store writes apply in call order (a port obligation the conformance suite already exercises
    for Durable Objects). On owner shutdown or an engine error the engine feeds `Abandon`, which
-   releases handles, and lets the database adapter close the connection.
+   releases handles, and lets the database adapter close the connection. On `Reset` the engine
+   closes any connection, drops its in-memory durable and volatile state, and reads the durable
+   state from the store for the next event, as a successor would.
 
 What each failure leads to (all decided by core, listed here because ADR 0007 depends on them):
 
 | Failure | Outcome |
 | --- | --- |
 | `OpenFailed`, `ExecuteFailed`, `BindingCheckFailed`, or binding not allowed | roll back if open, phase `failed`, reply with the class's code (`DATABASE_TIMEOUT`, `DATABASE_UNAVAILABLE`, `DATABASE_BINDING_REJECTED`, as today) |
-| `PersistFailed` before `Commit` | roll back, phase `failed`, reply `POLICYSQL_INTERNAL`; no commit is sent |
+| `PersistFailed` for a phase before `committing` (`active`, `validating`) | roll back, emit `Persist(failed)`; on `Persisted` reply `POLICYSQL_INTERNAL`, on `PersistFailed` `Reset` and reply `POLICYSQL_INTERNAL`; no commit is sent |
+| `PersistFailed` for `committing` | COMMIT was never sent; the store may hold `committing` or the earlier phase. Roll back and emit `Persist(failed)`. On `Persisted` the phase becomes `failed`, and the commit gets `POLICYSQL_INTERNAL` (later retries get `POLICYSQL_TRANSACTION_UNAVAILABLE` from the persisted `failed`, true because COMMIT was never sent). On `PersistFailed`: `Reset`, reply `POLICYSQL_INTERNAL`. The next event then sees the store's `committing` (outcome unknown) or the earlier phase without a connection (unavailable), from this owner and a successor alike |
+| `PersistFailed` for `expired` after the deadline check | COMMIT was never sent and the rollback is already emitted. `Reset` and reply `POLICYSQL_INTERNAL` (not the definite `POLICYSQL_TRANSACTION_UNAVAILABLE`). The store still holds `committing`, so a retry gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` from this owner and a successor alike |
 | `Persisted` for `committing` arrives at or after `expires_at_ms` | the consuming step does not emit `Commit`: it rolls back, persists `expired`, and only then replies `POLICYSQL_TRANSACTION_UNAVAILABLE` (true: COMMIT was never sent). If the owner is lost before `expired` is persisted, a successor finds `committing` and answers a retry with outcome-unknown, which is not a misreport. Before the deadline it emits `Commit`, and from then on nothing expires the transaction |
 | `PersistFailed` of the terminal record after `Committed` | reply committed (true); a retry finds `committing` and gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, never a rejection |
 | `CommitFailed { class: not_committed }` | phase `failed`, reply as today (`status: "failed"`) |
@@ -679,13 +703,15 @@ see no regression at the switch-over. For a commit that #48 could still replay f
   - once `Commit` has been emitted for an interactive transaction, no event sequence (duplicated,
     stale, or reordered outcomes, `Abandon`, invalid volatile state, owner loss, `TimerFired`)
     leads to a definite rejection of that commit or to phase `failed`, `expired`, or
-    `rolled_back`, except through `CommitFailed { class: not_committed }`; after
-    `Persisted` for `committing`, a definite rejection is possible only if `Commit` was never
-    emitted, and only after `expired` was persisted;
+    `rolled_back`, except through `CommitFailed { class: not_committed }`; once
+    `Persist(committing)` has been emitted, whether it succeeded or failed, a definite rejection
+    of that commit is possible only if `Commit` was never emitted and the rejecting state
+    (`failed` or `expired`) was persisted (`Persisted` observed) before the reply, and a
+    same-owner retry after `Reset` gets the same answer as a successor;
   - a reply says committed only after `Committed`, and after `Committed` no reply says expired,
     failed, or rolled back;
-  - a reply is a definite rejection of a commit only if no `Commit` was emitted or the outcome
-    was `not_committed`;
+  - a reply is a definite rejection of a commit only if (no `Commit` was emitted and the
+    rejecting state is persisted) or the outcome was `not_committed`;
   - duplicated, reordered, and stale outcome events never produce `Commit`, and never panic;
   - `TimerFired` injected before or after any event leaves no `Commit` unless one was already
     emitted;
