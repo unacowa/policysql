@@ -23,13 +23,13 @@ import ts from "typescript";
 // casts (`(env as any).X`), shorthand properties (`{ env }`), passing env to any other
 // function, declaring a variable or import named env, and any member read.
 //
-// Member names `env` (`<expr>.env`) are separate: the library's Hono context exposes the
+// Member names `env` (`<expr>.env`) are separate: the HTTP adapter's Hono context exposes the
 // bindings `app.fetch` builds itself as `context.env`. `<expr>.env` must be followed by
 // one of HONO_BINDINGS ("hono-binding" otherwise), and `this.env` / `process.env` are always
 // findings. An import from `cloudflare:workers` (the platform env as a module export) is a
 // "platform-import" finding.
 const NAMES = new Set(["env", "deployment"]);
-export const HONO_BINDINGS = new Set(["databaseBinding", "background", "session", "requestId", "callback"]);
+export const HONO_BINDINGS = new Set(["context", "background"]);
 const SINK_FUNCTIONS = new Set(["deployment", "build", "appFor"]);
 const SINK_METHODS = new Set(["fetch", "fetchCallback"]);
 const CACHE_METHODS = { apps: new Set(["get", "set"]) };

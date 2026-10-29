@@ -5,7 +5,7 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PLATFORM_NAMES, scanPlatformNames } from "./helpers/platform-scan.mjs";
 
-// Regression guard (#31, ADR 0022): routes and TransactionOwnerCore use only the
+// Regression guard (#31, ADR 0022): the engine, the HTTP adapter, and TransactionOwnerCore use only the
 // TransactionOwner port. Durable Objects, their storage and alarm, `waitUntil`, and the
 // `cloudflare:workers` module appear only in the Durable Objects adapter module.
 const repository = fileURLToPath(new URL("../../../", import.meta.url));
@@ -21,8 +21,8 @@ const files = sources(join(repository, library)).map((path) => relative(reposito
 const scan = (file) => scanPlatformNames(file, readFileSync(join(repository, file), "utf8"));
 
 test("Durable Object, storage, alarm, waitUntil, and cloudflare:workers names appear only in the adapter", () => {
-  for (const required of ["app.ts", "routes/execute.ts", "routes/transactions.ts", "routes/commit-checks.ts",
-    "transaction-owner.ts", "transaction-owner-port.ts", "worker.ts", "package.ts", "middleware/request-context.ts", "types.ts"]) {
+  for (const required of ["app.ts", "engine.ts", "http/adapter.ts", "http/responses.ts",
+    "transaction-owner.ts", "transaction-owner-port.ts", "worker.ts", "package.ts", "request-body.ts", "types.ts"]) {
     assert.ok(files.includes(`${library}/${required}`), `the scan covers ${required}`);
   }
   const outside = files.filter((file) => file !== ADAPTER).flatMap(scan);

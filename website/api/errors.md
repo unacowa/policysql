@@ -31,57 +31,63 @@ clientは`message`ではなく`code`を使って分岐してください。
 
 HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](../reference/http-conventions)を参照してください。`path`は可能な場合にrequest bodyへのRFC 6901 JSON Pointerを返します。
 
-## 主なerror code
+## Error codeとHTTP status
 
-| Code | 意味 |
-| --- | --- |
-| `POLICYSQL_INVALID_REQUEST` | JSONや必須fieldが不正 |
-| `POLICYSQL_UNAUTHENTICATED` | credentialがない、または無効・期限切れ・失効（HTTP 401）。ラッパーが返す401の標準code。参考ラッパーとJWT adapterはこのcodeだけを使う。[ラッパーが返すエラー](#ラッパーが返すエラー)を参照 |
-| `POLICYSQL_AUTHENTICATION_FAILED` | 予約code（HTTP 401）。同梱のコードはどれも返さない。独自のラッパーが「credentialはあるが検証に失敗した（署名不正、期限切れ、失効など）」を、credentialがない場合と区別したいときに使える。clientは`POLICYSQL_UNAUTHENTICATED`と同じく「実行されていない」拒否として扱う |
-| `POLICYSQL_FORBIDDEN_ROLE` | 選択したroleがtrusted sessionで許可されていない |
-| `POLICYSQL_FORBIDDEN_ACCESS` | `PolicySQL-Role`がtrusted sessionの`roles`にない、またはendpointに必要なaccessがない |
-| `POLICYSQL_INVALID_SQL` | SQLをparseできない |
-| `POLICYSQL_MULTIPLE_STATEMENTS` | statementが複数含まれる |
-| `POLICYSQL_UNSUPPORTED_SQL` | 対応範囲外の構文 |
-| `POLICYSQL_MISSING_POLICY` | 適用可能なpolicyがない |
-| `POLICYSQL_FORBIDDEN_OPERATION` | operationが許可されていない |
-| `POLICYSQL_FORBIDDEN_COLUMN` | 利用できないcolumnを参照した |
-| `POLICYSQL_FORBIDDEN_COLUMN_CONTEXT` | 条件付き出力列をprojection以外で参照した |
-| `POLICYSQL_DUPLICATE_RESULT_COLUMN` | alias適用後のresult column名が重複した |
-| `POLICYSQL_INVALID_PARAMETER` | parameterの不足、型、値が不正 |
-| `POLICYSQL_AMBIGUOUS_PARAMETER_TYPE` | Explainでparameter型を一意に証明できない |
-| `POLICYSQL_RESERVED_PARAMETER` | server用のparameter名を使用した |
-| `POLICYSQL_PRESET_COLUMN` | clientがserver-owned columnを指定した |
-| `POLICYSQL_CHECK_FAILED` | mutation後のrowがpolicy checkを満たさない |
-| `POLICYSQL_COMMIT_CHECK_REJECTED` | commit checkがtransactionを拒否した |
-| `POLICYSQL_COMMIT_CHECK_UNAVAILABLE` | commit checkを安全に完了できない |
-| `POLICYSQL_COMMIT_CHECK_QUERY` | validatorのcallback SELECTを許可または実行できない |
-| `POLICYSQL_LIMIT_EXCEEDED` | requestまたはresult limitを超えた |
-| `POLICYSQL_REQUEST_TOO_LARGE` | HTTP bodyまたはSQL textが受付上限を超えた |
-| `POLICYSQL_RATE_LIMITED` | request rate limitを超えた（HTTP 429）。ライブラリではなくラッパーが返す。[ラッパーが返すエラー](#ラッパーが返すエラー)を参照 |
-| `POLICYSQL_TIMEOUT` | compileまたはdatabase実行がtimeoutした |
-| `POLICYSQL_STALE_OPERATION` | policyまたはcatalog versionが古い |
-| `POLICYSQL_SCHEMA_MISMATCH` | database値がcompiled logical contractと一致しない |
-| `POLICYSQL_DATABASE_UNAVAILABLE` | database adapterまたはtransaction ownerを利用できない |
-| `POLICYSQL_DATABASE_TIMEOUT` | DB接続準備・実行・commit確認の期限を超えた（HTTP 504） |
-| `POLICYSQL_DATABASE_REQUIRED` | ラッパーが必須のDB引数を渡していない（HTTP 500） |
-| `POLICYSQL_DATABASE_BINDING_REJECTED` | DB bindingが不正、未登録、または現在の経路設定で許可されていない |
-| `POLICYSQL_COMMIT_CONFLICT` | MVCC conflictによりcommitできなかった |
-| `POLICYSQL_TRANSACTION_NOT_FOUND` | transactionが存在しないか、利用者に属していない |
-| `POLICYSQL_TRANSACTION_EXPIRED` | transactionの有効期限を超えた |
-| `POLICYSQL_TRANSACTION_SEQUENCE` | 対話型operationの順序が一致しない |
-| `POLICYSQL_TRANSACTION_FAILED` | transactionが失敗状態になり継続できない |
-| `POLICYSQL_EXPECTATION_FAILED` | transaction operationの期待条件を満たさない |
-| `POLICYSQL_IDEMPOTENCY_KEY_REQUIRED` | 明示されたkeyが空または形式不正。省略時には発生しない（互換性のため既存codeを維持） |
-| `POLICYSQL_IDEMPOTENCY_CONFLICT` | 通常atomicで同じkeyが異なるrequestに使われた |
-| `POLICYSQL_REQUEST_IN_PROGRESS` | 同じidempotency keyのrequestがまだ実行中 |
-| `POLICYSQL_INTERNAL` | 公開できない内部エラー。ラッパーが渡したtrusted sessionの形が不正な場合もこのcode（HTTP 500）になる |
+この表が、ライブラリが返すerror codeとHTTP statusの対応の正本です。HTTP adapter（`deploy/cloudflare/src/http/status.ts`）はこの表と同じ対応だけを持ち、ライブラリのコード（TypeScriptとRust）が返し得るcodeはすべてこの表にあります（どちらもテストで確認します）。engineの操作（[HTTPを使わない入口](../admin/operations-api)）はHTTP statusを返さず、同じ`code`を返します。表にないcodeはライブラリの不具合で、HTTPでは500になります。
 
-`POLICYSQL_USAGE_BUDGET_EXCEEDED`（queryの推定usageが予算を超えた）と`POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`（transactionの上限を超えた）も、ライブラリがHTTP 429で返します。これらはrequest rateの制限ではありません。
+<!-- policysql:error-status-table:library -->
+| Code | Status | 意味 |
+| --- | --- | --- |
+| `POLICYSQL_INVALID_REQUEST` | 400 | JSON、必須field、header（`PolicySQL-Role`の複数指定など）が不正 |
+| `POLICYSQL_INVALID_SQL` | 400 | SQLをparseできない |
+| `POLICYSQL_MULTIPLE_STATEMENTS` | 400 | statementが複数含まれる |
+| `POLICYSQL_UNSUPPORTED_SQL` | 400 | 対応範囲外の構文 |
+| `POLICYSQL_DUPLICATE_RESULT_COLUMN` | 400 | alias適用後のresult column名が重複した |
+| `POLICYSQL_INVALID_PARAMETER` | 400 | parameterの不足、型、値が不正 |
+| `POLICYSQL_AMBIGUOUS_PARAMETER_TYPE` | 400 | Explainでparameter型を一意に証明できない |
+| `POLICYSQL_RESERVED_PARAMETER` | 400 | server用のparameter名を使用した |
+| `POLICYSQL_IDEMPOTENCY_KEY_REQUIRED` | 400 | 明示されたkeyが空または形式不正。省略時には発生しない（互換性のため既存codeを維持） |
+| `POLICYSQL_FORBIDDEN_ACCESS` | 403 | `PolicySQL-Role`がtrusted sessionの`roles`にない、またはendpointに必要なaccessがない |
+| `POLICYSQL_MISSING_POLICY` | 403 | 適用可能なpolicyがない |
+| `POLICYSQL_FORBIDDEN_OPERATION` | 403 | operationが許可されていない |
+| `POLICYSQL_FORBIDDEN_COLUMN` | 403 | 利用できないcolumnを参照した |
+| `POLICYSQL_FORBIDDEN_COLUMN_CONTEXT` | 403 | 条件付き出力列をprojection以外で参照した |
+| `POLICYSQL_PRESET_COLUMN` | 403 | clientがserver-owned columnを指定した |
+| `POLICYSQL_TRANSACTION_MODE_VIOLATION` | 403 | read transactionでmutationを実行しようとした |
+| `POLICYSQL_DATABASE_BINDING_REJECTED` | 403 | DB bindingが不正、未登録、または現在の経路設定で許可されていない |
+| `POLICYSQL_COST_UNKNOWN` | 403 | queryのcostを安全に見積もれない |
+| `POLICYSQL_NOT_FOUND` | 404 | endpointが存在しない |
+| `POLICYSQL_STALE_OPERATION` | 409 | policyまたはcatalog versionが古い |
+| `POLICYSQL_IDEMPOTENCY_CONFLICT` | 409 | 通常atomicで同じkeyが異なるrequestに使われた |
+| `POLICYSQL_TRANSACTION_CONFLICT` | 409 | 対話型transactionのcommandが現在の状態（sequenceなど）と矛盾する |
+| `POLICYSQL_TRANSACTION_UNAVAILABLE` | 409 | transactionが存在しない、利用者に属していない、期限切れ、または失敗状態 |
+| `POLICYSQL_COMMIT_CHECK_REJECTED` | 409 | commit checkがtransactionを拒否した、または安全に完了できない |
+| `POLICYSQL_LIMIT_EXCEEDED` | 413 | requestまたはresult limitを超えた |
+| `POLICYSQL_REQUEST_TOO_LARGE` | 413 | HTTP bodyまたはSQL textが受付上限を超えた |
+| `POLICYSQL_UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type`が`application/json`でない |
+| `POLICYSQL_EXPECTATION_FAILED` | 422 | transaction operationの期待条件を満たさない |
+| `POLICYSQL_SCHEMA_MISMATCH` | 422 | database値がcompiled logical contractと一致しない |
+| `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` | 429 | transactionの上限を超えた（request rateの制限ではない） |
+| `POLICYSQL_USAGE_BUDGET_EXCEEDED` | 429 | queryの推定usageが予算を超えた（request rateの制限ではない） |
+| `POLICYSQL_INTERNAL` | 500 | 公開できない内部エラー。ラッパーが渡したtrusted sessionや文脈の形が不正な場合もこのcode |
+| `POLICYSQL_DATABASE_REQUIRED` | 500 | ラッパーが必須のDB引数を渡していない |
+| `POLICYSQL_DATABASE_UNAVAILABLE` | 503 | database adapterまたはtransaction ownerを利用できない |
+| `POLICYSQL_COST_ADMISSION_UNAVAILABLE` | 503 | cost admissionを一時的に実行できない |
+| `POLICYSQL_TIMEOUT` | 504 | database実行がtimeoutした |
+| `POLICYSQL_DATABASE_TIMEOUT` | 504 | DB接続準備・実行・commit確認の期限を超えた |
 
-error codeはAPI versionごとの安定したcontractです。minor releaseで既存codeの意味を変更しません。
+error codeはAPI versionごとの安定したcontractです。minor releaseで既存codeの意味やstatusを変更しません。以前この頁に載っていた`POLICYSQL_FORBIDDEN_ROLE`、`POLICYSQL_CHECK_FAILED`、`POLICYSQL_COMMIT_CHECK_UNAVAILABLE`、`POLICYSQL_COMMIT_CHECK_QUERY`、`POLICYSQL_COMMIT_CONFLICT`、`POLICYSQL_TRANSACTION_NOT_FOUND`、`POLICYSQL_TRANSACTION_EXPIRED`、`POLICYSQL_TRANSACTION_SEQUENCE`、`POLICYSQL_TRANSACTION_FAILED`、`POLICYSQL_REQUEST_IN_PROGRESS`は、どのコードも返したことがないため削除しました。役割の拒否は`POLICYSQL_FORBIDDEN_ACCESS`、transactionの不在・期限切れ・失敗は`POLICYSQL_TRANSACTION_UNAVAILABLE`、sequenceの不一致は`POLICYSQL_TRANSACTION_CONFLICT`です。
 
 ## ラッパーが返すエラー
+
+次のcodeはライブラリではなくラッパーが返します。statusはこの表のとおりです（`createErrorResponse`は、ライブラリの表にあるcodeを別のstatusで作ろうとすると`TypeError`にします）。
+
+<!-- policysql:error-status-table:wrapper -->
+| Code | Status | 意味 |
+| --- | --- | --- |
+| `POLICYSQL_UNAUTHENTICATED` | 401 | credentialがない、または無効・期限切れ・失効。ラッパーが返す401の標準code。参考ラッパーとJWT adapterはこのcodeだけを使う |
+| `POLICYSQL_AUTHENTICATION_FAILED` | 401 | 予約code。同梱のコードはどれも返さない。独自のラッパーが「credentialはあるが検証に失敗した」を、credentialがない場合と区別したいときに使える。clientは`POLICYSQL_UNAUTHENTICATED`と同じく「実行されていない」拒否として扱う |
+| `POLICYSQL_RATE_LIMITED` | 429 | request rate limitを超えた |
 
 認証はライブラリの機能ではなく、ラッパーの責務です（[JWT認証](../security/jwt)）。ラッパーはcredentialを検証し、失敗した場合は`app.fetch`を呼ばずにHTTP 401を返します。標準codeは`POLICYSQL_UNAUTHENTICATED`です（参考実装はこれだけを返す）。`POLICYSQL_AUTHENTICATION_FAILED`は予約codeで、独自のラッパーが「credentialはあるが検証に失敗した」場合を区別したいときだけ使います。ライブラリは401を返しません。対話型transactionのcommandとcommitも毎回認証するため、token失効や期限切れの後はtransactionを継続できません。
 

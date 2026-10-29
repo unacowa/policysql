@@ -26,7 +26,7 @@ const files = sources(join(repository, library))
   .filter((file) => !excluded.some((prefix) => file.startsWith(prefix)));
 
 test("library code reads no platform env property, TRANSACTION_OWNER included", () => {
-  for (const required of ["app.ts", "routes/system.ts", "routes/execute.ts", "commit-checks.ts", "cost.ts",
+  for (const required of ["app.ts", "engine.ts", "http/adapter.ts", "commit-checks.ts", "cost.ts",
     "transaction-owner.ts", "transaction-owner-port.ts", "worker.ts", "package.ts", "engine-config.ts",
     "adapters/durable-objects.ts"]) {
     assert.ok(files.includes(`${library}/${required}`), `the scan covers ${required}`);
@@ -110,8 +110,8 @@ test("the scan rejects every env use outside the allowlist", () => {
   const allowed = [
     "// env.POLICYSQL_PUBLIC_BASE_URL is not read here",
     'const name = "env.POLICYSQL_ENVIRONMENT";',
-    "const a = context.env.requestId ?? context.env.session;",
-    "const a = context.env.callback === true && context.env.databaseBinding;",
+    "const a = c.env.context.requestId ?? c.env.context.session;",
+    "const a = c.env.context.databaseBinding;",
     "const a = context.env.background;",
     "const C = (deployment) => class { constructor(state, env) { this.core = make(state, deployment(env)); } };",
     "const a = config.environment; const b = dependencies.config.publicBaseUrl;",
