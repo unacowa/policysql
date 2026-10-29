@@ -45,7 +45,7 @@ test("bounds a statement from the catalog without interpreting planner prose", a
         usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 1 },
       }];
   });
-  const result = await estimateSealedEnvelope(compiled, env, "req", () => fake);
+  const result = await estimateSealedEnvelope(compiled, env, "req", () => fake, 1_024);
   assert.equal(result.estimates[0].upperRowsRead, 20);
   assert.equal(result.estimates[0].access, "unknown");
   assert.equal(result.estimates[0].planSteps, 1);
@@ -59,7 +59,7 @@ test("records complex planner output without treating unstable detail text as au
         usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 1 },
       }];
   });
-  const result = await estimateSealedEnvelope(compiled, env, "req", () => fake);
+  const result = await estimateSealedEnvelope(compiled, env, "req", () => fake, 1_024);
   assert.equal(result.estimates[0].upperRowsRead, 20);
   assert.equal(result.estimates[0].access, "unknown");
   assert.equal(result.estimates[0].planSteps, 3);
@@ -75,7 +75,7 @@ test("logs complex cost observations without blocking execution", async () => {
       rows: [["SCAN outer"], ["CORRELATED SCALAR SUBQUERY"], ["SCAN inner"]],
       usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 1 },
     }]);
-    await observeCostEnvelope(compiled, env, "req", () => fake);
+    await observeCostEnvelope(compiled, env, "req", () => fake, 1_024);
   } finally {
     console.log = previous;
   }
@@ -94,7 +94,7 @@ test("logs cost observations and their own Turso usage", async () => {
       rows: [["SCAN projects"]],
       usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 2 },
     }]);
-    await observeCostEnvelope(compiled, env, "req", () => fake);
+    await observeCostEnvelope(compiled, env, "req", () => fake, 1_024);
   } finally {
     console.log = previous;
   }
@@ -124,6 +124,7 @@ test("bounds inserts directly and updates conservatively without parsing SEARCH 
     env,
     "req",
     () => fake,
+    1_024,
   );
   assert.equal(statements.length, 1);
   assert.equal(result.estimates[0].upperRowsWritten, 1);

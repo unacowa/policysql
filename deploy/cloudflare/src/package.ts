@@ -4,6 +4,7 @@ import { initSync, PolicySqlRuntime } from "../pkg/policysql_cloudflare.js";
 // @ts-ignore
 import wasm from "../pkg/policysql_cloudflare_bg.wasm";
 import { createApp } from "./app.ts";
+import { runtimeBytesLimit } from "./binary.ts";
 import { TransactionOwnerCore } from "./transaction-owner.ts";
 
 export { createApp } from "./app.ts";
@@ -11,8 +12,8 @@ export type { PolicySqlApp } from "./app.ts";
 export { TransactionOwnerCore } from "./transaction-owner.ts";
 export { TursoHttpTransport } from "./turso-http.ts";
 export type {
-  DatabaseBinding, DatabaseProvider, DatabaseTransport, DatabaseTransaction,
-  DatabaseResult, DatabaseUsage,
+  DatabaseBinding, DatabaseProvider, DatabaseTransport, DatabaseTransportOptions,
+  DatabaseTransaction, DatabaseResult, DatabaseUsage,
 } from "./database.ts";
 export type {
   AppDependencies,
@@ -63,7 +64,7 @@ export const createRuntimeFactory = (configuration: Omit<RuntimeConfiguration, "
     const physicalSchema = typeof configuration.physicalSchema === "string"
       ? configuration.physicalSchema
       : JSON.stringify(configuration.physicalSchema);
-    runtime = PolicySqlRuntime.newWithPhysicalSchema(
+    const candidate = PolicySqlRuntime.newWithPhysicalSchema(
       configuration.catalog,
       configuration.policy,
       configuration.schemaVersion,
@@ -76,6 +77,10 @@ export const createRuntimeFactory = (configuration: Omit<RuntimeConfiguration, "
       }),
       physicalSchema,
     );
+    // The adapter takes the per-value BLOB limit only from the runtime. Reject
+    // malformed metadata at construction rather than on a request's BLOB path.
+    try { runtimeBytesLimit(candidate); } catch (error) { candidate.free(); throw error; }
+    runtime = candidate;
     return runtime;
   };
 };

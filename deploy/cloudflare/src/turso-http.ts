@@ -1,12 +1,16 @@
 import { HttpError, binaryLimitExceeded } from "./errors.ts";
 import { remainingDatabaseTime } from "./database.ts";
-import { BinaryLimitError, decodeBlob, encodeBlob } from "./binary.ts";
+import type { DatabaseTransportOptions } from "./database.ts";
+import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.ts";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
 const databaseFailure = () =>
   new HttpError(503, "POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
 
-const encodeValue = (value) => {
+// `maxBytes` comes from the runtime through DatabaseTransportOptions. Without it the
+// transport validates BLOB encoding only, inside the bounded HTTP response, and
+// PolicySQL classifies size with the runtime limit before WASM (rawDriverValue).
+const encodeValue = (value, maxBytes: number) => {
   if (value === null) return { type: "null" };
   if (typeof value === "string") return { type: "text", value };
   if (typeof value === "boolean") return { type: "integer", value: value ? "1" : "0" };
@@ -15,23 +19,23 @@ const encodeValue = (value) => {
   }
   if (typeof value === "number" && Number.isFinite(value)) return { type: "float", value };
   if (value instanceof Uint8Array) {
-    return { type: "blob", base64: encodeBlob(value) };
+    return { type: "blob", base64: encodeBlob(value, maxBytes) };
   }
   throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
 };
 
 // Hrana may omit padding in database BLOB responses. Keep that protocol rule
 // here; the public contract and private WASM ABI still require canonical padding.
-const decodeHranaBlob = (value: string): Uint8Array => {
+const decodeHranaBlob = (value: string, maxBytes: number): Uint8Array => {
   const remainder = value.length % 4;
   if (remainder !== 0) {
     if (remainder === 1 || value.includes("=")) throw databaseFailure();
     value += "=".repeat(4 - remainder);
   }
-  return decodeBlob(value);
+  return decodeBlob(value, maxBytes);
 };
 
-const decodeValue = (value) => {
+const decodeValue = (value, maxBytes: number) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw databaseFailure();
   if (value.type === "null") return null;
   if (value.type === "text" && typeof value.value === "string") return value.value;
@@ -44,7 +48,7 @@ const decodeValue = (value) => {
     return value.value;
   }
   if (value.type === "blob" && typeof value.base64 === "string") {
-    try { return decodeHranaBlob(value.base64); } catch (error) {
+    try { return decodeHranaBlob(value.base64, maxBytes); } catch (error) {
       if (error instanceof BinaryLimitError) throw binaryLimitExceeded();
       throw databaseFailure();
     }
@@ -52,15 +56,15 @@ const decodeValue = (value) => {
   throw databaseFailure();
 };
 
-const executeRequest = ({ sql, args = {} }) => ({
+const executeRequest = ({ sql, args = {} }, maxBytes: number) => ({
   type: "execute",
   stmt: {
     sql,
-    named_args: Object.entries(args).map(([name, value]) => ({ name, value: encodeValue(value) })),
+    named_args: Object.entries(args).map(([name, value]) => ({ name, value: encodeValue(value, maxBytes) })),
   },
 });
 
-const decodeResult = (entry) => {
+const decodeResult = (entry, maxBytes: number) => {
   if (entry?.type !== "ok" || entry.response?.type !== "execute") throw databaseFailure();
   const result = entry.response.result;
   if (
@@ -84,7 +88,7 @@ const decodeResult = (entry) => {
   if (new Set(columns).size !== columns.length) throw databaseFailure();
   const rows = result.rows.map((row) => {
     if (!Array.isArray(row) || row.length !== columns.length) throw databaseFailure();
-    return row.map(decodeValue);
+    return row.map((value) => decodeValue(value, maxBytes));
   });
   return {
     columns,
@@ -163,15 +167,17 @@ export class TursoHttpTransport {
     return body;
   }
 
-  async begin(mode, timeoutMs, deadlineMs?: number) {
+  async begin(mode, timeoutMs, deadlineMs?: number, options?: DatabaseTransportOptions) {
+    // A supplied limit must be well formed; PolicySQL always supplies the runtime's.
+    const maxBytes = options === undefined ? Number.POSITIVE_INFINITY : bytesLimit(options?.maxBytesPerValue);
     const body = await this.pipeline(
-      [executeRequest({ sql: mode === "write" ? "BEGIN IMMEDIATE" : "BEGIN DEFERRED" })],
+      [executeRequest({ sql: mode === "write" ? "BEGIN IMMEDIATE" : "BEGIN DEFERRED" }, maxBytes)],
       undefined,
       Math.min(timeoutMs, remainingDatabaseTime(deadlineMs)),
     );
-    const beginResult = decodeResult(body.results[0]);
+    const beginResult = decodeResult(body.results[0], maxBytes);
     if (!body.baton) throw databaseFailure();
-    return new TursoHttpTransaction(this, body.baton, timeoutMs, beginResult.usage, deadlineMs);
+    return new TursoHttpTransaction(this, body.baton, timeoutMs, beginResult.usage, deadlineMs, maxBytes);
   }
 }
 
@@ -180,14 +186,16 @@ class TursoHttpTransaction {
   baton: string;
   readonly timeoutMs: number;
   readonly deadlineMs?: number;
+  readonly maxBytes: number;
   open: boolean;
   readonly usage: any[];
 
-  constructor(transport, baton, timeoutMs, beginUsage, deadlineMs?: number) {
+  constructor(transport, baton, timeoutMs, beginUsage, deadlineMs: number | undefined, maxBytes: number) {
     this.transport = transport;
     this.baton = baton;
     this.timeoutMs = timeoutMs;
     this.deadlineMs = deadlineMs;
+    this.maxBytes = maxBytes;
     this.open = true;
     this.usage = [beginUsage];
   }
@@ -195,14 +203,14 @@ class TursoHttpTransaction {
   async execute(statements) {
     if (!this.open) throw databaseFailure();
     const body = await this.transport.pipeline(
-      statements.map(executeRequest),
+      statements.map((statement) => executeRequest(statement, this.maxBytes)),
       this.baton,
       Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
       binaryLimitExceeded,
     );
     if (!body.baton) throw databaseFailure();
     this.baton = body.baton;
-    const results = body.results.map(decodeResult);
+    const results = body.results.map((entry) => decodeResult(entry, this.maxBytes));
     this.usage.push(...results.map((result) => result.usage));
     return results;
   }
@@ -210,12 +218,12 @@ class TursoHttpTransaction {
   async finish(sql) {
     if (!this.open) return;
     const body = await this.transport.pipeline(
-      [executeRequest({ sql }), { type: "close" }],
+      [executeRequest({ sql }, this.maxBytes), { type: "close" }],
       this.baton,
       // Cleanup still gets a bounded attempt after the execution deadline expires.
       sql === "ROLLBACK" ? this.timeoutMs : Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
     );
-    const terminal = decodeResult(body.results[0]);
+    const terminal = decodeResult(body.results[0], this.maxBytes);
     this.usage.push(terminal.usage);
     if (body.results[1]?.type !== "ok" || body.results[1].response?.type !== "close") {
       throw databaseFailure();

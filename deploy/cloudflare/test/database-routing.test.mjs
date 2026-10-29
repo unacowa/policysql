@@ -457,7 +457,7 @@ test("a slow commit authorization cannot extend the transaction deadline", async
       commit: async () => { committed = true; }, rollback: async () => { rolledBack = true; },
     }) }),
   };
-  const transport = await databaseTransportFactory(provider, binding)({}, "request");
+  const transport = await databaseTransportFactory(provider, binding, 1_024)({}, "request");
   const transaction = await transport.begin("write", 100);
   slow = true;
   await assert.rejects(transaction.commit(), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
@@ -515,7 +515,7 @@ test("revocation before direct commit rolls back without opening a replacement c
     open: true, usage: [], execute: async () => [],
     commit: async () => { commits++; }, rollback: async () => { rollbacks++; },
   }) }) };
-  const transport = await databaseTransportFactory(provider, binding)({}, "request");
+  const transport = await databaseTransportFactory(provider, binding, 1_024)({}, "request");
   const transaction = await transport.begin("write", 1000);
   allowed = false;
   await assert.rejects(transaction.commit(), (error) => error.code === "POLICYSQL_DATABASE_BINDING_REJECTED");

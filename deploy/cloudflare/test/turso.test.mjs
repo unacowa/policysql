@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { enforceCumulativeLimits, executeSealedEnvelope } from "../src/turso.ts";
+import { enforceCumulativeLimits, executeSealedEnvelope, executeSealedOnTransaction } from "../src/turso.ts";
+import { databaseTransportFactory } from "../src/database.ts";
+import { testBinding } from "./helpers/database.mjs";
+import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
 
 test("applies the statement limits cumulatively to the atomic envelope", () => {
   const compiled = {
@@ -26,6 +29,7 @@ test("rolls back and publishes no partial result after a cumulative limit breach
   let committed = false;
   let rolledBack = false;
   const runtime = {
+    max_bytes_per_value: MAX_BYTES_PER_VALUE,
     validate_result_json(_handle, _index, raw) {
       return JSON.stringify({ ...JSON.parse(raw), redactions: [[false], [false]] });
     },
@@ -73,6 +77,7 @@ test("executes only protected SQL and validates every result before publication"
   const seen = [];
   const released = [];
   const runtime = {
+    max_bytes_per_value: MAX_BYTES_PER_VALUE,
     validate_result_json(handle, index, raw) {
       assert.equal(handle, 7n);
       assert.equal(index, 0);
@@ -131,6 +136,7 @@ test("validates mutation inside the dedicated transaction and stores terminal id
   const order = [];
   let stored;
   const runtime = {
+    max_bytes_per_value: MAX_BYTES_PER_VALUE,
     validate_result_json() {
       order.push("validate");
       return JSON.stringify({
@@ -201,7 +207,6 @@ test("validates mutation inside the dedicated transaction and stores terminal id
 // BLOB exactly like the HTTP transport (413), and the shape log is emitted before
 // row validation can throw.
 test("serverless oversized BLOB and malformed rows fail before validation, log shape and roll back", async t => {
-  const { MAX_BYTES_PER_VALUE } = await import("../src/binary.ts");
   const log = t.mock.method(console, "log", () => {});
   for (const [rows, status, code, widths] of [
     [[[new Uint8Array(MAX_BYTES_PER_VALUE + 1)]], 413, "POLICYSQL_LIMIT_EXCEEDED", [1]],
@@ -210,6 +215,7 @@ test("serverless oversized BLOB and malformed rows fail before validation, log s
   ]) {
     let rolledBack = false, released = false;
     const runtime = {
+      max_bytes_per_value: MAX_BYTES_PER_VALUE,
       validate_result_json() { assert.fail("invalid physical results must not reach WASM"); },
       release_execution() { released = true; },
     };
@@ -229,5 +235,87 @@ test("serverless oversized BLOB and malformed rows fail before validation, log s
     assert.deepEqual(logged.rowWidths, widths);
     assert.ok(!JSON.stringify(logged).includes("private-value"));
     assert.equal(logged.valueTypes, undefined);
+  }
+});
+
+// Regression (#22): a runtime whose Rust limit differs from the previous adapter
+// constant must not turn valid WASM output into 500 POLICYSQL_INTERNAL. Parameters,
+// raw driver results and the transport options all follow runtime.max_bytes_per_value.
+test("execution follows the runtime's advertised per-value limit end to end", async t => {
+  t.mock.method(console, "log", () => {});
+  const statement = (base64) => ({
+    operation: "select", protectedSql: "SELECT state FROM projects WHERE state = :state",
+    clientParameters: { state: { type: "blob", base64 } }, serverParameters: {}, result: [], limits: { timeoutMs: 1000 },
+  });
+  for (const advertised of [MAX_BYTES_PER_VALUE * 2, 16]) {
+    const fits = Buffer.alloc(advertised, 3);
+    const over = new Uint8Array(advertised + 1);
+    for (const [rows, expected] of [[[[new Uint8Array(fits)]], "validated"], [[[over]], 413]]) {
+      let validated = false, rolledBack = false, beginOptions, boundArgs;
+      const runtime = {
+        max_bytes_per_value: advertised,
+        validate_result_json(_handle, _index, raw) {
+          validated = true;
+          const value = JSON.parse(raw);
+          assert.deepEqual(value.rows, [[{ type: "blob", base64: fits.toString("base64") }]]);
+          return JSON.stringify({ ...value, rows: [["ok"]], redactions: [[false]] });
+        },
+        release_execution() {},
+      };
+      const provider = {
+        check: () => true,
+        connect: () => ({
+          async begin(_mode, _timeoutMs, _deadlineMs, options) {
+            beginOptions = options;
+            return {
+              open: true, usage: [],
+              async execute(statements) {
+                boundArgs = statements[0].args;
+                return [{ columns: ["state"], rows, rowsAffected: 0, usage: { rowsRead: 1, rowsWritten: 0, queryDurationMs: 1 } }];
+              },
+              async commit() {}, async rollback() { rolledBack = true; },
+            };
+          },
+        }),
+      };
+      const run = executeSealedEnvelope(runtime, { executionHandle: 9, transactionMode: "read", statements: [statement(fits.toString("base64"))] },
+        {}, "req_drift", databaseTransportFactory(provider, testBinding(), runtime.max_bytes_per_value));
+      if (expected === 413) {
+        await assert.rejects(run, { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" }, `advertised=${advertised}`);
+        assert.ok(rolledBack);
+        assert.equal(validated, false);
+      } else {
+        await run;
+        assert.ok(validated, `advertised=${advertised}`);
+      }
+      assert.deepEqual(beginOptions, { maxBytesPerValue: advertised });
+      assert.deepEqual(Buffer.from(boundArgs.state), fits);
+    }
+  }
+  // The interactive/callback path uses the same runtime value.
+  const value = Buffer.alloc(MAX_BYTES_PER_VALUE + 1, 4).toString("base64");
+  let bound;
+  await executeSealedOnTransaction({
+    max_bytes_per_value: MAX_BYTES_PER_VALUE * 2,
+    validate_result_json: (_h, _i, raw) => JSON.stringify({ ...JSON.parse(raw), redactions: [] }),
+    release_execution() {},
+  }, { executionHandle: 3, statements: [statement(value)] }, {
+    usage: [],
+    async execute(statements) {
+      bound = statements[0].args.state;
+      return [{ columns: ["state"], rows: [], rowsAffected: 0, usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 0 } }];
+    },
+  }, "req_drift_interactive");
+  assert.equal(Buffer.from(bound).toString("base64"), value);
+});
+
+test("a runtime without a well-formed per-value limit cannot execute", async () => {
+  for (const max_bytes_per_value of [undefined, 0, "262144"]) {
+    let released = false;
+    await assert.rejects(executeSealedOnTransaction({ max_bytes_per_value, release_execution() { released = true; } }, {
+      executionHandle: 3,
+      statements: [{ operation: "select", protectedSql: "SELECT 1", clientParameters: {}, serverParameters: {}, result: [], limits: { timeoutMs: 1000 } }],
+    }, { usage: [], async execute() { assert.fail("must not reach the database"); } }, "req_bad_limit"), TypeError);
+    assert.ok(released);
   }
 });

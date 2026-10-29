@@ -32,6 +32,7 @@ const transaction = () => ({
 
 const runtime = () => ({
   snapshot: "test-snapshot",
+  max_bytes_per_value: 1_024,
   released: 0,
   compile_json() {
     return JSON.stringify({
@@ -141,6 +142,7 @@ test("fails closed after owner replacement and on alarm expiry", async () => {
 
 const commitRuntime = () => ({
   snapshot: "test-snapshot",
+  max_bytes_per_value: 1_024,
   released: 0,
   compile_json(_auth, envelope) {
     const sql = JSON.parse(envelope).statements[0].sql;

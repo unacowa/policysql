@@ -101,6 +101,17 @@ WASM and its adapter are distributed together. The ABI version participates in t
 snapshot, so active transactions and bindings from ABI 1 must be recreated. No new
 public API version or alternate Client mode is introduced.
 
+The per-value limit has a single source, `policysql_core::bytes::MAX_BYTES_PER_VALUE`,
+exposed to the host as `PolicySqlRuntime.max_bytes_per_value` (#22). The TypeScript
+adapter keeps no copy: Capabilities, WASM-parameter decoding (including cost
+queries), driver-result classification and the Turso HTTP transport all take the
+limit from the loaded runtime. PolicySQL passes it to every database transport as
+`begin(..., { maxBytesPerValue })`; a transport called without it validates BLOB
+encoding only, within its bounded response, and PolicySQL still classifies size with
+the runtime value before WASM. Runtime construction rejects a missing or malformed
+limit, so changing only the Rust constant changes every boundary together and cannot
+turn valid WASM output into `POLICYSQL_INTERNAL`.
+
 Shared byte vectors, native Rust boundary tests, Client-only Transport tests and
 real-WASM/JWT/HTTP/SQLite tests cover the contract, policy bypasses, physical BLOB/hash
 equality, limits, rollback and replay. Local SQLite-backed transport evidence does

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { TursoHttpTransport } from "../src/turso-http.ts";
-import { MAX_BYTES_PER_VALUE } from "../src/binary.ts";
+import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
 
 const result = (columns, rows, usage = {}) => ({
   type: "ok",
@@ -20,7 +20,11 @@ const result = (columns, rows, usage = {}) => ({
 });
 
 const blobCases = JSON.parse(readFileSync(new URL("../../../tests/fixtures/hrana-blob-response.json", import.meta.url), "utf8"));
-const readBlob = async base64 => {
+// PolicySQL's transport wrapper always passes the runtime limit as begin options.
+const runtimeLimit = { maxBytesPerValue: MAX_BYTES_PER_VALUE };
+// An explicit `undefined` exercises a direct caller that supplies no options.
+const readBlob = async (base64, ...explicit) => {
+  const options = explicit.length > 0 ? explicit[0] : runtimeLimit;
   const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "blob-response", async (_url, init) => {
     const { requests } = JSON.parse(init.body);
     return Response.json({ baton: "blob-baton", results: requests.map(request => {
@@ -31,7 +35,7 @@ const readBlob = async base64 => {
       return response;
     }) });
   });
-  const transaction = await transport.begin("read", 1000);
+  const transaction = await transport.begin("read", 1000, undefined, options);
   return (await transaction.execute([{ sql: "SELECT state FROM projects" }]))[0].rows[0][0];
 };
 
@@ -74,6 +78,32 @@ test("bounds padded and unpadded Hrana BLOB responses before decoding", async t 
     await assert.rejects(readBlob(base64), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" });
     assert.equal(decode.mock.callCount(), calls);
   }
+});
+
+// Regression (#22): the transport has no copy of the per-value limit. It bounds
+// BLOBs with the limit PolicySQL injects from the runtime; without one it only
+// validates encoding inside the bounded response and PolicySQL classifies size.
+test("bounds Hrana BLOB responses with the injected runtime limit, not a host constant", async t => {
+  for (const limit of [3, 16, MAX_BYTES_PER_VALUE * 2]) {
+    const fits = Buffer.alloc(limit, 9);
+    for (const base64 of new Set([fits.toString("base64"), fits.toString("base64").replace(/=+$/, "")])) {
+      assert.deepEqual(Buffer.from(await readBlob(base64, { maxBytesPerValue: limit })), fits, `limit=${limit}`);
+    }
+    const over = Buffer.alloc(limit + 1).toString("base64");
+    await assert.rejects(readBlob(over, { maxBytesPerValue: limit }), { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" }, `limit=${limit}`);
+    await assert.rejects(readBlob(`${over.slice(0, -1)}!`, { maxBytesPerValue: limit }), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" });
+  }
+  const aboveDefault = Buffer.alloc(MAX_BYTES_PER_VALUE + 1, 5);
+  assert.deepEqual(Buffer.from(await readBlob(aboveDefault.toString("base64"), undefined)), aboveDefault);
+  for (const base64 of blobCases.invalid) {
+    await assert.rejects(readBlob(base64, undefined), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" }, JSON.stringify(base64));
+  }
+  const fetchImpl = t.mock.fn(async () => assert.fail("a malformed limit must fail before any request"));
+  const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "bad-limit", fetchImpl);
+  for (const options of [null, {}, { maxBytesPerValue: 0 }, { maxBytesPerValue: "262144" }, { maxBytesPerValue: Infinity }]) {
+    await assert.rejects(transport.begin("read", 1000, undefined, options), TypeError, JSON.stringify(options));
+  }
+  assert.equal(fetchImpl.mock.callCount(), 0);
 });
 
 // Regression (PR #23 review): a BLOB large enough to push the Hrana response past

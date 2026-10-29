@@ -20,7 +20,7 @@ for (const stage of ["check", "connect"]) {
       connect: () => ({ begin: async () => { begins++; } }),
       [stage]: () => { calls++; return new Promise((resolve) => { finish = resolve; }); },
     };
-    const transport = databaseTransportFactory(provider, testBinding(), Date.now() + 80);
+    const transport = databaseTransportFactory(provider, testBinding(), 1_024, Date.now() + 80);
     await assert.rejects(transport({}, "deadline"), (error) => error.status === 504 && error.code === "POLICYSQL_DATABASE_TIMEOUT");
     assert.equal(calls, 1);
     assert.ok(waits.length > 0 && waits.every((wait) => wait > 0 && wait <= 80));
@@ -33,7 +33,7 @@ for (const stage of ["check", "connect"]) {
 
 test("an expired parent deadline rejects before invoking the provider", async () => {
   const provider = { check() { assert.fail("provider must not run"); }, connect() { assert.fail("provider must not run"); } };
-  const acquire = databaseTransportFactory(provider, testBinding(), Date.now() - 1);
+  const acquire = databaseTransportFactory(provider, testBinding(), 1_024, Date.now() - 1);
   await assert.rejects(acquire({}, "expired", Date.now() + 1000), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
 });
 

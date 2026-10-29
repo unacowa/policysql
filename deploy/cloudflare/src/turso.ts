@@ -1,6 +1,7 @@
 import { HttpError, wasmError } from "./errors.ts";
 import { databaseRequired } from "./database.ts";
 import { driverArgs, rawDriverValue, rowValues } from "./driver-values.ts";
+import { runtimeBytesLimit } from "./binary.ts";
 import type { ExecutionTrace } from "./types.ts";
 
 const remoteFailure = (timeout = false) =>
@@ -78,9 +79,9 @@ export const enforceCumulativeLimits = (compiled, results, elapsedMs) => {
   }
 };
 
-const rawResult = (result, operation, rows) => ({
+const rawResult = (result, operation, rows, maxBytes: number) => ({
   columns: result.columns,
-  rows: rows.map((row) => row.map(rawDriverValue)),
+  rows: rows.map((row) => row.map((value) => rawDriverValue(value, maxBytes))),
   affectedRows:
     operation !== "select" && result.columns.length > 0
       ? result.rows.length
@@ -118,7 +119,7 @@ const validateDriverResults = (runtime, compiled, wasmHandle, driverResults, req
       runtime.validate_result_json(
         wasmHandle,
         index,
-        JSON.stringify(rawResult(result, descriptor.operation, rows)),
+        JSON.stringify(rawResult(result, descriptor.operation, rows, runtimeBytesLimit(runtime))),
       ),
     );
     const error = wasmError(validated);
@@ -167,7 +168,7 @@ export const executeSealedOnTransaction = async (
     const driverResults = await transaction.execute(
       compiled.statements.map((statement) => ({
         sql: statement.protectedSql,
-        args: driverArgs(statement),
+        args: driverArgs(statement, runtimeBytesLimit(runtime)),
       })),
     );
     return {
@@ -209,7 +210,7 @@ export const executeSealedEnvelope = async (
     transaction = await transport.begin(compiled.transactionMode, timeoutMs);
     const statements = compiled.statements.map((statement) => ({
       sql: statement.protectedSql,
-      args: driverArgs(statement),
+      args: driverArgs(statement, runtimeBytesLimit(runtime)),
     }));
     if (compiled.transactionMode === "write" && idempotency) {
       const [existingResult] = await transaction.execute([

@@ -16,6 +16,16 @@ const schemaVersion = "schema_routing_1";
 const policyVersion = "policy_routing_1";
 const limits = { maxRows: 100, maxResultBytes: 64_000, timeoutMs: 1_000, maxStatements: 8 };
 const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
+
+// The adapter owns no copy of the per-value limit (#22); tests read it from the real WASM.
+export const MAX_BYTES_PER_VALUE = (() => {
+  const runtime = PolicySqlRuntime.newWithPhysicalSchema(
+    example("catalog.yaml"), example("policy.yaml"), schemaVersion, policyVersion,
+    JSON.stringify({ max_rows: limits.maxRows, max_result_bytes: limits.maxResultBytes, timeout_ms: limits.timeoutMs, max_statements: limits.maxStatements }),
+    example("physical-schema.json"),
+  );
+  try { return runtime.max_bytes_per_value; } finally { runtime.free(); }
+})();
 // Match Hrana's STANDARD_NO_PAD BLOB serializer, independently of the adapter codec.
 const encode = (value) => value === null ? { type: "null" } : typeof value === "number"
   ? { type: "integer", value: String(value) } : value instanceof Uint8Array

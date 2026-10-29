@@ -1,6 +1,6 @@
 // Private server-adapter codec. Public clients use the PolicySQL JSON contract.
-// Kept in sync with policysql_core::bytes by the real-WASM conformance tests.
-export const MAX_BYTES_PER_VALUE = 262_144;
+// The adapter owns no copy of the per-value limit: every caller injects the value
+// advertised by the loaded runtime (policysql_core::bytes::MAX_BYTES_PER_VALUE).
 
 // Well-formed binary value whose decoded size exceeds the per-value limit.
 // Transports map it to 413 POLICYSQL_LIMIT_EXCEEDED; malformed values stay TypeError.
@@ -8,8 +8,31 @@ export class BinaryLimitError extends RangeError {
   constructor() { super("Binary value exceeds the configured limit"); }
 }
 
-export const encodeBlob = (value: Uint8Array): string => {
-  if (value.byteLength > MAX_BYTES_PER_VALUE) throw new BinaryLimitError();
+const validLimit = (value: unknown): value is number =>
+  value === Number.POSITIVE_INFINITY || (Number.isSafeInteger(value) && (value as number) > 0);
+
+// A concrete per-value limit: a positive safe integer from the runtime.
+export const bytesLimit = (value: unknown): number => {
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new TypeError("PolicySQL runtime advertises an invalid per-value binary limit");
+  }
+  return value as number;
+};
+
+// Runtime metadata is validated like any other host input. Package construction
+// calls this once, so a malformed runtime is rejected before it serves requests.
+export const runtimeBytesLimit = (runtime: { max_bytes_per_value?: unknown } | null | undefined): number =>
+  bytesLimit(runtime?.max_bytes_per_value);
+
+// An absent or malformed injected limit is an adapter wiring defect; fail closed.
+// POSITIVE_INFINITY is only for structural decoding that defers size to a caller.
+export const checkedLimit = (maxBytes: number): number => {
+  if (!validLimit(maxBytes)) throw new TypeError("Invalid binary limit");
+  return maxBytes;
+};
+
+export const encodeBlob = (value: Uint8Array, maxBytes: number): string => {
+  if (value.byteLength > checkedLimit(maxBytes)) throw new BinaryLimitError();
   let binary = "";
   for (const byte of value) binary += String.fromCharCode(byte);
   return btoa(binary);
@@ -17,7 +40,8 @@ export const encodeBlob = (value: Uint8Array): string => {
 
 // Validate the alphabet, padding and unused bits before classifying size. No
 // decoded-payload allocation occurs until the complete encoded input is checked.
-const decodedBlobLength = (value: unknown): number => {
+const decodedBlobLength = (value: unknown, maxBytes: number): number => {
+  checkedLimit(maxBytes);
   if (typeof value !== "string" || value.length % 4 !== 0) throw new TypeError("Invalid binary value");
   const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
   for (let index = 0; index < value.length - padding; index++) {
@@ -33,12 +57,12 @@ const decodedBlobLength = (value: unknown): number => {
     }
   }
   const length = value.length / 4 * 3 - padding;
-  if (length > MAX_BYTES_PER_VALUE) throw new BinaryLimitError();
+  if (length > maxBytes) throw new BinaryLimitError();
   return length;
 };
 
-export const decodeBlob = (value: unknown): Uint8Array => {
-  decodedBlobLength(value);
+export const decodeBlob = (value: unknown, maxBytes: number): Uint8Array => {
+  decodedBlobLength(value, maxBytes);
   const binary = atob(value as string);
   return Uint8Array.from(binary, character => character.charCodeAt(0));
 };
