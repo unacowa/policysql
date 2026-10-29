@@ -96,7 +96,7 @@ Explainでは`params`にruntime値がなくても、SQL内の利用箇所、Cata
 }
 ```
 
-`parameters`はclient-owned named parameterの入力contractです。`result.columns`は実行時に付与される`results[].meta.result.columns`の予測で、alias、式、JOIN、aggregate、policy projection後の型候補と最終nullable性を示します。Executeは実際に与えられたparameterを使って再compileし、成功後のresponseへ確定したmetadataを付与します。
+`parameters`はclient-owned named parameterの入力contractです。各descriptorの`nullable`はcompilerによるstatement全体のNULL判定で、すべての出現箇所がnullable列へのINSERT／UPDATEの直接代入である場合だけ`true`になります。Executeが`null`を受け付ける範囲と全型で一致し、`params`に与えた値には依存しません。`params: {}`の場合、`nullable: true`のparameterはNULL、それ以外は型ごとの非NULL値を仮置きしてcompileします。値を与えた場合はExecuteと同じく検証し、`nullable: false`のparameterへの`null`は400 `POLICYSQL_INVALID_PARAMETER`になります。`result.columns`は実行時に付与される`results[].meta.result.columns`の予測で、alias、式、JOIN、aggregate、policy projection後の型候補と最終nullable性を示します。Executeは実際に与えられたparameterを使って再compileし、成功後のresponseへ確定したmetadataを付与します。
 
 `statements`はrequestと同じ順序です。一つでもcompileできない場合はresponse全体をerrorにし、部分的な型生成結果は返しません。`meta.transactionMode`は全statementから導出した`read`または`write`です。
 

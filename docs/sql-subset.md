@@ -58,6 +58,15 @@ Examples:
 
 Operation checks evaluate to success only on SQL TRUE. FALSE and UNKNOWN fail. A zero-row mutation passes the row check vacuously; callers use transaction `expect.affectedRows` when cardinality is part of the invariant.
 
+Named parameters may bind JSON `null` as SQL NULL only as the whole value of direct
+`INSERT ... VALUES` / `UPDATE ... SET` assignments to Catalog columns with
+`nullable: true`, for every logical type including bytes and json. Every occurrence
+of a shared parameter must be such an assignment; reuse in a non-nullable column,
+comparison, `IN`, `LIKE`/`GLOB`, function, `CASE`, ordering, `LIMIT` or `OFFSET`
+rejects NULL. SQL `NULL` literals and NULL inside expressions remain unsupported;
+use `column IS NULL` to query stored NULLs. A post-state check that a NULL makes
+UNKNOWN fails like FALSE. See [ADR 0017](adr/0017-nullable-assignments.md).
+
 ## Always rejected from public SQL
 
 - multiple statements inside one `sql` field and SQL transaction control;

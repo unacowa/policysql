@@ -43,7 +43,7 @@ const load = async h => {
 test("bytes generation and execution use the common string descriptor through an opaque Transport", async t => {
   const h = await fixture(t);
   const descriptor = { type: "bytes", representation: "string", format: "base64", nullable: true };
-  // Explain reports bytes parameters as non-nullable; NULL appears only in results (#20).
+  // A bytes parameter used outside a nullable assignment is non-nullable (#20).
   await generate({ ...h.config, transport: async request => request.kind === "explain"
     ? { status: 200, body: { meta: { ...versions, role: "author" }, statements: [{
       parameters: [{ name: "status", ...descriptor, nullable: false }],
@@ -60,6 +60,30 @@ test("bytes generation and execution use the common string descriptor through an
     } });
     assert.deepEqual(await getPosts.execute(client, { status: input }), [{ id: value }]);
   }
+});
+
+test("parameters proven nullable by Explain accept null in generated types and on the wire", async t => {
+  const h = await fixture(t);
+  // Explain marks a parameter nullable only for direct nullable assignments (#20).
+  await generate({ ...h.config, transport: async request => request.kind === "explain"
+    ? { status: 200, body: { meta: { ...versions, role: "author" }, statements: [{
+      parameters: [
+        { name: "status", type: "string", representation: "string", nullable: true },
+        { name: "payload", type: "bytes", representation: "string", format: "base64", nullable: true },
+        { name: "id", type: "string", representation: "string", nullable: false },
+      ],
+      result: { columns: [{ name: "status", type: "string", representation: "string", nullable: true }] },
+    }] } } : h.config.transport(request) });
+  const source = await h.source();
+  assert.match(source, /"status": string \| null/);
+  assert.match(source, /"payload": string \| null/);
+  assert.match(source, /"id": string[;,\s}]/);
+  const { getPosts } = await load(h);
+  const client = new PolicySqlClient({ role: "author", ...versions, transport: async request => {
+    assert.deepEqual(JSON.parse(request.body).statements[0].params, { status: null, payload: null, id: "p1" });
+    return { status: 200, body: { status: "committed", results: [{ rows: [{ status: null }], meta: { result: { columns: [{ name: "status", type: "string", representation: "string", nullable: true }], redactions: [] } } }], meta: {} } };
+  } });
+  assert.deepEqual(await getPosts.execute(client, { status: null, payload: null, id: "p1" }), [{ status: null }]);
 });
 
 test("generator uses only the injected function and retains discovery and query metadata", async t => {

@@ -150,7 +150,7 @@ code generatorはselect、insert、update、returningを別々に読み取りま
 | `instant / string / rfc3339` | branded string |
 | `json / object` | generated JSON typeまたは`unknown` |
 
-`bytes / string / base64`のJSON表現は、parameterとSELECT／RETURNINGの結果で共通のcanonical base64 stringです。空bytesは`""`、nullable列の結果に含まれるSQL NULLは`null`として区別します（bytes parameterへの`null`は拒否されます）。公式Clientとgeneratorはstringを保持し、`Uint8Array`の自動変換は行いません。application向けcodecを使用する場合は、この公開表現へ変換してからTransportへ渡します。server側のWASM／DB driver変換はserver adapterの責務です。encodingとサイズ上限は[HTTP共通仕様](../reference/http-conventions#bytesの入出力)を参照してください。
+`bytes / string / base64`のJSON表現は、parameterとSELECT／RETURNINGの結果で共通のcanonical base64 stringです。空bytesは`""`、nullable列の結果に含まれるSQL NULLは`null`として区別します（bytes parameterへの`null`は、Explainが`nullable: true`と返すparameter、つまりnullable列への直接代入だけで受け付けられます）。公式Clientとgeneratorはstringを保持し、`Uint8Array`の自動変換は行いません。application向けcodecを使用する場合は、この公開表現へ変換してからTransportへ渡します。server側のWASM／DB driver変換はserver adapterの責務です。encodingとサイズ上限は[HTTP共通仕様](../reference/http-conventions#bytesの入出力)を参照してください。
 
 日時を標準でJavaScriptの`Date`へ変換しません。`date`は時点ではなく、`datetime`はtimezoneが確定していない場合があり、`Date`へ変換すると意味が変わるためです。
 

@@ -55,10 +55,11 @@ fn bytes_descriptor_rejects_incompatible_representations() {
     }
 }
 
-// NULL for bytes client parameters is out of scope here (#20/#21): JSON null is
-// rejected at every use, and Explain must not advertise nullable bytes parameters.
+// NULL for bytes client parameters follows the shared nullable-assignment proof
+// (#20): accepted only when every use is a direct assignment to a nullable bytes
+// column, and Explain advertises exactly that.
 #[test]
-fn null_bytes_parameters_are_rejected_at_every_use() {
+fn null_bytes_parameters_follow_the_nullable_assignment_proof() {
     let runtime = super::PolicySqlRuntime::new(
         CATALOG,
         POLICY,
@@ -68,47 +69,52 @@ fn null_bytes_parameters_are_rejected_at_every_use() {
     )
     .unwrap_or_else(|_| unreachable!("valid runtime"));
     let auth = r#"{"subject":"u","role":"member","roles":["member"],"access":["execute","explain"],"session":{"tenant_id":"tenant_a"}}"#;
-    for sql in [
-        "UPDATE projects SET state=:value WHERE id='seed' RETURNING state",
-        "INSERT INTO projects(id,name,state) VALUES('n','n',:value)",
-        "SELECT id FROM projects WHERE state=:value",
-        "SELECT id FROM projects WHERE state IN (:value)",
+    let compile = |sql: &str, params: Value, endpoint: &str| -> Value {
+        serde_json::from_str(&runtime.compile_json(
+            auth,
+            &json!({"statements":[{"sql":sql,"params":params}]}).to_string(),
+            endpoint,
+        ))
+        .unwrap_or_else(|_| unreachable!())
+    };
+    for (sql, accepted) in [
+        (
+            "UPDATE projects SET state=:value WHERE id='seed' RETURNING state",
+            true,
+        ),
+        (
+            "INSERT INTO projects(id,name,state) VALUES('n','n',:value)",
+            true,
+        ),
+        ("SELECT id FROM projects WHERE state=:value", false),
+        ("SELECT id FROM projects WHERE state IN (:value)", false),
+        ("UPDATE projects SET state=:value WHERE state=:value", false),
     ] {
         for endpoint in ["execute", "explain"] {
-            let output: Value = serde_json::from_str(&runtime.compile_json(
-                auth,
-                &json!({"statements":[{"sql":sql,"params":{"value":null}}]}).to_string(),
-                endpoint,
-            ))
-            .unwrap_or_else(|_| unreachable!());
+            let output = compile(sql, json!({"value": null}), endpoint);
+            if accepted {
+                assert_eq!(
+                    output["statements"][0]["clientParameters"]["value"],
+                    Value::Null,
+                    "{endpoint} {sql}: {output}"
+                );
+            } else {
+                assert_eq!(
+                    output["error"]["code"], "POLICYSQL_INVALID_PARAMETER",
+                    "{endpoint} {sql}: {output}"
+                );
+            }
+            let explained = compile(sql, json!({}), "explain");
             assert_eq!(
-                output["error"]["code"], "POLICYSQL_INVALID_PARAMETER",
-                "{endpoint} {sql}: {output}"
+                explained["statements"][0]["clientParameterTypes"]["value"], "bytes",
+                "{explained}"
+            );
+            assert_eq!(
+                explained["statements"][0]["clientParameterNullable"]["value"], accepted,
+                "{explained}"
             );
         }
     }
-    let output: Value = serde_json::from_str(
-        &runtime.compile_json(
-            auth,
-            &json!({"statements":[{
-                "sql":"UPDATE projects SET state=:value WHERE id='seed' RETURNING state",
-                "params":{}
-            }]})
-            .to_string(),
-            "explain",
-        ),
-    )
-    .unwrap_or_else(|_| unreachable!());
-    assert_eq!(
-        output["statements"][0]["clientParameterTypes"]["value"], "bytes",
-        "{output}"
-    );
-    assert!(
-        output["statements"][0]
-            .get("clientParameterNullable")
-            .is_none(),
-        "{output}"
-    );
 }
 
 fn fixture() -> Value {
@@ -149,7 +155,11 @@ fn bytes_ingress_uses_expected_type_and_strict_public_representation() {
             "{case}"
         );
     }
-    assert!(logical_value(Value::Null, Some(LogicalType::Bytes)).is_err());
+    // JSON null decodes to SQL NULL; the compiler decides whether it is allowed.
+    assert_eq!(
+        logical_value(Value::Null, Some(LogicalType::Bytes)).ok(),
+        Some(LogicalValue::Null)
+    );
     assert!(matches!(
         logical_value(json!([0, 255]), Some(LogicalType::Json)),
         Ok(LogicalValue::Json(_))

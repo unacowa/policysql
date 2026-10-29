@@ -25,15 +25,12 @@ const fixture = {
   },
   callbackQuery: { sql: "SELECT id,state,seed FROM projects WHERE state=:state", params: { state: "AAEC/w==" } },
 };
-// state === null omits the nullable column so SQL NULL comes from the database;
-// JSON null for a bytes client parameter is rejected in this contract (#20).
-const insert = (id, state, returning = " RETURNING id,name,state,seed,metadata") => state === null ? {
-  sql: `INSERT INTO projects(id,name,metadata) VALUES(:id,:name,:metadata)${returning}`,
-  params: { id, name: "AAEC/w==", metadata: [0, 1, 2, 255] },
-} : {
+// state === null binds SQL NULL: `:state` is only a direct assignment to the
+// nullable bytes column, so the compiler proves NULL is allowed (#20).
+const insert = (id, state, returning = " RETURNING id,name,state,seed,metadata") => ({
   sql: `INSERT INTO projects(id,name,state,metadata) VALUES(:id,:name,:state,:metadata)${returning}`,
   params: { id, name: "AAEC/w==", state, metadata: [0, 1, 2, 255] },
-};
+});
 const insertRaw = (id, state) => ({
   sql: "INSERT INTO projects(id,name,state) VALUES(:id,:name,:state) RETURNING state",
   params: { id, name: "n", state },
@@ -255,25 +252,40 @@ for (const hooks of [false, true]) test(`encoded result limits apply per envelop
   assert.equal(accepted.status, 200, JSON.stringify(accepted.body.error));
 });
 
+const nonNullableFixture = { ...fixture, catalog: fixture.catalog.replace("type: bytes, nullable: true", "type: bytes, nullable: false"), physicalSchema: fixture.physicalSchema.replace('"state": { "declaredType": "BLOB", "nullable": true }', '"state": { "declaredType": "BLOB", "nullable": false }'), schema: fixture.schema.replace("state BLOB,", "state BLOB NOT NULL,") };
+
 test("Explain and Catalog expose bytes descriptors independently of runtime values", async t => {
   const h = await harness(t, { hooks: false, fixture });
+  const nonnull = await harness(t, { hooks: false, fixture: nonNullableFixture });
   const sql = "UPDATE projects SET state=:state WHERE id=:id RETURNING state";
-  for (const params of [{}, { state: "AA==", id: "seed" }]) {
-    const result = await h.request("a", "/v1/transactions:explain", { statements: [{ sql, params }] }, null);
-    assert.equal(result.status, 200, JSON.stringify(result.body));
-    // NULL bytes parameters are not part of this contract (#20), even for a nullable column.
-    assert.deepEqual(result.body.statements[0].parameters.find(p => p.name === "state"), { name: "state", type: "bytes", representation: "string", format: "base64", nullable: false });
+  const descriptor = nullable => ({ name: "state", type: "bytes", representation: "string", format: "base64", nullable });
+  // The descriptor is the compiler's NULL proof (#20), never inferred from the sample.
+  for (const [target, nullable] of [[h, true], [nonnull, false]]) {
+    for (const params of [{}, { state: "AA==", id: "seed" }, ...(nullable ? [{ state: null, id: "seed" }] : [])]) {
+      const result = await target.request("a", "/v1/transactions:explain", { statements: [{ sql, params }] }, null);
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+      assert.deepEqual(result.body.statements[0].parameters.find(p => p.name === "state"), descriptor(nullable));
+    }
   }
-  const nullSample = await h.request("a", "/v1/transactions:explain", { statements: [{ sql, params: { state: null, id: "seed" } }] }, null);
-  assert.equal(nullSample.status, 400);
-  assert.equal(nullSample.body.error.code, "POLICYSQL_INVALID_PARAMETER");
+  const comparison = await h.request("a", "/v1/transactions:explain", { statements: [{ sql: "SELECT id FROM projects WHERE state=:state", params: {} }] }, null);
+  assert.deepEqual(comparison.body.statements[0].parameters, [descriptor(false)]);
+  // A NULL sample that Execute would reject is rejected by Explain with the same error.
+  for (const [target, statement, params] of [
+    [nonnull, sql, { state: null, id: "seed" }],
+    [h, "SELECT id FROM projects WHERE state=:state", { state: null }],
+  ]) {
+    const nullSample = await target.request("a", "/v1/transactions:explain", { statements: [{ sql: statement, params }] }, null);
+    assert.equal(nullSample.status, 400);
+    assert.equal(nullSample.body.error.code, "POLICYSQL_INVALID_PARAMETER");
+  }
+  assert.equal(nonnull.counts().connects, 0);
   const catalog = await h.request("a", "/v1/catalog", undefined, null);
   const state = catalog.body.resources.find(r => r.name === "projects").operations.select.columns.find(c => c.name === "state");
   assert.equal(state.type, "bytes"); assert.equal(state.format, "base64"); assert.equal(state.representation, "string");
   assert.equal(h.counts().connects, 0);
 });
 
-test("bytes containing SQL text stay bound data and NULL bytes parameters are rejected", async t => {
+test("bytes containing SQL text stay bound data and NULL bytes parameters follow the nullable-assignment proof", async t => {
   const h = await harness(t, { hooks: false, fixture });
   const payload = Buffer.from("'); DROP TABLE projects; --\u0000\u00ff").toString("base64");
   const result = await execute(h, [insert("injection", payload)]);
@@ -281,19 +293,26 @@ test("bytes containing SQL text stay bound data and NULL bytes parameters are re
   assert.equal(result.body.results[0].rows[0].state, payload);
   assert.equal(hash(physical(h, "injection").state), hash(Buffer.from(payload, "base64")));
   assert.ok(h.events.every(event => !event.sql.includes("DROP TABLE")));
-  const required = { ...fixture, catalog: fixture.catalog.replace("type: bytes, nullable: true", "type: bytes, nullable: false"), physicalSchema: fixture.physicalSchema.replace('"state": { "declaredType": "BLOB", "nullable": true }', '"state": { "declaredType": "BLOB", "nullable": false }'), schema: fixture.schema.replace("state BLOB,", "state BLOB NOT NULL,") };
-  const nonnull = await harness(t, { hooks: false, fixture: required });
-  for (const target of [h, nonnull]) {
-    for (const statement of [
-      insertRaw("null", null),
-      { sql: "UPDATE projects SET state=:state WHERE id=:id", params: { state: null, id: "seed" } },
-      { sql: "SELECT id FROM projects WHERE state=:state", params: { state: null } },
+  const nonnull = await harness(t, { hooks: false, fixture: nonNullableFixture });
+  for (const [target, nullable] of [[h, true], [nonnull, false]]) {
+    for (const [statement, proven] of [
+      [insertRaw("null", null), nullable],
+      [{ sql: "UPDATE projects SET state=:state WHERE id=:id RETURNING state", params: { state: null, id: "seed" } }, nullable],
+      [{ sql: "SELECT id FROM projects WHERE state=:state", params: { state: null } }, false],
+      [{ sql: "UPDATE projects SET state=:state WHERE state=:state", params: { state: null } }, false],
     ]) {
-      const denied = await execute(target, [statement]);
-      assert.equal(denied.status, 400, JSON.stringify(denied.body));
-      assert.equal(denied.body.error.code, "POLICYSQL_INVALID_PARAMETER");
+      const result = await execute(target, [statement]);
+      if (proven) {
+        assert.equal(result.status, 200, JSON.stringify(result.body));
+        assert.deepEqual(result.body.results[0].rows, [{ state: null }]);
+      } else {
+        assert.equal(result.status, 400, JSON.stringify(result.body));
+        assert.equal(result.body.error.code, "POLICYSQL_INVALID_PARAMETER");
+      }
     }
   }
+  assert.equal(physical(h, "null").storage, "null");
+  assert.equal(physical(h, "seed").storage, "null");
   assert.equal(nonnull.counts().connects, 0);
 });
 

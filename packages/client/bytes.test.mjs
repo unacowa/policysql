@@ -9,9 +9,10 @@ const fixture = JSON.parse(readFileSync(new URL("../../tests/fixtures/bytes-cont
 const descriptor = { name: "state", type: "bytes", representation: "string", format: "base64", nullable: true };
 
 // This is a protocol fixture: no gateway runtime, WASM, hosting API or DB driver.
-// SQL NULL appears only in nullable result cells; bytes parameters are never null (#20).
+// JSON null is forwarded unchanged; the gateway accepts it only for parameters
+// Explain reports as nullable (direct nullable assignments, #20).
 for (const value of [...fixture.valid.map(c => c.base64), null]) test(`Client and Kysely preserve public bytes through a function Transport: ${JSON.stringify(value)}`, async t => {
-  const input = value ?? "";
+  const input = value;
   const requests = [];
   const client = new PolicySqlClient({ transport: async request => {
     const body = JSON.parse(request.body);

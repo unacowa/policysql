@@ -29,11 +29,13 @@ requestとresponseのmedia typeは`application/json`です。request bodyはUTF-
 
 `params`はparameter名をkeyとするobjectです。値にはJSON `null`、boolean、finite number、string、object、arrayを使用できます。objectとarrayはtarget descriptorがJSONの場合だけ、stringはTEXT、format付きstring、int64、bytesなどexpected descriptorに従って検証されます。
 
+named parameterへのJSON `null`は、そのparameterのすべての出現箇所が、Catalogで`nullable: true`と宣言された列へのINSERT `VALUES`／UPDATE `SET`の直接代入（値全体がparameter）である場合だけSQL NULLとしてbindします。型はstring、number、integer、boolean、json、bytes、日付系のいずれでも同じです。同じparameterを非nullable列への代入、比較、`IN`、`LIKE`、関数、`CASE`、`ORDER BY`、`LIMIT`／`OFFSET`で再利用した場合はNULLを受け付けず、それ以外のJSON `null`は400 `POLICYSQL_INVALID_PARAMETER`で拒否します（database接続前）。json列では`null`はJSON文字列`null`ではなくSQL NULLです。列権限、preset、tenant filter、RETURNING権限、TRUEだけを成功とするpost-state checkはNULLを書き込む行にもそのまま適用され、NULLによって比較がUNKNOWNになるcheckは失敗します。SQLの`NULL` literalは引き続き未対応で、保存済みNULLの照会には`column IS NULL`を使用します。Explainのparameter descriptorの`nullable`はこの判定そのもので、Executeが受け付ける範囲と常に一致します。
+
 SQLite BLOBはtarget descriptorが`bytes / string / base64`のときにbase64 stringとして送ります。parameter値だけから型を推測せず、SQLの利用箇所とcompiled Catalogからexpected descriptorを決定します。
 
 ## bytesの入出力
 
-bytesは配備先に依存しないPolicySQL共通のJSON契約です。INSERT／UPDATEのparameterとSELECT／RETURNINGの結果は、標準alphabet（`+/`）、必要なpadding、未使用bitが0のcanonical base64 stringを使用します。空白、改行、base64url、省略padding、配列、DB driver固有objectはbytes入力として拒否します。空bytesは`""`、nullable列の結果に含まれるSQL NULLは`null`です。bytes parameterへのJSON `null`は他の型と同じく400 `POLICYSQL_INVALID_PARAMETER`で拒否し、Explainもbytes parameterを`nullable: false`として返します。
+bytesは配備先に依存しないPolicySQL共通のJSON契約です。INSERT／UPDATEのparameterとSELECT／RETURNINGの結果は、標準alphabet（`+/`）、必要なpadding、未使用bitが0のcanonical base64 stringを使用します。空白、改行、base64url、省略padding、配列、DB driver固有objectはbytes入力として拒否します。空bytesは`""`、nullable列の結果に含まれるSQL NULLは`null`です。bytes parameterへのJSON `null`は他の型と同じく、次のNULL parameterの規則に従います。
 
 ```json
 {

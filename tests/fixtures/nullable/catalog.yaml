@@ -1,0 +1,18 @@
+version: 1
+resources:
+  nullabletexts:
+    source: { table: nullabletexts }
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      label: { type: string }
+      state: { type: string, nullable: true }
+      note: { type: string, nullable: true }
+      amount: { type: number, nullable: true }
+      count: { type: integer, nullable: true }
+      flag: { type: boolean, nullable: true }
+      meta: { type: json, representation: object, storage: text, nullable: true }
+      payload: { type: bytes, nullable: true }
+      due: { type: date, format: iso-date, nullable: true }
+      secret: { type: string, nullable: true }
+      owner: { type: string, nullable: true }

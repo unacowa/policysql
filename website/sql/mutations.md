@@ -106,6 +106,8 @@ returning:
       on_deny: null
 ```
 
+Catalogで`nullable: true`と宣言された書込み可能列には、named parameterへJSON `null`を渡してSQL NULLを保存できます（例: `UPDATE nullabletexts SET state=:value WHERE id=:id RETURNING state`に`{"value": null}`）。そのparameterのすべての出現箇所がnullable列への直接代入である必要があり、WHERE、`IN`、関数、`LIMIT`などで再利用すると400 `POLICYSQL_INVALID_PARAMETER`になります。presetやserver-owned列、`columns`にない列は従来どおり書き込めません。`check`はNULLを書き込んだ後の行で評価され、`neq`や`not`などNULLでUNKNOWNになる条件は失敗します。
+
 条件付きreturning columnは直接projectionだけに使用でき、visibilityがdenyなら値を`null`にしてredaction metadataを返します。`returning`を省略したoperationでは`RETURNING`を使用できません。
 
 ## Transaction

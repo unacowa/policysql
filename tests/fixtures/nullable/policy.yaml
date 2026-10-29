@@ -1,0 +1,26 @@
+version: 1
+resources:
+  nullabletexts:
+    roles:
+      member:
+        select:
+          columns: [id, label, state, note, amount, count, flag, meta, payload, due, owner]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          limit: 100
+        insert:
+          columns: [id, label, state, note, amount, count, flag, meta, payload, due]
+          presets: { tenant_id: { session: tenant_id }, owner: { session: tenant_id } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, label, state, note, amount, count, flag, meta, payload, due, owner] }
+        update:
+          columns: [label, state, note, amount, count, flag, meta, payload, due]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, label, state, note, amount, count, flag, meta, payload, due, owner] }
+commit_checks:
+  consistency:
+    triggered_by: [nullabletexts]
+    hook:
+      url_env: VALIDATOR_URL
+      timeout_ms: 1500
+      hmac_secret_env: VALIDATOR_SECRET

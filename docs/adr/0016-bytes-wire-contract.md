@@ -9,10 +9,11 @@ The public descriptor is `type: bytes`, `representation: string`, `format: base6
 Parameters and SELECT/RETURNING result cells use canonical RFC 4648 standard base64:
 the `+/` alphabet, required padding for incomplete groups, zero unused bits, and no
 whitespace. Empty bytes are `""`. A nullable bytes result cell uses JSON `null` for
-SQL NULL. JSON `null` is not accepted for a bytes client parameter: like every other
-logical type it is rejected with `POLICYSQL_INVALID_PARAMETER`, and Explain reports
-bytes parameters as `nullable: false`. Binding SQL NULL through parameters is a
-separate decision (#20, #21). Arrays and database-driver objects are not alternative
+SQL NULL. JSON `null` for a bytes client parameter follows the same rule as every
+other logical type ([ADR 0017](0017-nullable-assignments.md), #20): it binds SQL
+NULL only when every use is a direct assignment to a nullable column, Explain
+reports exactly that as the parameter's `nullable`, and any other JSON `null` is
+rejected with `POLICYSQL_INVALID_PARAMETER`. Arrays and database-driver objects are not alternative
 public bytes encodings.
 
 The compiler resolves SQL parameter uses against the immutable Catalog before
