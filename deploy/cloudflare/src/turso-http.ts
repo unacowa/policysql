@@ -2,6 +2,7 @@ import { HttpError, binaryLimitExceeded } from "./errors.ts";
 import { remainingDatabaseTime } from "./database.ts";
 import type { DatabaseTransportOptions } from "./database.ts";
 import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.ts";
+import { NO_FOLLOW, discardBody, isRedirectResponse } from "./redirects.ts";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
 const databaseFailure = () =>
@@ -131,7 +132,8 @@ export class TursoHttpTransport {
   async pipeline(requests, baton = undefined, timeoutMs = 1_000, oversized = databaseFailure) {
     const response = await this.fetchImpl(this.url, {
       method: "POST",
-      redirect: "error",
+      // See redirects.ts: workerd does not support the "error" redirect mode.
+      redirect: NO_FOLLOW,
       headers: {
         authorization: `Bearer ${this.token}`,
         "content-type": "application/json",
@@ -145,8 +147,9 @@ export class TursoHttpTransport {
       }
       throw databaseFailure();
     });
-    if (!response.ok) {
-      try { await response.body?.cancel(); } catch { /* the failure is already terminal */ }
+    // A redirect is never followed: it would forward the bearer token elsewhere.
+    if (isRedirectResponse(response) || !response.ok) {
+      await discardBody(response);
       throw databaseFailure();
     }
     const declared = Number(response.headers.get("content-length"));

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runCommitChecks, verifyCapabilityToken } from "../src/commit-checks.ts";
+import { redirectResponses } from "./helpers/redirects.mjs";
 
 const compiled = {
   policyVersion: "policy_1",
@@ -93,5 +94,54 @@ test("does not call a hook for a zero-row mutation and rejects deny or malformed
       }),
       (error) => error.code === "POLICYSQL_COMMIT_CHECK_REJECTED",
     );
+  }
+});
+
+// Regression (#36): workerd throws on `redirect: "error"`, so every commit check on
+// the real Worker was rejected. The hook call now asks for "manual" and treats a
+// redirect as a rejection, without following it or reading its body.
+test("calls the validator with manual redirects and rejects redirect responses unread", async () => {
+  const passed = await runCommitChecks({
+    compiled,
+    results: [{ affectedRows: 1 }],
+    auth,
+    env,
+    requestId: "req_redirect_ok",
+    validationId: `cval_${"d".repeat(32)}`,
+    activate: async () => {},
+    deactivate: async () => {},
+    fetchImpl: async (_url, init) => {
+      assert.equal(init.redirect, "manual");
+      return new Response(JSON.stringify({ version: "1", allowed: true }), { status: 200 });
+    },
+  });
+  assert.equal(passed, "passed");
+
+  for (const { label, response, state } of redirectResponses()) {
+    let calls = 0;
+    let deactivated = false;
+    await assert.rejects(
+      runCommitChecks({
+        compiled,
+        results: [{ affectedRows: 1 }],
+        auth,
+        env,
+        requestId: "req_redirect",
+        validationId: `cval_${"e".repeat(32)}`,
+        activate: async () => {},
+        deactivate: async () => { deactivated = true; },
+        fetchImpl: async (_url, init) => {
+          calls += 1;
+          assert.equal(init.redirect, "manual");
+          return response;
+        },
+      }),
+      (error) => error.status === 409 && error.code === "POLICYSQL_COMMIT_CHECK_REJECTED",
+      label,
+    );
+    assert.equal(calls, 1, `${label}: the redirect is not followed`);
+    assert.equal(state.read, false, `${label}: the redirect body is not read`);
+    assert.equal(state.cancelled, true, `${label}: the redirect body is released`);
+    assert.equal(deactivated, true, `${label}: the query capability is revoked`);
   }
 });

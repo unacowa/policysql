@@ -1,5 +1,6 @@
 import { HttpError } from "./errors.ts";
 import { sha256 } from "./idempotency.ts";
+import { NO_FOLLOW, discardBody, isRedirectResponse } from "./redirects.ts";
 
 const rejected = () => new HttpError(
   409,
@@ -125,7 +126,8 @@ export const runCommitChecks = async ({
     try {
       response = await fetchImpl(url, {
         method: "POST",
-        redirect: "error",
+        // See redirects.ts: workerd does not support the "error" redirect mode.
+        redirect: NO_FOLLOW,
         signal: AbortSignal.timeout(remainingMs),
         headers: {
           "content-type": "application/json",
@@ -136,6 +138,12 @@ export const runCommitChecks = async ({
         body,
       });
     } catch {
+      await deactivate();
+      throw rejected();
+    }
+    // A redirect is never followed: it would forward the signed body elsewhere.
+    if (isRedirectResponse(response)) {
+      await discardBody(response);
       await deactivate();
       throw rejected();
     }
