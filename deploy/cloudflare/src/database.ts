@@ -36,6 +36,8 @@ export interface DatabaseTransport {
    * Bound each operation by timeoutMs and the shared absolute deadline when supplied.
    * PolicySQL always passes `options`; a transport may use it to reject oversized
    * BLOBs early. PolicySQL re-checks every BLOB against the same runtime limit.
+   * The bundled `TursoHttpTransport` requires `options` and rejects an omitted or
+   * malformed limit before sending any request.
    */
   begin(mode: "read" | "write", timeoutMs: number, deadlineMs?: number, options?: DatabaseTransportOptions): Promise<DatabaseTransaction>;
 }

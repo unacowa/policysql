@@ -130,3 +130,14 @@ test("bounds inserts directly and updates conservatively without parsing SEARCH 
   assert.equal(result.estimates[0].upperRowsWritten, 1);
   assert.equal(result.estimates[1].upperRowsWritten, 20);
 });
+
+// Regression (PR #24 review): a malformed injected per-value limit fails before the
+// cost transaction is opened, not as a BEGIN/rollback followed by a 503.
+test("a malformed per-value limit fails before the cost transaction begins", async () => {
+  for (const limit of [undefined, 0, "1024", Infinity]) {
+    let connected = 0;
+    const factory = () => { connected++; return { async begin() { assert.fail("must not BEGIN"); } }; };
+    await assert.rejects(estimateSealedEnvelope(compiled, env, "req", factory, limit), TypeError, String(limit));
+    assert.equal(connected, 0);
+  }
+});

@@ -22,9 +22,7 @@ const result = (columns, rows, usage = {}) => ({
 const blobCases = JSON.parse(readFileSync(new URL("../../../tests/fixtures/hrana-blob-response.json", import.meta.url), "utf8"));
 // PolicySQL's transport wrapper always passes the runtime limit as begin options.
 const runtimeLimit = { maxBytesPerValue: MAX_BYTES_PER_VALUE };
-// An explicit `undefined` exercises a direct caller that supplies no options.
-const readBlob = async (base64, ...explicit) => {
-  const options = explicit.length > 0 ? explicit[0] : runtimeLimit;
+const readBlob = async (base64, options = runtimeLimit) => {
   const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "blob-response", async (_url, init) => {
     const { requests } = JSON.parse(init.body);
     return Response.json({ baton: "blob-baton", results: requests.map(request => {
@@ -81,9 +79,8 @@ test("bounds padded and unpadded Hrana BLOB responses before decoding", async t 
 });
 
 // Regression (#22): the transport has no copy of the per-value limit. It bounds
-// BLOBs with the limit PolicySQL injects from the runtime; without one it only
-// validates encoding inside the bounded response and PolicySQL classifies size.
-test("bounds Hrana BLOB responses with the injected runtime limit, not a host constant", async t => {
+// BLOBs with the limit PolicySQL injects from the runtime.
+test("bounds Hrana BLOB responses with the injected runtime limit, not a host constant", async () => {
   for (const limit of [3, 16, MAX_BYTES_PER_VALUE * 2]) {
     const fits = Buffer.alloc(limit, 9);
     for (const base64 of new Set([fits.toString("base64"), fits.toString("base64").replace(/=+$/, "")])) {
@@ -93,15 +90,20 @@ test("bounds Hrana BLOB responses with the injected runtime limit, not a host co
     await assert.rejects(readBlob(over, { maxBytesPerValue: limit }), { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" }, `limit=${limit}`);
     await assert.rejects(readBlob(`${over.slice(0, -1)}!`, { maxBytesPerValue: limit }), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" });
   }
-  const aboveDefault = Buffer.alloc(MAX_BYTES_PER_VALUE + 1, 5);
-  assert.deepEqual(Buffer.from(await readBlob(aboveDefault.toString("base64"), undefined)), aboveDefault);
-  for (const base64 of blobCases.invalid) {
-    await assert.rejects(readBlob(base64, undefined), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" }, JSON.stringify(base64));
-  }
-  const fetchImpl = t.mock.fn(async () => assert.fail("a malformed limit must fail before any request"));
+});
+
+// Regression (PR #24 review): a direct caller that omits options must not get an
+// unbounded transport. An omitted, infinite or malformed limit fails closed with a
+// TypeError before BEGIN or any other request is sent.
+test("begin without a valid per-value limit is rejected before any request", async t => {
+  const fetchImpl = t.mock.fn(async () => assert.fail("a missing or malformed limit must fail before any request"));
   const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "bad-limit", fetchImpl);
-  for (const options of [null, {}, { maxBytesPerValue: 0 }, { maxBytesPerValue: "262144" }, { maxBytesPerValue: Infinity }]) {
-    await assert.rejects(transport.begin("read", 1000, undefined, options), TypeError, JSON.stringify(options));
+  await assert.rejects(transport.begin("read", 1000), TypeError, "options omitted");
+  await assert.rejects(transport.begin("write", 1000, Date.now() + 1000), TypeError, "options omitted with deadline");
+  for (const options of [undefined, null, {}, { maxBytesPerValue: undefined }, { maxBytesPerValue: 0 },
+    { maxBytesPerValue: -1 }, { maxBytesPerValue: 1.5 }, { maxBytesPerValue: NaN }, { maxBytesPerValue: "262144" },
+    { maxBytesPerValue: Infinity }, { maxBytesPerValue: 2 ** 53 }]) {
+    await assert.rejects(transport.begin("read", 1000, undefined, options), TypeError, String(JSON.stringify(options)));
   }
   assert.equal(fetchImpl.mock.callCount(), 0);
 });
@@ -124,7 +126,7 @@ test("classifies oversized Hrana statement responses as result limit errors", as
         headers: declare ? { "content-length": String(text.length) } : {},
       });
     });
-    const transaction = await transport.begin("read", 1000);
+    const transaction = await transport.begin("read", 1000, undefined, runtimeLimit);
     return transaction.execute([{ sql: "SELECT state FROM projects" }]);
   };
   for (const declare of [false, true]) {
@@ -159,7 +161,7 @@ test("decodes exact usage metrics while preserving transaction ownership", async
     "req_1",
     fetchImpl,
   );
-  const transaction = await transport.begin("read", 1000);
+  const transaction = await transport.begin("read", 1000, undefined, runtimeLimit);
   const output = await transaction.execute([{ sql: "SELECT id FROM projects", args: {} }]);
   await transaction.commit();
   assert.equal(output[0].usage.rowsRead, 12);
@@ -179,7 +181,7 @@ test("rejects missing per-query billing metrics", async () => {
       }],
     })),
   );
-  await assert.rejects(transport.begin("read", 1000), (error) => error.code === "POLICYSQL_DATABASE_UNAVAILABLE");
+  await assert.rejects(transport.begin("read", 1000, undefined, runtimeLimit), (error) => error.code === "POLICYSQL_DATABASE_UNAVAILABLE");
 });
 
 test("HTTP operations share an absolute deadline while rollback retains its cleanup budget", async (t) => {
@@ -200,14 +202,14 @@ test("HTTP operations share an absolute deadline while rollback retains its clea
         ? { type: "ok", response: { type: "close" } } : result([], [])),
     });
   });
-  const first = await transport.begin("read", 1000, 10_200);
+  const first = await transport.begin("read", 1000, 10_200, runtimeLimit);
   now += 120;
   await first.execute([{ sql: "SELECT id FROM projects" }]);
   now += 50;
   await first.commit();
   assert.deepEqual(budgets, [200, 80, 30]);
 
-  const second = await transport.begin("read", 1000, 10_200);
+  const second = await transport.begin("read", 1000, 10_200, runtimeLimit);
   now = 10_200;
   const count = requests.length;
   await assert.rejects(second.execute([{ sql: "SELECT id FROM projects" }]), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");

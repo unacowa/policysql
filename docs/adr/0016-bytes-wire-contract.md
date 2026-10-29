@@ -106,10 +106,11 @@ exposed to the host as `PolicySqlRuntime.max_bytes_per_value` (#22). The TypeScr
 adapter keeps no copy: Capabilities, WASM-parameter decoding (including cost
 queries), driver-result classification and the Turso HTTP transport all take the
 limit from the loaded runtime. PolicySQL passes it to every database transport as
-`begin(..., { maxBytesPerValue })`; a transport called without it validates BLOB
-encoding only, within its bounded response, and PolicySQL still classifies size with
-the runtime value before WASM. Runtime construction rejects a missing or malformed
-limit, so changing only the Rust constant changes every boundary together and cannot
+`begin(..., { maxBytesPerValue })`, and PolicySQL still classifies size with the
+runtime value before WASM. The Turso HTTP transport and the private codec have no
+unbounded mode: an omitted, infinite or malformed limit fails closed with a
+`TypeError` before any database request. Runtime construction rejects a missing or
+malformed limit, so changing only the Rust constant changes every boundary together and cannot
 turn valid WASM output into `POLICYSQL_INTERNAL`.
 
 Shared byte vectors, native Rust boundary tests, Client-only Transport tests and

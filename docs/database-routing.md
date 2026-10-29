@@ -102,6 +102,11 @@ may use it to reject an oversized BLOB before decoding it, as the Turso HTTP ada
 does; it must not hard-code its own copy. PolicySQL re-checks every driver BLOB
 against the same runtime value before WASM result validation.
 
+`TursoHttpTransport.begin` requires `options`. When called directly, an omitted or
+malformed `maxBytesPerValue` (missing, non-integer, zero, negative or `Infinity`) is a
+`TypeError` raised before any HTTP request; the transport never runs without a
+per-value BLOB bound. Pass `{ maxBytesPerValue: runtime.max_bytes_per_value }`.
+
 ## Immutable binding and DO integration
 
 ```ts

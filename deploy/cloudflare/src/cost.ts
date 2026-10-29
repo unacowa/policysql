@@ -1,6 +1,7 @@
 import { HttpError } from "./errors.ts";
 import { databaseRequired } from "./database.ts";
 import { driverArgs } from "./driver-values.ts";
+import { bytesLimit } from "./binary.ts";
 
 const invalidPlanner = () =>
   new HttpError(403, "POLICYSQL_COST_UNKNOWN", "The query cost could not be bounded safely.");
@@ -102,6 +103,8 @@ export const estimateSealedEnvelope = async (
   maxBytes: number,
 ) => {
   if (typeof transportFactory !== "function") throw databaseRequired();
+  // A malformed injected limit is a wiring defect: fail before BEGIN, not as a 503.
+  bytesLimit(maxBytes);
   const catalog = parseCatalog(env);
   let transaction;
   try {

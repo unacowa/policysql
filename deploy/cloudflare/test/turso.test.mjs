@@ -319,3 +319,32 @@ test("a runtime without a well-formed per-value limit cannot execute", async () 
     assert.ok(released);
   }
 });
+
+// Regression (PR #24 review): a runtime with a malformed per-value limit is a host
+// wiring defect. It fails as 500 before BEGIN, so a misconfiguration is neither a
+// retryable 503 nor a database transaction opened and rolled back per retry.
+test("a malformed runtime limit fails before BEGIN on serverless and interactive paths", async t => {
+  t.mock.method(console, "log", () => {});
+  const statement = { operation: "select", protectedSql: "SELECT 1", clientParameters: {}, serverParameters: {}, result: [], limits: { timeoutMs: 1000 } };
+  for (const max_bytes_per_value of [undefined, 0, -1, 1.5, "262144", Infinity]) {
+    let released = 0, begun = 0, connected = 0;
+    const runtime = { max_bytes_per_value, release_execution() { released++; } };
+    const transportFactory = async () => {
+      connected++;
+      return { async begin() { begun++; assert.fail("must not BEGIN"); } };
+    };
+    const error = await executeSealedEnvelope(runtime, { executionHandle: 9, transactionMode: "read", statements: [statement] },
+      {}, "req_bad_runtime", transportFactory).then(() => assert.fail("must reject"), e => e);
+    assert.ok(error instanceof TypeError, `limit=${String(max_bytes_per_value)}`);
+    assert.notEqual(error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+    assert.equal(connected, 0);
+    assert.equal(begun, 0);
+    assert.equal(released, 1, "the execution handle is still released");
+
+    let executed = 0;
+    await assert.rejects(executeSealedOnTransaction(runtime, { executionHandle: 3, statements: [statement] },
+      { usage: [], async execute() { executed++; return []; } }, "req_bad_runtime_interactive"), TypeError);
+    assert.equal(executed, 0);
+    assert.equal(released, 2);
+  }
+});

@@ -8,10 +8,9 @@ export class BinaryLimitError extends RangeError {
   constructor() { super("Binary value exceeds the configured limit"); }
 }
 
-const validLimit = (value: unknown): value is number =>
-  value === Number.POSITIVE_INFINITY || (Number.isSafeInteger(value) && (value as number) > 0);
-
-// A concrete per-value limit: a positive safe integer from the runtime.
+// A concrete per-value limit: a positive safe integer from the runtime. An absent,
+// infinite or malformed limit is an adapter wiring defect, so every codec and
+// driver-value path fails closed; no caller can opt out of the bound.
 export const bytesLimit = (value: unknown): number => {
   if (!Number.isSafeInteger(value) || (value as number) <= 0) {
     throw new TypeError("PolicySQL runtime advertises an invalid per-value binary limit");
@@ -24,15 +23,8 @@ export const bytesLimit = (value: unknown): number => {
 export const runtimeBytesLimit = (runtime: { max_bytes_per_value?: unknown } | null | undefined): number =>
   bytesLimit(runtime?.max_bytes_per_value);
 
-// An absent or malformed injected limit is an adapter wiring defect; fail closed.
-// POSITIVE_INFINITY is only for structural decoding that defers size to a caller.
-export const checkedLimit = (maxBytes: number): number => {
-  if (!validLimit(maxBytes)) throw new TypeError("Invalid binary limit");
-  return maxBytes;
-};
-
 export const encodeBlob = (value: Uint8Array, maxBytes: number): string => {
-  if (value.byteLength > checkedLimit(maxBytes)) throw new BinaryLimitError();
+  if (value.byteLength > bytesLimit(maxBytes)) throw new BinaryLimitError();
   let binary = "";
   for (const byte of value) binary += String.fromCharCode(byte);
   return btoa(binary);
@@ -41,7 +33,7 @@ export const encodeBlob = (value: Uint8Array, maxBytes: number): string => {
 // Validate the alphabet, padding and unused bits before classifying size. No
 // decoded-payload allocation occurs until the complete encoded input is checked.
 const decodedBlobLength = (value: unknown, maxBytes: number): number => {
-  checkedLimit(maxBytes);
+  bytesLimit(maxBytes);
   if (typeof value !== "string" || value.length % 4 !== 0) throw new TypeError("Invalid binary value");
   const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
   for (let index = 0; index < value.length - padding; index++) {

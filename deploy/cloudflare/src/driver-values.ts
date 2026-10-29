@@ -1,5 +1,5 @@
 import { HttpError, binaryLimitExceeded } from "./errors.ts";
-import { BinaryLimitError, checkedLimit, decodeBlob, encodeBlob } from "./binary.ts";
+import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.ts";
 
 const internal = () => new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
 const mismatch = () => new HttpError(422, "POLICYSQL_SCHEMA_MISMATCH", "The database result does not match the compiled logical contract.");
@@ -17,14 +17,14 @@ const driverValue = (value, maxBytes: number) => {
 };
 
 export const driverArgs = (statement, maxBytes: number) => {
-  checkedLimit(maxBytes);
+  bytesLimit(maxBytes);
   if (Object.keys(statement.clientParameters).some(name => Object.hasOwn(statement.serverParameters, name))) throw internal();
   return Object.fromEntries(Object.entries({ ...statement.clientParameters, ...statement.serverParameters })
     .map(([name, value]) => [name, driverValue(value, maxBytes)]));
 };
 
 export const rawDriverValue = (value, maxBytes: number) => {
-  checkedLimit(maxBytes);
+  bytesLimit(maxBytes);
   if (typeof value === "number" && !Number.isFinite(value)) throw mismatch();
   if (typeof value === "bigint") {
     const number = Number(value);

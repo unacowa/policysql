@@ -90,8 +90,10 @@ test("binary codec honors the injected runtime limit instead of a host constant"
   }
 });
 
+// Regression (PR #24 review): Infinity is not an "unbounded" escape hatch. The codec
+// and every driver-value path reject it like any other malformed limit.
 test("a missing or malformed injected limit fails closed instead of disabling the bound", () => {
-  for (const limit of [undefined, null, 0, -1, 1.5, NaN, "262144", 2 ** 53]) {
+  for (const limit of [undefined, null, 0, -1, 1.5, NaN, "262144", 2 ** 53, Infinity, -Infinity]) {
     assert.throws(() => decodeWithLimit("AA==", limit), TypeError, String(limit));
     assert.throws(() => encodeWithLimit(new Uint8Array(1), limit), TypeError, String(limit));
     assert.throws(() => driverArgsWithLimit({ clientParameters: {}, serverParameters: {} }, limit), TypeError, String(limit));
@@ -102,6 +104,13 @@ test("a missing or malformed injected limit fails closed instead of disabling th
   for (const runtime of [undefined, null, {}, { max_bytes_per_value: Infinity }]) {
     assert.throws(() => runtimeBytesLimit(runtime), TypeError);
   }
+  // An unbounded limit must not let an oversized value through any path.
+  const huge = new Uint8Array(MAX_BYTES_PER_VALUE * 4);
+  const hugeBase64 = Buffer.from(huge).toString("base64");
+  assert.throws(() => encodeWithLimit(huge, Infinity), TypeError);
+  assert.throws(() => decodeWithLimit(hugeBase64, Infinity), TypeError);
+  assert.throws(() => rawWithLimit(huge, Infinity), TypeError);
+  assert.throws(() => driverArgsWithLimit({ clientParameters: { v: { type: "blob", base64: hugeBase64 } }, serverParameters: {} }, Infinity), TypeError);
   assert.equal(runtimeBytesLimit({ max_bytes_per_value: 512 * 1024 }), 512 * 1024);
 });
 

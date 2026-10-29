@@ -167,9 +167,10 @@ export class TursoHttpTransport {
     return body;
   }
 
-  async begin(mode, timeoutMs, deadlineMs?: number, options?: DatabaseTransportOptions) {
-    // A supplied limit must be well formed; PolicySQL always supplies the runtime's.
-    const maxBytes = options === undefined ? Number.POSITIVE_INFINITY : bytesLimit(options?.maxBytesPerValue);
+  async begin(mode, timeoutMs, deadlineMs: number | undefined, options: DatabaseTransportOptions) {
+    // The runtime's per-value limit is required. An omitted or malformed limit fails
+    // closed before any request, so a direct caller cannot disable the BLOB bound.
+    const maxBytes = bytesLimit(options?.maxBytesPerValue);
     const body = await this.pipeline(
       [executeRequest({ sql: mode === "write" ? "BEGIN IMMEDIATE" : "BEGIN DEFERRED" }, maxBytes)],
       undefined,
