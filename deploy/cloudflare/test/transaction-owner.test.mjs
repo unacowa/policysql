@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { testBinding, testProvider } from "./helpers/database.mjs";
+import { identity_json } from "./helpers/identity.mjs";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { statusFor } from "../src/http/status.ts";
 
@@ -57,6 +58,7 @@ const ownerProvider = (database) => {
 const runtime = () => ({
   snapshot: "test-snapshot",
   max_bytes_per_value: 1_024,
+  identity_json,
   released: 0,
   compile_json() {
     return JSON.stringify({
@@ -178,6 +180,7 @@ test("fails closed after owner replacement and on alarm expiry", async () => {
 const commitRuntime = () => ({
   snapshot: "test-snapshot",
   max_bytes_per_value: 1_024,
+  identity_json,
   released: 0,
   compile_json(_auth, envelope) {
     const sql = JSON.parse(envelope).statements[0].sql;

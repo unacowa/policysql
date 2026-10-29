@@ -577,7 +577,9 @@ today.
   request that changes the ABI bumps it again. The snapshot is
   `{profile}:{schema}:{policy}:abi-{ABI_VERSION}` (`crates/policysql-wasm/src/lib.rs` 382), so it
   changes on the deployments of those pull requests, not necessarily on the switch-over
-  deployments (pull requests 7 and 8).
+  deployments (pull requests 7 and 8). Pull request 2 adds the `identity_json` method without a
+  bump: no existing method, value, or limit changes, the engine and the module ship in one
+  bundle, and keeping the snapshot is what keeps the hashes equal across that deployment.
 - **In-flight transactions** do not survive any deployment: owners restart, so their
   connections are gone, and they fail closed as today.
 - **Keyed atomic retries across a snapshot change** get `POLICYSQL_IDEMPOTENCY_CONFLICT`,

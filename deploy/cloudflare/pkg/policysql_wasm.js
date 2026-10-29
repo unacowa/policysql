@@ -109,6 +109,32 @@ export class PolicySqlRuntime {
         }
     }
     /**
+     * Computes a request identity, fingerprint, or command digest with core's canonical
+     * JSON and SHA-256 (ADR 0024 pull request 2). The input and output contract is
+     * [`policysql_transaction::identity_json`]; bodies are passed as their exact text, so an
+     * escaped lone surrogate in a body reaches core intact.
+     *
+     * Adding this method does not change `ABI_VERSION`: no existing method or value changes,
+     * the engine and this module ship in one bundle, and keeping the version keeps the
+     * snapshot, which every fingerprint includes (ADR 0024, "ABI impact and rollout").
+     * @param {string} input_json
+     * @returns {string}
+     */
+    identity_json(input_json) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(input_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.policysqlruntime_identity_json(this.__wbg_ptr, ptr0, len0);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * @returns {number}
      */
     get max_bytes_per_value() {

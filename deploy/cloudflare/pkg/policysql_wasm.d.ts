@@ -25,6 +25,17 @@ export class PolicySqlRuntime {
      */
     compile_json(verified_auth_json: string, request_json: string, permission: string): string;
     /**
+     * Computes a request identity, fingerprint, or command digest with core's canonical
+     * JSON and SHA-256 (ADR 0024 pull request 2). The input and output contract is
+     * [`policysql_transaction::identity_json`]; bodies are passed as their exact text, so an
+     * escaped lone surrogate in a body reaches core intact.
+     *
+     * Adding this method does not change `ABI_VERSION`: no existing method or value changes,
+     * the engine and this module ship in one bundle, and keeping the version keeps the
+     * snapshot, which every fingerprint includes (ADR 0024, "ABI impact and rollout").
+     */
+    identity_json(input_json: string): string;
+    /**
      * Activates one immutable deployment snapshot.
      *
      * # Errors
@@ -67,6 +78,7 @@ export interface InitOutput {
     readonly policysqlruntime_catalog_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_commit_checks_enabled: (a: number) => number;
     readonly policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+    readonly policysqlruntime_identity_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_max_bytes_per_value: (a: number) => number;
     readonly policysqlruntime_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
     readonly policysqlruntime_newWithPhysicalSchema: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number];

@@ -11,7 +11,7 @@ import { internalError, operationError, EngineError } from "./errors.ts";
 import type { OperationError } from "./errors.ts";
 import { parseBodyText } from "./request-body.ts";
 import type { BodyText } from "./request-body.ts";
-import { authFingerprint, mutationIdempotency, requestIdempotency, sha256, stableJson } from "./idempotency.ts";
+import { authIdentity, requestIdentity, startDigest } from "./identity.ts";
 import { authorizeSession } from "./session.ts";
 import type { RequiredAccess } from "./session.ts";
 import { capabilities as capabilitiesValue, explainResponse, parsedRuntimeCall } from "./presenters.ts";
@@ -255,7 +255,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         const snapshot = dependencies.getRuntime().snapshot;
         const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, snapshot);
         const body = await parseBodyText(fields.bodyText);
-        const fingerprint = await authFingerprint(auth, databaseBinding);
+        const fingerprint = await authIdentity(dependencies.getRuntime(), auth, databaseBinding, checked.requestId);
         const reply = await owner(fields.transactionId).command(kind, {
           transactionId: fields.transactionId, authFingerprint: fingerprint, command: body.value, databaseBinding, snapshot,
         }, checked.requestId);
@@ -313,7 +313,9 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       let idempotency;
       try {
         idempotency = compiled.transactionMode === "write"
-          ? await mutationIdempotency(fields.idempotencyKey, auth, body.value, databaseBinding)
+          ? await requestIdentity(runtime, {
+            key: fields.idempotencyKey, auth, bodyText: body.text, body: body.value, endpoint: "execute", databaseBinding, requestId,
+          })
           : null;
       } catch (error) {
         runtime.release_execution(BigInt(compiled.executionHandle));
@@ -415,11 +417,15 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
          body.value.expected.policyVersion !== (dependencies.publicConfig?.policyVersion ?? POLICY_VERSION))) {
         throw new EngineError("POLICYSQL_STALE_OPERATION", "The operation was compiled for a different active snapshot.");
       }
-      const idempotency = await requestIdempotency(fields.idempotencyKey, auth, body.value, "interactive-start", databaseBinding);
+      const runtime = dependencies.getRuntime();
+      const { requestId } = checked;
+      const idempotency = await requestIdentity(runtime, {
+        key: fields.idempotencyKey, auth, bodyText: body.text, body: body.value, endpoint: "interactive-start", databaseBinding, requestId,
+      });
       const transactionId = `tx_${idempotency?.keyHash.slice(0, 32) ?? crypto.randomUUID().replaceAll("-", "")}`;
-      const fingerprint = await authFingerprint(auth, databaseBinding);
+      const fingerprint = await authIdentity(runtime, auth, databaseBinding, requestId);
       // The owner still validates its start command; this digest is not a public retry key.
-      const startFingerprint = idempotency?.fingerprint ?? await sha256(stableJson({ transactionId, request: body.value }));
+      const startFingerprint = idempotency?.fingerprint ?? await startDigest(runtime, transactionId, body.text, body.value, requestId);
       const reply: OwnerReply = await owner(transactionId).begin({
         transactionId,
         authFingerprint: fingerprint,
