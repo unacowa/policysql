@@ -24,6 +24,7 @@ const env = {
 };
 
 const auth = {
+  principal: "test:u1",
   subject: "u1",
   role: "member",
   roles: ["member"],

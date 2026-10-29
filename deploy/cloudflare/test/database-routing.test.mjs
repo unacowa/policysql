@@ -13,7 +13,7 @@ const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
 const insert = (id, name = id) => ({ sql: "INSERT INTO projects (id, name) VALUES (:id, :name) RETURNING id, name", params: { id, name } });
 const envelope = (...statements) => ({ statements });
 
-test("parallel JWT/Wasm/HTTP reads and cost observations stay on their selected SQLite databases", async (t) => {
+test("parallel session/Wasm/HTTP reads and cost observations stay on their selected SQLite databases", async (t) => {
   const h = await harness(t);
   const results = await Promise.all(["a", "b"].map((tenant) => h.request(tenant, "/v1/transactions:execute", envelope(read))));
   for (const [index, tenant] of ["a", "b"].entries()) {
@@ -26,14 +26,25 @@ test("parallel JWT/Wasm/HTTP reads and cost observations stay on their selected 
   assert.ok(h.counts().checks >= 2);
 });
 
-test("invalid JWT and wrong endpoint access never connect or check a database", async (t) => {
+test("wrapper-rejected JWTs and missing endpoint access never connect or check a database", async (t) => {
   const h = await harness(t);
-  for (const customToken of ["invalid", await h.token("a", { policysql: { roles: ["member"], default_role: "member", access: ["catalog"], session: { tenant_id: "tenant_a" } } })]) {
-    assert.equal((await h.request("a", "/v1/transactions:execute", envelope(read), undefined, customToken)).status, 401);
+  // The example wrapper rejects an unverifiable credential with 401 before the library runs.
+  assert.equal((await h.request("a", "/v1/transactions:execute", envelope(read), undefined, "invalid")).status, 401);
+  for (const jwt of [{ issuer: "https://other-issuer.test" }, { audience: "another-app" }, { expires: "-1h" }]) {
+    const rejected = await h.request("a", "/v1/transactions:execute", envelope(read), undefined, await h.token("a", {}, jwt));
+    assert.equal(rejected.status, 401);
+    assert.equal(rejected.body.error.code, "POLICYSQL_UNAUTHENTICATED");
   }
   assert.equal(h.counts().checks, 0);
-  for (const jwt of [{ issuer: "https://other-issuer.test" }, { audience: "another-app" }, { expires: "-1h" }]) {
-    assert.equal((await h.request("a", "/v1/transactions:execute", envelope(read), undefined, await h.token("a", {}, jwt))).status, 401);
+  // A verified session without the endpoint's access is a client-caused 403 from core,
+  // whether it arrives directly or through the wrapper's JWT adapter.
+  for (const credential of [
+    h.session("a", { access: ["catalog"] }),
+    await h.token("a", { policysql: { roles: ["member"], default_role: "member", access: ["catalog"], session: { tenant_id: "tenant_a" } } }),
+  ]) {
+    const denied = await h.request("a", "/v1/transactions:execute", envelope(read), undefined, credential);
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.error.code, "POLICYSQL_FORBIDDEN_ACCESS");
   }
   assert.equal(h.counts().checks, 0);
   assert.equal(h.counts().connects, 0);
@@ -52,11 +63,11 @@ test("Catalog and Explain validate the binding without opening a DB connection",
 test("a missing request database is detected even when legacy Turso env credentials exist", async (t) => {
   const h = await harness(t);
   const env = { ...h.env, TURSO_DATABASE_URL: "https://a.test", TURSO_AUTH_TOKEN: "token_a" };
-  for (const database of [undefined, null]) {
+  for (const context of [undefined, null, { session: h.session("a") }, { database: null, session: h.session("a") }, h.binding("a")]) {
     const response = await h.app.fetch(new Request("https://worker.test/v1/transactions:execute", {
-      method: "POST", headers: { authorization: `Bearer ${await h.token("a")}`, "content-type": "application/json" },
+      method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify(envelope(read)),
-    }), env, h.ctx, database);
+    }), env, h.ctx, context);
     assert.equal(response.status, 500);
     assert.equal((await response.json()).error.code, "POLICYSQL_DATABASE_REQUIRED");
   }
@@ -467,16 +478,15 @@ test("a slow commit authorization cannot extend the transaction deadline", async
 
 test("database identity scopes retries while generation/snapshot changes conflict instead of making a fresh key", async () => {
   const binding = { version: 1, scope: "test:tenant_a", databaseId: "db_a", generation: "1", snapshot: "snapshot_1" };
-  const auth = { subject: "u", role: "member", session: { tenant_id: "a" } };
-  const env = { POLICYSQL_JWT_ISSUER: "issuer" };
+  const auth = { principal: "issuer:u", subject: "u", role: "member", session: { tenant_id: "a" } };
   const request = new Request("https://worker.test", { headers: { "idempotency-key": "same-idempotency-key" } });
-  const digest = (value) => requestIdempotency(request, env, auth, envelope(read), "execute", value);
+  const digest = (value) => requestIdempotency(request, auth, envelope(read), "execute", value);
   const first = await digest(binding);
   for (const changed of [{ ...binding, generation: "2" }, { ...binding, snapshot: "snapshot_2" }]) {
     const next = await digest(changed);
     assert.equal(next.keyHash, first.keyHash);
     assert.notEqual(next.fingerprint, first.fingerprint);
-    assert.notEqual(await authFingerprint(env, auth, binding), await authFingerprint(env, auth, changed));
+    assert.notEqual(await authFingerprint(auth, binding), await authFingerprint(auth, changed));
   }
   assert.notEqual((await digest({ ...binding, databaseId: "db_b" })).keyHash, first.keyHash);
 });

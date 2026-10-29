@@ -1,4 +1,7 @@
-import { createErrorResponse, createPolicySqlWorker, TursoHttpTransport } from "@unacowa/policysql/cloudflare";
+import {
+  createErrorResponse, createJwtSessionVerifier, createPolicySqlWorker, TursoHttpTransport,
+} from "@unacowa/policysql/cloudflare";
+import { createJwtAuthentication } from "./auth.ts";
 import { createDatabaseRegistry } from "./provider.ts";
 import { createRateLimitedFetch, type RateLimitEnv } from "./rate-limit.ts";
 import catalog from "./catalog.yaml";
@@ -23,9 +26,10 @@ const worker = createPolicySqlWorker({
 // Both isolates use the same wrapper-owned provider. No credentials cross the DO message boundary.
 export const TransactionOwner = worker.TransactionOwner;
 
-// The wrapper owns rate limiting (rate-limit.ts) and runs it before the library: client
-// requests before registry.binding() (which reads the runtime snapshot and so initializes
-// WASM), and commit-check callbacks in their own bucket before fetchCallback.
+// The wrapper owns rate limiting (rate-limit.ts) and authentication (auth.ts) and runs both
+// before the library: client requests are limited, then authenticated with the JWT identity
+// adapter, before registry.binding() (which reads the runtime snapshot and so initializes
+// WASM); commit-check callbacks are limited in their own bucket before fetchCallback.
 // This example wrapper chooses a fixed registered DB. A tenant-aware wrapper can supply an
 // ID from its own authorization/routing service instead of this setting.
 export default {
@@ -33,5 +37,6 @@ export default {
     worker.app,
     (env) => registry.binding(env.APPLICATION_DATABASE_ID, env),
     createErrorResponse,
+    createJwtAuthentication<RateLimitEnv>(createJwtSessionVerifier),
   ),
 };

@@ -8,7 +8,10 @@ import { initSync, PolicySqlRuntime } from "../../pkg/policysql_cloudflare.js";
 import { createApp } from "../../src/app.ts";
 import { TransactionOwnerCore } from "../../src/transaction-owner.ts";
 import { TursoHttpTransport } from "../../src/turso-http.ts";
+import { createErrorResponse } from "../../src/errors.ts";
+import { createJwtSessionVerifier } from "../../src/adapters/jwt.ts";
 import { createDatabaseRegistry } from "../../../../examples/database-routing/provider.ts";
+import { authenticateRequest, createJwtAuthentication } from "../../../../examples/database-routing/auth.ts";
 
 initSync({ module: readFileSync(new URL("../../pkg/policysql_cloudflare_bg.wasm", import.meta.url)) });
 const example = (name) => readFileSync(new URL(`../../../../examples/database-routing/${name}`, import.meta.url), "utf8");
@@ -167,16 +170,36 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     ...overrides,
   }).setProtectedHeader({ alg: "ES256", kid: "test-key" }).setSubject("same_user")
     .setIssuer(jwt.issuer ?? "https://issuer.test").setAudience(jwt.audience ?? "routing").setIssuedAt().setExpirationTime(jwt.expires ?? "5m").sign(privateKey);
-  const tokens = { a: await token("a"), b: await token("b") };
-  const request = async (tenant, path, body, key = "same-idempotency-key", customToken = tokens[tenant], extraHeaders = {}) => {
+  // The trusted session a wrapper passes after authentication (ADR 0019). Library tests
+  // pass it directly; `overrides` replaces top-level fields.
+  const session = (tenant, overrides = {}) => ({
+    principal: "https://issuer.test:same_user", subject: "same_user", roles: ["member"], defaultRole: "member",
+    access: ["execute", "explain", "catalog"], session: { tenant_id: `tenant_${tenant}` }, ...overrides,
+  });
+  // A string credential goes through the example wrapper's JWT authentication first, as in
+  // a deployment: 401 from the wrapper, or the verified session passed to the library.
+  const authenticate = createJwtAuthentication(createJwtSessionVerifier);
+  const request = async (tenant, path, body, key = "same-idempotency-key", credential = session(tenant), extraHeaders = {}) => {
     const input = new Request(`https://worker.test${path}`, {
       method: body === undefined ? "GET" : "POST",
-      headers: { authorization: `Bearer ${customToken}`, "content-type": "application/json", ...(key === null ? {} : { "idempotency-key": key }), ...extraHeaders },
+      headers: {
+        ...(typeof credential === "string" ? { authorization: `Bearer ${credential}` } : {}),
+        "content-type": "application/json", ...(key === null ? {} : { "idempotency-key": key }), ...extraHeaders,
+      },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    const response = path.startsWith("/v1/commit-checks/")
-      ? await app.fetchCallback(input, env, ctx)
-      : await app.fetch(input, env, ctx, customizeBinding(registry.binding(`db_${tenant}`, env)));
+    let response;
+    if (path.startsWith("/v1/commit-checks/")) {
+      response = await app.fetchCallback(input, env, ctx);
+    } else {
+      let trusted = credential;
+      if (typeof credential === "string") {
+        const outcome = await authenticateRequest(authenticate, input, env, "req_wrapper", createErrorResponse);
+        if ("response" in outcome) return { status: outcome.response.status, body: await outcome.response.json() };
+        trusted = outcome.session;
+      }
+      response = await app.fetch(input, env, ctx, { database: customizeBinding(registry.binding(`db_${tenant}`, env)), session: trusted });
+    }
     return { status: response.status, body: await response.json() };
   };
   const flush = async () => {
@@ -190,7 +213,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     rmSync(directory, { recursive: true, force: true });
   });
   return {
-    runtime, env, app, ctx, database, databases, events, owners, hooksSeen, token, request, flush,
+    runtime, env, app, ctx, database, databases, events, owners, hooksSeen, token, session, request, flush,
     binding: (tenant) => registry.binding(`db_${tenant}`, env),
     setValidator(value) { validator = value; },
     counts: () => ({ checks, connects }),

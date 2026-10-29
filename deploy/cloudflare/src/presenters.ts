@@ -118,7 +118,7 @@ export const capabilities = (runtime: any, publicConfig: any = {}) => {
     mutationsRequired: false,
     interactiveStartRequired: false,
     persistent: true,
-    binding: ["issuer", "subject", "role", "session", "endpoint", "payload"],
+    binding: ["principal", "subject", "role", "session", "endpoint", "payload"],
   },
   costObservation: { enabled: true, timing: "after_response", planner: "sqlite-explain-query-plan" },
   });

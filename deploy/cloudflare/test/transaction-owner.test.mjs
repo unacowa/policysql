@@ -65,7 +65,7 @@ const environment = {
 const txId = `tx_${"a".repeat(32)}`;
 const fingerprint = "b".repeat(64);
 const startFingerprint = "c".repeat(64);
-const auth = { subject: "u1", role: "member", roles: ["member"], access: ["execute"], session: { tenant_id: "tenant_a" } };
+const auth = { principal: "test:u1", subject: "u1", role: "member", roles: ["member"], access: ["execute"], session: { tenant_id: "tenant_a" } };
 
 test("malformed delegated idempotency cannot silently disable replay protection", async () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/optional-idempotency.json", import.meta.url), "utf8"));

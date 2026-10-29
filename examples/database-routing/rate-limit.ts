@@ -1,4 +1,5 @@
-import type { createErrorResponse, DatabaseBinding, PolicySqlApp, WorkerBindings } from "@unacowa/policysql/cloudflare";
+import type { createErrorResponse, DatabaseBinding, PolicySqlApp } from "@unacowa/policysql/cloudflare";
+import { authenticateRequest, type Authenticate, type JwtEnv } from "./auth.ts";
 
 // Application-owned request-rate limiting. PolicySQL has no limiter (ADR 0018); this
 // wrapper decides the keys and runs before `app.fetch` / `app.fetchCallback`, so a rejected
@@ -14,7 +15,7 @@ export type FetchHandler<Env> = (
   context: ExecutionContext | undefined,
 ) => Promise<Response>;
 
-export type RateLimitEnv = WorkerBindings & {
+export type RateLimitEnv = JwtEnv & {
   RATE_LIMITER?: RateLimiter;
   CALLBACK_RATE_LIMITER?: RateLimiter;
   APPLICATION_DATABASE_ID?: string;
@@ -80,16 +81,25 @@ export const withRateLimit = <Env extends RateLimitEnv>(
 /**
  * The example's whole request entry point. Every request is limited before the library:
  * callbacks in their own bucket before `fetchCallback`, everything else in the client
- * bucket before `binding(env)`, which reads the runtime snapshot and so initializes WASM.
+ * bucket. A client request is then authenticated (except the public `/healthz`), and only
+ * then is `binding(env)` computed, which reads the runtime snapshot and so initializes WASM.
  */
 export const createRateLimitedFetch = <Env extends RateLimitEnv>(
   app: PolicySqlApp,
   binding: (env: Env) => DatabaseBinding,
   errorResponse: typeof createErrorResponse,
+  authenticate: Authenticate<Env>,
 ): FetchHandler<Env> => {
-  const client = withRateLimit<Env>(
-    (request, env, context) => app.fetch(request, env, context, binding(env)), CLIENT_RATE_LIMIT, errorResponse,
-  );
+  const client = withRateLimit<Env>(async (request, env, context) => {
+    let session;
+    if (new URL(request.url).pathname !== "/healthz") {
+      const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
+      const outcome = await authenticateRequest(authenticate, request, env, requestId, errorResponse);
+      if ("response" in outcome) return outcome.response;
+      session = outcome.session;
+    }
+    return app.fetch(request, env, context, { database: binding(env), session });
+  }, CLIENT_RATE_LIMIT, errorResponse);
   const callback = withRateLimit<Env>(
     (request, env, context) => app.fetchCallback(request, env, context), CALLBACK_RATE_LIMIT, errorResponse,
   );

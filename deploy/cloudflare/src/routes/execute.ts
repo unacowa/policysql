@@ -12,7 +12,7 @@ import { runtimeBytesLimit } from "../binary.ts";
 import type { AppDependencies, AppEnv } from "../types.ts";
 
 export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDependencies) => {
-  app.post("/v1/transactions:explain", authorize("explain"), runtimeContext(dependencies), async (context) => {
+  app.post("/v1/transactions:explain", authorize(dependencies, "explain"), runtimeContext(dependencies), async (context) => {
     const runtime = context.get("runtime");
     const auth = context.get("auth");
     await checkDatabaseBinding(dependencies.database, context.env.databaseBinding, context.env.deployment, runtime.snapshot);
@@ -21,7 +21,7 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDepend
     return jsonResponse(context, explainResponse(compiled, auth, context.get("requestId")));
   });
 
-  app.post("/v1/transactions:execute", authorize("execute"), runtimeContext(dependencies), async (context) => {
+  app.post("/v1/transactions:execute", authorize(dependencies, "execute"), runtimeContext(dependencies), async (context) => {
     const runtime = context.get("runtime");
     const auth = context.get("auth");
     const requestId = context.get("requestId");
@@ -34,7 +34,7 @@ export const registerExecuteRoutes = (app: Hono<AppEnv>, dependencies: AppDepend
     let idempotency;
     try {
       idempotency = compiled.transactionMode === "write"
-        ? await mutationIdempotency(context.req.raw, context.env.deployment, auth, body.value, databaseBinding)
+        ? await mutationIdempotency(context.req.raw, auth, body.value, databaseBinding)
         : null;
     } catch (error) {
       runtime.release_execution(BigInt(compiled.executionHandle));

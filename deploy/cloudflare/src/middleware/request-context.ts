@@ -2,7 +2,7 @@ import { createMiddleware } from "hono/factory";
 import type { AppDependencies, AppEnv } from "../types.ts";
 
 export const requestContext = () => createMiddleware<AppEnv>(async (context, next) => {
-  context.set("requestId", context.req.header("cf-ray") ?? crypto.randomUUID());
+  context.set("requestId", context.env.requestId ?? context.req.header("cf-ray") ?? crypto.randomUUID());
   await next();
 });
 

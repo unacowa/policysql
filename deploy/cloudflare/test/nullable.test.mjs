@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { harness } from "./helpers/routing.mjs";
 
-// NULL named parameters in direct nullable assignments (#20), through JWT,
+// NULL named parameters in direct nullable assignments (#20), through the trusted session,
 // real WASM, the HTTP transport and SQLite. The same cases run natively in
 // crates/policysql-cloudflare/src/nullable_tests.rs.
 const read = name => readFileSync(new URL(`../../../tests/fixtures/nullable/${name}`, import.meta.url), "utf8");
@@ -40,7 +40,7 @@ const physical = (h, id) => h.databases.get("a").database.prepare(
 ).get(id);
 const allNull = Object.fromEntries(TYPED.map(c => [c, null]));
 
-for (const hooks of [false, true]) test(`nullable writes round-trip through JWT, WASM, HTTP and SQLite (hooks=${hooks})`, async t => {
+for (const hooks of [false, true]) test(`nullable writes round-trip through the trusted session, WASM, HTTP and SQLite (hooks=${hooks})`, async t => {
   const h = await harness(t, { hooks, fixture });
   const statements = [issueInsert("inserted"), issueUpdate(), clearAll()];
   const first = await execute(h, statements, "nullable-roundtrip-123");

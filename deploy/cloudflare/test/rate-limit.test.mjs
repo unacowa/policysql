@@ -9,6 +9,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app.ts";
 import { createErrorResponse } from "../src/errors.ts";
+import { createJwtSessionVerifier } from "../src/adapters/jwt.ts";
+import { createJwtAuthentication } from "../../../examples/database-routing/auth.ts";
 import { createWrapperFetch } from "../wrapper/fetch.ts";
 import { CALLBACK_RATE_LIMIT as REFERENCE_CALLBACK, CLIENT_RATE_LIMIT as REFERENCE_CLIENT } from "../wrapper/rate-limit.ts";
 import {
@@ -108,7 +110,7 @@ test("the commit-check route is served only by fetchCallback, never by fetch", a
     body: JSON.stringify({ sequence: 1, ...read }),
   });
   for (const path of [`/v1/commit-checks/cval_${id}/query`, `/v1/commit%2Dchecks/cval_${id}/query`, `/v%31/commit-checks/cval_${id}/query`]) {
-    const viaFetch = await h.app.fetch(post(path), env, h.ctx, h.binding("a"));
+    const viaFetch = await h.app.fetch(post(path), env, h.ctx, { database: h.binding("a"), session: h.session("a") });
     assert.equal(viaFetch.status, 404, path);
     assert.equal((await viaFetch.json()).error.code, "POLICYSQL_NOT_FOUND");
   }
@@ -155,7 +157,7 @@ const wrappers = [
   },
   {
     name: "database-routing example",
-    create: (app, binding) => createRateLimitedFetch(app, binding, createErrorResponse),
+    create: (app, binding) => createRateLimitedFetch(app, binding, createErrorResponse, createJwtAuthentication(createJwtSessionVerifier)),
     limits: { client: EXAMPLE_CLIENT, callback: EXAMPLE_CALLBACK },
     wrangler: "../../../examples/database-routing/wrangler.jsonc",
     clientKey: "db_a:192.0.2.10",
@@ -233,7 +235,7 @@ for (const wrapper of wrappers) {
     assert.equal(result.headers.has("retry-after"), false);
     assert.ok(runtimeCalls() > 0);
     assert.ok(h.counts().connects > 0);
-    // Library errors still come from the library, unchanged by the wrapper.
+    // An unverifiable token is rejected by the wrapper after the limiter, before the library.
     const denied = await call(fetch, env, h, "/v1/transactions:execute", envelope(read), { authorization: "Bearer invalid" });
     assert.equal(denied.status, 401);
     assert.equal(denied.headers.has("retry-after"), false);

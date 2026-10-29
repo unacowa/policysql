@@ -9,11 +9,8 @@ export const registerSystemRoutes = (app: Hono<AppEnv>, dependencies: AppDepende
     return jsonResponse(context, {
       status: "ok",
       live: true,
-      ready: Boolean(
-        (context.env.deployment.POLICYSQL_JWKS_JSON || context.env.deployment.POLICYSQL_JWKS_URL) &&
-          context.env.deployment.POLICYSQL_JWT_ISSUER &&
-          context.env.deployment.POLICYSQL_JWT_AUDIENCE,
-      ),
+      // The runtime loaded. Identity configuration belongs to the wrapper (ADR 0019).
+      ready: true,
       environment: context.env.deployment.POLICYSQL_ENVIRONMENT,
       abiVersion: runtime.abi_version,
       profile: runtime.profile,

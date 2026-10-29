@@ -21,6 +21,7 @@ const runtime = PolicySqlRuntime.newWithPhysicalSchema(
 );
 
 const auth = JSON.stringify({
+  principal: "https://issuer.test:user_1",
   subject: "user_1",
   role: "member",
   roles: ["member"],

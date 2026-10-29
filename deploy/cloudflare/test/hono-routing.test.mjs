@@ -12,16 +12,13 @@ const runtime = {
   max_bytes_per_value: 1_024,
 };
 
-const env = {
-  POLICYSQL_ENVIRONMENT: "test",
-  POLICYSQL_JWKS_JSON: "{}",
-  POLICYSQL_JWT_ISSUER: "https://issuer.test",
-  POLICYSQL_JWT_AUDIENCE: "policysql-test",
-};
+const env = { POLICYSQL_ENVIRONMENT: "test" };
 
 test("Hono health route preserves the public response and security headers", async () => {
   const app = createApp({ getRuntime: () => runtime, database: testProvider() });
-  const response = await app.fetch(new Request("https://worker.test/healthz"), env, {}, testBinding(runtime.snapshot));
+  // /healthz is public: it needs no session, and readiness no longer depends on any
+  // identity configuration (which belongs to the wrapper).
+  const response = await app.fetch(new Request("https://worker.test/healthz"), env, {}, { database: testBinding(runtime.snapshot) });
   const body = await response.json();
 
   assert.equal(response.status, 200);
@@ -38,7 +35,7 @@ test("Hono not-found handler preserves the safe error contract", async () => {
     runtimeCalls += 1;
     return runtime;
   }, database: testProvider() });
-  const response = await app.fetch(new Request("https://worker.test/not-a-route"), env, {}, testBinding(runtime.snapshot));
+  const response = await app.fetch(new Request("https://worker.test/not-a-route"), env, {}, { database: testBinding(runtime.snapshot) });
   const body = await response.json();
 
   assert.equal(response.status, 404);

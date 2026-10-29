@@ -7,15 +7,23 @@ import { registerDiscoveryRoutes } from "./routes/discovery.ts";
 import { registerExecuteRoutes } from "./routes/execute.ts";
 import { registerSystemRoutes } from "./routes/system.ts";
 import { registerTransactionRoutes } from "./routes/transactions.ts";
-import type { AppDependencies, AppEnv, WorkerBindings } from "./types.ts";
+import { HttpError } from "./errors.ts";
+import type { AppDependencies, AppEnv, RequestContext, WorkerBindings } from "./types.ts";
 import { databaseRequired, validateDatabaseBinding, validateDatabaseProvider } from "./database.ts";
-import type { DatabaseBinding } from "./database.ts";
 
 export type PolicySqlApp = {
-  fetch(request: Request, env: WorkerBindings, executionContext: ExecutionContext | undefined, database: DatabaseBinding): Promise<Response>;
+  /**
+   * Serves one client request. The wrapper has already authenticated the caller and
+   * selected the database; `context` carries both as data (ADR 0014, ADR 0019).
+   */
+  fetch(request: Request, env: WorkerBindings, executionContext: ExecutionContext | undefined, context: RequestContext): Promise<Response>;
   /** Callback capabilities use the database already pinned by the owner. No database selection. */
   fetchCallback(request: Request, env: WorkerBindings, executionContext: ExecutionContext | undefined): Promise<Response>;
 };
+
+const REQUEST_CONTEXT_KEYS = new Set(["database", "session", "requestId"]);
+// Echoed in response bodies and forwarded as a header to the transaction owner.
+const REQUEST_ID = /^[\x21-\x7e]{1,128}$/u;
 
 export const createApp = (dependencies: AppDependencies): PolicySqlApp => {
   if (typeof dependencies?.getRuntime !== "function") {
@@ -61,11 +69,20 @@ export const createApp = (dependencies: AppDependencies): PolicySqlApp => {
   });
 
   return {
-    async fetch(request, env, executionContext, database) {
+    async fetch(request, env, executionContext, context) {
       try {
+        const database = context === null || typeof context !== "object" ? undefined : context.database;
         if (database === undefined || database === null) throw databaseRequired();
+        const unknownKey = Object.keys(context).find((key) => !REQUEST_CONTEXT_KEYS.has(key));
+        if (unknownKey !== undefined || (context.requestId !== undefined &&
+          (typeof context.requestId !== "string" || !REQUEST_ID.test(context.requestId)))) {
+          console.log(JSON.stringify({ event: "request_context_rejected", field: unknownKey ?? "requestId" }));
+          throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+        }
         const databaseBinding = validateDatabaseBinding(database, database.snapshot);
-        return await app.fetch(request, { deployment: env, databaseBinding }, executionContext);
+        return await app.fetch(request, {
+          deployment: env, databaseBinding, session: context.session, requestId: context.requestId,
+        }, executionContext);
       } catch (error) {
         const response = safeError(error, crypto.randomUUID());
         return Response.json(response.body, { status: response.status, headers: { "cache-control": "no-store" } });
