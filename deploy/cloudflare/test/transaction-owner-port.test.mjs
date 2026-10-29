@@ -244,7 +244,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         if (value?.status === "committing") before = value;
         if (value?.status !== "committed") return undefined;
         const stale = { ...value, last: before.last, nextSequence: before.nextSequence };
-        if (legacy) delete stale.commitSent;
+        if (legacy) { delete stale.commitSent; delete stale.commitRecording; }
         return { value: stale, lose: true };
       }));
       await commit();
@@ -253,18 +253,212 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     }
   });
 
-  test(`${ownerAdapter}: a failed store put after COMMIT, without owner loss, leaves a commit retry unknown`, async (t) => {
+  // Every put as the previous release would have written it: no `commitRecording`, no
+  // `commitSent`, and no `committing` (it wrote nothing before COMMIT).
+  const previousRelease = (h, more = () => undefined) => h.interceptOwnerPut((input) => {
+    const extra = more(input);
+    if (extra?.fail) return extra;
+    const value = structuredClone(extra?.value ?? input.value);
+    if (value && typeof value === "object") {
+      delete value.commitRecording;
+      delete value.commitSent;
+      if (value.status === "committing") value.status = "active";
+    }
+    return { ...extra, value };
+  });
+
+  test(`${ownerAdapter}: active and failed records of the previous release leave a commit retry unknown, not rejected`, async (t) => {
     t.mock.method(console, "log", () => {});
     const h = await setup(t, { hooks: false });
-    const { id, commit } = await openWrite(h, "put_failed");
-    h.interceptOwnerPut(once(({ value }) => value?.status === "committed" && { fail: true }));
-    const first = await commit();
-    // The same live owner answers the retry.
-    for (const attempt of [1, 2]) unknown(await commit(), `retry ${attempt}`);
+    // Its window A: the record stays `active`, and the successor marks it `failed`.
+    previousRelease(h);
+    const lost = await openWrite(h, "previous_window_a");
+    h.afterDatabaseStatement(once(({ sql }) => sql === "COMMIT" && (h.loseOwner(lost.id), true)));
+    await lost.commit();
+    assert.equal((await h.ownerRecord(lost.id)).status, "active");
+    for (const attempt of [1, 2]) unknown(await lost.commit(), `previous window A retry ${attempt}`);
+    committedOnce(h, "previous_window_a");
+    // Its COMMIT error: `failed`.
+    const errored = await openWrite(h, "previous_commit_error");
+    h.afterDatabaseStatement(once(({ sql }) => {
+      if (sql === "COMMIT") throw new Error("connection reset");
+      return undefined;
+    }));
+    await errored.commit();
+    assert.equal((await h.ownerRecord(errored.id)).status, "failed");
+    unknown(await errored.commit(), "previous COMMIT error");
+    committedOnce(h, "previous_commit_error");
+    // A rolled-back transaction, or a commit at another sequence, is still rejected.
+    const rolled = await openWrite(h, "previous_rolled_back");
+    assert.equal((await h.request("a", `/v1/transactions/${rolled.id}/rollback`, { sequence: 2 }, null)).status, 200);
+    assert.equal((await rolled.commit()).status, 409);
+    const skipped = await h.request("a", `/v1/transactions/${errored.id}/commit`, { sequence: 3 }, null);
+    assert.equal(skipped.status, 409);
+    h.interceptOwnerPut(null);
+  });
+
+  test(`${ownerAdapter}: a failed store put after COMMIT, without owner loss, never makes a commit retry a rejection`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    // The put keeps failing: the same live owner answers every retry with the unknown outcome.
+    const stuck = await openWrite(h, "put_failed");
+    let failing = true;
+    h.interceptOwnerPut(({ value }) => (failing && value?.status === "committed" ? { fail: true } : undefined));
+    const first = await stuck.commit();
+    for (const attempt of [1, 2]) unknown(await stuck.commit(), `retry ${attempt}`);
     assert.equal(first.status, 200, JSON.stringify(first.body));
     assert.equal(first.body.status, "committed");
-    assert.equal((await h.ownerRecord(id)).status, "committing");
+    assert.equal((await h.ownerRecord(stuck.id)).status, "committing");
     committedOnce(h, "put_failed");
+    // The store recovers: the live owner, which saw COMMIT succeed, stores its terminal
+    // record on the next retry and replays the reply.
+    failing = false;
+    const recovered = await stuck.commit();
+    assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
+    assert.deepEqual(recovered.body, first.body);
+    const record = await h.ownerRecord(stuck.id);
+    assert.equal(record.status, "committed");
+    assert.deepEqual(record.last.response, first.body);
+    assert.deepEqual((await stuck.commit()).body, first.body);
+    // One failed put, then a working store: the first retry already replays.
+    const transient = await openWrite(h, "put_transient");
+    h.interceptOwnerPut(once(({ value }) => value?.status === "committed" && { fail: true }));
+    const original = await transient.commit();
+    assert.deepEqual((await transient.commit()).body, original.body);
+    committedOnce(h, "put_transient");
+    // A successor has no such memory and stays unknown.
+    const lost = await openWrite(h, "put_then_lost");
+    h.interceptOwnerPut(once(({ value }) => value?.status === "committed" && { fail: true }));
+    assert.equal((await lost.commit()).status, 200);
+    h.loseOwner(lost.id);
+    unknown(await lost.commit(), "successor");
+    committedOnce(h, "put_then_lost");
+  });
+
+  test(`${ownerAdapter}: a store failure after a COMMIT transport error still answers the unknown outcome`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    const { id, commit } = await openWrite(h, "commit_lost_put_failed");
+    h.afterDatabaseStatement(once(({ sql }) => {
+      if (sql === "COMMIT") throw new Error("connection reset");
+      return undefined;
+    }));
+    h.interceptOwnerPut(once(({ value }) => value?.status === "failed" && { fail: true }));
+    unknown(await commit(), "first reply");
+    assert.equal((await h.ownerRecord(id)).status, "committing");
+    unknown(await commit(), "retry");
+    committedOnce(h, "commit_lost_put_failed");
+  });
+
+  test(`${ownerAdapter}: a deadline that passes once committing is stored sends no COMMIT and rejects`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const now = Date.now;
+    const late = (h, label) => {
+      h.interceptOwnerPut(once(({ value }) => {
+        if (value?.status !== "committing") return undefined;
+        // Time moves past the transaction deadline right after `committing` lands.
+        Date.now = () => now() + 60_000;
+        return {};
+      }));
+      return label;
+    };
+    t.after(() => { Date.now = now; });
+    const h = await setup(t, { hooks: false });
+    const expired = await openWrite(h, late(h, "deadline_passed"));
+    const rejected = await expired.commit();
+    Date.now = now;
+    assert.equal(rejected.status, 409, JSON.stringify(rejected.body));
+    assert.equal(rejected.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+    assert.equal(h.events.some(({ sql }) => sql === "COMMIT"), false, "COMMIT was never sent");
+    assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
+    const record = await h.ownerRecord(expired.id);
+    assert.equal(record.status, "expired");
+    assert.equal(record.commitSent, undefined);
+    assert.equal((await expired.commit()).status, 409);
+    assert.equal(h.rows("a").some((row) => row.id === "deadline_passed"), false);
+    // If `expired` cannot be stored, `committing` stays: 500 now, and the retry is unknown.
+    const unstored = await openWrite(h, "deadline_unstored");
+    let committingSeen = false;
+    h.interceptOwnerPut(({ value }) => {
+      if (value?.status === "committing" && !committingSeen) {
+        committingSeen = true;
+        Date.now = () => now() + 60_000;
+        return {};
+      }
+      return value?.status === "expired" ? { fail: true } : undefined;
+    });
+    const failed = await unstored.commit();
+    Date.now = now;
+    h.interceptOwnerPut(null);
+    assert.equal(failed.status, 500, JSON.stringify(failed.body));
+    assert.equal(failed.body.error.code, "POLICYSQL_INTERNAL");
+    assert.equal((await h.ownerRecord(unstored.id)).status, "committing");
+    unknown(await unstored.commit(), "retry after an unstored expiry");
+    assert.equal(h.rows("a").some((row) => row.id === "deadline_unstored"), false);
+  });
+
+  // A deployment between a commit and its retry changes the snapshot, and with it the
+  // database binding and the auth fingerprint the Worker sends.
+  const deploy = (h) => Object.defineProperty(h.runtime, "snapshot", { value: `${h.runtime.snapshot}-next`, configurable: true });
+
+  test(`${ownerAdapter}: a deployment between a commit and its retry keeps the commit answer`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    const { id, commit } = await openWrite(h, "deployed");
+    const first = await commit();
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    deploy(h);
+    const replay = await commit();
+    assert.equal(replay.status, 200, JSON.stringify(replay.body));
+    assert.deepEqual(replay.body, first.body);
+    committedOnce(h, "deployed");
+    // Every other command still requires the current snapshot.
+    const path = `/v1/transactions/${id}`;
+    for (const [route, body] of [["rollback", { sequence: 2 }], ["statements", { sequence: 3, ...read }], ["commit", { sequence: 3 }]]) {
+      const other = await h.request("a", `${path}/${route}`, body, null);
+      assert.equal(other.status, 409, route);
+      assert.equal(other.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", route);
+    }
+  });
+
+  test(`${ownerAdapter}: window A and then a deployment leave a commit retry unknown`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    const { id, commit } = await openWrite(h, "window_a_deployed");
+    h.afterDatabaseStatement(once(({ sql }) => sql === "COMMIT" && (h.loseOwner(id), true)));
+    await commit();
+    deploy(h);
+    unknown(await commit(), "retry after the deployment");
+    committedOnce(h, "window_a_deployed");
+  });
+
+  test(`${ownerAdapter}: a commit retry from another principal or database is rejected, before and after a deployment`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    const { id } = await openWrite(h, "foreign");
+    h.afterDatabaseStatement(once(({ sql }) => sql === "COMMIT" && (h.loseOwner(id), true)));
+    const path = `/v1/transactions/${id}/commit`;
+    const own = await h.request("a", path, { sequence: 2 }, null);
+    assert.equal(own.status, 200);
+    const strangers = [
+      ["another subject", "a", h.session("a", { subject: "other_user" })],
+      ["another principal", "a", h.session("a", { principal: "https://issuer.test:other_user" })],
+      ["another role", "a", h.session("a", { roles: ["member", "reader"], defaultRole: "reader" })],
+      ["another session", "a", h.session("a", { session: { tenant_id: "tenant_b" } })],
+      ["another database", "b", h.session("a")],
+    ];
+    for (const deployed of [false, true]) {
+      if (deployed) deploy(h);
+      for (const [label, tenant, credential] of strangers) {
+        const reply = await h.request(tenant, path, { sequence: 2 }, null, credential);
+        assert.equal(reply.status, 409, `${label}, deployed ${deployed}: ${JSON.stringify(reply.body)}`);
+        assert.equal(reply.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", label);
+        assert.notEqual(reply.body.error?.code, UNKNOWN, label);
+        assert.equal(Object.hasOwn(reply.body, "status"), false, label);
+      }
+      // The owner itself still answers the unknown outcome.
+      unknown(await h.request("a", path, { sequence: 2 }, null), `owner, deployed ${deployed}`);
+    }
   });
 
   test(`${ownerAdapter}: a transport error during COMMIT is an unknown outcome, never a failed status`, async (t) => {

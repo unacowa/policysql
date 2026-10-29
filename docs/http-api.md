@@ -248,7 +248,13 @@ the commit and every repetition of it return 503 `POLICYSQL_COMMIT_OUTCOME_UNKNO
 ([ADR 0007](adr/0007-transaction-retry-and-commit-check-protocol.md), issue #48). That code
 is never a rejection: clients treat it as an unknown outcome. A commit is rejected (409) only
 when its COMMIT was never sent, for example after owner loss or expiry before the commit, or
-when a commit check rejects it.
+when a commit check rejects it. This also holds across a deployment that changes the
+snapshot: for a commit command only, the owner accepts a caller that differs from the
+transaction in nothing but the snapshot (same principal, subject, role, session, and database
+scope, id, and generation), and if that commit's COMMIT was sent it answers with the recorded
+reply or the unknown outcome.
+Another principal or database is rejected as before, and every other command requires the
+current snapshot. The order of the checks is in ADR 0007.
 
 ## Catalog and capabilities
 

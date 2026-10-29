@@ -39,24 +39,69 @@ sent. The owner therefore:
 - persists the record in status `committing`, with `commitSent: { sequence, digest }` (the
   commit command's sequence and canonical payload digest), before it sends COMMIT. If that put
   fails, COMMIT is not sent and the transaction rolls back as before;
+- checks the deadline again after that put. If it has passed, COMMIT is not sent: the owner
+  rolls back, records `expired` without `commitSent`, and only then answers 409
+  `POLICYSQL_TRANSACTION_UNAVAILABLE`. If `expired` cannot be stored, it answers 500 and the
+  record stays `committing`, so a retry gets the unknown outcome;
 - after COMMIT succeeds, writes the terminal record (`committed`, the next sequence, and the
   reply as `last`) in one put, so no record says `committed` without that commit's reply. If
-  the put fails, the reply is still `committed`, because the commit applied;
-- after a COMMIT error (the transport cannot prove that nothing committed), records `failed`
-  and keeps `commitSent`, and answers the commit with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`;
+  the put fails, the reply is still `committed`, because the commit applied. The live owner
+  keeps that terminal record in memory and stores it again on the next retry of that commit,
+  then replays the reply; a successor, which has no such memory, or a second failed put
+  answers with the unknown outcome;
+- after a COMMIT error, records `failed`, keeps `commitSent`, and answers the commit with
+  `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, also when that record cannot be stored (the record then
+  stays `committing`). A transport error does not prove that nothing committed. An error
+  result for COMMIT from the database is treated the same way: neither the Hrana protocol nor
+  the remote server documents that such a result means COMMIT did not apply;
 - never ends a `committing` transaction from its timer or from a failing callback query: the
   commit's outcome alone decides.
 
-`commitSent` is never removed, so it records explicitly that the record's later status was
-reached after COMMIT was sent; nothing is inferred from the status alone. A commit command
-whose sequence and digest equal `commitSent` is answered after the transaction identity and
-pinned database binding are checked, but before any snapshot, route, or
-expiry check: with the recorded reply when the record is `committed` with that commit as
-`last`, and otherwise (`committing`, `failed`, `expired`, or `committed` with another `last`)
-with the new public code `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (HTTP 503, ADR 0024). A record of
-the previous release that says `committed` while its `last` is the preceding command's is
-answered the same way for a commit at its next sequence. A commit that waits on its validator
-has not sent COMMIT, so its expiry still answers 409 `POLICYSQL_COMMIT_CHECK_REJECTED`.
+`commitSent` is never removed. It records explicitly that every later status of the record was
+reached after COMMIT was sent; nothing is inferred from the status alone.
+
+A commit command is checked in this order:
+
+1. The stored record must have the command's transaction id.
+2. The caller must be the record's caller: its auth fingerprint and database binding must
+   equal the record's. Both include the snapshot. For a commit command only, a caller that
+   differs in nothing but the snapshot is also accepted: the database binding must be equal
+   except for `snapshot` (version, scope, database id, and generation are the same), and the
+   fingerprint the caller presents must equal the one the owner computes from the record's
+   stored `auth` (principal, subject, role, session) and the caller's binding. The owner first
+   checks that the stored `auth` and binding still produce the stored fingerprint. Another
+   principal, subject, role, session, or database is rejected with 409
+   `POLICYSQL_TRANSACTION_UNAVAILABLE`, as before.
+3. If the command's sequence and digest equal `commitSent` (or the record is one of the
+   previous release's, described below), the commit is answered now, before any snapshot,
+   route, or expiry check. It gets the recorded reply when the record is `committed` with this
+   commit as `last`, or when the live owner has just stored the terminal record it kept in
+   memory. Otherwise it gets the new public code `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (HTTP 503,
+   ADR 0024): the record is `committing`, `failed`, or `expired` after COMMIT was sent, or
+   `committed` with another `last`.
+4. Every other command, and a commit that step 3 does not answer, must be on the record's
+   snapshot (otherwise 409 `POLICYSQL_TRANSACTION_UNAVAILABLE`), and then passes the route and
+   expiry checks and the sequence rules as before.
+
+A deployment between a commit and its retry therefore changes nothing for that commit: it
+gets its recorded reply or the unknown outcome. A commit that waits on its validator has not
+sent COMMIT, so its expiry still answers 409 `POLICYSQL_COMMIT_CHECK_REJECTED`.
+
+Records written by the previous release carry neither `commitSent` nor `commitRecording: 1`,
+which this release writes into every record it starts. The previous release wrote nothing
+before COMMIT and could leave `committed` with the preceding command's `last` (between its two
+puts), `active` (owner lost after COMMIT), `failed` (a COMMIT error, or its successor's fail
+closed), or `expired` (its timer during COMMIT) after a COMMIT that may have applied. Nothing in
+such a record proves that COMMIT was not sent (ADR 0024), so a commit at the record's next
+sequence is answered with the unknown outcome, never a rejection, when no open transaction of
+this owner belongs to it. The cost is that a commit that really was rejected or never sent by
+the previous release also gets the unknown outcome; `validating` and `rolled_back` records,
+and a commit at any other sequence, are still rejected because they prove that no COMMIT was
+sent for that command. What remains is a retry that the previous release's own owner serves
+before the deployment replaces it: that code answers as it always did, possibly with 409, and
+no change in this release can reach it. This needs a retry that overlaps the deployment
+itself, so it occurs only during the rollout: an interactive transaction lives at most a few
+seconds, and a deployment restarts every owner.
 
 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` is never a rejection. The client library does not list it
 among definite rejections, so it raises `PolicySqlOutcomeUnknownError` and keeps the commit
