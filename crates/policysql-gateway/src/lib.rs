@@ -140,12 +140,13 @@ impl Gateway {
         let frontend = SqliteFrontend::default();
         let mut statements = Vec::with_capacity(requests.len());
         for (index, request) in requests.iter().enumerate() {
-            let statement = frontend
-                .bind(&request.sql, &self.catalog)
+            let document = frontend
+                .bind_document(&request.sql, &self.catalog)
                 .map_err(|error| GatewayError::Rejected {
                     kind: classify_bind_error(&error),
                     index,
                 })?;
+            let statement = document.statement;
             let mut output = match &statement {
                 BoundStatement::Select(_)
                 | BoundStatement::ConstantSelect(_)
@@ -194,6 +195,7 @@ impl Gateway {
                     output.plan.expected_affected_rows = Some(requested);
                 }
             }
+            output.plan.string_literals.client = document.string_literals;
             output.plan.expected_result_rows = request
                 .expected_row_count
                 .or(output.plan.expected_result_rows);

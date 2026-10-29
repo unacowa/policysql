@@ -251,6 +251,7 @@ dependencies = [
  "policysql-catalog",
  "policysql-core",
  "policysql-execution",
+ "policysql-gateway",
  "policysql-parser",
  "policysql-policy",
  "policysql-sqlite",

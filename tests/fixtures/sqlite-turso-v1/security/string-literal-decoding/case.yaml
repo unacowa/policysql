@@ -1,0 +1,6 @@
+id: sqlite.security.string-literal-decoding
+profile: sqlite-turso-v1
+description: クライアントSQLの文字列リテラルを引用符と''エスケープを外した値でbindし、<>で除外した行とpolicyのneq checkを復号済みの値で評価する (#39)
+covers: [ast.expr.literal-supported, statement.update.direct, policy.mutation.row-filter, policy.mutation.operation-check, emission.reparse, threat.string-literal-token, threat.row-policy-replacement]
+tests: [positive, negative, bypass, differential]
+expected: allow

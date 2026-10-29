@@ -1,0 +1,1 @@
+UPDATE "projects" SET "name" = :__policysql_literal_0 WHERE (("id" != :__policysql_literal_2) AND ("tenant_id" = :__policysql_session_tenant_id)) RETURNING "id" AS "id", "name" AS "name", "status" AS "status", CASE WHEN (("tenant_id" = :__policysql_session_tenant_id) AND ("status" != :__policysql_literal_1)) THEN TRUE ELSE FALSE END AS "__policysql_check"

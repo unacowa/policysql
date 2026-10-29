@@ -13,7 +13,7 @@ regression, bypass, protected-egress, and differential evidence before advertisi
 
 | Milestone | Status | Evidence |
 | --- | --- | --- |
-| 0. Test contract first | complete | SQL surface registry, strict fixture manifests, digest-bound execution evidence, coverage checker, recording executor, negative controls, JSON/Markdown reports, and twenty-one fixture pairs verified |
+| 0. Test contract first | complete | SQL surface registry, strict fixture manifests, digest-bound execution evidence, coverage checker, recording executor, negative controls, JSON/Markdown reports, and twenty-two fixture pairs verified |
 | 1. Backend-neutral core and sealed execution | complete | Stable identities, logical Catalog, string-only trusted session, parameter namespaces, bound IR, protected plan, opaque verified plan, and profile-typed Turso boundary verified |
 | 2. SQLite parser and single-table binder | complete | Turso parser 0.7.2, exact statement count, initial SELECT subset, source range, parameter discovery, stable binding, logical typing, limits, and fail-closed unsupported nodes verified |
 | 3. Policy loading and SELECT compiler | complete | Catalog-aware immutable activation, closed typed predicates, role/resource selection, column-context authorization, row-filter/limit composition, and independent fixture oracle verified |
@@ -42,7 +42,7 @@ regression, bypass, protected-egress, and differential evidence before advertisi
 - `tests/schemas/sql-surface.schema.json` and `tests/schemas/fixture-case.schema.json` publish the manifest contracts.
 - `policysql-testkit` rejects duplicate IDs, unknown coverage IDs, profile mismatches, incomplete fixture pairs, malformed deny expectations, and uncovered advertised leaves.
 - `coverage-check` writes reviewable Markdown and CI-oriented JSON artifacts beneath `target/policysql-test-coverage/sqlite-turso-v1`.
-- Twenty-one self-contained fixture pairs cover the initial security cases, expanded reads, JSON collections, typed projections, subquery/CTE forms, and all three mutation operations.
+- Twenty-two self-contained fixture pairs cover the initial security cases, the string-literal decoding regression, expanded reads, JSON collections, typed projections, subquery/CTE forms, and all three mutation operations.
 - Missing advertised coverage, incomplete allow pairs, and incomplete deny proofs each have a failing negative-control test.
 - The specification validator checks both new JSON Schemas, both surface documents, and all five compiler fixture manifests.
 - Strict workspace Clippy and all workspace tests pass after the initial implementation.

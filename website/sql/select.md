@@ -108,6 +108,8 @@ WHERE status = :status
   AND (title LIKE :prefix OR published_at >= :since);
 ```
 
+文字列literalはSQLiteと同じく単一引用符で書きます。引用符の中の`'`は`''`と重ねます。PolicySQLは両端の引用符を外し、`''`を`'`に戻した値をserver-owned parameterとしてbindします。`WHERE id = 'it''s'`は`it's`と比較され、`'''x'''`は`'x'`という値になります。二重引用符の`"seed"`は文字列ではなく識別子として解決されるため、同名のcolumnがなければ拒否されます。blob literal（`X'00'`）と`NULL` literalは使えません。
+
 clientのWHERE条件とは別に、policyのrow filterが常に適用されます。
 
 ## SubqueryとCTE

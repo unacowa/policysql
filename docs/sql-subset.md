@@ -18,6 +18,8 @@ PolicySQL accepts a strict, capability-gated SQLite subset. A deployment adverti
 - unique, non-empty output names under SQLite ASCII case-insensitive comparison;
 - conditional output columns only as direct base-column projections with optional aliases.
 
+String literals use SQLite single quotes with `''` as the only escape. The binder strictly decodes each token (outer quotes removed, `''` turned into `'`) and the emitter binds the decoded value as a server-owned `__policysql_literal_N` parameter, so `'it''s'` compares with `it's` and `'''x'''` with `'x'`. Anything else is rejected: a double-quoted `"x"` is an identifier, never a string, and blob (`X'..'`) and `NULL` literals are outside the subset. Before sealing, the emitted-plan verifier re-encodes every client literal value and requires it to reproduce the original token; a server literal that still begins and ends with `'` is accepted only when it is such a verified decoded value or a policy-configured literal ([issue #39](https://github.com/unacowa/policysql/issues/39)).
+
 CTE names may not shadow protected resource names. Nested aliases may not shadow an outer alias used for correlation. Ambiguous references and correlations whose base-column provenance is not statically provable are rejected.
 
 ## Capability and policy gates

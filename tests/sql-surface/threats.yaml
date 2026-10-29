@@ -31,3 +31,8 @@ leaves:
     kind: threat
     status: advertised
     required_tests: [negative, bypass, differential]
+  - id: threat.string-literal-token
+    profile: common
+    kind: threat
+    status: advertised
+    required_tests: [negative, bypass, differential]
