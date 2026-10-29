@@ -282,6 +282,46 @@ test("concurrent dispose rolls back once; an explicit rollback failure is not hi
   assert.equal(other.status, "unknown");
 });
 
+test("503 COMMIT_OUTCOME_UNKNOWN on a commit is an unknown outcome; retryPending resends the same commit (#48)", async () => {
+  // Also as an earlier Worker that maps the code by its own table would serve it: 500.
+  for (const status of [503, 500]) {
+    const unknown = errorBody("POLICYSQL_COMMIT_OUTCOME_UNKNOWN", "The commit outcome is unknown.");
+    let attempts = 0;
+    const requests = [];
+    const h = setup({}, send => async request => {
+      if (request.kind !== "commit") return send(request);
+      requests.push(request);
+      // The first two attempts get the unknown outcome; the third finds the recorded reply.
+      if (++attempts <= 2) { if (attempts === 1) await send(request); return { status, body: unknown }; }
+      return send(request);
+    });
+    const tx = await h.client.beginTransaction();
+    let failure;
+    await assert.rejects(tx.commit(), error => {
+      failure = error;
+      return error instanceof PolicySqlOutcomeUnknownError && error.phase === "commit" && error.sequence === 1 &&
+        error.cause.code === "POLICYSQL_COMMIT_OUTCOME_UNKNOWN" && error.cause.status === status;
+    });
+    assert.equal(tx.status, "unknown", String(status));
+    // A contradictory rollback is never sent while the commit is unresolved.
+    await assert.rejects(tx.rollback(), error => error === failure);
+    await assert.rejects(tx.retryPending(), error => error === failure &&
+      error.lastError instanceof PolicySqlOutcomeUnknownError && error.lastError.cause.code === "POLICYSQL_COMMIT_OUTCOME_UNKNOWN");
+    assert.equal(tx.status, "unknown");
+    assert.equal(await tx.retryPending(), undefined);
+    assert.equal(tx.status, "committed");
+    assert.equal(attempts, 3);
+    assert.ok(requests.every((request) => request === requests[0]), "the same commit bytes every time");
+    assert.equal(h.calls.some(c => c.path.endsWith("rollback")), false);
+    await tx.closed;
+  }
+});
+
+test("COMMIT_OUTCOME_UNKNOWN never establishes the rejection of an atomic execute either", async () => {
+  const h = setup({}, () => async () => ({ status: 503, body: errorBody("POLICYSQL_COMMIT_OUTCOME_UNKNOWN") }));
+  await assert.rejects(h.client.execute("INSERT INTO posts (id) VALUES ('x')"), error => error instanceof PolicySqlOutcomeUnknownError);
+});
+
 test("an error for a different operation is not accepted as proof of a commit result", async () => {
   const h = setup({}, send => async request => request.kind === "commit"
     ? { status: 400, body: errorBody("POLICYSQL_INVALID_SQL") }

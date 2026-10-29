@@ -158,6 +158,181 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal((await h.ownerRecord(other)).status, "failed");
   });
 
+  // #48 (ADR 0007): once COMMIT may have been sent, a repeated commit is answered with the
+  // recorded reply or with POLICYSQL_COMMIT_OUTCOME_UNKNOWN, never with a 409 rejection.
+  const UNKNOWN = "POLICYSQL_COMMIT_OUTCOME_UNKNOWN";
+  const committedOnce = (h, id) => {
+    assert.equal(h.rows("a").filter((row) => row.id === id).length, 1, `${id}: the database committed`);
+  };
+  const openWrite = async (h, label) => {
+    const id = await start(h, "write");
+    const path = `/v1/transactions/${id}`;
+    assert.equal((await h.request("a", `${path}/statements`, { sequence: 1, ...insert(label) }, null)).status, 200);
+    return { id, commit: () => h.request("a", `${path}/commit`, { sequence: 2 }, null) };
+  };
+  const once = (fault) => {
+    let done = false;
+    return (input) => {
+      if (done) return undefined;
+      const result = fault(input);
+      if (result) done = true;
+      return result;
+    };
+  };
+  const unknown = (reply, label) => {
+    assert.equal(reply.status, 503, `${label}: ${JSON.stringify(reply.body)}`);
+    assert.equal(reply.body.error.code, UNKNOWN, label);
+    assert.equal(reply.body.error.message, "The commit outcome is unknown.", label);
+  };
+
+  test(`${ownerAdapter}: owner loss after COMMIT, before its record (window A), leaves a commit retry unknown, never rejected`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    for (const hooks of [false, true]) {
+      const h = await setup(t, { hooks });
+      const label = hooks ? "window_a_checked" : "window_a";
+      const { id, commit } = await openWrite(h, label);
+      h.afterDatabaseStatement(once(({ sql }) => sql === "COMMIT" && (h.loseOwner(id), true)));
+      const first = await commit();
+      const record = await h.ownerRecord(id);
+      for (const attempt of [1, 2]) unknown(await commit(), `${label} retry ${attempt}`);
+      // The lost owner cannot record anything, but its COMMIT applied: the reply says so.
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal(first.body.status, "committed");
+      assert.equal(record.status, "committing", "the successor finds the record written before COMMIT");
+      assert.equal(record.commitSent.sequence, 2);
+      assert.equal((await h.ownerRecord(id)).status, "committing", "a retry never rewrites the record");
+      committedOnce(h, label);
+      // Other commands are still unavailable: nothing executes on a lost connection.
+      assert.equal((await h.request("a", `/v1/transactions/${id}/rollback`, { sequence: 2 }, null)).status, 409);
+      assert.equal(await h.fireTimer(id), true);
+      assert.equal((await h.ownerRecord(id)).status, "committing", "the timer never expires a commit that was sent");
+      unknown(await commit(), `${label} after the timer`);
+    }
+  });
+
+  test(`${ownerAdapter}: owner loss between the committed status and its reply (window B) replays the commit`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    const { id, commit } = await openWrite(h, "window_b");
+    // The first put that says `committed` lands, then the owner is lost. The previous
+    // release wrote `last` in a second put after this one.
+    h.interceptOwnerPut(once(({ value }) => value?.status === "committed" && { lose: true }));
+    const first = await commit();
+    const retry = await commit();
+    assert.notEqual(retry.status, 409, JSON.stringify(retry.body));
+    // The committed record and its reply are one put, so the successor replays the reply.
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(retry.status, 200, JSON.stringify(retry.body));
+    assert.deepEqual(retry.body, first.body);
+    const record = await h.ownerRecord(id);
+    assert.equal(record.status, "committed");
+    assert.equal(record.nextSequence, 3);
+    assert.deepEqual(record.last.response, first.body);
+    committedOnce(h, "window_b");
+  });
+
+  test(`${ownerAdapter}: a committed record without its reply, as the previous release wrote it, leaves a commit retry unknown`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    for (const legacy of [true, false]) {
+      const h = await setup(t, { hooks: false });
+      const label = legacy ? "window_b_legacy" : "window_b_stale";
+      const { id, commit } = await openWrite(h, label);
+      let before;
+      // The record as the previous release's first put wrote it: `committed`, but `last` and
+      // `nextSequence` still the statement's; then the owner is lost.
+      h.interceptOwnerPut(once(({ value }) => {
+        if (value?.status === "committing") before = value;
+        if (value?.status !== "committed") return undefined;
+        const stale = { ...value, last: before.last, nextSequence: before.nextSequence };
+        if (legacy) delete stale.commitSent;
+        return { value: stale, lose: true };
+      }));
+      await commit();
+      unknown(await commit(), label);
+      committedOnce(h, label);
+    }
+  });
+
+  test(`${ownerAdapter}: a failed store put after COMMIT, without owner loss, leaves a commit retry unknown`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    const { id, commit } = await openWrite(h, "put_failed");
+    h.interceptOwnerPut(once(({ value }) => value?.status === "committed" && { fail: true }));
+    const first = await commit();
+    // The same live owner answers the retry.
+    for (const attempt of [1, 2]) unknown(await commit(), `retry ${attempt}`);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.status, "committed");
+    assert.equal((await h.ownerRecord(id)).status, "committing");
+    committedOnce(h, "put_failed");
+  });
+
+  test(`${ownerAdapter}: a transport error during COMMIT is an unknown outcome, never a failed status`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    const { id, commit } = await openWrite(h, "commit_lost");
+    // The remote database applies COMMIT, and its reply is lost.
+    h.afterDatabaseStatement(once(({ sql }) => {
+      if (sql === "COMMIT") throw new Error("connection reset");
+      return undefined;
+    }));
+    const first = await commit();
+    unknown(first, "first reply");
+    const record = await h.ownerRecord(id);
+    assert.equal(record.status, "failed");
+    assert.equal(record.commitSent.sequence, 2, "the failure is recorded as after COMMIT was sent");
+    unknown(await commit(), "retry");
+    committedOnce(h, "commit_lost");
+  });
+
+  test(`${ownerAdapter}: the timer firing while COMMIT is in flight does not end the transaction`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    const { id, commit } = await openWrite(h, "timer_in_commit");
+    h.afterDatabaseStatement(once(({ sql }) => sql === "COMMIT" && h.fireTimer(id)));
+    const first = await commit();
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.status, "committed");
+    assert.equal((await h.ownerRecord(id)).status, "committed");
+    assert.deepEqual((await commit()).body, first.body);
+    assert.equal(h.events.some(({ sql }) => sql === "ROLLBACK"), false);
+    committedOnce(h, "timer_in_commit");
+  });
+
+  test(`${ownerAdapter}: a failed store put before COMMIT sends no COMMIT and stays a definite rejection`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    const { id, commit } = await openWrite(h, "not_sent");
+    h.interceptOwnerPut(once(({ value }) => value?.status === "committing" && { fail: true }));
+    const first = await commit();
+    assert.equal(first.status, 500);
+    assert.equal(first.body.error.code, "POLICYSQL_INTERNAL");
+    assert.equal(h.events.some(({ sql }) => sql === "COMMIT"), false);
+    assert.equal((await h.ownerRecord(id)).status, "failed");
+    const retry = await commit();
+    assert.equal(retry.status, 409);
+    assert.equal(retry.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+    assert.equal(h.rows("a").some((row) => row.id === "not_sent"), false);
+  });
+
+  test(`${ownerAdapter}: a keyed atomic execute resolves through policysql_idempotency after owner loss at COMMIT`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t);
+    const body = { statements: [insert("atomic_lost")] };
+    const key = "atomic-commit-window-01";
+    h.afterDatabaseStatement(once(({ sql }) => sql === "COMMIT" && (h.loseOwner(h.ownerNames().at(-1)), true)));
+    const first = await h.request("a", "/v1/transactions:execute", body, key);
+    assert.notEqual(first.status, 409, JSON.stringify(first.body));
+    const retry = await h.request("a", "/v1/transactions:execute", body, key);
+    assert.equal(retry.status, 200, JSON.stringify(retry.body));
+    committedOnce(h, "atomic_lost");
+    // A failed put of the owner record after COMMIT no longer turns the committed reply
+    // into a 500.
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.deepEqual(retry.body.results, first.body.results);
+    assert.equal(retry.body.meta.requestId, first.body.meta.requestId, "the stored reply is replayed");
+  });
+
   test(`${ownerAdapter}: commit-check callbacks reach the owner of the open transaction`, async (t) => {
     const h = await setup(t);
     const id = await start(h, "write");
@@ -394,6 +569,23 @@ test("durable-objects: an earlier Worker forwarding this object's replies shows 
   assert.equal(unknown.status, 409);
   assert.equal(unknown.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
   assert.equal(typeof unknown.body.error.requestId, "string");
+
+  // The new unknown commit outcome (#48) reaches the client through an earlier Worker with
+  // its status, 503, so the client treats it as unknown, never as a rejection. (A Worker
+  // that maps codes by a table without it serves 500, which is unknown too.)
+  t.mock.method(console, "log", () => {});
+  const uncertain = (await h.request("a", "/v1/transactions", { mode: "write" }, null)).body.transactionId;
+  assert.equal((await h.request("a", `/v1/transactions/${uncertain}/statements`, { sequence: 1, ...insert("rollout_unknown") }, null)).status, 200);
+  h.afterDatabaseStatement(({ sql }) => { if (sql === "COMMIT") throw new Error("connection reset"); });
+  for (const label of ["unknown commit outcome", "its retry"]) {
+    const outcome = await forwarded(label, "/commit",
+      () => h.request("a", `/v1/transactions/${uncertain}/commit`, { sequence: 2 }, null));
+    assert.equal(outcome.status, 503, label);
+    assert.equal(outcome.body.error.code, "POLICYSQL_COMMIT_OUTCOME_UNKNOWN", label);
+  }
+  h.afterDatabaseStatement(null);
+  const { REJECTIONS } = await import("../../../packages/client/protocol.js");
+  assert.equal([...REJECTIONS.values()].flat().includes("COMMIT_OUTCOME_UNKNOWN"), false);
 
   // Atomic executes that trigger a commit check run in the owner.
   assert.equal((await forwarded("atomic", "/atomic",

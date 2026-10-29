@@ -19,11 +19,25 @@ const wire = (value) => (value === undefined ? undefined : JSON.parse(JSON.strin
 export class OwnerLostError extends Error {}
 
 /**
+ * Fault injection for one store put, shared by both test adapters (#48). `hook({ name, key,
+ * value })` returns nothing (the put lands), `{ fail: true }` (the put throws and nothing
+ * lands), or `{ value, lose }`: `value` (default: the put's own) lands, and with `lose` the
+ * owner is lost right after it landed, so its later store calls fail.
+ */
+export const faultedPut = (hook, { name, key, value, write, lose }) => {
+  const fault = hook?.({ name, key, value: structuredClone(value) }) ?? {};
+  if (fault.fail) throw new Error("store put failed");
+  write(structuredClone(Object.hasOwn(fault, "value") ? fault.value : value));
+  if (fault.lose) lose();
+};
+
+/**
  * `dependencies(name)` returns the ports for a new owner of `name` (the same shape
  * `TransactionOwnerCore` takes). `background` receives every task an owner defers.
  */
 export const createMemoryTransactionOwners = (dependencies, { background = { run() {} } } = {}) => {
   const slots = new Map();
+  let putHook = null;
 
   const incarnate = (name, slot) => {
     const life = { live: true };
@@ -31,7 +45,10 @@ export const createMemoryTransactionOwners = (dependencies, { background = { run
     const facilities = {
       store: {
         async get(key) { alive(); return structuredClone(slot.data.get(key)); },
-        async put(key, value) { alive(); slot.data.set(key, structuredClone(value)); },
+        async put(key, value) {
+          alive();
+          faultedPut(putHook, { name, key, value, write: (next) => slot.data.set(key, next), lose: () => lose(name) });
+        },
       },
       timer: { async schedule(atMs) { alive(); slot.timerAt = atMs; } },
       background: { run(task) { background.run(task); } },
@@ -48,6 +65,13 @@ export const createMemoryTransactionOwners = (dependencies, { background = { run
       slot.owner = incarnate(name, slot);
     }
     return slot.owner.core;
+  };
+
+  const lose = (name) => {
+    const slot = slots.get(name);
+    if (!slot) throw new Error(`no owner ${name}`);
+    slot.owner.life.live = false;
+    slot.owner = incarnate(name, slot);
   };
 
   const port = {
@@ -71,12 +95,9 @@ export const createMemoryTransactionOwners = (dependencies, { background = { run
     /** No message body to deliver late: calls reach the owner synchronously, in call order. */
     delayNextBody() {},
     /** Owner loss: the successor keeps the store and timer, not the open transaction. */
-    lose(name) {
-      const slot = slots.get(name);
-      if (!slot) throw new Error(`no owner ${name}`);
-      slot.owner.life.live = false;
-      slot.owner = incarnate(name, slot);
-    },
+    lose,
+    /** Every later store put passes through `hook` (see `faultedPut`); null removes it. */
+    interceptPut(hook) { putHook = hook; },
     /** Delivers the pending timer, if any, to the live owner. */
     async fireTimer(name) {
       const slot = slots.get(name);

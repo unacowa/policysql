@@ -29,6 +29,9 @@ const invalid = () => new EngineError("POLICYSQL_INVALID_REQUEST", "The request 
 const conflict = () => new EngineError("POLICYSQL_TRANSACTION_CONFLICT", "The transaction command conflicts with its current state.");
 const unavailable = () => new EngineError("POLICYSQL_TRANSACTION_UNAVAILABLE", "The transaction is no longer active.");
 const internal = () => new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
+// COMMIT may have been sent and the owner cannot tell whether it applied (#48, ADR 0007).
+// Never a rejection: the client must treat it as an unknown outcome.
+const outcomeUnknown = () => new EngineError("POLICYSQL_COMMIT_OUTCOME_UNKNOWN", "The commit outcome is unknown.");
 
 const exactKeys = (value, keys, required = keys) => {
   if (!value || Array.isArray(value) || typeof value !== "object") return false;
@@ -84,6 +87,8 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   queue: Promise<any>;
   validationQueue: Promise<any>;
   database: DatabaseProvider;
+  /** True while this owner's COMMIT is in flight: nothing else may end the transaction. */
+  committing: boolean;
 
   /**
    * `facilities` come from the owner adapter; `dependencies` are the same ports the wrapper
@@ -100,6 +105,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     this.database = dependencies.database;
     this.transaction = null;
     this.validation = null;
+    this.committing = false;
     this.queue = Promise.resolve();
     this.validationQueue = Promise.resolve();
   }
@@ -192,16 +198,17 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     return value;
   }
 
+  /** Rolls back an open transaction and records `status`. COMMIT is sent only by `commit`. */
   async close(status) {
+    // A failing callback query cannot roll back or overwrite a commit in flight; the commit's
+    // outcome alone decides the record.
+    if (this.committing) return "committing";
     if (this.transaction?.open) {
       try {
-        if (status === "committed") await this.transaction.commit();
-        else await this.transaction.rollback();
+        await this.transaction.rollback();
       } catch {
         status = "failed";
       }
-    } else if (status === "committed") {
-      status = "failed";
     }
     this.transaction = null;
     const current = await this.stored();
@@ -209,13 +216,44 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     return status;
   }
 
-  async active(body) {
+  /** The stored record, if it belongs to the caller's transaction and pinned database. */
+  async owned(body) {
     const current = await this.stored();
     if (!current || current.transactionId !== body.transactionId || current.authFingerprint !== body.authFingerprint) {
       throw unavailable();
     }
-    if (!sameDatabaseBinding(current.databaseBinding, body.databaseBinding) ||
-      (body.snapshot !== undefined && current.snapshot !== body.snapshot)) throw unavailable();
+    if (!sameDatabaseBinding(current.databaseBinding, body.databaseBinding)) throw unavailable();
+    return current;
+  }
+
+  /**
+   * A commit command whose COMMIT may already have been sent (#48, ADR 0007). `commitSent`
+   * is written before COMMIT and never removed, so it records explicitly that every later
+   * status of the record (`committing`, or `failed` after a COMMIT error) was reached after
+   * COMMIT was sent. Such a commit is answered only with its fully recorded reply, or with
+   * POLICYSQL_COMMIT_OUTCOME_UNKNOWN: never with a rejection, whatever the snapshot or route
+   * now says. Any other command returns null and is checked as usual.
+   */
+  async commitRetry(current, command) {
+    if (!Number.isSafeInteger(command?.sequence)) return null;
+    const digest = await sha256(stableJson({ kind: "commit", command }));
+    const sent = current.commitSent
+      ? current.commitSent.sequence === command.sequence && current.commitSent.digest === digest
+      // A record of the previous release written between its two puts: `committed` with the
+      // earlier command's `last`.
+      : current.status === "committed" && command.sequence === current.nextSequence;
+    if (!sent) return null;
+    if (current.status === "committed" && current.nextSequence - 1 === command.sequence && current.last?.digest === digest) {
+      return current.last.response;
+    }
+    console.log(JSON.stringify({
+      event: "transaction_commit_outcome_unknown", transactionId: current.transactionId, status: current.status,
+    }));
+    throw outcomeUnknown();
+  }
+
+  async active(body, current) {
+    if (body.snapshot !== undefined && current.snapshot !== body.snapshot) throw unavailable();
     await this.checkCurrent(current);
     if (current.status !== "active") return current;
     if (!this.transaction || Date.now() >= current.expiresAtMs) {
@@ -243,6 +281,8 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
         previous.snapshot !== bindingContext.snapshot || !sameDatabaseBinding(previous.databaseBinding, bindingContext.databaseBinding)) {
         throw conflict();
       }
+      // COMMIT may be in flight or its outcome unrecorded; only the commit command answers.
+      if (previous.status === "committing") throw unavailable();
       if (previous.status === "active" && !this.transaction) {
         await this.persist({ ...previous, status: "failed", expiresAt: undefined });
         throw unavailable();
@@ -289,7 +329,12 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   }
 
   async prepareCommand(body, kind) {
-    const current = await this.active(body);
+    const owned = await this.owned(body);
+    if (kind === "commit") {
+      const replay = await this.commitRetry(owned, body.command);
+      if (replay) return { replay };
+    }
+    const current = await this.active(body, owned);
     if (!Number.isSafeInteger(body.command?.sequence) || body.command.sequence < 1) throw invalid();
     const digest = await sha256(stableJson({ kind, command: body.command }));
     if (body.command.sequence === current.nextSequence - 1 && current.last?.digest === digest) {
@@ -405,9 +450,8 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
         throw error;
       }
     }
-    // A route can be revoked while an external validator is running.
-    if (kind === "commit") await this.checkCurrent(current);
-    const status = await this.close(kind === "commit" ? "committed" : "rolled_back");
+    if (kind === "commit") return await this.commit(current, digest, requestId, commitChecks);
+    const status = await this.close("rolled_back");
     const response = {
       transactionId: current.transactionId,
       status,
@@ -424,6 +468,68 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       event: "transaction_terminal",
       transactionId: current.transactionId,
       status,
+      requestId,
+      usage: current.usage,
+    }));
+    return response;
+  }
+
+  /**
+   * Sends COMMIT for `current`, which passed its commit checks. The record says `committing`
+   * (with the command's sequence and digest as `commitSent`) before COMMIT is sent, and the
+   * terminal record (`committed`, the next sequence, and the reply as `last`) is one put, so
+   * neither a successor nor a retry after a failed put reads a state that rejects a commit
+   * that applied (#48).
+   */
+  async commit(current, digest, requestId, commitChecks) {
+    // A route can be revoked while an external validator is running.
+    await this.checkCurrent(current);
+    // Nothing was sent: an expiry or failure already ended the transaction.
+    if (!this.transaction?.open) throw unavailable();
+    let committing;
+    try {
+      committing = await this.persist({ ...current, status: "committing", commitSent: { sequence: current.nextSequence, digest } });
+    } catch (error) {
+      // COMMIT was not sent. If the put did land, the failed record keeps `commitSent`, and a
+      // retry gets the unknown outcome rather than a rejection.
+      await this.close("failed");
+      throw error;
+    }
+    this.committing = true;
+    try {
+      await this.transaction.commit();
+    } catch {
+      // A transport error during COMMIT does not prove that nothing committed.
+      this.committing = false;
+      this.transaction = null;
+      console.log(JSON.stringify({ event: "transaction_commit_outcome_unknown", transactionId: current.transactionId, requestId }));
+      await this.persist({ ...committing, status: "failed", expiresAtMs: undefined });
+      throw outcomeUnknown();
+    }
+    this.committing = false;
+    this.transaction = null;
+    const response = {
+      transactionId: current.transactionId,
+      status: "committed",
+      meta: { requestId, commitChecks },
+    };
+    try {
+      await this.persist({
+        ...committing,
+        status: "committed",
+        nextSequence: current.nextSequence + 1,
+        expiresAtMs: undefined,
+        last: { digest, response },
+      });
+    } catch {
+      // The commit applied, so the reply says so. The record stays `committing`, and a retry
+      // gets the unknown outcome, never a rejection.
+      console.log(JSON.stringify({ event: "transaction_terminal_unrecorded", transactionId: current.transactionId, requestId }));
+    }
+    console.log(JSON.stringify({
+      event: "transaction_terminal",
+      transactionId: current.transactionId,
+      status: "committed",
       requestId,
       usage: current.usage,
     }));
@@ -573,6 +679,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       expiresAtMs,
     };
     const started = performance.now();
+    let terminal = null;
     try {
       await this.persist(current);
       await this.facilities.timer.schedule(current.expiresAtMs);
@@ -608,7 +715,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
         rowsWritten: executed.usage.rowsWritten,
         queryDurationMs: Math.round(executed.usage.queryDurationMs * 1000) / 1000,
       };
-      const terminal = {
+      const reply = {
         version: 1,
         transactionId: current.transactionId,
         status: "committed",
@@ -624,16 +731,23 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
           args: {
             key_hash: body.idempotency.keyHash,
             fingerprint: body.idempotency.fingerprint,
-            response_json: JSON.stringify(terminal),
+            response_json: JSON.stringify(reply),
           },
         }]);
       }
       await this.transaction.commit();
+      terminal = reply;
       this.transaction = null;
       this.validation = null;
       await this.persist({ ...current, status: "committed" });
       return terminal;
     } catch (error) {
+      // The commit applied: a failed put of the owner record does not change the outcome. A
+      // keyed retry resolves through `policysql_idempotency`, never through this record.
+      if (terminal) {
+        console.log(JSON.stringify({ event: "transaction_terminal_unrecorded", transactionId: current.transactionId, requestId }));
+        return terminal;
+      }
       if (!released) runtime.release_execution(BigInt(compiled.executionHandle));
       if (this.transaction?.open) {
         try { await this.transaction.rollback(); } catch { /* terminal */ }

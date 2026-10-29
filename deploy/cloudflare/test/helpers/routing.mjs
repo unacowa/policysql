@@ -73,6 +73,9 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     databases.set(tenant, { path, database });
   }
   const events = [];
+  // Called after the remote database ran each statement; may lose the owner, or throw to
+  // fail the transport after the statement took effect.
+  let afterStatement = null;
   const connections = new Map();
   const acceptedTokens = new Map(["a", "b"].map((tenant) => [tenant, new Set([`token_${tenant}`])]));
   const remote = async (url, options) => {
@@ -117,7 +120,9 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
         } } });
       } catch {
         results.push({ type: "error", error: { message: "SQL rejected" } });
+        continue;
       }
+      if (afterStatement) await afterStatement({ tenant, sql });
     }
     return Response.json({ baton, results });
   };
@@ -240,6 +245,10 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     ownerCore: (name) => owners.core(name),
     ownerTimerAt: (name) => owners.timerAt(name),
     loseOwner: (name) => owners.lose(name),
+    /** Fault injection on owner store puts, for both adapters (see helpers/memory-owner.mjs). */
+    interceptOwnerPut: (hook) => owners.interceptPut(hook),
+    /** `hook({ tenant, sql })` runs after the remote database executed each statement. */
+    afterDatabaseStatement(hook) { afterStatement = hook; },
     fireTimer: (name) => owners.fireTimer(name),
     delayNextOwnerBody: (ms) => owners.delayNextBody(ms),
     /** Durable Objects only: every raw reply the object sent over its wire. */

@@ -31,6 +31,44 @@ or callback capability. Fresh random IDs apply to unkeyed start requests, not to
 command within a transaction. Internal IDs are for ownership/routing and do not turn an
 unkeyed request into a keyed retry or require `policysql_idempotency`.
 
+### Commit outcome recording (amended by issue #48)
+
+A commit retry must never be answered with a definite rejection when COMMIT may have been
+sent. The owner therefore:
+
+- persists the record in status `committing`, with `commitSent: { sequence, digest }` (the
+  commit command's sequence and canonical payload digest), before it sends COMMIT. If that put
+  fails, COMMIT is not sent and the transaction rolls back as before;
+- after COMMIT succeeds, writes the terminal record (`committed`, the next sequence, and the
+  reply as `last`) in one put, so no record says `committed` without that commit's reply. If
+  the put fails, the reply is still `committed`, because the commit applied;
+- after a COMMIT error (the transport cannot prove that nothing committed), records `failed`
+  and keeps `commitSent`, and answers the commit with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`;
+- never ends a `committing` transaction from its timer or from a failing callback query: the
+  commit's outcome alone decides.
+
+`commitSent` is never removed, so it records explicitly that the record's later status was
+reached after COMMIT was sent; nothing is inferred from the status alone. A commit command
+whose sequence and digest equal `commitSent` is answered after the transaction identity and
+pinned database binding are checked, but before any snapshot, route, or
+expiry check: with the recorded reply when the record is `committed` with that commit as
+`last`, and otherwise (`committing`, `failed`, `expired`, or `committed` with another `last`)
+with the new public code `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (HTTP 503, ADR 0024). A record of
+the previous release that says `committed` while its `last` is the preceding command's is
+answered the same way for a commit at its next sequence. A commit that waits on its validator
+has not sent COMMIT, so its expiry still answers 409 `POLICYSQL_COMMIT_CHECK_REJECTED`.
+
+`POLICYSQL_COMMIT_OUTCOME_UNKNOWN` is never a rejection. The client library does not list it
+among definite rejections, so it raises `PolicySqlOutcomeUnknownError` and keeps the commit
+pending for `retryPending()`; the Kysely dialect then does not send a contradictory rollback.
+An earlier Worker that forwards an owner's reply unchanged passes 503 through; one that maps
+codes by its own table serves an unknown code as 500, which the client also treats as unknown.
+
+Atomic Execute on the owner does not answer from the owner record. A keyed retry runs again
+and resolves through the `policysql_idempotency` row written in the same database transaction,
+and an unkeyed request is never retried, so it has no such window. A failed put of the owner
+record after its COMMIT succeeded no longer turns the committed reply into an error.
+
 ## Consequences
 
 - Clients using keys can resolve ambiguous network outcomes without duplicating writes while the records remain available. Unkeyed requests can execute again when resent.
