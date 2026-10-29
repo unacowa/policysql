@@ -80,8 +80,8 @@ remains in the engine or an adapter.
 | Execution trace content | `turso.ts` 13-40 | core (`Execute` carries it); the sink call stays |
 | Driver failure class (`QueryTimeoutError` is a timeout) | `turso.ts` 7-11, 334 | stays (adapter classification); the class-to-code rule goes to core |
 | Client and server parameter namespaces must not collide | `driver-values.ts` 19-24 | core (BLOB decoding stays as the database codec) |
-| Driver value and row codecs (`rawDriverValue`, `rowValues`) | `driver-values.ts` 26-60 |
-| Binding shape, `version`, part syntax, snapshot equality (`POLICYSQL_DATABASE_BINDING_REJECTED`, `POLICYSQL_STALE_OPERATION`) for every operation | `database.ts` 94-105 | core: the `request` step validates the binding before it emits `CheckBinding`, and owners validate the forwarded binding again; the provider call (`checkDatabaseBinding` 109-115, `bounded` 76-92) stays | stays (codec; core validates every value again) |
+| Driver value and row codecs (`rawDriverValue`, `rowValues`) | `driver-values.ts` 26-60 | stays (codec; core validates every value again) |
+| Binding shape, `version`, part syntax, snapshot equality (`POLICYSQL_DATABASE_BINDING_REJECTED`, `POLICYSQL_STALE_OPERATION`) for every operation | `database.ts` 94-105 | core: the `request` step validates the binding before it emits `CheckBinding`, and owners validate the forwarded binding again; the provider call (`checkDatabaseBinding` 109-115, `bounded` 76-92) stays |
 
 **Cost** (`cost.ts`). The issue calls it cost admission, but no request is admitted or
 rejected by it: `observeCostEnvelope` runs after the response and only logs. The evaluation
@@ -190,7 +190,8 @@ write mode, as today.
 serializes work on the owner (it lets the timer expire a stuck execution and keeps a second
 execution from starting while one is open). It is never used to answer a request. Every atomic
 request, including a keyed retry that reaches an owner whose durable state is `active`,
-`committing`, `failed`, or unreadable, starts a fresh execution: compile, open, and, when keyed,
+`failed`, or unreadable, starts a fresh execution (atomic durable state uses only `active` and
+the terminal phases; it never enters `committing`): compile, open, and, when keyed,
 the `policysql_idempotency` lookup. The row in `policysql_idempotency` is the only record of the
 outcome: a row with the same fingerprint is replayed, a row with another fingerprint is
 `POLICYSQL_IDEMPOTENCY_CONFLICT`, and no row means the earlier attempt did not commit (the row is
@@ -305,12 +306,15 @@ An adapter that cannot classify an error reports `unknown`. Core never sees an e
 Core uses `entropy` for the unkeyed transaction and validation ids (16 bytes) and the capability
 token (32 bytes); a step that needs both takes disjoint slices. Expiry is checked against
 `now_ms` on every client, callback, and timer event, as the TypeScript code checks `Date.now()`
-today, and `TimerFired` is the same check when no client event arrives. Two cases are exempt:
-nothing expires a transaction in phase `committing`, and the outcome of a `Commit` effect
-(`Committed`, `CommitFailed`) and the `Persist` of the terminal record that follows it are never
-judged against the deadline. COMMIT has been sent by then, so only its outcome can decide; a
-`Committed` that arrives after `expires_at_ms` is reported as committed. The database deadline
-passed to `Open` still bounds how long COMMIT can take.
+today, and `TimerFired` is the same check when no client event arrives. Phase `committing` has
+exactly one deadline check: the step that consumes `Persisted` for `committing` compares
+`now_ms` with `expires_at_ms` before it emits `Commit`, and expires the transaction instead
+(rollback, no COMMIT) when the deadline has passed. A `TimerFired` while `committing` is
+ignored: before `Commit` that step decides, and after it nothing expires the transaction. The
+outcome of a `Commit` effect (`Committed`, `CommitFailed`) and the `Persist` of the terminal
+record that follows it are never judged against the deadline. COMMIT has been sent by then, so
+only its outcome can decide; a `Committed` that arrives after `expires_at_ms` is reported as
+committed. The database deadline passed to `Open` still bounds how long COMMIT can take.
 
 ### Effects
 
@@ -372,9 +376,28 @@ the connection at a time.
 - **Invalid volatile state** is an engine fault: the same as above, and the engine discards it.
 - **Invalid host facts** (`step_json` cannot read them) return `{"error": POLICYSQL_INTERNAL}`
   and no state; the engine replies 500 and sends `Abandon` with the previous state.
-- **An outcome event for an id that is not pending.** If the transaction is terminal, core logs
+- **`Abandon`** releases every handle in volatile state, drops its pending effects, and moves
+  the durable phase as follows, emitting `Persist` as its one awaited effect when the phase
+  changes. The engine runs that `Persist` before it discards the state:
+  - `active` or `validating` with an open connection → `failed` (the database adapter closes
+    the connection; COMMIT was never sent);
+  - `committing` → `commit_unknown`, whether or not `Commit` was emitted, because only the
+    volatile state knew whether it had been;
+  - a terminal phase, `discarded`, or `atomic` placement `direct` → unchanged (nothing to
+    persist).
+  If that `Persist` cannot run (the owner is gone), a successor finds `committing` and reaches
+  `commit_unknown` by the successor rule.
+- **An outcome event for an id that is not pending.** If the transaction is terminal (including
+  `commit_unknown`, where a late `Committed` or `CommitFailed` after `Abandon` lands), core logs
   and ignores it (a validator that answers after expiry). Otherwise core fails the transaction
   closed. Duplicated and reordered outcomes therefore never commit.
+- **Fail closed never turns `committing` into `failed`.** Every fail-closed path above (an
+  invalid volatile state, an outcome that is not pending, an invariant violation, `Abandon`)
+  moves an interactive transaction in phase `committing` to `commit_unknown` (persisted), so a
+  commit retry gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. It reaches `failed`, `expired`, or
+  `rolled_back` only through the deadline check of the step that consumes `Persisted` for
+  `committing`, before `Commit` is emitted (see [Effect contract](#effect-execution-contract)),
+  or through `CommitFailed { class: not_committed }`.
 - **A client or validator event that is invalid** gets the client-facing codes of today, and
   ADR 0007's rule that a conflicting command fails and rolls back an active transaction.
 - **A Rust invariant violation inside a transition** is reported as an invalid durable state.
@@ -483,6 +506,7 @@ What each failure leads to (all decided by core, listed here because ADR 0007 de
 | --- | --- |
 | `OpenFailed`, `ExecuteFailed`, `BindingCheckFailed`, or binding not allowed | roll back if open, phase `failed`, reply with the class's code (`DATABASE_TIMEOUT`, `DATABASE_UNAVAILABLE`, `DATABASE_BINDING_REJECTED`, as today) |
 | `PersistFailed` before `Commit` | roll back, phase `failed`, reply `POLICYSQL_INTERNAL`; no commit is sent |
+| `Persisted` for `committing` arrives at or after `expires_at_ms` | the consuming step does not emit `Commit`: it rolls back, persists `expired`, and only then replies `POLICYSQL_TRANSACTION_UNAVAILABLE` (true: COMMIT was never sent). If the owner is lost before `expired` is persisted, a successor finds `committing` and answers a retry with outcome-unknown, which is not a misreport. Before the deadline it emits `Commit`, and from then on nothing expires the transaction |
 | `PersistFailed` of the terminal record after `Committed` | reply committed (true); a retry finds `committing` and gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, never a rejection |
 | `CommitFailed { class: not_committed }` | phase `failed`, reply as today (`status: "failed"`) |
 | `CommitFailed` of any other class | phase `commit_unknown`; the reply and every exact retry of that commit get `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` |
@@ -582,8 +606,8 @@ see no regression at the switch-over. For a commit that #48 could still replay f
 1. **This ADR.** Design only.
 2. **Canonical JSON, hashing, and identities in core.** `policysql-transaction` with
    `stable_json`, SHA-256 (the `sha2` crate), key syntax, `keyHash`, fingerprints, digest;
-   exported as `identity_json`. The engine switches to it; `idempotency.ts` keeps only the call.
-   No behavior change.
+   exported as `identity_json`. The engine uses core's result; `idempotency.ts` stays as the
+   second computation of the gate below until pull request 9 deletes it. No behavior change.
    - **Corpus** (each case also as an object key, a nested value, and an array element):
      integers above 2^53 (`9007199254740993`, which JavaScript rounds), `-0` (printed `0`),
      overflow (`1e400` parses to Infinity, which `JSON.stringify` prints as `null`), number
@@ -647,10 +671,17 @@ see no regression at the switch-over. For a commit that #48 could still replay f
   generated from a model of the engine and adversarial inputs:
   - at most one `Commit` per interactive transaction, ever, and per atomic owner execution (one
     database transaction; a keyed retry is a new execution whose duplicate the idempotency row
-    prevents); none after a terminal phase, after expiry,
-    without a preceding `Persisted` for `committing`, without every triggered check allowed in
-    the current volatile state, or without a `BindingChecked { allowed: true }` after the last
-    validator;
+    prevents); none after a terminal phase, none when `now_ms` in the step that would emit it is
+    at or after `expires_at_ms`, none without every triggered check allowed in the current
+    volatile state, and none without a `BindingChecked { allowed: true }` after the last
+    validator; for interactive transactions, none without a preceding `Persisted` for
+    `committing` (atomic owner executions never persist `committing`);
+  - once `Commit` has been emitted for an interactive transaction, no event sequence (duplicated,
+    stale, or reordered outcomes, `Abandon`, invalid volatile state, owner loss, `TimerFired`)
+    leads to a definite rejection of that commit or to phase `failed`, `expired`, or
+    `rolled_back`, except through `CommitFailed { class: not_committed }`; after
+    `Persisted` for `committing`, a definite rejection is possible only if `Commit` was never
+    emitted, and only after `expired` was persisted;
   - a reply says committed only after `Committed`, and after `Committed` no reply says expired,
     failed, or rolled back;
   - a reply is a definite rejection of a commit only if no `Commit` was emitted or the outcome
