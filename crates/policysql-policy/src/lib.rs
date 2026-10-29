@@ -1212,6 +1212,11 @@ type PolicyMap<T> = BTreeMap<policysql_core::ResourceId, BTreeMap<RoleName, T>>;
 
 /// Collects policy string literals that begin and end with `'` for the
 /// emitted-plan verifier (see `StringLiteralWitnesses`).
+///
+/// The set is global to the bundle, across resources and roles. It only
+/// exempts quoted-looking values from the verifier's leak check, and client
+/// witnesses must round-trip before it is consulted, so it cannot mask a
+/// decoder fault.
 fn quoted_policy_literals(
     select: &PolicyMap<SelectPolicy>,
     insert: &PolicyMap<InsertPolicy>,

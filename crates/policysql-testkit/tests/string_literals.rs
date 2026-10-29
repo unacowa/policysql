@@ -610,3 +610,55 @@ fn literal_set_is_a_multiset_of_decoded_values() {
         .collect::<BTreeSet<_>>();
     assert_eq!(distinct.len(), 2);
 }
+
+#[test]
+fn nul_is_rejected_like_sqlite_and_other_control_characters_match_sqlite() {
+    // SQLite's tokenizer stops at NUL and reports an unrecognized token.
+    let reference = database(false);
+    for sql in [
+        "SELECT id, name FROM items WHERE id = 'se\0ed'",
+        "SELECT id, name FROM items WHERE id LIKE 'seed\0%'",
+        "UPDATE items SET name = 'a\0' WHERE id = 'seed' RETURNING id",
+    ] {
+        let error = reference
+            .prepare(sql)
+            .err()
+            .unwrap_or_else(|| unreachable!("SQLite accepted NUL: {sql:?}"));
+        assert!(
+            error.to_string().contains("unrecognized token"),
+            "{sql:?}: {error}"
+        );
+        // `InvalidLiteral` keeps its existing public classification.
+        assert_eq!(
+            compile(sql).map(|_| ()),
+            Err(GatewayError::Rejected {
+                kind: RejectionKind::InvalidParameter,
+                index: 0
+            }),
+            "{sql:?}"
+        );
+    }
+    // Every other control character is kept verbatim by SQLite and by PolicySQL.
+    let value = "c\u{1}\t\n\r\u{1f}\u{7f}\u{85}";
+    let insert = format!(
+        "INSERT INTO items (id, name, status) VALUES ('{value}', '{value}', 'active') RETURNING id, name"
+    );
+    let protected = database(true);
+    let reference = database(false);
+    let plan = compile(&insert).unwrap_or_else(|error| unreachable!("{error}"));
+    assert_eq!(
+        client_literal_values(&plan),
+        expected_values(&[value, value, "active"])
+    );
+    let (rows, passed) = execute_protected(&protected, &plan);
+    assert!(passed);
+    assert_eq!(rows, query(&reference, &insert, &BTreeMap::new()));
+    let select = format!("SELECT id, name FROM items WHERE id = '{value}' OR name LIKE 'c\u{1}%'");
+    let plan = compile(&select).unwrap_or_else(|error| unreachable!("{error}"));
+    let (rows, _) = execute_protected(&protected, &plan);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        sorted(rows),
+        sorted(query(&reference, &select, &BTreeMap::new()))
+    );
+}

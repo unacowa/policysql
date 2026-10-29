@@ -1655,6 +1655,10 @@ fn bind_literal(
 /// `Literal::String`. Only `'...'` with every inner quote doubled is accepted;
 /// anything else (double quotes, missing or stray quotes) is rejected rather
 /// than repaired.
+///
+/// A NUL character is rejected to match `SQLite`, whose tokenizer stops at NUL
+/// and reports the literal as an unrecognized token. `SQLite` keeps every
+/// other character, including the remaining control characters, verbatim.
 fn decode_string_literal(token: &str) -> Result<String, BindError> {
     let inner = token
         .strip_prefix('\'')
@@ -1663,7 +1667,7 @@ fn decode_string_literal(token: &str) -> Result<String, BindError> {
     let mut value = String::with_capacity(inner.len());
     let mut characters = inner.chars();
     while let Some(character) = characters.next() {
-        if character == '\'' && characters.next() != Some('\'') {
+        if character == '\0' || (character == '\'' && characters.next() != Some('\'')) {
             return Err(BindError::InvalidLiteral);
         }
         value.push(character);
@@ -2377,6 +2381,11 @@ mod tests {
             ("'se%'", "se%"),
             ("'\"double\"'", "\"double\""),
             ("'日本語'", "日本語"),
+            // SQLite keeps every non-NUL control character verbatim.
+            (
+                "'a\u{1}\t\n\r\u{1f}\u{7f}\u{85}b'",
+                "a\u{1}\t\n\r\u{1f}\u{7f}\u{85}b",
+            ),
         ] {
             assert_eq!(
                 super::decode_string_literal(token).as_deref(),
@@ -2386,6 +2395,8 @@ mod tests {
         }
         for token in [
             "seed", "\"seed\"", "'seed", "seed'", "'", "'''", "'a'b'", "'a''", "`seed`", "",
+            // SQLite stops at NUL and reports an unrecognized token.
+            "'se\0ed'", "'seed\0'", "'\0'",
         ] {
             assert_eq!(
                 super::decode_string_literal(token),
@@ -2441,6 +2452,14 @@ mod tests {
             (
                 "SELECT id FROM projects WHERE id = \"seed\"",
                 BindError::UnknownColumn,
+            ),
+            (
+                "SELECT id FROM projects WHERE id = 'se\0ed'",
+                BindError::InvalidLiteral,
+            ),
+            (
+                "UPDATE projects SET name = 'a\0' WHERE id = :id",
+                BindError::InvalidLiteral,
             ),
             (
                 "SELECT id FROM projects WHERE id = 'seed",

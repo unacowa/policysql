@@ -59,6 +59,9 @@ test("double-quoted, unterminated and blob literals are rejected before any data
     "SELECT id FROM projects WHERE id = \"seed\"",
     "SELECT id FROM projects WHERE id = 'seed",
     "SELECT id FROM projects WHERE id = X'73656564'",
+    // SQLite rejects NUL inside a literal as an unrecognized token.
+    "SELECT id FROM projects WHERE id = 'se\0ed'",
+    "SELECT id FROM projects WHERE id LIKE 'seed\0%'",
   ]) {
     const response = await execute(h, "a", [{ sql, params: {} }], null);
     assert.ok(response.status >= 400 && response.status < 500, `${sql}: ${response.status}`);

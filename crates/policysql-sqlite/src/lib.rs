@@ -970,6 +970,17 @@ impl SqliteInvariantVerifier {
     /// server literal that still begins and ends with `'` is accepted only when
     /// it is such a verified decoded value (`'''x'''` legitimately decodes to
     /// `'x'`) or a policy-configured value; otherwise it is a leaked token.
+    ///
+    /// The comparisons are set-based: they do not check which placeholder
+    /// carries which value, nor how many times a value is bound. A swapped or
+    /// dropped duplicate could only come from an emitter fault, which the
+    /// structural statement comparison above already guards. The decoder
+    /// regression this check exists for is caught by the per-witness
+    /// round-trip, which runs first and independently of the binder. Without
+    /// any witnesses only quoted-looking values are rejected; other values
+    /// pass vacuously. The policy set is global to the bundle (all resources
+    /// and roles); it cannot mask a leak because client witnesses must
+    /// round-trip before the set is consulted.
     fn verify_string_literals(
         &self,
         server_parameters: &BTreeMap<ServerParameterName, LogicalValue>,
