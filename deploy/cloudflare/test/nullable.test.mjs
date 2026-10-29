@@ -144,6 +144,13 @@ test("Explain nullable metadata matches what Execute accepts, for every type and
   assert.deepEqual(byName.bytes, { name: "bytes", type: "bytes", representation: "string", format: "base64", nullable: true });
   assert.deepEqual(byName.json, { name: "json", type: "json", representation: "object", nullable: true });
   assert.deepEqual(byName.integer, { name: "integer", type: "integer", representation: "number", nullable: true });
+  assert.deepEqual(byName.date, { name: "date", type: "date", representation: "string", format: "iso-date", nullable: true });
+  // A real date sample, or NULL, yields the same descriptor as type discovery.
+  for (const date of ["2026-10-30", null]) {
+    const sampled = await explain(h, [{ ...clearAll(), params: { ...clearAll().params, date }, expect: undefined }]);
+    assert.equal(sampled.status, 200, JSON.stringify(sampled.body));
+    assert.deepEqual(sampled.body.statements[0].parameters.find(p => p.name === "date"), byName.date);
+  }
   assert.equal(byName.id.nullable, false);
   assert.equal(h.counts().connects, 0);
 });
@@ -176,6 +183,16 @@ for (const hooks of [false, true]) test(`post-state FALSE/UNKNOWN, physical cons
   }
   // A NULL that makes the check UNKNOWN is indistinguishable from a FALSE check.
   assert.deepEqual(outcomes.unknown, outcomes.false);
+  // Regression pin of the current public error classes (#27 review). A failed
+  // post-state check is reported as a schema mismatch; physical NOT NULL and
+  // trigger failures surface as the database error class without details.
+  assert.deepEqual(outcomes, {
+    false: { status: 422, code: "POLICYSQL_SCHEMA_MISMATCH" },
+    unknown: { status: 422, code: "POLICYSQL_SCHEMA_MISMATCH" },
+    not_null: { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" },
+    trigger: { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" },
+    later: { status: 422, code: "POLICYSQL_EXPECTATION_FAILED" },
+  });
 });
 
 test("a post-state check that is TRUE for NULL still commits the NULL", async t => {

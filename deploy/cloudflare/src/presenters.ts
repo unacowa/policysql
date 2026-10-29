@@ -10,6 +10,8 @@ export const parsedRuntimeCall = (text: string) => {
   return result;
 };
 
+const TEMPORAL_FORMATS = new Map([["date", "iso-date"], ["datetime", "sqlite-datetime"], ["instant", "rfc3339"]]);
+
 // `nullable` is the compiler's statement-wide proof (#20): true only when every
 // use of the parameter is a direct INSERT/UPDATE assignment to a nullable column.
 // It never depends on the supplied sample value, and execute accepts JSON null
@@ -17,6 +19,11 @@ export const parsedRuntimeCall = (text: string) => {
 const valueDescriptor = (name: string, value: unknown, compiledType: string | undefined, nullable: boolean) => {
   if (compiledType === "bytes") {
     return { name, type: "bytes", representation: "string", format: "base64", nullable };
+  }
+  // Temporal types have exactly one Catalog format each (see `validate_format`).
+  const temporalFormat = TEMPORAL_FORMATS.get(compiledType ?? "");
+  if (temporalFormat) {
+    return { name, type: compiledType, representation: "string", format: temporalFormat, nullable };
   }
   if (["string", "boolean", "integer", "int64", "number", "json"].includes(compiledType ?? "")) {
     const representation = compiledType === "json"
