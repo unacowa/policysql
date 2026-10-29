@@ -21,6 +21,7 @@ use policysql_execution::{
 use policysql_ir::{
     BoundDelete, BoundExpr, BoundJsonCollectionSelect, BoundOrder, BoundProjection, BoundSelect,
     BoundStatement, BoundUpdate, ProtectedPlan, ScalarFunction, SortDirection,
+    StringLiteralWitnesses,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -37,6 +38,7 @@ pub const PROFILE_ID: &str = "sqlite-turso-v1";
 const TABLE_ALIAS: &str = "__policysql_t0";
 const CHECK_COLUMN: &str = "__policysql_check";
 const VISIBILITY_COLUMN_PREFIX: &str = "__policysql_visibility_";
+const LITERAL_PARAMETER_PREFIX: &str = "__policysql_literal_";
 
 /// Type marker binding candidates, verifiers, and executors to the `SQLite` profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -918,6 +920,7 @@ pub struct SqliteInvariantVerifier {
     expected_affected_rows: Option<u64>,
     expects_operation_check: bool,
     expected_result_rows: Option<u64>,
+    expected_string_literals: StringLiteralWitnesses,
 }
 
 impl SqliteInvariantVerifier {
@@ -948,7 +951,71 @@ impl SqliteInvariantVerifier {
             expected_affected_rows: None,
             expects_operation_check: false,
             expected_result_rows: None,
+            expected_string_literals: StringLiteralWitnesses::default(),
         })
+    }
+
+    /// Supplies the string literal provenance the server-literal check compares against.
+    #[must_use]
+    pub fn with_string_literals(mut self, witnesses: StringLiteralWitnesses) -> Self {
+        self.expected_string_literals = witnesses;
+        self
+    }
+
+    /// Second, independent check that every server literal string carries the
+    /// decoded value, never a raw SQL token.
+    ///
+    /// A client token is re-encoded from its bound value here, independently of
+    /// the binder's decoder, and must reproduce the original token exactly. A
+    /// server literal that still begins and ends with `'` is accepted only when
+    /// it is such a verified decoded value (`'''x'''` legitimately decodes to
+    /// `'x'`) or a policy-configured value; otherwise it is a leaked token.
+    ///
+    /// The comparisons are set-based: they do not check which placeholder
+    /// carries which value, nor how many times a value is bound. A swapped or
+    /// dropped duplicate could only come from an emitter fault, which the
+    /// structural statement comparison above already guards. The decoder
+    /// regression this check exists for is caught by the per-witness
+    /// round-trip, which runs first and independently of the binder. Without
+    /// any witnesses only quoted-looking values are rejected; other values
+    /// pass vacuously. The policy set is global to the bundle (all resources
+    /// and roles); it cannot mask a leak because client witnesses must
+    /// round-trip before the set is consulted.
+    fn verify_string_literals(
+        &self,
+        server_parameters: &BTreeMap<ServerParameterName, LogicalValue>,
+    ) -> Result<(), VerificationError> {
+        let witnesses = &self.expected_string_literals;
+        if witnesses
+            .client
+            .iter()
+            .any(|literal| sqlite_string_token(&literal.value) != literal.token)
+        {
+            return Err(violation("client string literal does not round-trip"));
+        }
+        let literal_strings = server_parameters
+            .iter()
+            .filter(|(name, _)| name.as_str().starts_with(LITERAL_PARAMETER_PREFIX))
+            .filter_map(|(_, value)| match value {
+                LogicalValue::String(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let client_values = witnesses
+            .client
+            .iter()
+            .map(|literal| literal.value.as_str())
+            .collect::<BTreeSet<_>>();
+        if !client_values.is_subset(&literal_strings) {
+            return Err(violation("client string literal value is not bound"));
+        }
+        for value in literal_strings {
+            let quoted = value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'');
+            if quoted && !witnesses.policy.contains(value) && !client_values.contains(value) {
+                return Err(violation("server literal still carries SQL string quoting"));
+            }
+        }
+        Ok(())
     }
 
     fn with_operation(mut self, operation: OperationKind) -> Self {
@@ -1036,7 +1103,7 @@ impl PlanVerifier<SqliteProfile> for SqliteInvariantVerifier {
         if candidate.result() != self.expected_result {
             return Err(violation("result descriptor mismatch"));
         }
-        Ok(())
+        self.verify_string_literals(candidate.server_parameters())
     }
 
     fn profile_id(&self) -> &BackendProfileId {
@@ -1069,6 +1136,11 @@ pub fn explain_query_plan_sql(protected_sql: &str) -> Result<String, EmitError> 
     Ok(Cmd::ExplainQueryPlan(statement).to_string())
 }
 
+/// Renders a value as a `SQLite` single-quoted string token.
+fn sqlite_string_token(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 fn violation(message: &str) -> VerificationError {
     VerificationError::InvariantViolation(message.to_owned())
 }
@@ -1097,7 +1169,8 @@ pub fn compile_verified_select(
         expected_servers,
         expected_result.clone(),
         snapshot.clone(),
-    )?;
+    )?
+    .with_string_literals(plan.string_literals.clone());
     if let Some(expected) = plan.expected_result_rows {
         verifier = verifier.with_expected_result_rows(expected);
     }
@@ -1152,6 +1225,7 @@ pub fn compile_verified_insert(
         expected_result.clone(),
         snapshot.clone(),
     )?
+    .with_string_literals(plan.string_literals.clone())
     .with_operation(OperationKind::Insert)
     .with_expected_affected_rows(expected_affected_rows)
     .with_operation_check();
@@ -1209,6 +1283,7 @@ pub fn compile_verified_update(
         expected_result.clone(),
         snapshot.clone(),
     )?
+    .with_string_literals(plan.string_literals.clone())
     .with_operation(OperationKind::Update)
     .with_operation_check();
     if let Some(expected) = plan.expected_affected_rows {
@@ -1271,6 +1346,7 @@ pub fn compile_verified_delete(
         expected_result.clone(),
         snapshot.clone(),
     )?
+    .with_string_literals(plan.string_literals.clone())
     .with_operation(OperationKind::Delete);
     if let Some(expected) = plan.expected_affected_rows {
         verifier = verifier.with_expected_affected_rows(expected);
@@ -2672,6 +2748,156 @@ resources:
         assert_eq!(
             verified.protected_sql(),
             include_str!("../../../tests/fixtures/sqlite-turso-v1/mutation/delete-filtered/expected/protected.sql").trim()
+        );
+    }
+
+    const LITERAL_POLICY: &str = r#"version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, tenant_id, name, status]
+          filter: { and: [ { tenant_id: { eq: { session: tenant_id } } }, { name: { neq: "'legacy'" } } ] }
+"#;
+
+    fn member_session() -> TrustedSession {
+        TrustedSession::new(
+            RoleName::new("member").unwrap_or_else(|error| unreachable!("valid role: {error}")),
+            "user_1",
+            BTreeMap::from([("tenant_id".to_owned(), "tenant_1".to_owned())]),
+        )
+        .unwrap_or_else(|error| unreachable!("valid session: {error}"))
+    }
+
+    /// Binds through `bind_document` and attaches client witnesses exactly as the gateway does.
+    fn literal_plan(sql: &str) -> (policysql_ir::ProtectedPlan, Catalog) {
+        let catalog = catalog();
+        let document = SqliteFrontend::default()
+            .bind_document(sql, &catalog)
+            .unwrap_or_else(|error| unreachable!("literal SQL binds: {error}"));
+        let bundle = PolicyBundle::activate(LITERAL_POLICY, &catalog, snapshot())
+            .unwrap_or_else(|error| unreachable!("literal policy activates: {error}"));
+        let mut output = bundle
+            .compile_select(&document.statement, &member_session())
+            .unwrap_or_else(|error| unreachable!("literal SQL compiles: {error}"));
+        output.plan.string_literals.client = document.string_literals;
+        (output.plan, catalog)
+    }
+
+    fn literal_values(plan: &VerifiedExecutionPlan<SqliteProfile>) -> BTreeSet<String> {
+        plan.server_parameters()
+            .iter()
+            .filter(|(name, _)| name.as_str().starts_with(super::LITERAL_PARAMETER_PREFIX))
+            .filter_map(|(_, value)| match value {
+                LogicalValue::String(value) => Some(value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Simulates a binder that leaked the raw token into the bound literal.
+    fn leak_token(expression: &mut policysql_ir::BoundExpr, decoded: &str, token: &str) {
+        use policysql_ir::BoundExpr;
+        match expression {
+            BoundExpr::Literal(LogicalValue::String(value)) if value == decoded => {
+                token.clone_into(value);
+            }
+            BoundExpr::Equal(left, right)
+            | BoundExpr::NotEqual(left, right)
+            | BoundExpr::And(left, right)
+            | BoundExpr::Or(left, right) => {
+                leak_token(left, decoded, token);
+                leak_token(right, decoded, token);
+            }
+            _ => {}
+        }
+    }
+
+    fn leak_in_plan(plan: &mut policysql_ir::ProtectedPlan, decoded: &str, token: &str) {
+        let policysql_ir::BoundStatement::Select(select) = &mut plan.statement else {
+            unreachable!("SELECT plan");
+        };
+        if let Some(predicate) = select.predicate.as_mut() {
+            leak_token(predicate, decoded, token);
+        }
+    }
+
+    fn literal_rejected(plan: &policysql_ir::ProtectedPlan, catalog: &Catalog) -> bool {
+        matches!(
+            compile_verified_select(plan, catalog, BTreeMap::new(), limits(), snapshot()),
+            Err(super::CompileError::Verification(
+                VerificationError::InvariantViolation(_)
+            ))
+        )
+    }
+
+    #[test]
+    fn server_literal_check_accepts_decoded_values_that_look_quoted() {
+        let (plan, catalog) = literal_plan(
+            "SELECT id FROM projects WHERE name = '''x''' OR name = 'x' OR id = 'it''s' OR id = ''",
+        );
+        let witnesses = plan
+            .string_literals
+            .client
+            .iter()
+            .map(|literal| (literal.token.as_str(), literal.value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            witnesses,
+            vec![
+                ("'''x'''", "'x'"),
+                ("'x'", "x"),
+                ("'it''s'", "it's"),
+                ("''", "")
+            ]
+        );
+        let verified =
+            compile_verified_select(&plan, &catalog, BTreeMap::new(), limits(), snapshot())
+                .unwrap_or_else(|error| unreachable!("decoded literals verify: {error}"));
+        assert_eq!(
+            literal_values(&verified),
+            ["", "'legacy'", "'x'", "it's", "x"]
+                .map(str::to_owned)
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn server_literal_check_rejects_a_leaked_raw_token() {
+        // The bound value is the raw token while the witness holds the decoded value.
+        let (mut plan, catalog) = literal_plan("SELECT id FROM projects WHERE id = 'seed'");
+        leak_in_plan(&mut plan, "seed", "'seed'");
+        assert!(literal_rejected(&plan, &catalog));
+        // The witness agrees with the leaked value: re-encoding no longer reproduces the token.
+        plan.string_literals.client[0].value = "'seed'".to_owned();
+        assert!(literal_rejected(&plan, &catalog));
+        // No witness at all, as when a caller skips `bind_document`.
+        plan.string_literals.client.clear();
+        assert!(literal_rejected(&plan, &catalog));
+        // `'''x'''` legitimately decodes to `'x'`; leaking its token is still caught.
+        let (mut plan, catalog) = literal_plan("SELECT id FROM projects WHERE id = '''x'''");
+        leak_in_plan(&mut plan, "'x'", "'''x'''");
+        assert!(literal_rejected(&plan, &catalog));
+        // A quoted-looking value backed only by an unrelated witness is rejected.
+        let (mut plan, catalog) =
+            literal_plan("SELECT id FROM projects WHERE id = 'x' OR name = 'y'");
+        leak_in_plan(&mut plan, "y", "'x'");
+        assert!(literal_rejected(&plan, &catalog));
+    }
+
+    #[test]
+    fn server_literal_check_accepts_quoted_policy_literals_without_client_witnesses() {
+        let (plan, catalog) = literal_plan("SELECT id FROM projects");
+        assert_eq!(plan.string_literals.client.len(), 0);
+        assert!(plan.string_literals.policy.contains("'legacy'"));
+        let verified =
+            compile_verified_select(&plan, &catalog, BTreeMap::new(), limits(), snapshot())
+                .unwrap_or_else(|error| unreachable!("policy literal verifies: {error}"));
+        assert_eq!(
+            literal_values(&verified),
+            BTreeSet::from(["'legacy'".to_owned()])
         );
     }
 }

@@ -7,7 +7,7 @@ use policysql_core::{
 };
 use policysql_ir::{
     BoundAssignment, BoundColumn, BoundExpr, BoundJsonCollectionSelect, BoundProjection,
-    BoundSelect, BoundStatement, ColumnUsage, ProtectedPlan,
+    BoundSelect, BoundStatement, ColumnUsage, ProtectedPlan, StringLiteralWitnesses,
 };
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
@@ -25,6 +25,8 @@ pub struct PolicyBundle {
     update: BTreeMap<policysql_core::ResourceId, BTreeMap<RoleName, UpdatePolicy>>,
     delete: BTreeMap<policysql_core::ResourceId, BTreeMap<RoleName, DeletePolicy>>,
     commit_checks: Vec<ActivatedCommitCheck>,
+    /// Policy string literals that begin and end with `'`; see [`StringLiteralWitnesses`].
+    quoted_string_literals: BTreeSet<String>,
 }
 
 /// Read-only, role-scoped policy information used to construct the public Catalog.
@@ -373,6 +375,12 @@ impl PolicyBundle {
                 return Err(PolicyError::DuplicatePolicy);
             }
         }
+        let quoted_string_literals = quoted_policy_literals(
+            &select,
+            &insert_policies,
+            &update_policies,
+            &delete_policies,
+        );
         Ok(Self {
             snapshot,
             select,
@@ -380,7 +388,15 @@ impl PolicyBundle {
             update: update_policies,
             delete: delete_policies,
             commit_checks,
+            quoted_string_literals,
         })
+    }
+
+    fn string_literal_witnesses(&self) -> StringLiteralWitnesses {
+        StringLiteralWitnesses {
+            client: Vec::new(),
+            policy: self.quoted_string_literals.clone(),
+        }
     }
 
     #[must_use]
@@ -414,6 +430,7 @@ impl PolicyBundle {
                     operation_check: None,
                     expected_affected_rows: None,
                     expected_result_rows: None,
+                    string_literals: self.string_literal_witnesses(),
                 },
                 explain: Explain {
                     operation: OperationKind::Select,
@@ -550,6 +567,7 @@ impl PolicyBundle {
                 operation_check: None,
                 expected_affected_rows: None,
                 expected_result_rows: None,
+                string_literals: self.string_literal_witnesses(),
             },
             explain: Explain {
                 operation: OperationKind::Select,
@@ -592,6 +610,7 @@ impl PolicyBundle {
                 operation_check: None,
                 expected_affected_rows: None,
                 expected_result_rows: Some(1),
+                string_literals: self.string_literal_witnesses(),
             },
             explain: Explain {
                 operation: OperationKind::Select,
@@ -661,6 +680,7 @@ impl PolicyBundle {
                 operation_check: Some(check),
                 expected_affected_rows: Some(expected_affected_rows),
                 expected_result_rows: None,
+                string_literals: self.string_literal_witnesses(),
             },
             explain: Explain {
                 operation: OperationKind::Insert,
@@ -723,6 +743,7 @@ impl PolicyBundle {
                 operation_check: Some(check),
                 expected_affected_rows: None,
                 expected_result_rows: None,
+                string_literals: self.string_literal_witnesses(),
             },
             explain: Explain {
                 operation: OperationKind::Update,
@@ -767,6 +788,7 @@ impl PolicyBundle {
                 operation_check: None,
                 expected_affected_rows: None,
                 expected_result_rows: None,
+                string_literals: self.string_literal_witnesses(),
             },
             explain: Explain {
                 operation: OperationKind::Delete,
@@ -1184,6 +1206,81 @@ fn parse_operand(
 
 fn mapping_value<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
     mapping.get(Value::String(key.to_owned()))
+}
+
+type PolicyMap<T> = BTreeMap<policysql_core::ResourceId, BTreeMap<RoleName, T>>;
+
+/// Collects policy string literals that begin and end with `'` for the
+/// emitted-plan verifier (see `StringLiteralWitnesses`).
+///
+/// The set is global to the bundle, across resources and roles. It only
+/// exempts quoted-looking values from the verifier's leak check, and client
+/// witnesses must round-trip before it is consulted, so it cannot mask a
+/// decoder fault.
+fn quoted_policy_literals(
+    select: &PolicyMap<SelectPolicy>,
+    insert: &PolicyMap<InsertPolicy>,
+    update: &PolicyMap<UpdatePolicy>,
+    delete: &PolicyMap<DeletePolicy>,
+) -> BTreeSet<String> {
+    let mut quoted_string_literals = BTreeSet::new();
+    for policy in select.values().flat_map(BTreeMap::values) {
+        collect_quoted_predicate(&policy.filter, &mut quoted_string_literals);
+        for predicate in policy.conditional_columns.values() {
+            collect_quoted_predicate(predicate, &mut quoted_string_literals);
+        }
+    }
+    for policy in insert.values().flat_map(BTreeMap::values) {
+        collect_quoted_predicate(&policy.check, &mut quoted_string_literals);
+        for (_, operand) in policy.presets.values() {
+            collect_quoted_operand(operand, &mut quoted_string_literals);
+        }
+    }
+    for policy in update.values().flat_map(BTreeMap::values) {
+        collect_quoted_predicate(&policy.filter, &mut quoted_string_literals);
+        collect_quoted_predicate(&policy.check, &mut quoted_string_literals);
+        for (_, operand) in policy.presets.values() {
+            collect_quoted_operand(operand, &mut quoted_string_literals);
+        }
+    }
+    for policy in delete.values().flat_map(BTreeMap::values) {
+        collect_quoted_predicate(&policy.filter, &mut quoted_string_literals);
+    }
+    quoted_string_literals
+}
+
+fn collect_quoted_predicate(predicate: &PolicyPredicate, output: &mut BTreeSet<String>) {
+    match predicate {
+        PolicyPredicate::Comparison { operand, .. } => collect_quoted_operand(operand, output),
+        PolicyPredicate::In { values, .. } => {
+            for value in values {
+                collect_quoted_value(value, output);
+            }
+        }
+        PolicyPredicate::IsNull { .. } => {}
+        PolicyPredicate::And(values) | PolicyPredicate::Or(values) => {
+            for value in values {
+                collect_quoted_predicate(value, output);
+            }
+        }
+        PolicyPredicate::Not(value) => collect_quoted_predicate(value, output),
+    }
+}
+
+fn collect_quoted_operand(operand: &PolicyOperand, output: &mut BTreeSet<String>) {
+    if let PolicyOperand::Literal(value) = operand {
+        collect_quoted_value(value, output);
+    }
+}
+
+fn collect_quoted_value(value: &LogicalValue, output: &mut BTreeSet<String>) {
+    if let LogicalValue::String(value) = value
+        && value.len() >= 2
+        && value.starts_with('\'')
+        && value.ends_with('\'')
+    {
+        output.insert(value.clone());
+    }
 }
 
 fn literal_for_type(value: &Value, expected: LogicalType) -> Result<LogicalValue, PolicyError> {

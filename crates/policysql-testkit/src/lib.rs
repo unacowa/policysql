@@ -1851,12 +1851,237 @@ mod tests {
         }
     }
 
+    /// Catalog for an all-string fixture manifest.
+    fn string_fixture_catalog(root: &Path, snapshot: &SnapshotId) -> Catalog {
+        let raw: FixtureCatalog =
+            serde_yaml::from_str(&read_fixture(root, "catalog-manifest.yaml"))
+                .unwrap_or_else(|error| unreachable!("fixture Catalog parses: {error}"));
+        let resources = raw
+            .resources
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, resource))| {
+                let columns = resource.columns.into_iter().map(|(column, value)| {
+                    assert_eq!(value.r#type, "string", "string-only fixture Catalog");
+                    (
+                        ColumnName::new(column)
+                            .unwrap_or_else(|error| unreachable!("fixture column: {error}")),
+                        ValueDescriptor {
+                            logical_type: LogicalType::String,
+                            representation: ValueRepresentation::String,
+                            nullable: value.nullable,
+                            format: None,
+                            storage: None,
+                            constraints: None,
+                            json_schema: None,
+                        },
+                    )
+                });
+                ResourceDescriptor::new(
+                    ResourceId::new(u64::try_from(index + 1).unwrap_or(u64::MAX))
+                        .unwrap_or_else(|error| unreachable!("fixture resource ID: {error}")),
+                    ResourceName::new(name)
+                        .unwrap_or_else(|error| unreachable!("fixture resource: {error}")),
+                    columns,
+                )
+                .unwrap_or_else(|error| unreachable!("fixture descriptor: {error}"))
+            })
+            .collect::<Vec<_>>();
+        Catalog::new(snapshot.clone(), resources)
+            .unwrap_or_else(|error| unreachable!("fixture Catalog: {error}"))
+    }
+
+    /// Runs SQL with named arguments directly on SQLite and returns every physical row.
+    fn raw_rows(
+        connection: &rusqlite::Connection,
+        sql: &str,
+        arguments: &BTreeMap<String, LogicalValue>,
+    ) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut statement = connection
+            .prepare(sql)
+            .unwrap_or_else(|error| unreachable!("SQL prepares: {error}"));
+        for (name, value) in arguments {
+            let index = statement
+                .parameter_index(&format!(":{name}"))
+                .unwrap_or_else(|error| unreachable!("parameter index: {error}"))
+                .unwrap_or_else(|| unreachable!("SQL references :{name}"));
+            statement
+                .raw_bind_parameter(
+                    index,
+                    super::encode(value).unwrap_or_else(|error| unreachable!("encode: {error}")),
+                )
+                .unwrap_or_else(|error| unreachable!("bind: {error}"));
+        }
+        let width = statement.column_count();
+        let mut rows = statement.raw_query();
+        let mut output = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .unwrap_or_else(|error| unreachable!("SQL executes: {error}"))
+        {
+            output.push(
+                (0..width)
+                    .map(|index| {
+                        row.get_ref(index).map_or_else(
+                            |error| unreachable!("column: {error}"),
+                            rusqlite::types::Value::from,
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        output
+    }
+
+    /// Issue #39 regression: client string literals bind decoded values, `<>`
+    /// excludes the decoded row, and a policy `neq` check sees the decoded value.
+    #[allow(clippy::too_many_lines)]
+    fn string_literal_security_fixture() {
+        use rusqlite::types::Value as SqlValue;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/sqlite-turso-v1/security/string-literal-decoding");
+        let snapshot = SnapshotId::new("security_string_literal_decoding")
+            .unwrap_or_else(|error| unreachable!("fixture snapshot: {error}"));
+        let catalog = string_fixture_catalog(&root, &snapshot);
+        let bundle = PolicyBundle::activate(
+            &read_fixture(&root, "policy.yaml"),
+            &catalog,
+            snapshot.clone(),
+        )
+        .unwrap_or_else(|error| unreachable!("fixture policy: {error}"));
+        let compile = |sql: &str| {
+            // Same composition as the gateway: client witnesses travel with the plan.
+            let document = SqliteFrontend::default()
+                .bind_document(sql, &catalog)
+                .unwrap_or_else(|error| unreachable!("fixture binds: {error}"));
+            let mut output = bundle
+                .compile_update(&document.statement, &mutation_session())
+                .unwrap_or_else(|error| unreachable!("fixture compiles: {error}"));
+            output.plan.string_literals.client = document.string_literals;
+            compile_verified_update(
+                &output.plan,
+                &catalog,
+                fixture_parameters(&root),
+                ExecutionLimits {
+                    max_rows: 100,
+                    max_result_bytes: 10_000,
+                    timeout_ms: 1_000,
+                },
+                snapshot.clone(),
+            )
+            .unwrap_or_else(|error| unreachable!("fixture verifies: {error}"))
+        };
+        let arguments =
+            |plan: &policysql_execution::VerifiedExecutionPlan<policysql_sqlite::SqliteProfile>| {
+                plan.client_parameters()
+                    .iter()
+                    .map(|(name, value)| (name.as_str().to_owned(), value.clone()))
+                    .chain(
+                        plan.server_parameters()
+                            .iter()
+                            .map(|(name, value)| (name.as_str().to_owned(), value.clone())),
+                    )
+                    .collect::<BTreeMap<_, _>>()
+            };
+        let database = |single_tenant: bool| {
+            let connection = rusqlite::Connection::open_in_memory()
+                .unwrap_or_else(|error| unreachable!("database: {error}"));
+            connection
+                .execute_batch(&read_fixture(&root, "schema.sql"))
+                .and_then(|()| connection.execute_batch(&read_fixture(&root, "seed.sql")))
+                .unwrap_or_else(|error| unreachable!("seed: {error}"));
+            if single_tenant {
+                connection
+                    .execute_batch("DELETE FROM projects WHERE tenant_id <> 'tenant_1'")
+                    .unwrap_or_else(|error| unreachable!("single tenant: {error}"));
+            }
+            connection
+        };
+        let text = |value: &str| SqlValue::Text(value.to_owned());
+
+        // Positive and golden: decoded server literals and sealed SQL.
+        let verified = compile(&read_fixture(&root, "input.sql"));
+        assert_eq!(
+            verified.protected_sql(),
+            read_fixture(&root, "expected/protected.sql").trim()
+        );
+        let literals = verified
+            .server_parameters()
+            .iter()
+            .filter(|(name, _)| name.as_str().starts_with("__policysql_literal_"))
+            .map(|(_, value)| match value {
+                LogicalValue::String(value) => value.clone(),
+                other => unreachable!("string literal expected: {other:?}"),
+            })
+            .collect::<BTreeSet<_>>();
+        let expected_literals = ["it's", "p2", "archived"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(literals, expected_literals);
+
+        // Differential: protected on multi-tenant data vs client SQL unprotected
+        // on the single-tenant data the policy exposes.
+        let protected_database = database(false);
+        let rows = raw_rows(
+            &protected_database,
+            verified.protected_sql(),
+            &arguments(&verified),
+        );
+        let width = verified.result().len();
+        assert!(
+            rows.iter()
+                .all(|row| matches!(row.get(width), Some(SqlValue::Integer(1))))
+        );
+        let returned = rows
+            .into_iter()
+            .map(|row| row.into_iter().take(width).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let reference_database = database(true);
+        let reference = raw_rows(
+            &reference_database,
+            &read_fixture(&root, "input.sql"),
+            &BTreeMap::new(),
+        );
+        assert_eq!(returned, reference);
+        let expected: serde_json::Value =
+            serde_json::from_str(&read_fixture(&root, "expected/result.json"))
+                .unwrap_or_else(|error| unreachable!("fixture result: {error}"));
+        assert_eq!(
+            returned,
+            vec![vec![text("p1"), text("it's"), text("active")]]
+        );
+        assert_eq!(expected["affectedRows"], 1);
+        let state = "SELECT id, tenant_id, name, status FROM projects ORDER BY id";
+        assert_eq!(
+            raw_rows(&protected_database, state, &BTreeMap::new()),
+            vec![
+                vec![text("p1"), text("tenant_1"), text("it's"), text("active")],
+                // Bypass: the row excluded by `<> 'p2'` and the other tenant are untouched.
+                vec![text("p2"), text("tenant_1"), text("Keep"), text("active")],
+                vec![text("p3"), text("tenant_2"), text("Other"), text("active")],
+            ]
+        );
+
+        // Negative control: writing the decoded `archived` fails the policy `neq` check.
+        let negative = compile(&read_fixture(&root, "negative-control.sql"));
+        let rows = raw_rows(
+            &database(false),
+            negative.protected_sql(),
+            &arguments(&negative),
+        );
+        let width = negative.result().len();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get(width), Some(&SqlValue::Integer(0)));
+    }
+
     #[test]
     fn executed_fixture_matrix_writes_coverage_evidence() {
         protected_fixture_matches_reference_sqlite_result();
         expanded_read_fixtures_match_golden_sql_and_reference_sqlite();
         mutation_fixtures_match_golden_sql_and_reference_sqlite();
         verify_denied_security_fixtures();
+        string_literal_security_fixture();
 
         let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
         let fixtures = load_fixtures(&fixture_root)

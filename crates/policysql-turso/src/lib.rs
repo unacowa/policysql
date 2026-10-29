@@ -740,6 +740,7 @@ mod tests {
             operation_check: None,
             expected_affected_rows: None,
             expected_result_rows: Some(1),
+            string_literals: policysql_ir::StringLiteralWitnesses::default(),
         };
         compile_verified_select(
             &protected,
@@ -810,6 +811,7 @@ mod tests {
             operation_check: Some(BoundExpr::Literal(LogicalValue::Boolean(true))),
             expected_affected_rows: Some(1),
             expected_result_rows: Some(1),
+            string_literals: policysql_ir::StringLiteralWitnesses::default(),
         };
         compile_verified_insert(
             &protected,
@@ -885,6 +887,7 @@ mod tests {
             operation_check: None,
             expected_affected_rows: None,
             expected_result_rows: None,
+            string_literals: policysql_ir::StringLiteralWitnesses::default(),
         };
         compile_verified_select(
             &protected,

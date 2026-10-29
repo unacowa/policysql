@@ -211,6 +211,29 @@ pub struct ProtectedPlan {
     pub operation_check: Option<BoundExpr>,
     pub expected_affected_rows: Option<u64>,
     pub expected_result_rows: Option<u64>,
+    /// Provenance for string literal values, consumed by the emitted-plan verifier.
+    pub string_literals: StringLiteralWitnesses,
+}
+
+/// One client SQL string literal: the raw token and the value bound from it.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ClientStringLiteral {
+    /// The single-quoted token exactly as it appeared in client SQL, quotes included.
+    pub token: String,
+    /// The decoded value the binder placed in the bound statement.
+    pub value: String,
+}
+
+/// Evidence that lets the emitted-plan verifier tell a decoded string value
+/// apart from a raw SQL token that leaked into a bound literal.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StringLiteralWitnesses {
+    /// String literals the binder decoded from client SQL.
+    pub client: Vec<ClientStringLiteral>,
+    /// Policy-configured string literal values that themselves begin and end
+    /// with a single quote. Policy literals are never SQL tokens, so such a
+    /// value is legitimate verbatim.
+    pub policy: std::collections::BTreeSet<String>,
 }
 
 #[cfg(test)]

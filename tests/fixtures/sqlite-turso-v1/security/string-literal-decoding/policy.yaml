@@ -1,0 +1,13 @@
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        update:
+          columns: [name, status]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check:
+            and:
+              - { tenant_id: { eq: { session: tenant_id } } }
+              - { status: { neq: archived } }
+          returning: { columns: [id, name, status] }

@@ -21,5 +21,6 @@ rusqlite = "0.37"
 
 [dev-dependencies]
 policysql-catalog = { path = "../policysql-catalog" }
+policysql-gateway = { path = "../policysql-gateway" }
 policysql-parser = { path = "../policysql-parser" }
 policysql-policy = { path = "../policysql-policy" }

@@ -1,0 +1,5 @@
+operation: update
+resource: projects
+invariants: [string-literals-bound-decoded, caller-filter-and-policy-filter, post-state-check-true]
+server_literals: ["it's", p2, archived]
+negative_control: post-state-check-false

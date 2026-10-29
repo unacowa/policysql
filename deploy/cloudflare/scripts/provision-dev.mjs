@@ -213,6 +213,23 @@ const smoke = async (baseUrl, token) => {
       }],
     }),
   });
+  // Regression (#39): client SQL string literals must bind their decoded value
+  // and match seeded rows; a raw-token binding returns no rows.
+  const literalResponse = await fetch(`${baseUrl}/v1/transactions:execute`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({
+      statements: [
+        { sql: "SELECT id FROM projects WHERE id = 'project_a'", params: {}, expect: { rowCount: 1 } },
+        { sql: "SELECT id, name FROM projects WHERE name LIKE 'Alph%'", params: {}, expect: { rowCount: 1 } },
+        { sql: "SELECT id FROM projects WHERE id <> 'project_a' AND name = 'it''s'", params: {}, expect: { rowCount: 0 } },
+      ],
+    }),
+  });
+  const literal = await literalResponse.json();
+  const literalRows = (literal.results ?? []).map((result) => result.rows?.map((row) => row.id) ?? []);
+  const literalOk = literalResponse.ok
+    && JSON.stringify(literalRows) === JSON.stringify([["project_a"], ["project_a"], []]);
   const unauthenticatedResponse = await fetch(`${baseUrl}/v1/capabilities`);
   const interactiveHeaders = {
     ...headers,
@@ -300,6 +317,7 @@ const smoke = async (baseUrl, token) => {
     visibleRows[0].id !== "project_a" ||
     deniedResponse.status !== 403 ||
     bombResponse.status !== 400 ||
+    !literalOk ||
     unauthenticatedResponse.status !== 401 ||
     interactiveResponse.status !== 201
     || !interactiveStatementResponse.ok
@@ -335,6 +353,7 @@ const smoke = async (baseUrl, token) => {
       },
       deniedStatus: deniedResponse.status,
       bombStatus: bombResponse.status,
+      stringLiterals: { status: literalResponse.status, rows: literalRows, error: literal.error },
       unauthenticatedStatus: unauthenticatedResponse.status,
       interactive: {
         beginStatus: interactiveResponse.status,
@@ -368,6 +387,11 @@ const smoke = async (baseUrl, token) => {
       statements: surfaceBatches.reduce((sum, batch) => sum + batch.statements.length, 0),
       rollbackCode: rollback.error.code,
       rollbackProbeRows: rollbackVerification.results[0].rowCount,
+    },
+    stringLiterals: {
+      status: literalResponse.status,
+      rowCounts: literal.results.map((result) => result.rowCount),
+      matchedSeededRows: literalOk,
     },
     security: {
       forbiddenColumnStatus: deniedResponse.status,

@@ -5,7 +5,7 @@ use policysql_core::{ClientParameterName, LogicalType, LogicalValue, ResultName}
 use policysql_ir::{
     BoundAssignment, BoundColumn, BoundConstantSelect, BoundDelete, BoundExpr, BoundInsert,
     BoundJoin, BoundJsonCollectionSelect, BoundOrder, BoundProjection, BoundSelect, BoundStatement,
-    BoundUpdate, ColumnUsage, JoinKind, ScalarFunction, SortDirection,
+    BoundUpdate, ClientStringLiteral, ColumnUsage, JoinKind, ScalarFunction, SortDirection,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -50,6 +50,15 @@ pub struct BoundDocument {
     pub statement: BoundStatement,
     pub source_span: SourceSpan,
     pub parameters: BTreeSet<ClientParameterName>,
+    /// Every client string literal the binder decoded, with its raw token.
+    pub string_literals: Vec<ClientStringLiteral>,
+}
+
+/// Parameters and string literals collected while binding one statement.
+#[derive(Clone, Debug, Default)]
+struct BindTrace {
+    parameters: BTreeSet<ClientParameterName>,
+    string_literals: Vec<ClientStringLiteral>,
 }
 
 impl SqliteFrontend {
@@ -86,17 +95,17 @@ impl SqliteFrontend {
         let Cmd::Stmt(statement) = &parsed[0] else {
             return Err(BindError::Unsupported("EXPLAIN"));
         };
-        let (statement, parameters) = match statement {
+        let (statement, trace) = match statement {
             Stmt::Select(select) => {
                 if has_json_table_call(select) {
-                    let (select, parameters) = self.bind_json_collection_select(select, catalog)?;
-                    (BoundStatement::JsonCollectionSelect(select), parameters)
+                    let (select, trace) = self.bind_json_collection_select(select, catalog)?;
+                    (BoundStatement::JsonCollectionSelect(select), trace)
                 } else if matches!(&select.body.select, OneSelect::Select { from: None, .. }) {
                     let select = self.bind_constant_select(select)?;
-                    (BoundStatement::ConstantSelect(select), BTreeSet::new())
+                    (BoundStatement::ConstantSelect(select), BindTrace::default())
                 } else {
-                    let (select, parameters) = self.bind_select(select, catalog)?;
-                    (BoundStatement::Select(Box::new(select)), parameters)
+                    let (select, trace) = self.bind_select(select, catalog)?;
+                    (BoundStatement::Select(Box::new(select)), trace)
                 }
             }
             Stmt::Insert {
@@ -143,7 +152,8 @@ impl SqliteFrontend {
         Ok(BoundDocument {
             statement,
             source_span: SourceSpan { start, end },
-            parameters,
+            parameters: trace.parameters,
+            string_literals: trace.string_literals,
         })
     }
 
@@ -202,7 +212,7 @@ impl SqliteFrontend {
         &self,
         select: &Select,
         catalog: &Catalog,
-    ) -> Result<(BoundJsonCollectionSelect, BTreeSet<ClientParameterName>), BindError> {
+    ) -> Result<(BoundJsonCollectionSelect, BindTrace), BindError> {
         if select.with.is_some()
             || !select.body.compounds.is_empty()
             || !select.order_by.is_empty()
@@ -255,7 +265,7 @@ impl SqliteFrontend {
             .ok_or(BindError::Unsupported("JSON table alias"))?;
         let mut state = BindState {
             scopes: vec![root],
-            parameters: BTreeSet::new(),
+            trace: BindTrace::default(),
             limits: self.limits,
             catalog,
         };
@@ -326,7 +336,7 @@ impl SqliteFrontend {
                 output_name,
                 predicate,
             },
-            state.parameters,
+            state.trace,
         ))
     }
 
@@ -341,7 +351,7 @@ impl SqliteFrontend {
         order_by: &[turso_parser::ast::SortedColumn],
         limit: Option<&turso_parser::ast::Limit>,
         catalog: &Catalog,
-    ) -> Result<(BoundStatement, BTreeSet<ClientParameterName>), BindError> {
+    ) -> Result<(BoundStatement, BindTrace), BindError> {
         if with.is_some()
             || table.db_name.is_some()
             || indexed.is_some()
@@ -356,7 +366,7 @@ impl SqliteFrontend {
         let root = bind_source(&SelectTable::Table(table.clone(), None, None), catalog)?;
         let mut state = BindState {
             scopes: vec![root],
-            parameters: BTreeSet::new(),
+            trace: BindTrace::default(),
             limits: self.limits,
             catalog,
         };
@@ -370,7 +380,7 @@ impl SqliteFrontend {
                 predicate,
                 returning,
             }),
-            state.parameters,
+            state.trace,
         ))
     }
 
@@ -378,7 +388,7 @@ impl SqliteFrontend {
         &self,
         update: &turso_parser::ast::Update,
         catalog: &Catalog,
-    ) -> Result<(BoundStatement, BTreeSet<ClientParameterName>), BindError> {
+    ) -> Result<(BoundStatement, BindTrace), BindError> {
         if update.with.is_some()
             || update.or_conflict.is_some()
             || update.tbl_name.db_name.is_some()
@@ -399,7 +409,7 @@ impl SqliteFrontend {
         )?;
         let mut state = BindState {
             scopes: vec![root],
-            parameters: BTreeSet::new(),
+            trace: BindTrace::default(),
             limits: self.limits,
             catalog,
         };
@@ -448,7 +458,7 @@ impl SqliteFrontend {
                 predicate,
                 returning,
             }),
-            state.parameters,
+            state.trace,
         ))
     }
 
@@ -462,7 +472,7 @@ impl SqliteFrontend {
         body: &InsertBody,
         returning: &[ResultColumn],
         catalog: &Catalog,
-    ) -> Result<(BoundStatement, BTreeSet<ClientParameterName>), BindError> {
+    ) -> Result<(BoundStatement, BindTrace), BindError> {
         if with.is_some() || or_conflict.is_some() || table.db_name.is_some() {
             return Err(BindError::Unsupported("INSERT option"));
         }
@@ -502,7 +512,7 @@ impl SqliteFrontend {
         let root = bind_source(&SelectTable::Table(table.clone(), None, None), catalog)?;
         let mut state = BindState {
             scopes: vec![root],
-            parameters: BTreeSet::new(),
+            trace: BindTrace::default(),
             limits: self.limits,
             catalog,
         };
@@ -542,7 +552,7 @@ impl SqliteFrontend {
                 rows,
                 returning,
             }),
-            state.parameters,
+            state.trace,
         ))
     }
 
@@ -551,7 +561,7 @@ impl SqliteFrontend {
         &self,
         select: &Select,
         catalog: &Catalog,
-    ) -> Result<(BoundSelect, BTreeSet<ClientParameterName>), BindError> {
+    ) -> Result<(BoundSelect, BindTrace), BindError> {
         if !select.body.compounds.is_empty() {
             return Err(BindError::Unsupported("compound SELECT"));
         }
@@ -576,7 +586,7 @@ impl SqliteFrontend {
         if from.joins.len() > self.limits.max_joins {
             return Err(BindError::JoinLimit);
         }
-        let (root, inherited_predicate, inherited_parameters) =
+        let (root, inherited_predicate, inherited_trace) =
             self.bind_root_source(select, from, catalog)?;
         let resource = root.resource;
         let alias = root.alias.clone();
@@ -586,7 +596,7 @@ impl SqliteFrontend {
 
         let mut state = BindState {
             scopes: vec![root],
-            parameters: inherited_parameters,
+            trace: inherited_trace,
             limits: self.limits,
             catalog,
         };
@@ -674,7 +684,7 @@ impl SqliteFrontend {
             .and_then(|limit| limit.offset.as_ref())
             .map(|offset| state.bind_limit(offset))
             .transpose()?;
-        let parameters = std::mem::take(&mut state.parameters);
+        let trace = std::mem::take(&mut state.trace);
         drop(state);
 
         Ok((
@@ -690,7 +700,7 @@ impl SqliteFrontend {
                 limit,
                 offset,
             },
-            parameters,
+            trace,
         ))
     }
 
@@ -699,14 +709,7 @@ impl SqliteFrontend {
         select: &Select,
         from: &turso_parser::ast::FromClause,
         catalog: &'a Catalog,
-    ) -> Result<
-        (
-            SourceScope<'a>,
-            Option<BoundExpr>,
-            BTreeSet<ClientParameterName>,
-        ),
-        BindError,
-    > {
+    ) -> Result<(SourceScope<'a>, Option<BoundExpr>, BindTrace), BindError> {
         match from.select.as_ref() {
             SelectTable::Table(name, alias, indexed)
                 if select.with.as_ref().is_some_and(|with| {
@@ -734,9 +737,11 @@ impl SqliteFrontend {
                 let qualifier = explicit_alias(alias.as_ref()).unwrap_or(cte.tbl_name.as_str());
                 self.bind_derived_source(&cte.select, qualifier, catalog)
             }
-            SelectTable::Table(..) if select.with.is_none() => {
-                Ok((bind_source(&from.select, catalog)?, None, BTreeSet::new()))
-            }
+            SelectTable::Table(..) if select.with.is_none() => Ok((
+                bind_source(&from.select, catalog)?,
+                None,
+                BindTrace::default(),
+            )),
             SelectTable::Select(inner, alias) if select.with.is_none() => {
                 let alias = explicit_alias(alias.as_ref())
                     .ok_or(BindError::Unsupported("derived table without alias"))?;
@@ -751,15 +756,8 @@ impl SqliteFrontend {
         inner: &Select,
         alias: &str,
         catalog: &'a Catalog,
-    ) -> Result<
-        (
-            SourceScope<'a>,
-            Option<BoundExpr>,
-            BTreeSet<ClientParameterName>,
-        ),
-        BindError,
-    > {
-        let (inner, parameters) = self.bind_select(inner, catalog)?;
+    ) -> Result<(SourceScope<'a>, Option<BoundExpr>, BindTrace), BindError> {
+        let (inner, trace) = self.bind_select(inner, catalog)?;
         if !inner.joins.is_empty()
             || !inner.order_by.is_empty()
             || inner.limit.is_some()
@@ -796,7 +794,7 @@ impl SqliteFrontend {
                 columns,
             },
             inner.predicate,
-            parameters,
+            trace,
         ))
     }
 }
@@ -898,7 +896,7 @@ fn bind_joins<'a>(
 
 struct BindState<'a> {
     scopes: Vec<SourceScope<'a>>,
-    parameters: BTreeSet<ClientParameterName>,
+    trace: BindTrace,
     limits: BindingLimits,
     catalog: &'a Catalog,
 }
@@ -1234,7 +1232,7 @@ impl BindState<'_> {
         let alias = source.alias.clone();
         let mut nested = BindState {
             scopes: self.scopes.clone(),
-            parameters: self.parameters.clone(),
+            trace: self.trace.clone(),
             limits: self.limits,
             catalog: self.catalog,
         };
@@ -1270,7 +1268,7 @@ impl BindState<'_> {
             .as_deref()
             .map(|expression| nested.bind_boolean(expression, ColumnUsage::Filter, depth + 1))
             .transpose()?;
-        self.parameters = nested.parameters;
+        self.trace = nested.trace;
         Ok(BoundExpr::Exists(Box::new(BoundSelect {
             resource,
             alias,
@@ -1343,8 +1341,8 @@ impl BindState<'_> {
                     _ => BindError::InvalidParameterName,
                 })?;
                 let logical_type = expected.ok_or(BindError::UnprovableParameterType)?;
-                self.parameters.insert(name.clone());
-                if self.parameters.len() > self.limits.max_parameters {
+                self.trace.parameters.insert(name.clone());
+                if self.trace.parameters.len() > self.limits.max_parameters {
                     return Err(BindError::ParameterLimit);
                 }
                 Ok((
@@ -1352,7 +1350,18 @@ impl BindState<'_> {
                     logical_type,
                 ))
             }
-            Expr::Literal(literal) => bind_literal(literal, expected),
+            Expr::Literal(literal) => {
+                let (bound, logical_type) = bind_literal(literal, expected)?;
+                if let (Literal::String(token), BoundExpr::Literal(LogicalValue::String(value))) =
+                    (literal, &bound)
+                {
+                    self.trace.string_literals.push(ClientStringLiteral {
+                        token: token.clone(),
+                        value: value.clone(),
+                    });
+                }
+                Ok((bound, logical_type))
+            }
             Expr::FunctionCallStar { name, filter_over }
                 if name.as_str().eq_ignore_ascii_case("count")
                     && filter_over.filter_clause.is_none()
@@ -1617,7 +1626,10 @@ fn bind_literal(
     expected: Option<LogicalType>,
 ) -> Result<(BoundExpr, LogicalType), BindError> {
     let (value, logical_type) = match literal {
-        Literal::String(value) => (LogicalValue::String(value.clone()), LogicalType::String),
+        Literal::String(token) => (
+            LogicalValue::String(decode_string_literal(token)?),
+            LogicalType::String,
+        ),
         Literal::Numeric(value) if value.parse::<i64>().is_ok() => (
             LogicalValue::Int64(value.parse().map_err(|_| BindError::InvalidLiteral)?),
             LogicalType::Int64,
@@ -1635,6 +1647,32 @@ fn bind_literal(
         return Err(BindError::IncompatibleTypes);
     }
     Ok((BoundExpr::Literal(value), logical_type))
+}
+
+/// Strictly decodes a `SQLite` single-quoted string token into its value.
+///
+/// `turso_parser` keeps the raw token, quotes and `''` escapes included, in
+/// `Literal::String`. Only `'...'` with every inner quote doubled is accepted;
+/// anything else (double quotes, missing or stray quotes) is rejected rather
+/// than repaired.
+///
+/// A NUL character is rejected to match `SQLite`, whose tokenizer stops at NUL
+/// and reports the literal as an unrecognized token. `SQLite` keeps every
+/// other character, including the remaining control characters, verbatim.
+fn decode_string_literal(token: &str) -> Result<String, BindError> {
+    let inner = token
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .ok_or(BindError::InvalidLiteral)?;
+    let mut value = String::with_capacity(inner.len());
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        if character == '\0' || (character == '\'' && characters.next() != Some('\'')) {
+            return Err(BindError::InvalidLiteral);
+        }
+        value.push(character);
+    }
+    Ok(value)
 }
 
 fn canonical(name: &str) -> String {
@@ -2330,5 +2368,121 @@ mod tests {
             &catalog(),
         );
         assert_eq!(error, Err(BindError::InvalidResultName));
+    }
+
+    #[test]
+    fn decodes_only_strict_single_quoted_string_tokens() {
+        for (token, expected) in [
+            ("'seed'", "seed"),
+            ("'it''s'", "it's"),
+            ("''''", "'"),
+            ("''", ""),
+            ("'''x'''", "'x'"),
+            ("'se%'", "se%"),
+            ("'\"double\"'", "\"double\""),
+            ("'日本語'", "日本語"),
+            // SQLite keeps every non-NUL control character verbatim.
+            (
+                "'a\u{1}\t\n\r\u{1f}\u{7f}\u{85}b'",
+                "a\u{1}\t\n\r\u{1f}\u{7f}\u{85}b",
+            ),
+        ] {
+            assert_eq!(
+                super::decode_string_literal(token).as_deref(),
+                Ok(expected),
+                "{token}"
+            );
+        }
+        for token in [
+            "seed", "\"seed\"", "'seed", "seed'", "'", "'''", "'a'b'", "'a''", "`seed`", "",
+            // SQLite stops at NUL and reports an unrecognized token.
+            "'se\0ed'", "'seed\0'", "'\0'",
+        ] {
+            assert_eq!(
+                super::decode_string_literal(token),
+                Err(BindError::InvalidLiteral),
+                "{token}"
+            );
+        }
+    }
+
+    #[test]
+    fn binds_decoded_string_literals_and_records_their_tokens() {
+        let document = SqliteFrontend::default()
+            .bind_document(
+                "SELECT id FROM projects WHERE id = 'it''s' AND name LIKE 'se%' AND status IN ('''', '')",
+                &catalog(),
+            )
+            .unwrap_or_else(|error| unreachable!("string literals bind: {error}"));
+        let tokens = document
+            .string_literals
+            .iter()
+            .map(|literal| (literal.token.as_str(), literal.value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tokens,
+            vec![
+                ("'it''s'", "it's"),
+                ("'se%'", "se%"),
+                ("''''", "'"),
+                ("''", "")
+            ]
+        );
+        let BoundStatement::Select(select) = document.statement else {
+            unreachable!("SELECT binds as SELECT");
+        };
+        let Some(BoundExpr::And(left, _)) = select.predicate else {
+            unreachable!("conjunction binds");
+        };
+        let BoundExpr::And(equal, _) = *left else {
+            unreachable!("nested conjunction binds");
+        };
+        assert!(matches!(
+            *equal,
+            BoundExpr::Equal(_, ref right)
+                if **right == BoundExpr::Literal(policysql_core::LogicalValue::String("it's".to_owned()))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_string_quoting_and_blob_literals() {
+        let frontend = SqliteFrontend::default();
+        for (sql, expected) in [
+            // A double-quoted token is an identifier in SQLite, never a string literal.
+            (
+                "SELECT id FROM projects WHERE id = \"seed\"",
+                BindError::UnknownColumn,
+            ),
+            (
+                "SELECT id FROM projects WHERE id = 'se\0ed'",
+                BindError::InvalidLiteral,
+            ),
+            (
+                "UPDATE projects SET name = 'a\0' WHERE id = :id",
+                BindError::InvalidLiteral,
+            ),
+            (
+                "SELECT id FROM projects WHERE id = 'seed",
+                BindError::InvalidSql,
+            ),
+            (
+                "SELECT id FROM projects WHERE id = 'seed''",
+                BindError::InvalidSql,
+            ),
+            (
+                "SELECT id FROM projects WHERE id = X'00'",
+                BindError::Unsupported("literal"),
+            ),
+            (
+                "UPDATE projects SET name = \"renamed\" WHERE id = :id",
+                BindError::UnknownColumn,
+            ),
+            (
+                "INSERT INTO projects (id) VALUES (X'00')",
+                BindError::Unsupported("literal"),
+            ),
+        ] {
+            assert_eq!(frontend.bind(sql, &catalog()), Err(expected), "{sql}");
+        }
     }
 }
