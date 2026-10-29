@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { testBinding, testProvider } from "./helpers/database.mjs";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
-import { ownerResponse } from "../src/responses.ts";
+import { statusFor } from "../src/http/status.ts";
 
 // Unit tests of the owner core through the port's owner-side facilities (ADR 0022): an
 // in-memory store, a recorded timer, and background tasks. No platform object is involved.
@@ -23,9 +23,13 @@ const makeStorage = () => {
   return facilities;
 };
 
-// The owner's typed reply, as the HTTP response a route returns.
+// The owner's reply, rendered as the HTTP adapter would: 201 for a begin, 200 for any other
+// value, and the error's status from the single table.
+const ownerResponse = (reply, okStatus = 200, requestId = "req") => reply.ok
+  ? Response.json(reply.value, { status: okStatus })
+  : Response.json({ error: { ...reply.error, requestId } }, { status: statusFor(reply.error.code) });
 const callbackQuery = async (owner, token, command, requestId = "callback_req") =>
-  ownerResponse(await owner.callbackQuery({ authorization: `Bearer ${token}`, command }, requestId));
+  ownerResponse(await owner.callbackQuery({ capability: token, command }, requestId), 200, requestId);
 
 const transaction = () => ({
   open: true,
@@ -117,7 +121,7 @@ const call = async (owner, action, body) => {
   const reply = action === "begin" ? await owner.begin(input, "req")
     : action === "atomic" ? await owner.atomic(input, "req")
       : await owner.command(action, input, "req");
-  return ownerResponse(reply);
+  return ownerResponse(reply, action === "begin" ? 201 : 200);
 };
 
 const setup = async () => {

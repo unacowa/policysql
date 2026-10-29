@@ -11,11 +11,15 @@
 // object at a time, and a restarted instance keeps its storage but none of its memory.
 //
 // Between the Worker and the object, commands travel as the internal HTTP messages they
-// always used (`https://owner/<command>`, JSON body, request id header). Keeping that wire
-// form lets a Worker and an object of adjacent versions talk during a rollout, and needs no
-// `cloudflare:workers` import (RPC stubs), so the adapter also runs in the Node test harness.
-import { HttpError } from "../errors.ts";
-import { ownerResponse } from "../responses.ts";
+// always used (`https://owner/<command>`, JSON body, request id header, and the callback
+// capability as `authorization: Bearer <capability>`). A reply is a 2xx response whose body
+// is the value, or a non-2xx response whose body is `{ error: { code, message, path } }`;
+// the object sends 200 and 500 (ADR 0023). That status is this wire's marker, not the public
+// HTTP status, which only the HTTP adapter decides. A Worker of this version reads an older
+// object's replies unchanged; an older Worker forwards this object's errors as 500, which no
+// client treats as a definite outcome. The wire needs no `cloudflare:workers` import (RPC
+// stubs), so the adapter also runs in the Node test harness.
+import { internalError } from "../errors.ts";
 import { TransactionOwnerCore } from "../transaction-owner.ts";
 import type { TransactionOwnerDependencies } from "../transaction-owner.ts";
 import type {
@@ -28,7 +32,7 @@ const COMMAND_PATHS: Readonly<Record<OwnerCommandKind, string>> = Object.freeze(
   statement: "/statement", commit: "/commit", rollback: "/rollback",
 });
 
-const malformedReply = () => new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+const BEARER = /^Bearer (.*)$/su;
 
 // Worker side: one internal message to the object, its JSON reply back as data.
 const send = async (stub: DurableObjectStub, path: string, body: unknown, headers: Record<string, string>): Promise<OwnerReply> => {
@@ -37,10 +41,18 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
-  let parsed: unknown;
-  try { parsed = await response.json(); } catch { throw malformedReply(); }
-  return { status: response.status, body: parsed };
+  let parsed: any;
+  try { parsed = await response.json(); } catch { throw internalError(); }
+  if (response.ok) return { ok: true, value: parsed };
+  const error = parsed?.error;
+  return { ok: false, error: { code: error?.code, message: error?.message, path: error?.path ?? null } };
 };
+
+// Object side: a reply as the wire response.
+const replyResponse = (reply: OwnerReply) => new Response(
+  JSON.stringify(reply.ok ? reply.value : { error: (reply as { error: unknown }).error }),
+  { status: reply.ok ? 200 : 500, headers: { "content-type": "application/json; charset=utf-8" } },
+);
 
 /** Routing over a Durable Object namespace: one object per owner name. */
 export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace): TransactionOwnerPort => {
@@ -57,8 +69,10 @@ export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace
           if (!Object.hasOwn(COMMAND_PATHS, kind)) return Promise.reject(new TypeError("unknown owner command"));
           return send(stub, COMMAND_PATHS[kind], input, { [REQUEST_ID_HEADER]: requestId });
         },
-        callbackQuery: ({ authorization, command }, requestId) =>
-          send(stub, "/validation-query", command, { authorization, [REQUEST_ID_HEADER]: requestId }),
+        callbackQuery: ({ capability, command }, requestId) => send(stub, "/validation-query", command, {
+          authorization: typeof capability === "string" && capability !== "" ? `Bearer ${capability}` : "",
+          [REQUEST_ID_HEADER]: requestId,
+        }),
       };
     },
   };
@@ -85,13 +99,14 @@ const serve = async (core: TransactionOwnerCore, request: Request): Promise<Resp
   if (path === "/begin") reply = await core.begin(body, requestId);
   else if (path === "/atomic") reply = await core.atomic(body, requestId);
   else if (path === "/validation-query") {
-    reply = await core.callbackQuery({ authorization: request.headers.get("authorization") ?? "", command: body }, requestId);
+    const capability = request.headers.get("authorization")?.match(BEARER)?.[1] ?? "";
+    reply = await core.callbackQuery({ capability, command: body }, requestId);
   } else {
     const kind = (Object.keys(COMMAND_PATHS) as OwnerCommandKind[]).find((name) => COMMAND_PATHS[name] === path);
     // An unknown path reaches the core as an unknown kind, which it rejects as invalid.
     reply = await core.command(kind ?? (path as OwnerCommandKind), body, requestId);
   }
-  return ownerResponse(reply);
+  return replyResponse(reply);
 };
 
 /**

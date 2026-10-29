@@ -196,7 +196,7 @@ test("without a cost catalog, cost observation is logged as unknown and opens no
   const compiled = { statements: [{ operation: "select", costExplainSql: "EXPLAIN QUERY PLAN SELECT 1", clientParameters: {}, serverParameters: {}, explain: { resource: 1 } }] };
   await observeCostEnvelope(compiled, validateConfig({ environment: "test" }).costCatalog, "req", () => { connected++; }, 1_024);
   assert.equal(connected, 0);
-  assert.deepEqual(logs, [{ event: "cost_observation_failed", requestId: "req", code: "POLICYSQL_COST_UNKNOWN", status: 403 }]);
+  assert.deepEqual(logs, [{ event: "cost_observation_failed", requestId: "req", code: "POLICYSQL_COST_UNKNOWN" }]);
 });
 
 const readJsonc = (relative) => JSON.parse(readFileSync(new URL(relative, import.meta.url), "utf8")

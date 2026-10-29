@@ -1,0 +1,109 @@
+// The transport-independent checks on an operation's body text (ADR 0019). Every transport
+// passes the body as text, and these run in the engine, once, for all of them, so parser
+// differentials are handled in one place:
+//
+// - well-formed Unicode: a string with a lone surrogate is rejected (it has no UTF-8 form);
+// - the total body limit, counted in UTF-8 bytes;
+// - duplicate JSON object keys, including escaped equivalents, then strict JSON.
+//
+// Decoding bytes is the transport's job. The HTTP adapter (src/http/body.ts) decodes the
+// request stream with a fatal UTF-8 decoder, so malformed bytes never become replacement
+// characters, and bounds the stream with the same limit before buffering it.
+import { EngineError } from "./errors.ts";
+
+export const MAX_BODY_BYTES = 1_048_576;
+
+/**
+ * An operation's body: the text itself, or a reader the engine calls when the operation
+ * reaches its body. A reader lets a transport stream the body only after the session and
+ * the database have been checked; whatever it throws is the operation's error.
+ */
+export type BodyText = string | (() => Promise<string>);
+
+export const invalidBody = (message: string) => new EngineError("POLICYSQL_INVALID_REQUEST", message);
+export const bodyTooLarge = () => new EngineError("POLICYSQL_REQUEST_TOO_LARGE", "Request body exceeds the size limit.");
+
+// With the `u` flag a surrogate pair is one code point outside this class, so only a lone
+// surrogate matches.
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
+
+const rejectDuplicateKeys = (text: string) => {
+  let offset = 0;
+  const whitespace = () => {
+    while (/\s/.test(text[offset] ?? "")) offset += 1;
+  };
+  const string = () => {
+    const start = offset;
+    if (text[offset] !== '"') throw new Error("string expected");
+    offset += 1;
+    while (offset < text.length) {
+      if (text[offset] === "\\") offset += 2;
+      else if (text[offset] === '"') {
+        offset += 1;
+        return JSON.parse(text.slice(start, offset));
+      } else offset += 1;
+    }
+    throw new Error("unterminated string");
+  };
+  const value = (depth = 0) => {
+    if (depth > 64) throw new Error("too deep");
+    whitespace();
+    if (text[offset] === "{") {
+      offset += 1;
+      whitespace();
+      const keys = new Set();
+      if (text[offset] === "}") { offset += 1; return; }
+      while (true) {
+        whitespace();
+        const key = string();
+        if (keys.has(key)) throw new Error("duplicate key");
+        keys.add(key);
+        whitespace();
+        if (text[offset] !== ":") throw new Error("colon expected");
+        offset += 1;
+        value(depth + 1);
+        whitespace();
+        if (text[offset] === "}") { offset += 1; return; }
+        if (text[offset] !== ",") throw new Error("comma expected");
+        offset += 1;
+      }
+    }
+    if (text[offset] === "[") {
+      offset += 1;
+      whitespace();
+      if (text[offset] === "]") { offset += 1; return; }
+      while (true) {
+        value(depth + 1);
+        whitespace();
+        if (text[offset] === "]") { offset += 1; return; }
+        if (text[offset] !== ",") throw new Error("comma expected");
+        offset += 1;
+      }
+    }
+    if (text[offset] === '"') { string(); return; }
+    const start = offset;
+    while (offset < text.length && !/[\s,}\]]/.test(text[offset])) offset += 1;
+    JSON.parse(text.slice(start, offset));
+  };
+  value();
+  whitespace();
+  if (offset !== text.length) throw new Error("trailing content");
+};
+
+/** Reads (if deferred) and checks a body. Returns the parsed value and the exact text. */
+export const parseBodyText = async (bodyText: BodyText): Promise<{ value: any; text: string }> => {
+  const text = typeof bodyText === "function" ? await bodyText() : bodyText;
+  if (typeof text !== "string") throw invalidBody("Request body is required.");
+  if (LONE_SURROGATE.test(text)) throw invalidBody("Request body is not valid UTF-8.");
+  // Every UTF-16 unit is at least one UTF-8 byte, so a longer string is over the limit
+  // without encoding it.
+  if (text.length > MAX_BODY_BYTES || new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
+    throw bodyTooLarge();
+  }
+  try {
+    rejectDuplicateKeys(text);
+    return { value: JSON.parse(text), text };
+  } catch {
+    throw invalidBody("Request body is not valid JSON.");
+  }
+};

@@ -56,7 +56,7 @@ test("private binary adapters share strict vectors and preserve physical value i
   assert.throws(() => driverArgs({ clientParameters: { x: "AA==" }, serverParameters: { x: "AA==" } }), { code: "POLICYSQL_INTERNAL" });
   assert.throws(() => decodeBlob(Buffer.alloc(MAX_BYTES_PER_VALUE + 1).toString("base64")), BinaryLimitError);
   assert.throws(() => encodeBlob(new Uint8Array(MAX_BYTES_PER_VALUE + 1)), BinaryLimitError);
-  assert.throws(() => rawDriverValue(new Uint8Array(MAX_BYTES_PER_VALUE + 1)), { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" });
+  assert.throws(() => rawDriverValue(new Uint8Array(MAX_BYTES_PER_VALUE + 1)), { code: "POLICYSQL_LIMIT_EXCEEDED" });
   for (const row of [[], new Array(1), {}, { unrelated: null }, [null, null]]) {
     assert.throws(() => rowValues(["state"], row), { code: "POLICYSQL_SCHEMA_MISMATCH" });
   }
@@ -80,8 +80,8 @@ test("binary codec honors the injected runtime limit instead of a host constant"
     assert.deepEqual(Buffer.from(decodeWithLimit(fits.toString("base64"), lowered)), fits);
     assert.throws(() => decodeWithLimit(over.toString("base64"), lowered), BinaryLimitError);
     assert.throws(() => encodeWithLimit(over, lowered), BinaryLimitError);
-    assert.throws(() => rawWithLimit(new Uint8Array(over), lowered), { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" });
-    assert.throws(() => driverArgsWithLimit({ clientParameters: { v: { type: "blob", base64: over.toString("base64") } }, serverParameters: {} }, lowered), { status: 500, code: "POLICYSQL_INTERNAL" });
+    assert.throws(() => rawWithLimit(new Uint8Array(over), lowered), { code: "POLICYSQL_LIMIT_EXCEEDED" });
+    assert.throws(() => driverArgsWithLimit({ clientParameters: { v: { type: "blob", base64: over.toString("base64") } }, serverParameters: {} }, lowered), { code: "POLICYSQL_INTERNAL" });
     // Malformed input stays malformed (TypeError → 400/503/422) at any limit.
     assert.throws(() => decodeWithLimit("A===", lowered), TypeError);
   }

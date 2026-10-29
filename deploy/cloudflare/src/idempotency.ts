@@ -1,4 +1,4 @@
-import { HttpError } from "./errors.ts";
+import { EngineError } from "./errors.ts";
 
 export const stableJson = (value) => {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -14,14 +14,16 @@ export const sha256 = async (value) => {
   return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 };
 
-export const requestIdempotency = async (request, auth, body, endpoint, databaseBinding) => {
-  if (!databaseBinding) throw new HttpError(500, "POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
-  const key = request.headers.get("idempotency-key");
-  if (key === null) return null;
-  if (key.includes(",") || !/^[A-Za-z0-9._:-]{16,128}$/.test(key)) {
-    throw new HttpError(
-      400,
-      "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED",
+/**
+ * The replay identity of a request with an optional idempotency key (`undefined` when the
+ * caller sent none). A transport that can repeat a field (HTTP joins repeated headers with a
+ * comma) passes the joined value, which never matches the key syntax.
+ */
+export const requestIdempotency = async (key: unknown, auth, body, endpoint, databaseBinding) => {
+  if (!databaseBinding) throw new EngineError("POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
+  if (key === undefined) return null;
+  if (typeof key !== "string" || !/^[A-Za-z0-9._:-]{16,128}$/.test(key)) {
+    throw new EngineError("POLICYSQL_IDEMPOTENCY_KEY_REQUIRED",
       "Idempotency-Key must contain 16-128 letters, digits, dots, underscores, colons, or hyphens when provided.",
     );
   }
@@ -40,11 +42,11 @@ export const requestIdempotency = async (request, auth, body, endpoint, database
   };
 };
 
-export const mutationIdempotency = (request, auth, body, databaseBinding) =>
-  requestIdempotency(request, auth, body, "execute", databaseBinding);
+export const mutationIdempotency = (key: unknown, auth, body, databaseBinding) =>
+  requestIdempotency(key, auth, body, "execute", databaseBinding);
 
 export const authFingerprint = (auth, databaseBinding) => {
-  if (!databaseBinding) throw new HttpError(500, "POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
+  if (!databaseBinding) throw new EngineError("POLICYSQL_DATABASE_REQUIRED", "A database must be supplied by the application wrapper.");
   return sha256(stableJson({
     principal: auth.principal,
     subject: auth.subject,

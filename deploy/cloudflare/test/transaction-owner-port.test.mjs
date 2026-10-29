@@ -57,8 +57,8 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       owner.command("statement", input({ sequence: 1, ...insert("ordered") }), "req_1"),
       owner.command("commit", input({ sequence: 2 }), "req_2"),
     ]);
-    assert.deepEqual(replies.map((reply) => reply.status), [200, 200], JSON.stringify(replies));
-    assert.equal(replies[1].body.status, "committed");
+    assert.deepEqual(replies.map((reply) => reply.ok), [true, true], JSON.stringify(replies));
+    assert.equal(replies[1].value.status, "committed");
     assert.ok(h.rows("a").some((row) => row.id === "ordered"));
   });
 
@@ -215,15 +215,20 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
     get: (id) => ({
       async fetch(url, init) {
         sent.push({ name: id.name, url, method: init.method, headers: init.headers, body: JSON.parse(init.body) });
-        return Response.json({ ok: true }, { status: 201 });
+        if (new URL(url).pathname === "/rollback") {
+          return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null, requestId: "old" } }, { status: 409 });
+        }
+        return Response.json({ started: true }, { status: 201 });
       },
     }),
   };
   const owner = durableObjectTransactionOwners(namespace).route(`tx_${"a".repeat(32)}`);
-  assert.deepEqual(await owner.begin({ transactionId: "x" }, "req_1"), { status: 201, body: { ok: true } });
+  // A 2xx reply is the value; any other is the error, whatever its wire status (ADR 0023).
+  assert.deepEqual(await owner.begin({ transactionId: "x" }, "req_1"), { ok: true, value: { started: true } });
   await owner.command("statement", { transactionId: "x" }, "req_2");
-  await owner.command("rollback", { transactionId: "x" }, "req_3");
-  await owner.callbackQuery({ authorization: "Bearer cap", command: { sequence: 1 } }, "req_4");
+  assert.deepEqual(await owner.command("rollback", { transactionId: "x" }, "req_3"),
+    { ok: false, error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null } });
+  await owner.callbackQuery({ capability: "cap", command: { sequence: 1 } }, "req_4");
   assert.deepEqual(sent.map(({ url }) => new URL(url).pathname), ["/begin", "/statement", "/rollback", "/validation-query"]);
   assert.ok(sent.every(({ name, method }) => name === `tx_${"a".repeat(32)}` && method === "POST"));
   assert.equal(sent[3].headers.authorization, "Bearer cap");
@@ -266,17 +271,16 @@ test("durable-objects: the object class decodes the internal messages and fails 
   }));
   for (const [path, body] of [["/begin", "{"], ["/atomic", "null"], ["/statement", "[]"], ["/unknown", "{}"]]) {
     const response = await send(path, body);
-    assert.equal(response.status, 400, path);
-    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.status, 500, `${path}: the wire marks every error reply the same way`);
     const reply = await response.json();
-    assert.equal(reply.error.code, "POLICYSQL_INVALID_REQUEST", path);
-    assert.equal(reply.error.requestId, "req_obj");
+    assert.deepEqual(reply, { error: { code: "POLICYSQL_INVALID_REQUEST", message: "The request is invalid.", path: null } }, path);
   }
   const begun = await send("/begin", JSON.stringify({
     transactionId: `tx_${"a".repeat(32)}`, authFingerprint: "b".repeat(64), startFingerprint: "c".repeat(64), mode: "read",
     auth: {}, databaseBinding: testBinding(), snapshot: "test-snapshot",
   }));
-  assert.equal(begun.status, 201);
+  assert.equal(begun.status, 200);
+  assert.equal((await begun.json()).transactionId, `tx_${"a".repeat(32)}`);
   assert.equal(alarm, values.get("transaction").expiresAtMs, "the core's timer is the object's alarm");
   await object.alarm();
   assert.equal(values.get("transaction").status, "expired");

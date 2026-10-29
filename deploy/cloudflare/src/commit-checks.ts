@@ -1,12 +1,10 @@
-import { HttpError } from "./errors.ts";
+import { EngineError } from "./errors.ts";
 import { sha256 } from "./idempotency.ts";
-import { fetchNoFollow } from "./redirects.ts";
+import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import type { ValidatedConfig } from "./engine-config.ts";
 
-const rejected = () => new HttpError(
-  409,
-  "POLICYSQL_COMMIT_CHECK_REJECTED",
+const rejected = () => new EngineError("POLICYSQL_COMMIT_CHECK_REJECTED",
   "A commit check rejected the transaction.",
 );
 
@@ -20,22 +18,6 @@ const opaqueToken = () => {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   return base64url(bytes);
-};
-
-const hex = (bytes) => [...new Uint8Array(bytes)]
-  .map((byte) => byte.toString(16).padStart(2, "0"))
-  .join("");
-
-const signature = async (secret, timestamp, body) => {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  return `v1=${hex(await crypto.subtle.sign("HMAC", key, encoder.encode(`${timestamp}.${body}`)))}`;
 };
 
 const secureUrl = (raw) => {
@@ -134,49 +116,43 @@ export const runCommitChecks = async ({
       auth: callbackAuth,
       check: check.id,
     });
-    const queryUrl = new URL(`/v1/commit-checks/${validationId}/query`, publicBase).toString();
-    const body = JSON.stringify({
-      version: "1",
-      validationId,
-      check: check.id,
-      requestId,
-      policyVersion: compiled.policyVersion,
-      schemaVersion: compiled.schemaVersion,
-      role: callbackRole,
-      session: callbackAuth.session,
-      statements: changed,
-      query: { token, url: queryUrl, expiresAt: new Date(expiresAtMs).toISOString() },
-    });
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    let response;
+    let reply: { ok: boolean; decision: any };
     try {
-      // fetchNoFollow never follows a redirect (it would forward the signed body) and
-      // rejects one unread; that rejection revokes the capability like any failure.
-      response = await fetchNoFollow(url, {
-        method: "POST",
-        signal: AbortSignal.timeout(remainingMs),
-        headers: {
-          "content-type": "application/json",
-          "policysql-hook-version": "1",
-          "policysql-hook-timestamp": timestamp,
-          "policysql-hook-signature": await signature(secret, timestamp, body),
+      // The hook adapter never follows a redirect; a failed call revokes the capability
+      // like any other failure.
+      reply = await callCommitCheckHook({
+        url,
+        hmacSecret: secret,
+        publicBaseUrl: publicBase,
+        validationId,
+        payload: {
+          version: "1",
+          validationId,
+          check: check.id,
+          requestId,
+          policyVersion: compiled.policyVersion,
+          schemaVersion: compiled.schemaVersion,
+          role: callbackRole,
+          session: callbackAuth.session,
+          statements: changed,
         },
-        body,
-      }, fetchImpl);
+        capability: { token, expiresAtMs },
+        timeoutMs: remainingMs,
+        fetchImpl,
+      });
     } catch {
       await deactivate();
       throw rejected();
     }
-    let decision;
-    try { decision = await response.json(); } catch { decision = null; }
     await deactivate();
-    if (!response.ok || !exactDecision(decision) || !decision.allowed) throw rejected();
+    if (!reply.ok || !exactDecision(reply.decision) || !reply.decision.allowed) throw rejected();
   }
   return "passed";
 };
 
-export const verifyCapabilityToken = async (authorization, session) => {
-  const token = authorization?.match(/^Bearer ([A-Za-z0-9_-]{43})$/u)?.[1];
+/** Checks a presented capability (the opaque token itself) against the active validation. */
+export const verifyCapabilityToken = async (capability: unknown, session) => {
+  const token = typeof capability === "string" && /^[A-Za-z0-9_-]{43}$/u.test(capability) ? capability : undefined;
   if (!token || !session || Date.now() >= session.expiresAtMs) return false;
   const actual = await sha256(token);
   if (actual.length !== session.tokenHash.length) return false;

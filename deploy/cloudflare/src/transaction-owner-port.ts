@@ -2,11 +2,14 @@
 // interfaces; a platform adapter (for Cloudflare: src/adapters/durable-objects.ts)
 // implements them, and the wrapper supplies that adapter.
 
+import type { OperationError } from "./errors.ts";
+
 /**
- * An owner's answer to one command: the HTTP status and the JSON body the route returns
- * to the client unchanged. Adapters carry it across their message boundary as data.
+ * An owner's answer to one command: the operation's value, or its error (ADR 0023). The
+ * engine returns it as the operation result; it carries no transport status. Adapters carry
+ * it across their message boundary as data, and the engine checks its shape.
  */
-export type OwnerReply = { status: number; body: unknown };
+export type OwnerReply = { ok: true; value: unknown } | { ok: false; error: OperationError };
 
 export type OwnerCommandKind = "statement" | "commit" | "rollback";
 
@@ -41,8 +44,8 @@ export type OwnerAtomicInput = {
   snapshot: string;
 };
 
-/** A validator's callback SELECT, with the capability it presented. */
-export type OwnerCallbackInput = { authorization: string; command: unknown };
+/** A validator's callback SELECT, with the opaque capability it presented ("" for none). */
+export type OwnerCallbackInput = { capability: string; command: unknown };
 
 /**
  * A handle to the single owner of one name. Every input and reply is plain JSON data: an
@@ -113,6 +116,24 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 
 const hasMethods = (value: unknown, names: string[]) =>
   isObject(value) && names.every((name) => typeof value[name] === "function");
+
+const ERROR_CODE = /^POLICYSQL_[A-Z0-9_]+$/u;
+
+/**
+ * Checks a reply that crossed an adapter boundary. Anything that is not exactly a value or
+ * a well-formed error is null, which the engine treats as an internal failure.
+ */
+export const checkedOwnerReply = (reply: unknown): OwnerReply | null => {
+  if (!isObject(reply) || typeof reply === "function" || Object.keys(reply).length !== 2) return null;
+  if (reply.ok === true && Object.hasOwn(reply, "value")) return { ok: true, value: reply.value };
+  const error = reply.error;
+  if (reply.ok === false && isObject(error) &&
+    typeof error.code === "string" && ERROR_CODE.test(error.code) &&
+    typeof error.message === "string" && (error.path === null || typeof error.path === "string")) {
+    return { ok: false, error: { code: error.code, message: error.message, path: error.path as string | null } };
+  }
+  return null;
+};
 
 export const validateTransactionOwnerPort = (port: unknown): TransactionOwnerPort => {
   if (!hasMethods(port, ["route"])) {

@@ -1,4 +1,4 @@
-import { HttpError, safeError, wasmError } from "./errors.ts";
+import { EngineError, operationError, wasmError } from "./errors.ts";
 import { stableJson, sha256 } from "./idempotency.ts";
 import { observeCostEnvelope } from "./cost.ts";
 import { executeSealedOnTransaction } from "./turso.ts";
@@ -25,10 +25,10 @@ const COMMAND_KINDS: readonly OwnerCommandKind[] = ["statement", "commit", "roll
 const replyRequestId = (requestId: unknown) =>
   typeof requestId === "string" && requestId !== "" ? requestId : crypto.randomUUID();
 
-const invalid = () => new HttpError(400, "POLICYSQL_INVALID_REQUEST", "The request is invalid.");
-const conflict = () => new HttpError(409, "POLICYSQL_TRANSACTION_CONFLICT", "The transaction command conflicts with its current state.");
-const unavailable = () => new HttpError(409, "POLICYSQL_TRANSACTION_UNAVAILABLE", "The transaction is no longer active.");
-const internal = () => new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+const invalid = () => new EngineError("POLICYSQL_INVALID_REQUEST", "The request is invalid.");
+const conflict = () => new EngineError("POLICYSQL_TRANSACTION_CONFLICT", "The transaction command conflicts with its current state.");
+const unavailable = () => new EngineError("POLICYSQL_TRANSACTION_UNAVAILABLE", "The transaction is no longer active.");
+const internal = () => new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
 
 const exactKeys = (value, keys, required = keys) => {
   if (!value || Array.isArray(value) || typeof value !== "object") return false;
@@ -135,13 +135,12 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   }
 
   // Client commands: one at a time, in arrival order.
-  clientLane(requestId: string, status: number, work: () => Promise<unknown>): Promise<OwnerReply> {
-    const run = this.queue.then(async () => {
+  clientLane(work: () => Promise<unknown>): Promise<OwnerReply> {
+    const run = this.queue.then(async (): Promise<OwnerReply> => {
       try {
-        return { status, body: await work() };
+        return { ok: true, value: await work() };
       } catch (error) {
-        const response = safeError(error, requestId);
-        return { status: response.status, body: response.body };
+        return { ok: false, error: operationError(error) };
       }
     });
     this.queue = run.catch(() => undefined);
@@ -150,17 +149,17 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
 
   begin(input: OwnerBeginInput, requestId: string): Promise<OwnerReply> {
     const id = replyRequestId(requestId);
-    return this.clientLane(id, 201, () => this.startTransaction(input, id));
+    return this.clientLane(() => this.startTransaction(input, id));
   }
 
   atomic(input: OwnerAtomicInput, requestId: string): Promise<OwnerReply> {
     const id = replyRequestId(requestId);
-    return this.clientLane(id, 200, () => this.executeAtomic(input, id));
+    return this.clientLane(() => this.executeAtomic(input, id));
   }
 
   command(kind: OwnerCommandKind, input: OwnerCommandInput, requestId: string): Promise<OwnerReply> {
     const id = replyRequestId(requestId);
-    return this.clientLane(id, 200, async () => {
+    return this.clientLane(async () => {
       if (!COMMAND_KINDS.includes(kind)) throw invalid();
       return kind === "statement" ? await this.statement(input, id) : await this.terminal(input, id, kind);
     });
@@ -170,15 +169,14 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   // on the client lane waits for the validator. Any failure ends the open transaction.
   callbackQuery(input: OwnerCallbackInput, requestId: string): Promise<OwnerReply> {
     const id = replyRequestId(requestId);
-    const run = this.validationQueue.then(async () => {
+    const run = this.validationQueue.then(async (): Promise<OwnerReply> => {
       try {
-        const authorization = typeof input?.authorization === "string" ? input.authorization : "";
-        return { status: 200, body: await this.validationQuery(input?.command, authorization, id) };
+        const capability = typeof input?.capability === "string" ? input.capability : "";
+        return { ok: true, value: await this.validationQuery(input?.command, capability, id) };
       } catch (error) {
         if (this.transaction?.open) await this.close("failed");
         this.validation = null;
-        const response = safeError(error, id);
-        return { status: response.status, body: response.body };
+        return { ok: false, error: operationError(error) };
       }
     });
     this.validationQueue = run.catch(() => undefined);
@@ -325,7 +323,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     const { current, digest } = prepared;
     if (current.statementCount >= MAX_STATEMENTS) {
       await this.close("failed");
-      throw new HttpError(429, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
+      throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
     }
     const runtime = this.getRuntime();
     const envelope = JSON.stringify({ statements: [{
@@ -342,7 +340,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     if (current.mode === "read" && compiled.transactionMode !== "read") {
       runtime.release_execution(BigInt(compiled.executionHandle));
       await this.close("failed");
-      throw new HttpError(403, "POLICYSQL_TRANSACTION_MODE_VIOLATION", "A read transaction cannot execute a mutation.");
+      throw new EngineError("POLICYSQL_TRANSACTION_MODE_VIOLATION", "A read transaction cannot execute a mutation.");
     }
     let executed;
     try {
@@ -367,7 +365,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     const resultBytes = current.resultBytes + new TextEncoder().encode(JSON.stringify(response.result)).byteLength;
     if (resultBytes > MAX_RESULT_BYTES) {
       await this.close("failed");
-      throw new HttpError(429, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
+      throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
     }
     console.log(JSON.stringify({
       event: "transaction_usage",
@@ -454,7 +452,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   async deactivateValidation(current) {
     this.validation = null;
     if (!this.transaction?.open) {
-      throw new HttpError(409, "POLICYSQL_COMMIT_CHECK_REJECTED", "A commit check rejected the transaction.");
+      throw new EngineError("POLICYSQL_COMMIT_CHECK_REJECTED", "A commit check rejected the transaction.");
     }
     await this.persist({ ...current, status: "active" });
   }
@@ -484,11 +482,11 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     });
   }
 
-  async validationQuery(command, authorization, requestId) {
+  async validationQuery(command, capability, requestId) {
     const session = this.validation;
     const current = await this.stored();
     if (!current || current.status !== "validating" || !this.transaction?.open ||
-      !await verifyCapabilityToken(authorization, session) ||
+      !await verifyCapabilityToken(capability, session) ||
       !exactKeys(command, ["sequence", "sql", "params"], ["sequence", "sql", "params"]) ||
       !Number.isSafeInteger(command.sequence) || command.sequence < 1 ||
       typeof command.sql !== "string" || !command.params || Array.isArray(command.params) ||
@@ -525,7 +523,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     const rowsReturned = session.rowsReturned + executed.results[0].rowCount;
     const resultBytes = session.resultBytes + new TextEncoder().encode(JSON.stringify(response)).byteLength;
     if (rowsReturned > 100 || resultBytes > MAX_RESULT_BYTES) {
-      throw new HttpError(429, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
+      throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
     }
     this.validation = {
       ...session,

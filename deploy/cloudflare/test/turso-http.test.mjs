@@ -48,7 +48,7 @@ test("decodes padded and unpadded Hrana BLOB responses without changing their by
 
 test("rejects malformed typed Hrana BLOB responses", async () => {
   for (const base64 of [...blobCases.invalid, ...blobCases.wrongTypes]) {
-    await assert.rejects(readBlob(base64), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" }, JSON.stringify(base64));
+    await assert.rejects(readBlob(base64), { code: "POLICYSQL_DATABASE_UNAVAILABLE" }, JSON.stringify(base64));
   }
 });
 
@@ -67,14 +67,14 @@ test("bounds padded and unpadded Hrana BLOB responses before decoding", async t 
     for (const base64 of new Set([padded, padded.replace(/=+$/, "")])) {
       // Regression (PR #19 review): a stored oversized BLOB is a permanent limit
       // condition, never a retryable 503, and matches the serverless-driver path.
-      await assert.rejects(readBlob(base64), { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" });
+      await assert.rejects(readBlob(base64), { code: "POLICYSQL_LIMIT_EXCEEDED" });
       assert.equal(decode.mock.callCount(), calls, "oversized values are rejected before decode allocation");
     }
   }
   // Long but malformed responses stay transport encoding failures, not limit errors.
   const oversized = Buffer.alloc(MAX_BYTES_PER_VALUE + 3).toString("base64");
   for (const base64 of [`${oversized.slice(0, -1)}!`, `-${oversized.slice(1)}`, `${oversized}A`]) {
-    await assert.rejects(readBlob(base64), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" });
+    await assert.rejects(readBlob(base64), { code: "POLICYSQL_DATABASE_UNAVAILABLE" });
     assert.equal(decode.mock.callCount(), calls);
   }
 });
@@ -88,8 +88,8 @@ test("bounds Hrana BLOB responses with the injected runtime limit, not a host co
       assert.deepEqual(Buffer.from(await readBlob(base64, { maxBytesPerValue: limit })), fits, `limit=${limit}`);
     }
     const over = Buffer.alloc(limit + 1).toString("base64");
-    await assert.rejects(readBlob(over, { maxBytesPerValue: limit }), { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" }, `limit=${limit}`);
-    await assert.rejects(readBlob(`${over.slice(0, -1)}!`, { maxBytesPerValue: limit }), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" });
+    await assert.rejects(readBlob(over, { maxBytesPerValue: limit }), { code: "POLICYSQL_LIMIT_EXCEEDED" }, `limit=${limit}`);
+    await assert.rejects(readBlob(`${over.slice(0, -1)}!`, { maxBytesPerValue: limit }), { code: "POLICYSQL_DATABASE_UNAVAILABLE" });
   }
 });
 
@@ -131,10 +131,10 @@ test("classifies oversized Hrana statement responses as result limit errors", as
     return transaction.execute([{ sql: "SELECT state FROM projects" }]);
   };
   for (const declare of [false, true]) {
-    await assert.rejects(run({ declare }), { status: 413, code: "POLICYSQL_LIMIT_EXCEEDED" }, `declare=${declare}`);
-    await assert.rejects(run({ declare, failBegin: true }), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" });
+    await assert.rejects(run({ declare }), { code: "POLICYSQL_LIMIT_EXCEEDED" }, `declare=${declare}`);
+    await assert.rejects(run({ declare, failBegin: true }), { code: "POLICYSQL_DATABASE_UNAVAILABLE" });
   }
-  await assert.rejects(run({ status: 500 }), { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" });
+  await assert.rejects(run({ status: 500 }), { code: "POLICYSQL_DATABASE_UNAVAILABLE" });
 });
 
 test("decodes exact usage metrics while preserving transaction ownership", async () => {
@@ -241,7 +241,7 @@ test("requests manual redirects and rejects 3xx and opaqueredirect responses unr
     });
     await assert.rejects(
       transport.begin("read", 1000, undefined, runtimeLimit),
-      { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" },
+      { code: "POLICYSQL_DATABASE_UNAVAILABLE" },
       label,
     );
     assert.deepEqual(urls, ["https://db.test/v2/pipeline"], `${label}: the redirect is not followed`);

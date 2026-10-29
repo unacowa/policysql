@@ -1,11 +1,11 @@
-import { HttpError } from "./errors.ts";
+import { EngineError } from "./errors.ts";
 import { databaseRequired } from "./database.ts";
 import { driverArgs } from "./driver-values.ts";
 import { bytesLimit } from "./binary.ts";
 import type { CostCatalog } from "./engine-config.ts";
 
 const invalidPlanner = () =>
-  new HttpError(403, "POLICYSQL_COST_UNKNOWN", "The query cost could not be bounded safely.");
+  new EngineError("POLICYSQL_COST_UNKNOWN", "The query cost could not be bounded safely.");
 
 // The wrapper supplies the catalog in `PolicySqlConfig.costCatalog`, validated at
 // construction (ADR 0021). An absent catalog means cost cannot be bounded.
@@ -44,14 +44,14 @@ const evaluate = (compiled, catalog, planned, results) => {
     if (!resource) throw invalidPlanner();
     const upperRowsRead = resource.upperRows;
     if (upperRowsRead > catalog.maxEstimatedRowsRead) {
-      throw new HttpError(429, "POLICYSQL_USAGE_BUDGET_EXCEEDED", "The query exceeds the configured usage budget.");
+      throw new EngineError("POLICYSQL_USAGE_BUDGET_EXCEEDED", "The query exceeds the configured usage budget.");
     }
     // SQLite explicitly does not guarantee the format of EXPLAIN QUERY PLAN's `detail` text.
     // Record only the structured row count and keep catalog bounds conservative; never derive a
     // security or billing decision from text matching planner prose.
     const upperRowsWritten = statement.operation === "select" ? 0 : upperRowsRead;
     if (upperRowsWritten > catalog.maxEstimatedRowsWritten) {
-      throw new HttpError(429, "POLICYSQL_USAGE_BUDGET_EXCEEDED", "The query exceeds the configured usage budget.");
+      throw new EngineError("POLICYSQL_USAGE_BUDGET_EXCEEDED", "The query exceeds the configured usage budget.");
     }
     output[index] = {
       ...output[index],
@@ -126,13 +126,13 @@ export const estimateSealedEnvelope = async (
     if (transaction?.open) {
       try { await transaction.rollback(); } catch { /* timeout is terminal */ }
     }
-    if (error instanceof HttpError) throw error;
+    if (error instanceof EngineError) throw error;
     console.log(JSON.stringify({
       event: "cost_admission_internal_failure",
       requestId,
       internalClass: error?.constructor?.name ?? "UnknownError",
     }));
-    throw new HttpError(503, "POLICYSQL_COST_ADMISSION_UNAVAILABLE", "Cost admission is temporarily unavailable.");
+    throw new EngineError("POLICYSQL_COST_ADMISSION_UNAVAILABLE", "Cost admission is temporarily unavailable.");
   }
 };
 
@@ -155,8 +155,7 @@ export const observeCostEnvelope = async (
     console.log(JSON.stringify({
       event: "cost_observation_failed",
       requestId,
-      code: error?.code ?? "POLICYSQL_COST_OBSERVATION_FAILED",
-      status: Number.isSafeInteger(error?.status) ? error.status : undefined,
+      code: typeof error?.code === "string" ? error.code : null,
     }));
   }
 };

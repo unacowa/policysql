@@ -53,7 +53,7 @@ test("signs a triggered hook, grants one opaque query capability, and accepts al
       assert.equal(body.role, "admin");
       assert.equal(body.statements[0].resource, "projects");
       assert.equal(body.query.url, `https://gateway.example.test/v1/commit-checks/${body.validationId}/query`);
-      assert.equal(await verifyCapabilityToken(`Bearer ${body.query.token}`, session), true);
+      assert.equal(await verifyCapabilityToken(body.query.token, session), true);
       assert.equal(JSON.stringify(body).includes("database"), false);
       return new Response(JSON.stringify({ version: "1", allowed: true }), { status: 200 });
     },
@@ -139,7 +139,7 @@ test("calls the validator with manual redirects and rejects redirect responses u
           return response;
         },
       }),
-      (error) => error.status === 409 && error.code === "POLICYSQL_COMMIT_CHECK_REJECTED",
+      (error) => error.code === "POLICYSQL_COMMIT_CHECK_REJECTED",
       label,
     );
     assert.equal(calls, 1, `${label}: the redirect is not followed`);
@@ -227,7 +227,7 @@ test("a triggered check without a configured endpoint rejects before any capabil
         deactivate: async () => {},
         fetchImpl: async () => { calls += 1; return new Response("{}"); },
       }),
-      (error) => error.status === 409 && error.code === "POLICYSQL_COMMIT_CHECK_REJECTED",
+      (error) => error.code === "POLICYSQL_COMMIT_CHECK_REJECTED",
     );
     assert.equal(activated, 0, "no capability is granted");
     assert.equal(calls, 0, "no validator, not even a configured one, is contacted");

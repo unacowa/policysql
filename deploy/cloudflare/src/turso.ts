@@ -1,12 +1,11 @@
-import { HttpError, wasmError } from "./errors.ts";
+import { EngineError, wasmError } from "./errors.ts";
 import { databaseRequired } from "./database.ts";
 import { driverArgs, rawDriverValue, rowValues } from "./driver-values.ts";
 import { runtimeBytesLimit } from "./binary.ts";
 import type { ExecutionTrace } from "./types.ts";
 
 const remoteFailure = (timeout = false) =>
-  new HttpError(
-    timeout ? 504 : 503,
+  new EngineError(
     timeout ? "POLICYSQL_DATABASE_TIMEOUT" : "POLICYSQL_DATABASE_UNAVAILABLE",
     timeout ? "The database operation timed out." : "The database is temporarily unavailable.",
   );
@@ -68,14 +67,12 @@ export const enforceCumulativeLimits = (compiled, results, elapsedMs) => {
     rows > strictestLimit(compiled, "maxRows") ||
     bytes > strictestLimit(compiled, "maxResultBytes")
   ) {
-    throw new HttpError(
-      413,
-      "POLICYSQL_LIMIT_EXCEEDED",
+    throw new EngineError("POLICYSQL_LIMIT_EXCEEDED",
       "The request or result exceeded a configured limit.",
     );
   }
   if (elapsedMs > strictestLimit(compiled, "timeoutMs")) {
-    throw new HttpError(504, "POLICYSQL_TIMEOUT", "The database operation timed out.");
+    throw new EngineError("POLICYSQL_TIMEOUT", "The database operation timed out.");
   }
 };
 
@@ -161,7 +158,7 @@ export const executeSealedOnTransaction = async (
   requestId,
 ) => {
   if (!Number.isSafeInteger(compiled.executionHandle)) {
-    throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+    throw new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
   }
   const handle = BigInt(compiled.executionHandle);
   try {
@@ -198,7 +195,7 @@ export const executeSealedEnvelope = async (
   traceOptions = null,
 ) => {
   if (!Number.isSafeInteger(compiled.executionHandle)) {
-    throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+    throw new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
   }
   const wasmHandle = BigInt(compiled.executionHandle);
   // A misconfigured runtime is a 500 raised before BEGIN, never a retryable 503
@@ -231,14 +228,12 @@ export const executeSealedEnvelope = async (
         },
       ]);
       if (existingResult.rows.length > 1) {
-        throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+        throw new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
       }
       if (existingResult.rows.length === 1) {
         const [fingerprint, responseJson] = existingResult.rows[0];
         if (fingerprint !== idempotency.fingerprint) {
-          throw new HttpError(
-            409,
-            "POLICYSQL_IDEMPOTENCY_CONFLICT",
+          throw new EngineError("POLICYSQL_IDEMPOTENCY_CONFLICT",
             "The idempotency key is already bound to a different request.",
           );
         }
@@ -246,7 +241,7 @@ export const executeSealedEnvelope = async (
         try {
           stored = JSON.parse(responseJson);
         } catch {
-          throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+          throw new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
         }
         if (
           stored?.version !== 1 ||
@@ -256,7 +251,7 @@ export const executeSealedEnvelope = async (
           !stored.usage ||
           typeof stored.usage !== "object"
         ) {
-          throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+          throw new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
         }
         await transaction.rollback();
         transaction = undefined;
@@ -335,7 +330,7 @@ export const executeSealedEnvelope = async (
     if (transaction) {
       try { await transaction.rollback(); } catch { /* server timeout is terminal */ }
     }
-    if (error instanceof HttpError) throw error;
+    if (error instanceof EngineError) throw error;
     throw remoteFailure(error?.name === "QueryTimeoutError" || error?.code === "QUERY_TIMEOUT");
   } finally {
     runtime.release_execution(wasmHandle);
