@@ -4,15 +4,23 @@ use policysql_catalog::{Catalog, ResourceDescriptor};
 use policysql_core::{
     BackendProfileId, ClientParameterName, JsonSchemaType, JsonValueSchema, LogicalType,
     LogicalValue, OperationKind, ResultName, ServerParameterName, SnapshotId, ValueDescriptor,
-    ValueRepresentation, value_satisfies_contract,
+    ValueRepresentation,
 };
+mod parameter_contracts;
+
+use parameter_contracts::validate_client_parameters;
+pub use parameter_contracts::{
+    ClientParameterAnalysis, ClientParameterContract, ClientParameterTypeConflict,
+    analyze_client_parameters,
+};
+
 use policysql_execution::{
     CandidateExecutionPlan, ExecutionLimits, PlanVerifier, ResultColumnDescriptor,
     VerificationError, VerifiedExecutionPlan,
 };
 use policysql_ir::{
-    BoundColumn, BoundDelete, BoundExpr, BoundJsonCollectionSelect, BoundOrder, BoundProjection,
-    BoundSelect, BoundStatement, BoundUpdate, ProtectedPlan, ScalarFunction, SortDirection,
+    BoundDelete, BoundExpr, BoundJsonCollectionSelect, BoundOrder, BoundProjection, BoundSelect,
+    BoundStatement, BoundUpdate, ProtectedPlan, ScalarFunction, SortDirection,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1078,12 +1086,9 @@ pub fn compile_verified_select(
     snapshot: SnapshotId,
 ) -> Result<VerifiedExecutionPlan<SqliteProfile>, CompileError> {
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
-    let expected_clients = collect_client_parameters(&plan.statement);
-    if client_parameters.keys().cloned().collect::<BTreeSet<_>>() != expected_clients {
-        return Err(CompileError::ClientParameterMismatch);
-    }
-    validate_client_parameter_types(&plan.statement, &client_parameters)?;
-    validate_client_parameter_contracts(&plan.statement, catalog, &client_parameters)?;
+    let analysis = analyze_client_parameters(&plan.statement, catalog);
+    validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
     let expected_result = result_descriptors(&plan.statement, catalog, &client_parameters)?;
     let mut verifier = SqliteInvariantVerifier::new(
@@ -1135,12 +1140,9 @@ pub fn compile_verified_insert(
         EmitError::InvariantViolation("INSERT affected-row invariant is missing".to_owned())
     })?;
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
-    let expected_clients = collect_client_parameters(&plan.statement);
-    if client_parameters.keys().cloned().collect::<BTreeSet<_>>() != expected_clients {
-        return Err(CompileError::ClientParameterMismatch);
-    }
-    validate_client_parameter_types(&plan.statement, &client_parameters)?;
-    validate_client_parameter_contracts(&plan.statement, catalog, &client_parameters)?;
+    let analysis = analyze_client_parameters(&plan.statement, catalog);
+    validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
     let expected_result = result_descriptors(&plan.statement, catalog, &client_parameters)?;
     let mut verifier = SqliteInvariantVerifier::new(
@@ -1195,12 +1197,9 @@ pub fn compile_verified_update(
         return Err(EmitError::UnsupportedStatement.into());
     }
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
-    let expected_clients = collect_client_parameters(&plan.statement);
-    if client_parameters.keys().cloned().collect::<BTreeSet<_>>() != expected_clients {
-        return Err(CompileError::ClientParameterMismatch);
-    }
-    validate_client_parameter_types(&plan.statement, &client_parameters)?;
-    validate_client_parameter_contracts(&plan.statement, catalog, &client_parameters)?;
+    let analysis = analyze_client_parameters(&plan.statement, catalog);
+    validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
     let expected_result = result_descriptors(&plan.statement, catalog, &client_parameters)?;
     let mut verifier = SqliteInvariantVerifier::new(
@@ -1260,12 +1259,9 @@ pub fn compile_verified_delete(
         return Err(EmitError::UnsupportedStatement.into());
     }
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
-    let expected_clients = collect_client_parameters(&plan.statement);
-    if client_parameters.keys().cloned().collect::<BTreeSet<_>>() != expected_clients {
-        return Err(CompileError::ClientParameterMismatch);
-    }
-    validate_client_parameter_types(&plan.statement, &client_parameters)?;
-    validate_client_parameter_contracts(&plan.statement, catalog, &client_parameters)?;
+    let analysis = analyze_client_parameters(&plan.statement, catalog);
+    validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
     let expected_result = result_descriptors(&plan.statement, catalog, &client_parameters)?;
     let mut verifier = SqliteInvariantVerifier::new(
@@ -1893,498 +1889,6 @@ fn expression_nullable(
     }
 }
 
-fn collect_client_parameters(statement: &BoundStatement) -> BTreeSet<ClientParameterName> {
-    let mut output = BTreeSet::new();
-    let BoundStatement::Select(select) = statement else {
-        match statement {
-            BoundStatement::JsonCollectionSelect(select) => {
-                collect_expression_parameters(&select.path, &mut output);
-                if let Some(predicate) = &select.predicate {
-                    collect_expression_parameters(predicate, &mut output);
-                }
-            }
-            BoundStatement::Insert(insert) => {
-                for row in &insert.rows {
-                    for assignment in row {
-                        collect_expression_parameters(&assignment.value, &mut output);
-                    }
-                }
-            }
-            BoundStatement::Update(update) => {
-                for assignment in &update.assignments {
-                    collect_expression_parameters(&assignment.value, &mut output);
-                }
-                if let Some(predicate) = &update.predicate {
-                    collect_expression_parameters(predicate, &mut output);
-                }
-            }
-            BoundStatement::Delete(delete) => {
-                if let Some(predicate) = &delete.predicate {
-                    collect_expression_parameters(predicate, &mut output);
-                }
-            }
-            BoundStatement::Select(_) => unreachable!("handled above"),
-            BoundStatement::ConstantSelect(select) => {
-                for projection in &select.projections {
-                    collect_expression_parameters(&projection.expression, &mut output);
-                }
-            }
-        }
-        return output;
-    };
-    for projection in &select.projections {
-        collect_expression_parameters(&projection.expression, &mut output);
-    }
-    for join in &select.joins {
-        collect_expression_parameters(&join.on, &mut output);
-    }
-    if let Some(predicate) = &select.predicate {
-        collect_expression_parameters(predicate, &mut output);
-    }
-    if let Some(having) = &select.having {
-        collect_expression_parameters(having, &mut output);
-    }
-    if let Some(limit) = &select.limit {
-        collect_expression_parameters(limit, &mut output);
-    }
-    if let Some(offset) = &select.offset {
-        collect_expression_parameters(offset, &mut output);
-    }
-    output
-}
-
-fn collect_expression_parameters(
-    expression: &BoundExpr,
-    output: &mut BTreeSet<ClientParameterName>,
-) {
-    match expression {
-        BoundExpr::ClientParameter { name, .. } => {
-            output.insert(name.clone());
-        }
-        BoundExpr::Equal(left, right)
-        | BoundExpr::NotEqual(left, right)
-        | BoundExpr::Less(left, right)
-        | BoundExpr::LessEqual(left, right)
-        | BoundExpr::Greater(left, right)
-        | BoundExpr::GreaterEqual(left, right)
-        | BoundExpr::And(left, right)
-        | BoundExpr::Or(left, right)
-        | BoundExpr::Like(left, right)
-        | BoundExpr::Glob(left, right)
-        | BoundExpr::Least(left, right)
-        | BoundExpr::Concat(left, right)
-        | BoundExpr::ConditionalOutput {
-            value: left,
-            visible_if: right,
-        } => {
-            collect_expression_parameters(left, output);
-            collect_expression_parameters(right, output);
-        }
-        BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::CastText(inner) => {
-            collect_expression_parameters(inner, output);
-        }
-        BoundExpr::ScalarFunction { arguments, .. } => {
-            for argument in arguments {
-                collect_expression_parameters(argument, output);
-            }
-        }
-        BoundExpr::In {
-            expression, values, ..
-        } => {
-            collect_expression_parameters(expression, output);
-            for value in values {
-                collect_expression_parameters(value, output);
-            }
-        }
-        BoundExpr::Exists(select) => {
-            for projection in &select.projections {
-                collect_expression_parameters(&projection.expression, output);
-            }
-            if let Some(predicate) = &select.predicate {
-                collect_expression_parameters(predicate, output);
-            }
-        }
-        BoundExpr::Case {
-            branches,
-            else_expression,
-            ..
-        } => {
-            for (condition, value) in branches {
-                collect_expression_parameters(condition, output);
-                collect_expression_parameters(value, output);
-            }
-            if let Some(value) = else_expression {
-                collect_expression_parameters(value, output);
-            }
-        }
-        BoundExpr::Column(_)
-        | BoundExpr::ServerParameter { .. }
-        | BoundExpr::Literal(_)
-        | BoundExpr::CountAll(_)
-        | BoundExpr::RowNumber { .. } => {}
-    }
-}
-
-fn validate_client_parameter_types(
-    statement: &BoundStatement,
-    values: &BTreeMap<ClientParameterName, LogicalValue>,
-) -> Result<(), CompileError> {
-    let mut expected = BTreeMap::<ClientParameterName, LogicalType>::new();
-    let mut visit =
-        |expression: &BoundExpr| collect_expression_parameter_types(expression, &mut expected);
-    match statement {
-        BoundStatement::Select(select) => {
-            for projection in &select.projections {
-                visit(&projection.expression)?;
-            }
-            for join in &select.joins {
-                visit(&join.on)?;
-            }
-            if let Some(value) = &select.predicate {
-                visit(value)?;
-            }
-            if let Some(value) = &select.having {
-                visit(value)?;
-            }
-            if let Some(value) = &select.limit {
-                visit(value)?;
-            }
-            if let Some(value) = &select.offset {
-                visit(value)?;
-            }
-        }
-        BoundStatement::ConstantSelect(select) => {
-            for projection in &select.projections {
-                visit(&projection.expression)?;
-            }
-        }
-        BoundStatement::JsonCollectionSelect(select) => {
-            visit(&select.path)?;
-            if let Some(predicate) = &select.predicate {
-                visit(predicate)?;
-            }
-        }
-        BoundStatement::Insert(insert) => {
-            for assignment in insert.rows.iter().flatten() {
-                visit(&assignment.value)?;
-            }
-        }
-        BoundStatement::Update(update) => {
-            for assignment in &update.assignments {
-                visit(&assignment.value)?;
-            }
-            if let Some(value) = &update.predicate {
-                visit(value)?;
-            }
-        }
-        BoundStatement::Delete(delete) => {
-            if let Some(value) = &delete.predicate {
-                visit(value)?;
-            }
-        }
-    }
-    if expected.iter().all(|(name, logical_type)| {
-        values
-            .get(name)
-            .is_some_and(|value| logical_value_matches(value, *logical_type))
-    }) {
-        Ok(())
-    } else {
-        Err(CompileError::ClientParameterTypeMismatch)
-    }
-}
-
-fn validate_client_parameter_contracts(
-    statement: &BoundStatement,
-    catalog: &Catalog,
-    values: &BTreeMap<ClientParameterName, LogicalValue>,
-) -> Result<(), CompileError> {
-    let visit = |expression: &BoundExpr| validate_expression_contracts(expression, catalog, values);
-    match statement {
-        BoundStatement::Select(select) => {
-            for projection in &select.projections {
-                visit(&projection.expression)?;
-            }
-            for join in &select.joins {
-                visit(&join.on)?;
-            }
-            for expression in [
-                select.predicate.as_ref(),
-                select.having.as_ref(),
-                select.limit.as_ref(),
-                select.offset.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                visit(expression)?;
-            }
-        }
-        BoundStatement::ConstantSelect(select) => {
-            for projection in &select.projections {
-                visit(&projection.expression)?;
-            }
-        }
-        BoundStatement::JsonCollectionSelect(select) => {
-            visit(&select.path)?;
-            if let Some(predicate) = &select.predicate {
-                visit(predicate)?;
-            }
-        }
-        BoundStatement::Insert(insert) => {
-            for assignment in insert.rows.iter().flatten() {
-                validate_assignment_contract(assignment, catalog, values)?;
-            }
-        }
-        BoundStatement::Update(update) => {
-            for assignment in &update.assignments {
-                validate_assignment_contract(assignment, catalog, values)?;
-            }
-            if let Some(predicate) = &update.predicate {
-                visit(predicate)?;
-            }
-        }
-        BoundStatement::Delete(delete) => {
-            if let Some(predicate) = &delete.predicate {
-                visit(predicate)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_assignment_contract(
-    assignment: &policysql_ir::BoundAssignment,
-    catalog: &Catalog,
-    values: &BTreeMap<ClientParameterName, LogicalValue>,
-) -> Result<(), CompileError> {
-    if let BoundExpr::ClientParameter { name, .. } = &assignment.value {
-        validate_column_parameter_contract(&assignment.column, name, catalog, values)?;
-    }
-    validate_expression_contracts(&assignment.value, catalog, values)
-}
-
-fn validate_column_parameter_contract(
-    column: &BoundColumn,
-    parameter: &ClientParameterName,
-    catalog: &Catalog,
-    values: &BTreeMap<ClientParameterName, LogicalValue>,
-) -> Result<(), CompileError> {
-    let descriptor = catalog
-        .resource_by_id(column.id.resource())
-        .and_then(|resource| resource.column_by_id(column.id))
-        .ok_or(CompileError::ClientParameterTypeMismatch)?;
-    if values
-        .get(parameter)
-        .is_some_and(|value| value_satisfies_contract(value, &descriptor.value))
-    {
-        Ok(())
-    } else {
-        Err(CompileError::ClientParameterTypeMismatch)
-    }
-}
-
-fn validate_expression_contracts(
-    expression: &BoundExpr,
-    catalog: &Catalog,
-    values: &BTreeMap<ClientParameterName, LogicalValue>,
-) -> Result<(), CompileError> {
-    let validate_pair = |left: &BoundExpr, right: &BoundExpr| -> Result<(), CompileError> {
-        if let (BoundExpr::Column(column), BoundExpr::ClientParameter { name, .. }) = (left, right)
-        {
-            validate_column_parameter_contract(column, name, catalog, values)?;
-        }
-        if let (BoundExpr::ClientParameter { name, .. }, BoundExpr::Column(column)) = (left, right)
-        {
-            validate_column_parameter_contract(column, name, catalog, values)?;
-        }
-        Ok(())
-    };
-    match expression {
-        BoundExpr::Equal(left, right)
-        | BoundExpr::NotEqual(left, right)
-        | BoundExpr::Less(left, right)
-        | BoundExpr::LessEqual(left, right)
-        | BoundExpr::Greater(left, right)
-        | BoundExpr::GreaterEqual(left, right)
-        | BoundExpr::Like(left, right)
-        | BoundExpr::Glob(left, right)
-        | BoundExpr::Least(left, right)
-        | BoundExpr::Concat(left, right) => {
-            validate_pair(left, right)?;
-            validate_expression_contracts(left, catalog, values)?;
-            validate_expression_contracts(right, catalog, values)
-        }
-        BoundExpr::And(left, right) | BoundExpr::Or(left, right) => {
-            validate_expression_contracts(left, catalog, values)?;
-            validate_expression_contracts(right, catalog, values)
-        }
-        BoundExpr::Not(value) | BoundExpr::IsNull(value) | BoundExpr::CastText(value) => {
-            validate_expression_contracts(value, catalog, values)
-        }
-        BoundExpr::In {
-            expression,
-            values: items,
-            ..
-        } => {
-            if let BoundExpr::Column(column) = expression.as_ref() {
-                for item in items {
-                    if let BoundExpr::ClientParameter { name, .. } = item {
-                        validate_column_parameter_contract(column, name, catalog, values)?;
-                    }
-                }
-            }
-            validate_expression_contracts(expression, catalog, values)?;
-            for item in items {
-                validate_expression_contracts(item, catalog, values)?;
-            }
-            Ok(())
-        }
-        BoundExpr::ConditionalOutput { value, visible_if } => {
-            validate_expression_contracts(value, catalog, values)?;
-            validate_expression_contracts(visible_if, catalog, values)
-        }
-        BoundExpr::Exists(select) => {
-            for projection in &select.projections {
-                validate_expression_contracts(&projection.expression, catalog, values)?;
-            }
-            if let Some(predicate) = &select.predicate {
-                validate_expression_contracts(predicate, catalog, values)?;
-            }
-            Ok(())
-        }
-        BoundExpr::ScalarFunction { arguments, .. } => {
-            for argument in arguments {
-                validate_expression_contracts(argument, catalog, values)?;
-            }
-            Ok(())
-        }
-        BoundExpr::RowNumber { order_by, .. } => {
-            for order in order_by {
-                validate_expression_contracts(&order.expression, catalog, values)?;
-            }
-            Ok(())
-        }
-        BoundExpr::Case {
-            branches,
-            else_expression,
-            ..
-        } => {
-            for (condition, value) in branches {
-                validate_expression_contracts(condition, catalog, values)?;
-                validate_expression_contracts(value, catalog, values)?;
-            }
-            if let Some(value) = else_expression {
-                validate_expression_contracts(value, catalog, values)?;
-            }
-            Ok(())
-        }
-        BoundExpr::Column(_)
-        | BoundExpr::ClientParameter { .. }
-        | BoundExpr::ServerParameter { .. }
-        | BoundExpr::Literal(_)
-        | BoundExpr::CountAll(_) => Ok(()),
-    }
-}
-
-fn collect_expression_parameter_types(
-    expression: &BoundExpr,
-    output: &mut BTreeMap<ClientParameterName, LogicalType>,
-) -> Result<(), CompileError> {
-    match expression {
-        BoundExpr::ClientParameter { name, logical_type } => {
-            if output
-                .insert(name.clone(), *logical_type)
-                .is_some_and(|old| old != *logical_type)
-            {
-                return Err(CompileError::ClientParameterTypeMismatch);
-            }
-        }
-        BoundExpr::Equal(left, right)
-        | BoundExpr::NotEqual(left, right)
-        | BoundExpr::Less(left, right)
-        | BoundExpr::LessEqual(left, right)
-        | BoundExpr::Greater(left, right)
-        | BoundExpr::GreaterEqual(left, right)
-        | BoundExpr::And(left, right)
-        | BoundExpr::Or(left, right)
-        | BoundExpr::Like(left, right)
-        | BoundExpr::Glob(left, right)
-        | BoundExpr::Least(left, right)
-        | BoundExpr::Concat(left, right)
-        | BoundExpr::ConditionalOutput {
-            value: left,
-            visible_if: right,
-        } => {
-            collect_expression_parameter_types(left, output)?;
-            collect_expression_parameter_types(right, output)?;
-        }
-        BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::CastText(inner) => {
-            collect_expression_parameter_types(inner, output)?;
-        }
-        BoundExpr::ScalarFunction { arguments, .. } => {
-            for argument in arguments {
-                collect_expression_parameter_types(argument, output)?;
-            }
-        }
-        BoundExpr::In {
-            expression, values, ..
-        } => {
-            collect_expression_parameter_types(expression, output)?;
-            for value in values {
-                collect_expression_parameter_types(value, output)?;
-            }
-        }
-        BoundExpr::Exists(select) => {
-            for projection in &select.projections {
-                collect_expression_parameter_types(&projection.expression, output)?;
-            }
-            if let Some(predicate) = &select.predicate {
-                collect_expression_parameter_types(predicate, output)?;
-            }
-        }
-        BoundExpr::Case {
-            branches,
-            else_expression,
-            ..
-        } => {
-            for (condition, value) in branches {
-                collect_expression_parameter_types(condition, output)?;
-                collect_expression_parameter_types(value, output)?;
-            }
-            if let Some(value) = else_expression {
-                collect_expression_parameter_types(value, output)?;
-            }
-        }
-        BoundExpr::Column(_)
-        | BoundExpr::ServerParameter { .. }
-        | BoundExpr::Literal(_)
-        | BoundExpr::CountAll(_)
-        | BoundExpr::RowNumber { .. } => {}
-    }
-    Ok(())
-}
-
-fn logical_value_matches(value: &LogicalValue, expected: LogicalType) -> bool {
-    match (value, expected) {
-        (
-            LogicalValue::String(_),
-            LogicalType::String | LogicalType::Date | LogicalType::DateTime | LogicalType::Instant,
-        )
-        | (LogicalValue::Boolean(_), LogicalType::Boolean)
-        | (LogicalValue::Int64(_), LogicalType::Int64)
-        | (LogicalValue::Number(_), LogicalType::Number)
-        | (LogicalValue::Json(_), LogicalType::Json) => true,
-        (LogicalValue::Bytes(value), LogicalType::Bytes) => {
-            value.len() <= policysql_core::bytes::MAX_BYTES_PER_VALUE
-        }
-        (LogicalValue::Int64(value), LogicalType::Integer) => {
-            *value >= -9_007_199_254_740_991 && *value <= 9_007_199_254_740_991
-        }
-        _ => false,
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EmitError {
     UnsupportedStatement,
@@ -2784,16 +2288,16 @@ resources:
             LogicalType::DateTime,
             LogicalType::Instant,
         ] {
-            assert!(super::logical_value_matches(
+            assert!(super::parameter_contracts::logical_value_matches(
                 &LogicalValue::String("2026-08-12T00:00:00Z".to_owned()),
                 logical_type
             ));
         }
-        assert!(super::logical_value_matches(
+        assert!(super::parameter_contracts::logical_value_matches(
             &LogicalValue::Int64(9_007_199_254_740_991),
             LogicalType::Integer
         ));
-        assert!(!super::logical_value_matches(
+        assert!(!super::parameter_contracts::logical_value_matches(
             &LogicalValue::Int64(9_007_199_254_740_992),
             LogicalType::Integer
         ));
