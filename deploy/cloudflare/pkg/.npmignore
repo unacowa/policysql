@@ -1,0 +1,2 @@
+# Override wasm-pack's generated wildcard .gitignore when packaging from the root.
+.gitignore

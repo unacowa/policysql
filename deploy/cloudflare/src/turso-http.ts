@@ -1,5 +1,6 @@
-import { HttpError } from "./errors.ts";
+import { HttpError, binaryLimitExceeded } from "./errors.ts";
 import { remainingDatabaseTime } from "./database.ts";
+import { BinaryLimitError, decodeBlob, encodeBlob } from "./binary.ts";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
 const databaseFailure = () =>
@@ -14,11 +15,20 @@ const encodeValue = (value) => {
   }
   if (typeof value === "number" && Number.isFinite(value)) return { type: "float", value };
   if (value instanceof Uint8Array) {
-    let binary = "";
-    for (const byte of value) binary += String.fromCharCode(byte);
-    return { type: "blob", base64: btoa(binary) };
+    return { type: "blob", base64: encodeBlob(value) };
   }
   throw new HttpError(500, "POLICYSQL_INTERNAL", "The request could not be completed.");
+};
+
+// Hrana may omit padding in database BLOB responses. Keep that protocol rule
+// here; the public contract and private WASM ABI still require canonical padding.
+const decodeHranaBlob = (value: string): Uint8Array => {
+  const remainder = value.length % 4;
+  if (remainder !== 0) {
+    if (remainder === 1 || value.includes("=")) throw databaseFailure();
+    value += "=".repeat(4 - remainder);
+  }
+  return decodeBlob(value);
 };
 
 const decodeValue = (value) => {
@@ -34,9 +44,10 @@ const decodeValue = (value) => {
     return value.value;
   }
   if (value.type === "blob" && typeof value.base64 === "string") {
-    let binary;
-    try { binary = atob(value.base64); } catch { throw databaseFailure(); }
-    return Uint8Array.from(binary, (character: string) => character.charCodeAt(0));
+    try { return decodeHranaBlob(value.base64); } catch (error) {
+      if (error instanceof BinaryLimitError) throw binaryLimitExceeded();
+      throw databaseFailure();
+    }
   }
   throw databaseFailure();
 };
@@ -108,7 +119,12 @@ export class TursoHttpTransport {
       : (input, init) => globalThis.fetch(input, init);
   }
 
-  async pipeline(requests, baton = undefined, timeoutMs = 1_000) {
+  // `oversized` classifies a successful response over MAX_RESPONSE_BYTES. Statement
+  // execution passes a 413 limit error: only result rows (for example stored BLOBs)
+  // make it that large, and retrying cannot shrink stored data. BEGIN and
+  // COMMIT/ROLLBACK keep the 503 default, because an oversized control response is
+  // a transport anomaly and a COMMIT outcome must not be reported as a limit error.
+  async pipeline(requests, baton = undefined, timeoutMs = 1_000, oversized = databaseFailure) {
     const response = await this.fetchImpl(this.url, {
       method: "POST",
       redirect: "error",
@@ -125,10 +141,17 @@ export class TursoHttpTransport {
       }
       throw databaseFailure();
     });
+    if (!response.ok) {
+      try { await response.body?.cancel(); } catch { /* the failure is already terminal */ }
+      throw databaseFailure();
+    }
     const declared = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw databaseFailure();
+    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+      try { await response.body?.cancel(); } catch { /* the failure is already terminal */ }
+      throw oversized();
+    }
     const text = await response.text();
-    if (!response.ok || text.length > MAX_RESPONSE_BYTES) throw databaseFailure();
+    if (text.length > MAX_RESPONSE_BYTES) throw oversized();
     let body;
     try { body = JSON.parse(text); } catch { throw databaseFailure(); }
     if (
@@ -175,6 +198,7 @@ class TursoHttpTransaction {
       statements.map(executeRequest),
       this.baton,
       Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
+      binaryLimitExceeded,
     );
     if (!body.baton) throw databaseFailure();
     this.baton = body.baton;

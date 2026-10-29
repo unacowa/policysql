@@ -40,6 +40,28 @@ const load = async h => {
   return import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 };
 
+test("bytes generation and execution use the common string descriptor through an opaque Transport", async t => {
+  const h = await fixture(t);
+  const descriptor = { type: "bytes", representation: "string", format: "base64", nullable: true };
+  // Explain reports bytes parameters as non-nullable; NULL appears only in results (#20).
+  await generate({ ...h.config, transport: async request => request.kind === "explain"
+    ? { status: 200, body: { meta: { ...versions, role: "author" }, statements: [{
+      parameters: [{ name: "status", ...descriptor, nullable: false }],
+      result: { columns: [{ name: "id", ...descriptor }] },
+    }] } } : h.config.transport(request) });
+  assert.match(await h.source(), /"status": string[;,\s}]/);
+  assert.match(await h.source(), /"id": string \| null/);
+  const { getPosts } = await load(h);
+  for (const value of ["AAEC/w==", "", null]) {
+    const input = value ?? "";
+    const client = new PolicySqlClient({ role: "author", ...versions, transport: async request => {
+      assert.equal(JSON.parse(request.body).statements[0].params.status, input);
+      return { status: 200, body: { status: "committed", results: [{ rows: [{ id: value }], meta: { result: { columns: [{ name: "id", ...descriptor }], redactions: [] } } }], meta: {} } };
+    } });
+    assert.deepEqual(await getPosts.execute(client, { status: input }), [{ id: value }]);
+  }
+});
+
 test("generator uses only the injected function and retains discovery and query metadata", async t => {
   const h = await fixture(t);
   // A wrapper with no private properties or setup works unchanged.

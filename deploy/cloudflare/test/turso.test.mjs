@@ -196,3 +196,38 @@ test("validates mutation inside the dedicated transaction and stores terminal id
   });
   assert.equal(output.transactionId, `atomic_${"a".repeat(24)}`);
 });
+
+// Regression (PR #19 review): the serverless-driver path classifies an oversized
+// BLOB exactly like the HTTP transport (413), and the shape log is emitted before
+// row validation can throw.
+test("serverless oversized BLOB and malformed rows fail before validation, log shape and roll back", async t => {
+  const { MAX_BYTES_PER_VALUE } = await import("../src/binary.ts");
+  const log = t.mock.method(console, "log", () => {});
+  for (const [rows, status, code, widths] of [
+    [[[new Uint8Array(MAX_BYTES_PER_VALUE + 1)]], 413, "POLICYSQL_LIMIT_EXCEEDED", [1]],
+    [[{ unrelated: "private-value" }], 422, "POLICYSQL_SCHEMA_MISMATCH", [1]],
+    [[[]], 422, "POLICYSQL_SCHEMA_MISMATCH", [0]],
+  ]) {
+    let rolledBack = false, released = false;
+    const runtime = {
+      validate_result_json() { assert.fail("invalid physical results must not reach WASM"); },
+      release_execution() { released = true; },
+    };
+    const transaction = {
+      usage: [],
+      async execute() { return [{ columns: ["state"], rows, rowsAffected: 0, usage: { rowsRead: 1, rowsWritten: 0, queryDurationMs: 1 } }]; },
+      async commit() { assert.fail("must roll back"); },
+      async rollback() { rolledBack = true; },
+    };
+    await assert.rejects(executeSealedEnvelope(runtime, {
+      executionHandle: 7, transactionMode: "read",
+      statements: [{ operation: "select", protectedSql: "SELECT state FROM projects", clientParameters: {}, serverParameters: {}, result: [], limits: { timeoutMs: 1000 } }],
+    }, {}, "req_invalid_result", () => ({ async begin() { return transaction; } })), { status, code });
+    assert.ok(rolledBack);
+    assert.ok(released);
+    const logged = log.mock.calls.map(call => JSON.parse(call.arguments[0])).filter(entry => entry.event === "database_result_received").at(-1);
+    assert.deepEqual(logged.rowWidths, widths);
+    assert.ok(!JSON.stringify(logged).includes("private-value"));
+    assert.equal(logged.valueTypes, undefined);
+  }
+});

@@ -19,12 +19,18 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::prelude::*;
 
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 const MAX_SQL_BYTES: usize = 65_536;
 const MAX_ACTIVE_EXECUTIONS: usize = 64;
+
+#[cfg(test)]
+mod bytes_tests;
+
+/// Compiler-resolved logical types of client parameters, by name.
+type ParameterTypes = BTreeMap<ClientParameterName, LogicalType>;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -161,6 +167,16 @@ struct RawExecuteResult {
     columns: Vec<String>,
     rows: Vec<Vec<serde_json::Value>>,
     affected_rows: u64,
+}
+
+/// Private ABI value: preserves physical BLOB identity independently of the
+/// expected descriptor. Public bytes parameters are strings, never this object.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBlob {
+    #[serde(rename = "type")]
+    storage_type: String,
+    base64: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -459,6 +475,12 @@ impl PolicySqlRuntime {
 
     #[wasm_bindgen(getter)]
     #[must_use]
+    pub fn max_bytes_per_value(&self) -> usize {
+        policysql_core::bytes::MAX_BYTES_PER_VALUE
+    }
+
+    #[wasm_bindgen(getter)]
+    #[must_use]
     pub fn profile(&self) -> String {
         PROFILE_ID.to_owned()
     }
@@ -553,8 +575,10 @@ impl PolicySqlRuntime {
         index: usize,
         raw_result_json: &str,
     ) -> Result<ValidatedExecuteResult, RuntimeError> {
+        // The raw result is database output, not a client envelope: exceeding the
+        // private ABI bound is a result-size limit (413), never an invalid request.
         if raw_result_json.len() > MAX_REQUEST_BYTES {
-            return Err(RuntimeError::Envelope);
+            return Err(RuntimeError::Rejected(RejectionKind::LimitExceeded));
         }
         let raw: RawExecuteResult =
             serde_json::from_str(raw_result_json).map_err(|_| RuntimeError::RemoteResult)?;
@@ -602,10 +626,14 @@ impl PolicySqlRuntime {
             affected_rows: raw.affected_rows,
         };
         policysql_turso::validate_sealed_result(&statement.plan, &mut result).map_err(|error| {
-            if error == policysql_turso::AdapterError::ExpectationFailed {
-                RuntimeError::Rejected(RejectionKind::ExpectationFailed)
-            } else {
-                RuntimeError::RemoteResult
+            match error {
+                policysql_turso::AdapterError::ExpectationFailed => {
+                    RuntimeError::Rejected(RejectionKind::ExpectationFailed)
+                }
+                policysql_turso::AdapterError::LimitExceeded => {
+                    RuntimeError::Rejected(RejectionKind::LimitExceeded)
+                }
+                _ => RuntimeError::RemoteResult,
             }
         })?;
         Ok(ValidatedExecuteResult {
@@ -739,7 +767,7 @@ impl PolicySqlRuntime {
             return Err(RuntimeError::Snapshot);
         }
         validate_deployment_surface(&raw_request.statements, &self.catalog)?;
-        let requests = raw_request
+        let (requests, parameter_types): (Vec<_>, Vec<_>) = raw_request
             .statements
             .into_iter()
             .enumerate()
@@ -747,7 +775,9 @@ impl PolicySqlRuntime {
                 statement_request(statement, endpoint, &self.catalog)
                     .map_err(|error| error.at_statement(index))
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .unzip();
         let compiled = self
             .gateway
             .compile_envelope(&auth, endpoint, Some(&self.snapshot), &requests)
@@ -763,7 +793,8 @@ impl PolicySqlRuntime {
         let statements = compiled
             .statements
             .iter()
-            .map(|statement| compiled_statement(statement, &self.catalog))
+            .zip(&parameter_types)
+            .map(|(statement, types)| compiled_statement(statement, &self.catalog, types))
             .collect::<Result<Vec<_>, _>>()?;
         let commit_checks = self
             .policies
@@ -1156,6 +1187,14 @@ fn activate_catalog_with_schema(
                     };
                     let representation =
                         representation(column.representation.as_deref(), default_representation)?;
+                    if logical_type == LogicalType::Bytes
+                        && !matches!(
+                            representation,
+                            ValueRepresentation::Base64 | ValueRepresentation::String
+                        )
+                    {
+                        return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+                    }
                     validate_format(logical_type, column.format.as_deref())?;
                     let constraints = column
                         .constraints
@@ -1208,7 +1247,9 @@ fn activate_catalog_with_schema(
                             logical_type,
                             representation,
                             nullable,
-                            format: column.format,
+                            format: column.format.or_else(|| {
+                                (logical_type == LogicalType::Bytes).then(|| "base64".to_owned())
+                            }),
                             storage,
                             constraints,
                             json_schema,
@@ -1693,7 +1734,7 @@ fn statement_request(
     raw: RequestStatement,
     endpoint: EndpointPermission,
     catalog: &Catalog,
-) -> Result<StatementRequest, RuntimeError> {
+) -> Result<(StatementRequest, ParameterTypes), RuntimeError> {
     if raw.sql.is_empty() || raw.sql.len() > MAX_SQL_BYTES {
         return Err(RuntimeError::Envelope);
     }
@@ -1716,18 +1757,21 @@ fn statement_request(
         })
         .collect::<Result<BTreeMap<_, _>, RuntimeError>>()?;
     if endpoint == EndpointPermission::Explain {
-        for (name, logical_type) in parameter_types {
+        for (name, logical_type) in &parameter_types {
             parameters
-                .entry(name)
-                .or_insert_with(|| placeholder_value(logical_type));
+                .entry(name.clone())
+                .or_insert_with(|| placeholder_value(*logical_type));
         }
     }
-    Ok(StatementRequest {
-        sql: raw.sql,
-        parameters,
-        expected_affected_rows: expectation.affected_rows,
-        expected_row_count: expectation.row_count,
-    })
+    Ok((
+        StatementRequest {
+            sql: raw.sql,
+            parameters,
+            expected_affected_rows: expectation.affected_rows,
+            expected_row_count: expectation.row_count,
+        },
+        parameter_types,
+    ))
 }
 
 fn placeholder_value(logical_type: LogicalType) -> LogicalValue {
@@ -1883,6 +1927,25 @@ fn logical_value(
     value: serde_json::Value,
     expected: Option<LogicalType>,
 ) -> Result<LogicalValue, RuntimeError> {
+    if expected == Some(LogicalType::Bytes) {
+        // JSON null is not a bytes parameter value; nullable assignment is out of
+        // scope for the bytes wire contract and fails closed like other types.
+        return match value {
+            serde_json::Value::String(value) => policysql_core::bytes::decode(&value)
+                .map(LogicalValue::Bytes)
+                .map_err(|error| {
+                    RuntimeError::Rejected(match error {
+                        policysql_core::bytes::DecodeError::TooLarge => {
+                            RejectionKind::LimitExceeded
+                        }
+                        policysql_core::bytes::DecodeError::InvalidEncoding => {
+                            RejectionKind::InvalidParameter
+                        }
+                    })
+                }),
+            _ => Err(RuntimeError::Rejected(RejectionKind::InvalidParameter)),
+        };
+    }
     match value {
         serde_json::Value::Null => Ok(LogicalValue::Null),
         serde_json::Value::Bool(value) => Ok(LogicalValue::Boolean(value)),
@@ -1914,6 +1977,26 @@ fn logical_result_value(
     value: serde_json::Value,
     expected: &[LogicalType],
 ) -> Result<LogicalValue, RuntimeError> {
+    if value.is_object() {
+        if !expected.contains(&LogicalType::Bytes) {
+            return Err(RuntimeError::RemoteResult);
+        }
+        let blob: RawBlob =
+            serde_json::from_value(value).map_err(|_| RuntimeError::RemoteResult)?;
+        if blob.storage_type != "blob" {
+            return Err(RuntimeError::RemoteResult);
+        }
+        // Hosts classify oversized physical BLOBs first; the private ABI boundary
+        // independently applies the same category rather than trusting the host.
+        return policysql_core::bytes::decode(&blob.base64)
+            .map(LogicalValue::Bytes)
+            .map_err(|error| match error {
+                policysql_core::bytes::DecodeError::TooLarge => {
+                    RuntimeError::Rejected(RejectionKind::LimitExceeded)
+                }
+                policysql_core::bytes::DecodeError::InvalidEncoding => RuntimeError::RemoteResult,
+            });
+    }
     if expected.contains(&LogicalType::Boolean) {
         return match value {
             serde_json::Value::Bool(value) => Ok(LogicalValue::Boolean(value)),
@@ -1959,6 +2042,10 @@ fn logical_result_value_scalar(
         return Ok(LogicalValue::Null);
     }
     for logical_type in expected {
+        // A physical TEXT value cannot become BLOB by applying the public input codec.
+        if *logical_type == LogicalType::Bytes {
+            continue;
+        }
         if let Ok(value) = logical_value(value.clone(), Some(*logical_type)) {
             return Ok(value);
         }
@@ -1969,6 +2056,7 @@ fn logical_result_value_scalar(
 fn compiled_statement(
     statement: &policysql_gateway::CompiledStatement,
     catalog: &Catalog,
+    parameter_types: &ParameterTypes,
 ) -> Result<CompiledStatementDto, RuntimeError> {
     let plan = &statement.plan;
     let limits = plan.limits();
@@ -1984,10 +2072,11 @@ fn compiled_statement(
         cost_explain_sql: policysql_sqlite::explain_query_plan_sql(plan.protected_sql())
             .map_err(|_| RuntimeError::Internal)?,
         client_parameters: encode_parameters(plan.client_parameters()),
-        client_parameter_types: plan
-            .client_parameters()
+        client_parameter_types: parameter_types
             .iter()
-            .map(|(name, value)| (name.as_str().to_owned(), logical_value_type_name(value)))
+            .map(|(name, logical_type)| {
+                (name.as_str().to_owned(), logical_type_name(*logical_type))
+            })
             .collect(),
         server_parameters: encode_parameters(plan.server_parameters()),
         result: plan
@@ -2099,16 +2188,18 @@ fn encode_parameter_value(value: &LogicalValue) -> serde_json::Value {
         LogicalValue::Int64(value) => serde_json::Value::Number((*value).into()),
         LogicalValue::Number(value) => serde_json::Number::from_f64(*value)
             .map_or(serde_json::Value::Null, serde_json::Value::Number),
-        LogicalValue::Bytes(value) => serde_json::Value::Array(
-            value
-                .iter()
-                .map(|byte| serde_json::Value::Number((*byte).into()))
-                .collect(),
-        ),
+        LogicalValue::Bytes(value) => {
+            serde_json::json!({"type": "blob", "base64": policysql_core::bytes::encode(value)})
+        }
     }
 }
 
 fn encode_result_value(value: &LogicalValue) -> Result<serde_json::Value, RuntimeError> {
+    if let LogicalValue::Bytes(value) = value {
+        return Ok(serde_json::Value::String(policysql_core::bytes::encode(
+            value,
+        )));
+    }
     if let LogicalValue::Json(value) = value {
         return serde_json::from_str(value).map_err(|_| RuntimeError::RemoteResult);
     }
@@ -2149,18 +2240,6 @@ fn logical_types_json(values: &[LogicalType]) -> serde_json::Value {
                 .map(|value| serde_json::Value::String(logical_type_name(*value).to_owned()))
                 .collect(),
         )
-    }
-}
-
-const fn logical_value_type_name(value: &LogicalValue) -> &'static str {
-    match value {
-        LogicalValue::Null => "null",
-        LogicalValue::String(_) => "string",
-        LogicalValue::Boolean(_) => "boolean",
-        LogicalValue::Int64(_) => "int64",
-        LogicalValue::Number(_) => "number",
-        LogicalValue::Bytes(_) => "bytes",
-        LogicalValue::Json(_) => "json",
     }
 }
 

@@ -360,6 +360,10 @@ fn validate_value(
     descriptor: &ValueDescriptor,
     possible_types: &[LogicalType],
 ) -> Result<(), AdapterError> {
+    if matches!(value, LogicalValue::Bytes(value) if value.len() > policysql_core::bytes::MAX_BYTES_PER_VALUE)
+    {
+        return Err(AdapterError::LimitExceeded);
+    }
     if matches!(value, LogicalValue::Null) {
         return if descriptor.nullable {
             Ok(())
@@ -1177,5 +1181,39 @@ mod tests {
             ),
             Err(AdapterError::InvalidResult)
         );
+    }
+
+    // The adapter crate enforces the per-value bytes limit independently of any
+    // host-side codec, so direct users of the adapter get the same limit category.
+    #[test]
+    fn runtime_bounds_bytes_values() {
+        let descriptor = ValueDescriptor {
+            logical_type: LogicalType::Bytes,
+            representation: ValueRepresentation::Base64,
+            nullable: true,
+            format: Some("base64".to_owned()),
+            storage: None,
+            constraints: None,
+            json_schema: None,
+        };
+        let limit = policysql_core::bytes::MAX_BYTES_PER_VALUE;
+        for (value, expected) in [
+            (LogicalValue::Bytes(vec![255; limit]), Ok(())),
+            (LogicalValue::Bytes(Vec::new()), Ok(())),
+            (LogicalValue::Null, Ok(())),
+            (
+                LogicalValue::Bytes(vec![0; limit + 1]),
+                Err(AdapterError::LimitExceeded),
+            ),
+            (
+                LogicalValue::String("AA==".to_owned()),
+                Err(AdapterError::InvalidResult),
+            ),
+        ] {
+            assert_eq!(
+                validate_value(&value, &descriptor, &[LogicalType::Bytes]),
+                expected
+            );
+        }
     }
 }

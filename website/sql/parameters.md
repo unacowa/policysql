@@ -42,6 +42,8 @@ NaN、Infinity、integerとして安全に表現できないJSON numberは拒否
 
 同じJSON stringでも、target descriptorが`int64 / string / int64`なら64-bit integer、`bytes / string / base64`ならBLOBとして検証・encodeされます。parameter単体の見た目から型を決めません。
 
+bytesのcanonical base64規則、空値・NULL、復号後と結果のサイズ上限は[HTTP共通仕様](../reference/http-conventions#bytesの入出力)を参照してください。
+
 ## Parameterの一致
 
 SQL中で参照するclient parameterには、対応する値が必要です。

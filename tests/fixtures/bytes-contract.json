@@ -1,0 +1,12 @@
+{
+  "valid": [
+    { "base64": "", "bytes": [] },
+    { "base64": "AA==", "bytes": [0] },
+    { "base64": "/w==", "bytes": [255] },
+    { "base64": "AP8=", "bytes": [0, 255] },
+    { "base64": "AAEC", "bytes": [0, 1, 2] },
+    { "base64": "AAEC/w==", "bytes": [0, 1, 2, 255] }
+  ],
+  "invalid": ["A", "AA", "AAA", "/w", "AP8", "AAEC/w", "A===", "====", "AA===", "AA==AA==", "AB==", "AAB=", "_w==", "-w==", " AA==", "AA==\n", "AA\t==", "ＡＡ=="],
+  "wrongTypes": [false, 0, [0, 1, 2, 255], { "base64": "AAEC/w==" }, { "type": "blob", "base64": "AAEC/w==" }]
+}

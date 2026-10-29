@@ -9,6 +9,8 @@ description: PolicySQLへ接続するdriver、query builder adapter、code gener
 
 driverはsecurity boundaryではありません。SQL、parameter、role、型はgatewayがrequestごとに再検証します。driverの責務は、Catalogとresult metadataを使って、値をlosslessかつ予測可能にapplication型へ対応付けることです。
 
+Client、Kysely adapter、generatorの契約はgatewayの配備先に依存しません。公開HTTP/Transport契約、Catalog、Capabilities、result metadataを使用し、Cloudflare Workers、Durable Objects、内部WASM ABIやDB driverの値形式への依存を持ち込みません。transactionのowner routingはserverが担当します。SQL dialect、利用可能な機能、上限は接続先のbackend profileとCapabilitiesに従い、Cloudflareの既定値をClientへ固定しません。
+
 ## 起動時の処理
 
 driverまたはcode generatorは、対象roleで`GET /v1/catalog`と`GET /v1/capabilities`を取得します。query固有型を生成する場合は、続けて`POST /v1/transactions:explain`を呼び出します。
@@ -147,6 +149,8 @@ code generatorはselect、insert、update、returningを別々に読み取りま
 | `datetime / string / sqlite-datetime` | branded string |
 | `instant / string / rfc3339` | branded string |
 | `json / object` | generated JSON typeまたは`unknown` |
+
+`bytes / string / base64`のJSON表現は、parameterとSELECT／RETURNINGの結果で共通のcanonical base64 stringです。空bytesは`""`、nullable列の結果に含まれるSQL NULLは`null`として区別します（bytes parameterへの`null`は拒否されます）。公式Clientとgeneratorはstringを保持し、`Uint8Array`の自動変換は行いません。application向けcodecを使用する場合は、この公開表現へ変換してからTransportへ渡します。server側のWASM／DB driver変換はserver adapterの責務です。encodingとサイズ上限は[HTTP共通仕様](../reference/http-conventions#bytesの入出力)を参照してください。
 
 日時を標準でJavaScriptの`Date`へ変換しません。`date`は時点ではなく、`datetime`はtimezoneが確定していない場合があり、`Date`へ変換すると意味が変わるためです。
 

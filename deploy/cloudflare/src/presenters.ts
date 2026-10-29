@@ -11,12 +11,13 @@ export const parsedRuntimeCall = (text: string) => {
 
 const valueDescriptor = (name: string, value: unknown, compiledType?: string) => {
   if (compiledType === "bytes") {
+    // JSON null is rejected for bytes parameters, so they are never nullable.
     return { name, type: "bytes", representation: "string", format: "base64", nullable: false };
   }
-  if (["string", "boolean", "int64", "number", "json"].includes(compiledType ?? "")) {
+  if (["string", "boolean", "integer", "int64", "number", "json"].includes(compiledType ?? "")) {
     const representation = compiledType === "json"
       ? "object"
-      : (["int64", "number"].includes(compiledType!) ? "number" : compiledType);
+      : (["integer", "int64", "number"].includes(compiledType!) ? "number" : compiledType);
     return { name, type: compiledType, representation, nullable: false };
   }
   if (value === null) return { name, type: "string", representation: "string", nullable: true };
@@ -67,7 +68,7 @@ export const explainResponse = (compiled: any, auth: AuthContext, id: string) =>
 });
 
 export const capabilities = (runtime: any, publicConfig: any = {}) => {
-  const limits = { ...LIMITS, ...(publicConfig.limits ?? {}) };
+  const limits = { ...LIMITS, ...(publicConfig.limits ?? {}), maxBytesPerValue: runtime.max_bytes_per_value };
   return ({
   id: runtime.snapshot,
   profile: runtime.profile,
