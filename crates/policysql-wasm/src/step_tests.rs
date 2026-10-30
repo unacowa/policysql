@@ -41,6 +41,7 @@ struct Owner {
     durable: Option<String>,
     volatile: Option<String>,
     requests: u64,
+    configured: Vec<String>,
 }
 
 impl Owner {
@@ -49,6 +50,7 @@ impl Owner {
         let host = json!({
             "nowMs": 1_790_000_000_000_u64, "entropy": format!("{:064x}", self.requests),
             "requestId": format!("req_{}", self.requests), "owner": OWNER,
+            "configuredChecks": self.configured,
         });
         let output = self.runtime.step_json(
             self.durable.clone(),
@@ -105,6 +107,10 @@ fn begun() -> Owner {
         r#"{"max_rows":100,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":8}"#,
     )
     .unwrap_or_else(|| unreachable!("valid runtime"));
+    begun_with(runtime)
+}
+
+fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
     let snapshot = runtime.snapshot();
     let auth: Value = serde_json::from_str(AUTH).unwrap_or_default();
     let mut owner = Owner {
@@ -112,6 +118,7 @@ fn begun() -> Owner {
         durable: None,
         volatile: None,
         requests: 0,
+        configured: vec!["consistency".to_owned()],
     };
     let mut output = owner.step(&json!({"type": "forwarded", "input": {
         "kind": "begin", "transactionId": OWNER, "startFingerprint": "c".repeat(64), "mode": "write",
@@ -128,10 +135,100 @@ fn begun() -> Owner {
 }
 
 #[test]
-fn abi_6_names_the_step_machine() {
+fn abi_7_names_the_step_machine_with_commit_checks() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 6);
-    assert!(owner.runtime.snapshot().ends_with(":abi-6"));
+    assert_eq!(owner.runtime.abi_version(), 7);
+    assert!(owner.runtime.snapshot().ends_with(":abi-7"));
+}
+
+/// ADR 0024 pull request 5 with the real compiler: the policy's check triggers on the
+/// insert, the validator gets the hook payload and a capability, and a callback query is
+/// compiled under the callback session from its verified text and validated.
+#[test]
+fn commit_checks_run_with_the_policy_and_the_callback_session() {
+    let policy = format!(
+        "{POLICY}commit_checks:\n  consistency:\n    triggered_by: [counters]\n    role: member\n    hook:\n      timeout_ms: 700\n"
+    );
+    let runtime = super::PolicySqlRuntime::new(
+        CATALOG,
+        &policy,
+        "schema_1",
+        "policy_1",
+        r#"{"max_rows":100,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":8}"#,
+    )
+    .unwrap_or_else(|_| unreachable!("valid runtime"));
+    let mut owner = begun_with(runtime);
+    let mut output = owner.statement(
+        r#"{"sequence":1,"sql":"INSERT INTO counters (id) VALUES (:id)","params":{"id":"x"}}"#,
+    );
+    output = owner.succeed(&output); // binding checked: Execute
+    let id = output["effects"][0]["id"].clone();
+    // The insert returns the policy's check column.
+    output = owner.step(&json!({"type": "executed", "id": id, "results": [{
+        "columns": ["__policysql_check"], "rows": [[1]], "rowsAffected": 1,
+        "usage": {"rowsRead": 0, "rowsWritten": 1, "queryDurationMs": 1},
+    }]}));
+    owner.succeed(&output);
+    let auth: Value = serde_json::from_str(AUTH).unwrap_or_default();
+    let snapshot = owner.runtime.snapshot();
+    output = owner.step(&json!({"type": "forwarded", "input": {
+        "kind": "commit", "transactionId": OWNER, "auth": auth, "command": r#"{"sequence":2}"#,
+        "databaseBinding": binding(&snapshot), "snapshot": snapshot,
+    }}));
+    for _ in 0..2 {
+        output = owner.succeed(&output);
+    }
+    let call = output["effects"][0].clone();
+    assert_eq!(call["type"], "callValidator", "{output}");
+    assert_eq!(call["check"], "consistency");
+    assert_eq!(call["timeoutMs"], 700);
+    assert_eq!(call["payload"]["role"], "member");
+    assert_eq!(
+        call["payload"]["statements"],
+        json!([{"index": 0, "type": "insert", "resource": "counters"}])
+    );
+    let token = call["capability"]["token"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let validation = format!("cval_{}", &OWNER[3..]);
+    let text = r#"{"sequence":1,"sql":"SELECT id, big FROM counters","params":{}}"#;
+    let checked = owner.step(&json!({"type": "forwarded", "input": {
+        "kind": "callbackQuery", "validationId": validation, "capability": token, "command": text,
+    }}));
+    assert_eq!(checked["effects"][0]["type"], "checkBinding", "{checked}");
+    let id = checked["effects"][0]["id"].clone();
+    let execute = owner.step(&json!({"type": "bindingChecked", "id": id, "allowed": true}));
+    let statement = &execute["effects"][0]["statements"][0];
+    assert!(
+        statement["sql"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tenant_id"),
+        "the callback runs the policy's protected SQL: {execute}"
+    );
+    let id = execute["effects"][0]["id"].clone();
+    let replied = owner.step(&json!({"type": "executed", "id": id, "results": [{
+        "columns": ["id", "big"], "rows": [["x", 9_007_199_254_740_991_u64]], "rowsAffected": 0,
+        "usage": {"rowsRead": 1, "rowsWritten": 0, "queryDurationMs": 1},
+    }]}));
+    let reply = &replied["effects"][0];
+    assert_eq!(reply["lane"], "callback", "{replied}");
+    assert_eq!(reply["reply"]["value"]["rowCount"], 1, "{replied}");
+    assert_eq!(reply["reply"]["value"]["meta"]["role"], "member");
+    assert_eq!(reply["reply"]["value"]["meta"]["policyVersion"], "policy_1");
+    // The verdict, the second binding check, `committing`, COMMIT, and the terminal record.
+    let mut output = owner.step(
+        &json!({"type": "validatorReplied", "id": call["id"], "ok": true,
+        "decision": {"version": "1", "allowed": true}}),
+    );
+    for _ in 0..4 {
+        output = owner.succeed(&output);
+    }
+    assert_eq!(
+        output["effects"][1]["reply"]["value"]["meta"]["commitChecks"], "passed",
+        "{output}"
+    );
 }
 
 #[test]

@@ -77,8 +77,9 @@ export class PolicySqlRuntime {
      * `{"error":{"code":"POLICYSQL_INTERNAL",...}}` and no state. The contract is
      * [`policysql_transaction::machine`].
      *
-     * Adding this method bumped `ABI_VERSION` to 6. No production path calls it before the
-     * switch-over (ADR 0024 pull request 7).
+     * Adding this method bumped `ABI_VERSION` to 6; commit checks and callbacks (pull request
+     * 5) changed what it returns for some inputs and bumped it to 7. No production path calls
+     * it before the switch-over (ADR 0024 pull request 7).
      */
     step_json(durable_json: string | null | undefined, volatile_json: string | null | undefined, event_json: string, host_json: string): string;
     /**
