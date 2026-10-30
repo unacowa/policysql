@@ -1,6 +1,6 @@
 [package]
 name = "policysql-transaction"
-description = "Pure PolicySQL transaction rules: canonical JSON, identities, and digests (ADR 0024)."
+description = "Pure PolicySQL transaction rules: canonical JSON, identities, digests, and the step machine (ADR 0024)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,11 +9,15 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 # `float_roundtrip`: decimals read as the correctly rounded double (ADR 0025 (b) needs
 # `9007199254740991.0` to read as 2^53 - 1; the default reads it as 2^53 - 2).
-serde_json = { version = "1", features = ["float_roundtrip"] }
+# `raw_value`: replies and recorded responses are kept as their exact JSON text.
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 sha2 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
