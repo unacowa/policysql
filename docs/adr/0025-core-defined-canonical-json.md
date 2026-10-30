@@ -118,7 +118,8 @@ them. They are requirements, not examples, and the follow-up pull request must m
   differ, one has a character at or above U+10000 and the other a character in
   U+E000–U+FFFF. Identity inputs have only ASCII keys (see Context), so their order is
   unchanged. Non-ASCII keys reach hashing only inside request bodies and statement and
-  callback commands, whose values are covered by the next section.
+  callback commands, whose values are covered by
+  [What happens at the deployment that switches the rule](#what-happens-at-the-deployment-that-switches-the-rule).
 
 ### No version marker, no dual-hash gate
 
@@ -213,12 +214,17 @@ One pull request, before ADR 0024 pull request 4:
    - `keyHash` and auth fingerprints with non-ASCII `principal`, `subject`, and session values
      (accented Latin, CJK, a character above U+FFFF, and characters with escapes: `"`, `\`,
      U+0000, U+001F, U+007F, U+2028), with several session keys;
-   - auth and request fingerprints with the binding's `version: 1`;
+   - auth fingerprints with the binding's `version: 1`;
    - unkeyed start fingerprints with and without `expected`;
    - commit and rollback `{sequence}` digests for sequences `0`, `1`, `2`, and 2^53 − 1.
 
    The rest of the pull request must keep these goldens passing unchanged. A golden that would
-   change is a breaking change this ADR does not allow.
+   change is a breaking change this ADR does not allow. Request fingerprints are not among
+   them: they change with the snapshot, and the new rule may legitimately change them for
+   bodies with non-integer numbers, integers beyond 2^53 − 1, or non-ASCII keys. A
+   request-fingerprint golden is allowed only for a body inside the stability set (integers of
+   magnitude at most 2^53 − 1, ASCII keys) computed under the same snapshot, as a check of
+   (a)–(d), not as a value kept across the bump.
 2. Replace `canonical.rs` with a standard-parser-based canonical form as above; keep the
    duplicate-key rejection and the performance tests (wide objects, number-heavy bodies); add
    tests for (b) (`1.0`, `1e0`, `-0`, 2^53 − 1), (c), (d), and the number range (`1e400`).
