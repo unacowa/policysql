@@ -873,7 +873,8 @@ Recorded by pull request 5 (ABI 7), which adds commit checks and callbacks to th
 (`crates/policysql-transaction/src/machine/step/checks.rs`); no production path calls it yet.
 
 - **Flow.** A commit whose recorded mutations trigger checks (`Compiler::triggered_checks`, by
-  ascending id, with each check's callback role and `hook.timeout_ms`) checks the binding,
+  ascending id, with each check's callback role and `hook.timeout_ms`; the machine sorts and
+  deduplicates them itself, so the order does not rest on the compiler) checks the binding,
   then requires every triggered id in `HostFacts.configuredChecks` (the ids with an endpoint,
   empty without `publicBaseUrl`); a missing one logs `commit_check_unconfigured` and rejects
   with `POLICYSQL_COMMIT_CHECK_REJECTED` before any capability or validator call (ADR 0021). It
@@ -930,7 +931,10 @@ Recorded by pull request 5 (ABI 7), which adds commit checks and callbacks to th
   `expiry-during-validator` (inconsistency 5) and `callback-without-validation` (a callback that
   reaches an owner with no live capability changes nothing; `TransactionOwnerCore` fails that
   owner's open transaction, so anyone holding the validation id of an active transaction
-  could end it), and `loss-between-checks` (the machine writes nothing between checks, so an
+  could end it; ADR 0007 "Callback rules of the step machine" scopes its rollback rule to a
+  running validation accordingly, and `docs/commit-checks.md` says the same; while a capability
+  is live, a malformed or wrong token still rolls back, as today. A separate fix aligns the
+  TypeScript owner; that entry goes when it merges), and `loss-between-checks` (the machine writes nothing between checks, so an
   owner lost during one check still calls the next validator before its `Persist(committing)`
   fails; no COMMIT either way, and both answer `POLICYSQL_INTERNAL`). The harness compares validator calls (the signed hook body with the token
   masked, and the signature) and callback replies as well, and adds generated commit-check
@@ -942,10 +946,12 @@ Recorded by pull request 5 (ABI 7), which adds commit checks and callbacks to th
   the configuration, and serialize the callback lane as today. The payload may carry
   integers beyond 2^53 − 1 in `session`; the hook adapter must not round them (today's
   `JSON.parse` of the session rounds them already).
-- **Tests.** `tests/commit_checks.rs` (scenarios), `tests/check_properties.rs` (proptest: at
-  most one COMMIT; COMMIT only after every validator allowed and a binding check after the last
-  allow; a callback executes only with the live capability before its verdict; callback rows
-  within the limit; one effect on the connection at a time; determinism), transcripts of an
+- **Tests.** `tests/commit_checks.rs` (scenarios), `tests/check_properties.rs` (proptest over
+  one or two triggered checks: at most one COMMIT; validators called once each in ascending id
+  order, the next only after the previous allowed; stale verdicts never advance; COMMIT only
+  after every check was called and allowed and a binding check after the last allow; a
+  callback executes only with the live capability before its verdict; callback rows within the
+  limit; one effect on the connection at a time; determinism), transcripts of an
   allowed check with callbacks, a deny, a validator timeout and transport error, owner loss and
   expiry while validating, a late verdict after expiry, a callback after revocation, callback
   limit exhaustion, and capability tampering, and `step_tests.rs` in `policysql-wasm` with the

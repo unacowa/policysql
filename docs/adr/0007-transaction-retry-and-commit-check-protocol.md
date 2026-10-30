@@ -1,6 +1,6 @@
 # ADR 0007: Transaction retry and commit-check protocol
 
-- Status: accepted (retry rules amended by [ADR 0024](0024-transaction-step-machine.md) from
+- Status: accepted (retry and callback rules amended by [ADR 0024](0024-transaction-step-machine.md) from
   its pull request 7)
 
 ## Context
@@ -17,7 +17,7 @@ Interactive transaction start uses the same optional-key rule; an unkeyed start 
 
 Commit checks trigger only when an operation actually changes at least one row in a configured resource. Triggered checks execute sequentially by ascending check identifier. Each gets a distinct short-lived callback capability. Callback SELECTs are processed serially and use the same response and retry rule as transaction statements. Callback role is immutable policy data; trusted session remains the initiating session.
 
-The callback capability authorizes only policy-compiled SELECT against the owned open transaction. It cannot mutate, choose a role, commit, roll back, or obtain credentials. Owner loss, timeout, deny, malformed protocol, or query failure rolls back.
+The callback capability authorizes only policy-compiled SELECT against the owned open transaction. It cannot mutate, choose a role, commit, roll back, or obtain credentials. Owner loss, timeout, deny, malformed protocol, or query failure rolls back (for the step machine, scoped to a running validation: see "Callback rules of the step machine").
 
 ### DO ownership
 
@@ -154,6 +154,31 @@ Atomic Execute on the owner does not answer from the owner record. A keyed retry
 and resolves through the `policysql_idempotency` row written in the same database transaction,
 and an unkeyed request is never retried, so it has no such window. A failed put of the owner
 record after its COMMIT succeeded no longer turns the committed reply into an error.
+
+### Callback rules of the step machine (amended by ADR 0024, effective from its pull request 7)
+
+The rule "owner loss, timeout, deny, malformed protocol, or query failure rolls back" is
+scoped to the validation a callback belongs to. In the step machine of
+[ADR 0024](0024-transaction-step-machine.md) (pull request 5 adds it unused):
+
+- **No live capability: nothing changes.** A callback query that reaches an owner with no
+  validation running (the transaction is active, committing, or terminal, the owner is a
+  successor, or the validator's verdict already revoked the capability) is answered 409
+  `POLICYSQL_TRANSACTION_UNAVAILABLE` and has no other effect. It is not a callback of any
+  validation, so it cannot end the transaction; otherwise anyone holding a validation id could
+  end an active transaction.
+- **A live capability: any failure rolls back.** While a validator is awaited, a callback with a
+  malformed, wrong, or expired token is an authentication failure of that validation: it is
+  answered `POLICYSQL_TRANSACTION_UNAVAILABLE`, the transaction rolls back and records
+  `failed`, and the waiting commit gets `POLICYSQL_COMMIT_CHECK_REJECTED`. So does every other
+  callback failure (malformed command, sequence conflict, compile error, non-read or multi-
+  statement query, binding rejection, query or result failure, a callback limit). The commit is
+  answered at once, not when the validator returns.
+
+A caller that knows the validation id can therefore end the transaction only while one of its
+validations is running, which is today's behavior during validation. `TransactionOwnerCore`
+also fails an active transaction on a stray callback; the differential harness lists that as
+`callback-without-validation` until the TypeScript owner is aligned.
 
 ## Consequences
 
