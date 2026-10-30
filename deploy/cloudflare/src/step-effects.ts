@@ -31,6 +31,36 @@ export const failureClass = (error: unknown): FailureClass => {
   return "unknown";
 };
 
+/**
+ * The class of a database or provider failure on the engine's direct placement, as `turso.ts`
+ * `remoteFailure` classified it before ADR 0024 pull request 8: a query timeout or the
+ * engine's own timeout is `timeout`, a rejected binding `rejected`, anything else
+ * `unavailable`. Core turns each class into its code.
+ */
+export const directFailureClass = (error: unknown): FailureClass => {
+  const errorClass = failureClass(error);
+  return errorClass === "unknown" ? "unavailable" : errorClass;
+};
+
+const IMMEDIATE = new Set(["respond", "log", "observe", "reset"]);
+
+/**
+ * The batch rule (ADR 0024 "Effects"): any number of immediate effects, then at most one
+ * awaited effect, last. Anything else is an engine fault (Abandon follows), checked before any
+ * effect of the batch runs, so no outcome is ever dropped.
+ */
+export const checkBatch = (effects: unknown) => {
+  if (!Array.isArray(effects)) throw new Error("step output without effects");
+  const awaited = effects.flatMap((effect, index) => (IMMEDIATE.has(effect?.type) ? [] : [index]));
+  if (awaited.length > 1 || (awaited.length === 1 && awaited[0] !== effects.length - 1)) {
+    throw new Error("an awaited effect is not last in its batch");
+  }
+};
+
+/** 32 fresh random bytes as hex: the `entropy` host fact of one step. */
+export const entropyHex = () => [...crypto.getRandomValues(new Uint8Array(32))]
+  .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
 /** The class of a validator call that produced no answer. */
 export const validatorFailureClass = (error: unknown): FailureClass => {
   const name = (error as { name?: unknown })?.name;

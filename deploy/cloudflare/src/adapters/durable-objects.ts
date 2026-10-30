@@ -14,25 +14,33 @@
 // always used (`https://owner/<command>`, JSON body, request id header), plus the owner name
 // the Worker routed to (`x-policysql-owner`). Since ADR 0024 pull request 7 the body of an
 // interactive command or a callback query is the step machine's forwarded owner input
-// without its `kind` (the path names it); the callback capability travels in that body.
+// without its `kind` (the path names it); the callback capability travels in that body. Since
+// pull request 8 the body of `/atomic` is the machine's forwarded atomic input as the engine's
+// `request` step emitted it (`kind: "atomic"` included), and the object's reply is the public
+// `execute` response the owner's step decided, which the Worker relays.
 //
-// Both sides mark the wire version (`x-policysql-owner-wire: 1`): the Worker on every message,
-// the object on every reply. During a rollout a Worker and an object of different versions
-// can meet, and on the changed paths each side treats an unmarked counterpart as that skew:
-// - an object answers an unmarked message on a changed path (an earlier Worker; its old body
-//   shapes and the callback capability in `authorization`) with POLICYSQL_INTERNAL;
-// - a Worker turns an unmarked reply on a changed path (an earlier object, which rejects the
-//   new body shapes with POLICYSQL_INVALID_REQUEST) into POLICYSQL_COMMIT_OUTCOME_UNKNOWN for a
-//   commit (a retry of a COMMIT that applied must never be a rejection, ADR 0007) and
-//   POLICYSQL_INTERNAL otherwise.
-// Neither code is a rejection in the client. The `/atomic` message did not change and is not
-// checked, but an atomic execute with a commit check is affected too: its validator's
-// callback crosses `/validation-query`, which the skew answers 500, so the validator denies
-// and the execute gets 409 POLICYSQL_COMMIT_CHECK_REJECTED before COMMIT (nothing is stored
-// under its idempotency key; the same key succeeds once the skew ends).
-// A reply is a 2xx response whose body
-// is the value, or a non-2xx response whose body is `{ error: { code, message, path,
-// requestId } }`. A Worker of this version reads only that distinction. The object still
+// Both sides mark the wire version of the path (`x-policysql-owner-wire`): the Worker on every
+// message, the object on every reply. A path's version changes only with that path's message:
+// `1` for the paths pull request 7 changed (`/begin`, `/statement`, `/commit`, `/rollback`,
+// `/validation-query`), `2` for `/atomic`, which pull request 8 changed. The interactive paths
+// therefore keep working between this version and the previous one. During a rollout a Worker
+// and an object of different versions can meet, and each side treats a counterpart without the
+// path's version as that skew:
+// - an object answers a message without its path's version (an earlier Worker: its old body
+//   shapes, the callback capability in `authorization`, or the atomic input the TypeScript
+//   owner path read) with POLICYSQL_INTERNAL and runs nothing;
+// - a Worker does not read a reply without its path's version (an earlier object: it rejects
+//   the new interactive body shapes with POLICYSQL_INVALID_REQUEST, and the new atomic body,
+//   whose `kind` member it does not accept, likewise before any database work). A commit
+//   becomes POLICYSQL_COMMIT_OUTCOME_UNKNOWN (a retry of a COMMIT that applied must never be a
+//   rejection, ADR 0007), anything else, `/atomic` included, POLICYSQL_INTERNAL.
+// Neither code is a rejection in the client. A keyed execute that committed before the skew
+// is therefore answered 500 while it lasts (never IDEMPOTENCY_CONFLICT, never a second
+// execution: nothing on either side executes a message it cannot read), and replays from its
+// `policysql_idempotency` row once the versions agree.
+//
+// A reply is a 2xx response whose body is the value, or a non-2xx response whose body is
+// `{ error: { code, message, path, requestId } }`. A Worker of this version reads only that distinction. The object still
 // sends exactly the statuses and bodies of earlier versions (201 for a started transaction,
 // 200 for any other value, an error's public status from the one table in src/http/status.ts)
 // because an earlier Worker forwards them to the client unchanged during a rollout
@@ -52,9 +60,12 @@ const OWNER_ORIGIN = "https://owner";
 const REQUEST_ID_HEADER = "x-policysql-request-id";
 const OWNER_HEADER = "x-policysql-owner";
 const WIRE_HEADER = "x-policysql-owner-wire";
-const WIRE_VERSION = "1";
-// The paths whose body changed with ADR 0024 pull request 7.
-const CHANGED_PATHS = new Set(["/begin", "/statement", "/commit", "/rollback", "/validation-query"]);
+// The wire version of each path's message: 1 since ADR 0024 pull request 7 changed it, 2 for
+// `/atomic`, which pull request 8 changed. A later change of a path's message bumps its version.
+const WIRE_VERSIONS: Readonly<Record<string, string>> = Object.freeze({
+  "/begin": "1", "/statement": "1", "/commit": "1", "/rollback": "1", "/validation-query": "1", "/atomic": "2",
+});
+const wireVersion = (path: string): string | undefined => (Object.hasOwn(WIRE_VERSIONS, path) ? WIRE_VERSIONS[path] : undefined);
 const COMMAND_PATHS: Readonly<Record<OwnerCommandKind, string>> = Object.freeze({
   statement: "/statement", commit: "/commit", rollback: "/rollback",
 });
@@ -64,12 +75,13 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
   const response = await stub.fetch(`${OWNER_ORIGIN}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
-    body: JSON.stringify(body),
+    body: stringifyExact(body),
   });
-  if (CHANGED_PATHS.has(path) && response.headers.get(WIRE_HEADER) !== WIRE_VERSION) {
+  if (response.headers.get(WIRE_HEADER) !== wireVersion(path)) {
     // An object of an earlier version: it cannot read this message, and its answer (a 400 for
     // the new body shape) is not an answer to it. Never a rejection; a commit may have applied
-    // through the earlier wire, so its outcome is unknown.
+    // through the earlier wire, so its outcome is unknown. An execute is never answered
+    // outcome-unknown (ADR 0024): a keyed one resolves through its row once the skew ends.
     await response.body?.cancel().catch(() => undefined);
     console.log(JSON.stringify({ event: "owner_wire_skew", path, requestId: headers[REQUEST_ID_HEADER] ?? null }));
     const error = path === "/commit"
@@ -92,7 +104,7 @@ const replyResponse = (reply: OwnerReply, path: string, requestId: string) => {
     stringifyExact(reply.ok ? reply.value : { error: { ...failure.error, requestId } }),
     {
       status: reply.ok ? (path === "/begin" ? 201 : 200) : statusFor(failure.error.code),
-      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8", [WIRE_HEADER]: WIRE_VERSION },
+      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8", [WIRE_HEADER]: wireVersion(path) ?? "1" },
     },
   );
 };
@@ -105,15 +117,17 @@ export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace
   return {
     route(name: string): TransactionOwnerHandle {
       const stub = namespace.get(namespace.idFromName(name));
-      const headers = (requestId: string) => ({ [REQUEST_ID_HEADER]: requestId, [OWNER_HEADER]: name, [WIRE_HEADER]: WIRE_VERSION });
+      const message = (path: string, input: unknown, requestId: string) => send(stub, path, input, {
+        [REQUEST_ID_HEADER]: requestId, [OWNER_HEADER]: name, [WIRE_HEADER]: wireVersion(path) as string,
+      });
       return {
-        begin: (input, requestId) => send(stub, "/begin", input, headers(requestId)),
-        atomic: (input, requestId) => send(stub, "/atomic", input, headers(requestId)),
+        begin: (input, requestId) => message("/begin", input, requestId),
+        atomic: (input, requestId) => message("/atomic", input, requestId),
         command: (kind, input, requestId) => {
           if (!Object.hasOwn(COMMAND_PATHS, kind)) return Promise.reject(new TypeError("unknown owner command"));
-          return send(stub, COMMAND_PATHS[kind], input, headers(requestId));
+          return message(COMMAND_PATHS[kind], input, requestId);
         },
-        callbackQuery: (input, requestId) => send(stub, "/validation-query", input, headers(requestId)),
+        callbackQuery: (input, requestId) => message("/validation-query", input, requestId),
       };
     },
   };
@@ -142,7 +156,8 @@ const serve = async (core: TransactionOwnerCore, request: Request): Promise<Resp
   const path = new URL(request.url).pathname;
   let reply: OwnerReply;
   const owner = request.headers.get(OWNER_HEADER);
-  const earlierWire = CHANGED_PATHS.has(path) && (request.headers.get(WIRE_HEADER) !== WIRE_VERSION ||
+  const version = wireVersion(path);
+  const earlierWire = version !== undefined && (request.headers.get(WIRE_HEADER) !== version ||
     (body !== null && typeof body === "object" && Object.hasOwn(body, "authFingerprint")));
   if ((owner !== null && !core.bindName(owner)) || earlierWire) {
     // Routed to another name, or a message of an earlier Worker: an adapter or rollout fault.

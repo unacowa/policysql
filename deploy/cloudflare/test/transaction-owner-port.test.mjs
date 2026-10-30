@@ -647,15 +647,17 @@ test("durable-objects: the object class decodes the internal messages and fails 
   }));
   const object = new OwnerObject(state, {});
   const name = `tx_${"a".repeat(32)}`;
+  // Each path's wire version: 2 for `/atomic` (ADR 0024 pull request 8), 1 for the others.
+  const version = (path) => (path === "/atomic" ? "2" : "1");
   const send = (path, body, headers = {}) => object.fetch(new Request(`https://owner${path}`, {
-    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": "1", ...headers }, body,
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": version(path), ...headers }, body,
   }));
   for (const [path, body] of [["/begin", "{"], ["/atomic", "null"], ["/statement", "[]"], ["/unknown", "{}"]]) {
     const response = await send(path, body);
     // The same status and body as earlier objects, which an earlier Worker forwards (ADR 0023).
     assert.equal(response.status, 400, path);
     assert.equal(response.headers.get("cache-control"), "no-store");
-    assert.equal(response.headers.get("x-policysql-owner-wire"), "1", "every reply carries the wire version");
+    assert.equal(response.headers.get("x-policysql-owner-wire"), version(path), "every reply carries its path's wire version");
     const reply = await response.json();
     assert.deepEqual(reply, { error: { code: "POLICYSQL_INVALID_REQUEST", message: "The request is invalid.", path: null, requestId: "req_obj" } }, path);
   }
@@ -666,6 +668,11 @@ test("durable-objects: the object class decodes the internal messages and fails 
     assert.equal(response.status, 500);
     assert.equal((await response.json()).error.code, "POLICYSQL_INTERNAL");
   }
+  // An `/atomic` message without its path's version 2 (the previous release's Worker sends 1).
+  const earlierAtomic = await send("/atomic", "null", { "x-policysql-owner-wire": "1" });
+  assert.equal(earlierAtomic.status, 500);
+  assert.equal(earlierAtomic.headers.get("x-policysql-owner-wire"), "2");
+  assert.equal((await earlierAtomic.json()).error.code, "POLICYSQL_INTERNAL");
   const auth = JSON.parse(h.runtime.authorize_session_json(JSON.stringify(h.session("a")), undefined, "execute")).auth;
   const begun = await send("/begin", JSON.stringify({
     transactionId: name, startFingerprint: "c".repeat(64), mode: "read", auth, databaseBinding: testBinding(snapshot), snapshot,
@@ -721,43 +728,19 @@ test("durable-objects: an earlier Worker forwarding this object's replies shows 
   // main's Worker: `{ status: response.status, body: await response.json() }`, then
   // `ownerResponse(reply)`; for an atomic execute only a non-2xx reply was forwarded.
   const earlierWorker = (entry) => ({ status: entry.status, body: entry.body });
-  // main's 2xx atomic reshaping, transcribed from deploy/cloudflare/src/routes/execute.ts at
-  // a29dee9 (origin/main before #34). The values that come from the Worker rather than the
-  // owner are this harness's: the compiled versions, the session's role, and no debug access
-  // (the harness enables no execution trace). The Worker's own request id was only a fallback
-  // for a missing `originalRequestId`, which the owner always sets (asserted below).
-  const earlierAtomic = (executed, worker = {
-    requestId: undefined, policyVersion: "policy_routing_1", schemaVersion: "schema_routing_1", role: "member", debugAuthorized: false,
-  }) => ({
-    status: 200,
-    body: {
-      transactionId: executed.transactionId,
-      status: "committed",
-      results: executed.results,
-      meta: {
-        requestId: executed.originalRequestId ?? worker.requestId,
-        policyVersion: worker.policyVersion,
-        schemaVersion: worker.schemaVersion,
-        role: worker.role,
-        commitChecks: executed.commitChecks,
-      },
-      ...(worker.debugAuthorized && executed.executionTrace
-        ? { debug: { executionTrace: executed.executionTrace } }
-        : {}),
-    },
-  });
+  // main's Worker reshaped a 2xx atomic reply (deploy/cloudflare/src/routes/execute.ts at
+  // a29dee9). Since ADR 0024 pull request 8 no earlier Worker reaches this object's `/atomic`
+  // (its message lacks the path's wire version 2 and is answered 500 without running), and the
+  // object's atomic reply is the public `execute` response itself, which this Worker relays.
   const forwarded = async (label, ownerPath, send, { atomic = false } = {}) => {
     const from = wire.length;
     const current = await send();
     const replies = wire.slice(from).filter((entry) => entry.path === ownerPath);
     assert.equal(replies.length, 1, `${label}: one ${ownerPath} reply`);
-    if (atomic && replies[0].status >= 200 && replies[0].status <= 299) {
-      assert.equal(replies[0].status, 200, `${label}: an earlier Worker reshapes a 2xx atomic reply`);
-      assert.equal(typeof replies[0].body.originalRequestId, "string", `${label}: the owner names the request`);
-      assert.deepEqual(earlierAtomic(replies[0].body), current, label);
-    } else {
-      assert.deepEqual(earlierWorker(replies[0]), current, label);
+    if (atomic && replies[0].status === 200) {
+      assert.equal(replies[0].body.meta.requestId, current.body.meta.requestId, `${label}: the owner answers with the engine's request id`);
     }
+    assert.deepEqual(earlierWorker(replies[0]), current, label);
     return current;
   };
 

@@ -1,14 +1,14 @@
-// The differential harness of ADR 0024 pull request 6: atomic `execute` through today's
-// engine (`createEngine`: `executeSealedEnvelope` on the direct path, `TransactionOwnerCore`
-// behind the in-memory TransactionOwner port on the owner path) and through the step machine
-// (`StepEngine` for the `request` kind and the direct placement, test/helpers/step-engine.mjs,
-// forwarding to `StepOwnerCore` owners, test/helpers/step-owner.mjs), side by side with the
-// same fake clock, the same kind of database (one SQLite file each, `policysql_idempotency`
-// included), the same store faults, and the same scripted validator. It asserts equal results,
-// database calls (SQL and arguments; the stored `response_json` compared as JSON), validator
-// calls (the signed hook body with the token masked), callback replies, trace-sink calls, cost
-// observations, and final rows (the idempotency table included), except the differences in
-// `ALLOWLIST`, each named with its reason.
+// The differential harness of ADR 0024 pull requests 6 and 8: atomic `execute` through the
+// engine of before pull request 8 (`createLegacyExecute`, test/helpers/legacy-engine.mjs:
+// `executeSealedEnvelope` on the direct path, `LegacyTransactionOwnerCore` on the owner path)
+// and through production (`createEngine`, whose `request` step runs the direct placement and
+// forwards to production `TransactionOwnerCore` owners behind the in-memory port), side by side
+// with the same fake clock, the same kind of database (one SQLite file each,
+// `policysql_idempotency` included), the same store faults, and the same scripted validator. It
+// asserts equal results, database calls (SQL and arguments; the stored `response_json` compared
+// as JSON), validator calls (the signed hook body with the token masked), callback replies,
+// trace-sink calls, cost observations, and final rows (the idempotency table included), except
+// the differences in `ALLOWLIST`, each named with its reason.
 //
 // It covers the scenarios of turso.test.mjs, execute-egress.test.mjs, idempotency.test.mjs, and
 // cost.test.mjs that reach execution, on both placements, keyed and unkeyed. The owner-level
@@ -26,9 +26,9 @@ import { createEngine } from "../src/engine.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
 import { estimateSealedEnvelope } from "../src/cost.ts";
 import { validateConfig } from "../src/engine-config.ts";
+import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
 import { createMemoryTransactionOwners } from "./helpers/memory-owner.mjs";
-import { StepEngine } from "./helpers/step-engine.mjs";
-import { StepOwnerCore } from "./helpers/step-owner.mjs";
+import { createLegacyExecute } from "./helpers/legacy-engine.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 
@@ -40,11 +40,11 @@ initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.
 export const ALLOWLIST = Object.freeze({
   "idempotency-conflict-code":
     "ADR 0024 inconsistency 1: a keyed retry whose row has another fingerprint is IDEMPOTENCY_CONFLICT on both " +
-    "placements in core; TransactionOwnerCore answers TRANSACTION_CONFLICT on the owner path. Both are definite " +
+    "placements in core; LegacyTransactionOwnerCore answered TRANSACTION_CONFLICT on the owner path. Both are definite " +
     "rejections of execute in the client.",
   "duplicate-idempotency-rows":
     "ADR 0024 inconsistency 2: more than one row for a key hash is INTERNAL (500) on both placements in core; " +
-    "TransactionOwnerCore answers TRANSACTION_CONFLICT (409) on the owner path.",
+    "LegacyTransactionOwnerCore answered TRANSACTION_CONFLICT (409) on the owner path.",
   "stored-record-shape":
     "ADR 0024 inconsistency 2 (one strict rule for both paths): core writes one terminal record shape on both " +
     "placements, the owner path's, with `status: \"committed\"` and `commitChecks`; the TypeScript direct path " +
@@ -222,8 +222,8 @@ const sqliteProvider = (path, calls, faults, connections) => ({
   },
 });
 
-/** The owners of the step side: one `StepOwnerCore` per name, with a store and a timer. */
-const stepOwners = (dependencies, faults, background) => {
+/** The owners of the TypeScript side: one `LegacyTransactionOwnerCore` per name, with a store and a timer. */
+const legacyOwners = (dependencies, faults, background) => {
   const slots = new Map();
   const live = (name) => {
     let slot = slots.get(name);
@@ -233,15 +233,14 @@ const stepOwners = (dependencies, faults, background) => {
         store: {
           async get(key) { return structuredClone(data.get(key)); },
           async put(key, value) {
-            const fault = faults.put?.({ phase: typeof value === "string" ? JSON.parse(value).phase : value?.status }) ?? {};
-            if (fault.fail) throw new Error("store put failed");
+            if (faults.put?.({ phase: value?.status })?.fail) throw new Error("store put failed");
             data.set(key, structuredClone(value));
           },
         },
         timer: { async schedule() {} },
         background,
       };
-      slot = { data, core: new StepOwnerCore(facilities, dependencies, name) };
+      slot = { data, core: new LegacyTransactionOwnerCore(facilities, dependencies) };
       slots.set(name, slot);
     }
     return slot;
@@ -252,6 +251,7 @@ const stepOwners = (dependencies, faults, background) => {
       route(name) {
         return {
           atomic: async (input, requestId) => wire(await live(name).core.atomic(wire(input), requestId)),
+          // The TypeScript owner's own callback input: the parsed command.
           callbackQuery: async (input, requestId) => wire(await live(name).core.callbackQuery(wire(input), requestId)),
         };
       },
@@ -312,11 +312,11 @@ const environment = (t, { limits = {}, trace = false, engineConfig = config } = 
       const query = async (text) => {
         const requestId = `cb-${++callbackCount}`;
         const owner = env.sides[side].owner(`tx_${hook.validationId.slice("cval_".length)}`);
-        // The port's callback input since pull request 7 (the TypeScript side's production owner
-        // hands it to the TypeScript atomic path); the step side's helper takes `bodyText`.
+        // The TypeScript owner reads the parsed command; production the port's input since pull
+        // request 7 (the validation id and the verified text).
         const reply = side === "ts"
-          ? await owner.callbackQuery({ validationId: hook.validationId, capability: hook.query.token, command: text }, requestId)
-          : await owner.callbackQuery({ validationId: hook.validationId, capability: hook.query.token, bodyText: text }, requestId);
+          ? await owner.callbackQuery({ capability: hook.query.token, command: JSON.parse(text) }, requestId)
+          : await owner.callbackQuery({ validationId: hook.validationId, capability: hook.query.token, command: text }, requestId);
         const normalized = reply.ok ? { ok: true, value: reply.value } : { ok: false, code: reply.error.code };
         env.callbacks[side].push(normalized);
         return normalized;
@@ -330,16 +330,16 @@ const environment = (t, { limits = {}, trace = false, engineConfig = config } = 
     };
     const ownerDependencies = { getRuntime, database, config: engineConfig, fetchImpl };
     if (side === "ts") {
-      const owners = createMemoryTransactionOwners(() => ownerDependencies, { background });
-      owners.interceptPut(({ value }) => faults.put?.({ phase: value?.status }));
-      const engine = createEngine({ getRuntime, database, config: engineConfig, transactionOwners: owners.port, ...(executionTrace ? { executionTrace } : {}) });
-      env.sides.ts = { path, calls, tasks, background, execute: (input, context) => engine.execute(input, context, background),
-        owner: (name) => owners.port.route(name), records: async () => Promise.all(owners.names().map((name) => owners.record(name))) };
-    } else {
-      const owners = stepOwners(ownerDependencies, faults, background);
-      const engine = new StepEngine({ getRuntime, database, config: engineConfig, owners: owners.port, executionTrace });
-      env.sides.step = { path, calls, tasks, background, engine, execute: (input, context) => engine.execute(input, context, background),
+      const owners = legacyOwners(ownerDependencies, faults, background);
+      const execute = createLegacyExecute({ getRuntime, database, config: engineConfig, transactionOwners: owners.port, executionTrace });
+      env.sides.ts = { path, calls, tasks, background, execute: (input, context) => execute(input, context, background),
         owner: (name) => owners.port.route(name), records: async () => owners.names().map((name) => owners.record(name)) };
+    } else {
+      const owners = createMemoryTransactionOwners(() => ownerDependencies, { background });
+      owners.interceptPut(({ value }) => faults.put?.({ phase: typeof value === "string" ? JSON.parse(value).phase : value?.status }));
+      const engine = createEngine({ getRuntime, database, config: engineConfig, transactionOwners: owners.port, ...(executionTrace ? { executionTrace } : {}) });
+      env.sides.step = { path, calls, tasks, background, execute: (input, context) => engine.execute(input, context, background),
+        owner: (name) => owners.port.route(name), records: async () => Promise.all(owners.names().map((name) => owners.record(name))) };
     }
   }
   t.after(() => {
