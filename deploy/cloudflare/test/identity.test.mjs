@@ -5,6 +5,7 @@ import { authIdentity, callbackDigest, commandDigest, requestIdentity, startDige
 import { createInProcessPolicySql, loadRuntime } from "../../../examples/in-process/policysql.ts";
 import { identityRuntime as runtime } from "./helpers/identity.mjs";
 import { MAX_BODY_BYTES } from "../src/request-body.ts";
+import { readFileSync } from "node:fs";
 
 // ADR 0024 pull request 2: canonical JSON, SHA-256, and the identities move to core, and the
 // engine uses core's result. These tests are the compatibility evidence: core and the
@@ -122,6 +123,19 @@ test("the ADR 0024 corpus prints as documented and hashes identically in core an
   for (const [text, printed] of CORPUS) {
     assert.equal(stableJson(JSON.parse(text)), printed, `reference bytes: ${text}`);
     for (const form of forms(text)) await assertSameIdentities(form);
+  }
+});
+
+// ADR 0025, Follow-up 1: the goldens are today's values, computed by the reference too.
+test("the identity goldens are the reference's values", async () => {
+  const { goldens } = JSON.parse(readFileSync(new URL("../../../tests/fixtures/identity-goldens.json", import.meta.url), "utf8"));
+  for (const { name, input, output } of goldens) {
+    let expected;
+    if (input.op === "request") expected = { idempotency: await requestIdempotency(input.key, input.auth, JSON.parse(input.body), input.endpoint, input.binding) };
+    else if (input.op === "auth") expected = { fingerprint: await authFingerprint(input.auth, input.binding) };
+    else if (input.op === "start") expected = { digest: await sha256(stableJson({ transactionId: input.transactionId, request: JSON.parse(input.body) })) };
+    else expected = { digest: await sha256(stableJson({ kind: input.kind, command: input.command })) };
+    assert.deepEqual(output, expected, name);
   }
 });
 

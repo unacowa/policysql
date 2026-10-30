@@ -1,0 +1,1359 @@
+{
+  "description": "Identity goldens captured from origin/main (stableJson + sha256 in idempotency.ts, equal to core's identity_json there) before ADR 0025's canonical-form change. They must never change (ADR 0025, Stability requirements). Request fingerprints here use stability-set bodies (ASCII keys, integers within 2^53 - 1) under a fixed binding, as a check of (a)-(d) only.",
+  "goldens": [
+    {
+      "name": "request execute ascii body 0",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:user_1",
+          "subject": "user_1",
+          "role": "member",
+          "session": {
+            "tenant_id": "tenant_a"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"statements\":[{\"sql\":\"SELECT id FROM projects WHERE id = :id\",\"params\":{\"id\":\"p1\"}}]}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "0c4e3b1c85af5722b958dc2a6ca161147c45a3672b7a2676190af189ff546521",
+          "fingerprint": "ec6f3ed80ba89b476289f165fd0ee303e28cc9b64ef39d15ffdacfc8d8fbc0c1"
+        }
+      }
+    },
+    {
+      "name": "request execute ascii body 1",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:user_1",
+          "subject": "user_1",
+          "role": "member",
+          "session": {
+            "tenant_id": "tenant_a"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": " { \"statements\" : [ { \"params\" : { \"n\" : 1.0 , \"m\" : -0 , \"e\" : 1e0 , \"f\" : 10E-1 , \"max\" : 9007199254740991 , \"min\" : -9007199254740991 } , \"sql\" : \"SELECT 1\" } ] } ",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "0c4e3b1c85af5722b958dc2a6ca161147c45a3672b7a2676190af189ff546521",
+          "fingerprint": "69f4215ef7bc663b53a55db4d0a0018a0417d065b91616a6415300fddd6dbbde"
+        }
+      }
+    },
+    {
+      "name": "request interactive-start ascii body 2",
+      "input": {
+        "op": "request",
+        "endpoint": "interactive-start",
+        "auth": {
+          "principal": "https://issuer.test:user_1",
+          "subject": "user_1",
+          "role": "member",
+          "session": {
+            "tenant_id": "tenant_a"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"mode\":\"write\"}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "cc90d8cb5e2d8c4f3655b3d3226da4daae5e1019dfb3fd7c2c16d1e4b624e45a",
+          "fingerprint": "c40a390781f431ef606b424f45cb783868a721bff9f865941845f549e7238a06"
+        }
+      }
+    },
+    {
+      "name": "auth ascii",
+      "input": {
+        "op": "auth",
+        "auth": {
+          "principal": "https://issuer.test:user_1",
+          "subject": "user_1",
+          "role": "member",
+          "session": {
+            "tenant_id": "tenant_a"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        }
+      },
+      "output": {
+        "fingerprint": "290b737ae7d2f870c5df548d1d057d627aeb752ca77896ee21e4325c22eaccba"
+      }
+    },
+    {
+      "name": "request execute accented-latin body 0",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:josé",
+          "subject": "José Müller-Ångström",
+          "role": "member",
+          "session": {
+            "tenant_id": "café",
+            "region": "Île-de-France"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"statements\":[{\"sql\":\"SELECT id FROM projects WHERE id = :id\",\"params\":{\"id\":\"p1\"}}]}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "c953a0b1b43b6abb2b542437a67b4093b3ae94004a82344172452f703259d90f",
+          "fingerprint": "435847a6ddf887cdc0b10e684deaf36a67de6d59c8fefa06e0d997a7a051eb54"
+        }
+      }
+    },
+    {
+      "name": "request execute accented-latin body 1",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:josé",
+          "subject": "José Müller-Ångström",
+          "role": "member",
+          "session": {
+            "tenant_id": "café",
+            "region": "Île-de-France"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": " { \"statements\" : [ { \"params\" : { \"n\" : 1.0 , \"m\" : -0 , \"e\" : 1e0 , \"f\" : 10E-1 , \"max\" : 9007199254740991 , \"min\" : -9007199254740991 } , \"sql\" : \"SELECT 1\" } ] } ",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "c953a0b1b43b6abb2b542437a67b4093b3ae94004a82344172452f703259d90f",
+          "fingerprint": "6477a09a6fc4c0d623fc80f0fa4967bc20e61b8cbacd1af1ea8c5f12dcfe07fa"
+        }
+      }
+    },
+    {
+      "name": "request interactive-start accented-latin body 2",
+      "input": {
+        "op": "request",
+        "endpoint": "interactive-start",
+        "auth": {
+          "principal": "https://issuer.test:josé",
+          "subject": "José Müller-Ångström",
+          "role": "member",
+          "session": {
+            "tenant_id": "café",
+            "region": "Île-de-France"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"mode\":\"write\"}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "98ae43dc52e4a9f61b1a07867a89d47ea7c4b01c6e32290bd286cba66acc4c4e",
+          "fingerprint": "5ecd9874239e9c9bd96a210eb1c20735b582129674f43c844535e6611d969422"
+        }
+      }
+    },
+    {
+      "name": "auth accented-latin",
+      "input": {
+        "op": "auth",
+        "auth": {
+          "principal": "https://issuer.test:josé",
+          "subject": "José Müller-Ångström",
+          "role": "member",
+          "session": {
+            "tenant_id": "café",
+            "region": "Île-de-France"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        }
+      },
+      "output": {
+        "fingerprint": "7a86bca2e5c638befdc494583232bed05d8660244a07f9b22daa0df82e154cb4"
+      }
+    },
+    {
+      "name": "request execute cjk body 0",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:山田",
+          "subject": "山田太郎",
+          "role": "member",
+          "session": {
+            "tenant_id": "東京支店",
+            "team": "개발팀"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"statements\":[{\"sql\":\"SELECT id FROM projects WHERE id = :id\",\"params\":{\"id\":\"p1\"}}]}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "1c0ea59f3fbb5213350153630ff84881559ef2d2782cb364c2e93532ecfb6280",
+          "fingerprint": "81db2ac475fb99a5ca92902d52013008ff70ea4de65f9cc9eeef3a1d1debf719"
+        }
+      }
+    },
+    {
+      "name": "request execute cjk body 1",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:山田",
+          "subject": "山田太郎",
+          "role": "member",
+          "session": {
+            "tenant_id": "東京支店",
+            "team": "개발팀"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": " { \"statements\" : [ { \"params\" : { \"n\" : 1.0 , \"m\" : -0 , \"e\" : 1e0 , \"f\" : 10E-1 , \"max\" : 9007199254740991 , \"min\" : -9007199254740991 } , \"sql\" : \"SELECT 1\" } ] } ",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "1c0ea59f3fbb5213350153630ff84881559ef2d2782cb364c2e93532ecfb6280",
+          "fingerprint": "9a1fa1876adcdb4841205dfcb99108f3c40bb9b53f535a7b712eb6803cfaac32"
+        }
+      }
+    },
+    {
+      "name": "request interactive-start cjk body 2",
+      "input": {
+        "op": "request",
+        "endpoint": "interactive-start",
+        "auth": {
+          "principal": "https://issuer.test:山田",
+          "subject": "山田太郎",
+          "role": "member",
+          "session": {
+            "tenant_id": "東京支店",
+            "team": "개발팀"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"mode\":\"write\"}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "fe86368aedd0028a69a256f2aeb981e44c1781517be8a15abcb433fbebac7a5a",
+          "fingerprint": "61ca621c2eb827f437a67bc65fec79c04b3aa57f5dbf548a0905ba6bd76f71a4"
+        }
+      }
+    },
+    {
+      "name": "auth cjk",
+      "input": {
+        "op": "auth",
+        "auth": {
+          "principal": "https://issuer.test:山田",
+          "subject": "山田太郎",
+          "role": "member",
+          "session": {
+            "tenant_id": "東京支店",
+            "team": "개발팀"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        }
+      },
+      "output": {
+        "fingerprint": "342488a5863b1287e8b859ae58b902119d4d0c5e118bf82fddac6e627a772e34"
+      }
+    },
+    {
+      "name": "request execute astral body 0",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:😀",
+          "subject": "user_𝄞",
+          "role": "member",
+          "session": {
+            "tenant_id": "𠮷😀",
+            "z_last": "􏿿"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"statements\":[{\"sql\":\"SELECT id FROM projects WHERE id = :id\",\"params\":{\"id\":\"p1\"}}]}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "9cc0bc6aa8bb2135e7be4685252928f6a172932b2ecf9c12dc41ff9306d3d5f1",
+          "fingerprint": "5ed1e98654c3009aa1a468a62a3420978b364beb666d4ccb8112bbfcec899929"
+        }
+      }
+    },
+    {
+      "name": "request execute astral body 1",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:😀",
+          "subject": "user_𝄞",
+          "role": "member",
+          "session": {
+            "tenant_id": "𠮷😀",
+            "z_last": "􏿿"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": " { \"statements\" : [ { \"params\" : { \"n\" : 1.0 , \"m\" : -0 , \"e\" : 1e0 , \"f\" : 10E-1 , \"max\" : 9007199254740991 , \"min\" : -9007199254740991 } , \"sql\" : \"SELECT 1\" } ] } ",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "9cc0bc6aa8bb2135e7be4685252928f6a172932b2ecf9c12dc41ff9306d3d5f1",
+          "fingerprint": "9b77f117d186e2f729c55ac473f281b0b31a8a4376dff85e2a98aa78f0a45eb0"
+        }
+      }
+    },
+    {
+      "name": "request interactive-start astral body 2",
+      "input": {
+        "op": "request",
+        "endpoint": "interactive-start",
+        "auth": {
+          "principal": "https://issuer.test:😀",
+          "subject": "user_𝄞",
+          "role": "member",
+          "session": {
+            "tenant_id": "𠮷😀",
+            "z_last": "􏿿"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"mode\":\"write\"}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "7463e4e2881bf58d11803a83c61601b6781c705a40dc6c9a590932900185fd21",
+          "fingerprint": "67e33e22da3fa46461d32296666b3e622a419ca1642afe02fc5e14e33b291b8d"
+        }
+      }
+    },
+    {
+      "name": "auth astral",
+      "input": {
+        "op": "auth",
+        "auth": {
+          "principal": "https://issuer.test:😀",
+          "subject": "user_𝄞",
+          "role": "member",
+          "session": {
+            "tenant_id": "𠮷😀",
+            "z_last": "􏿿"
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        }
+      },
+      "output": {
+        "fingerprint": "fc096e088cf21507c3383406aee7c7bf989a8dd5bf30be3d32a5f8e153d01783"
+      }
+    },
+    {
+      "name": "request execute escapes body 0",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:q\"b\\n\u0000u\u001fdl e",
+          "subject": "q\"b\\n\u0000u\u001fdl e",
+          "role": "member",
+          "session": {
+            "tenant_id": "q\"b\\n\u0000u\u001fdl e",
+            "a_first": "\"",
+            "b_second": "\\",
+            "c_nul": "\u0000",
+            "d_us": "\u001f",
+            "e_del": "",
+            "f_ls": " "
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"statements\":[{\"sql\":\"SELECT id FROM projects WHERE id = :id\",\"params\":{\"id\":\"p1\"}}]}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "333ae13d6c4a09c8593875f3b8106d47e7b084a1a7bb082aeda2ea1ec1d62ed3",
+          "fingerprint": "ba06345674e71a0e3f0ecd7a705c53b5cc1a846aa98b27e14b5d49777a4122a2"
+        }
+      }
+    },
+    {
+      "name": "request execute escapes body 1",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:q\"b\\n\u0000u\u001fdl e",
+          "subject": "q\"b\\n\u0000u\u001fdl e",
+          "role": "member",
+          "session": {
+            "tenant_id": "q\"b\\n\u0000u\u001fdl e",
+            "a_first": "\"",
+            "b_second": "\\",
+            "c_nul": "\u0000",
+            "d_us": "\u001f",
+            "e_del": "",
+            "f_ls": " "
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": " { \"statements\" : [ { \"params\" : { \"n\" : 1.0 , \"m\" : -0 , \"e\" : 1e0 , \"f\" : 10E-1 , \"max\" : 9007199254740991 , \"min\" : -9007199254740991 } , \"sql\" : \"SELECT 1\" } ] } ",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "333ae13d6c4a09c8593875f3b8106d47e7b084a1a7bb082aeda2ea1ec1d62ed3",
+          "fingerprint": "8b123a8880efca4f11c43a1848ef91f88091bdc7237849165432623c57d6d912"
+        }
+      }
+    },
+    {
+      "name": "request interactive-start escapes body 2",
+      "input": {
+        "op": "request",
+        "endpoint": "interactive-start",
+        "auth": {
+          "principal": "https://issuer.test:q\"b\\n\u0000u\u001fdl e",
+          "subject": "q\"b\\n\u0000u\u001fdl e",
+          "role": "member",
+          "session": {
+            "tenant_id": "q\"b\\n\u0000u\u001fdl e",
+            "a_first": "\"",
+            "b_second": "\\",
+            "c_nul": "\u0000",
+            "d_us": "\u001f",
+            "e_del": "",
+            "f_ls": " "
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"mode\":\"write\"}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "a06537c33b8b8ce99461e1d02ba25043f670b5db30ccc0d1f51131e6600d4959",
+          "fingerprint": "be3a172df08ca367de044a187c9dbb1757f24cb8b4d0a76872502d71fdb5383d"
+        }
+      }
+    },
+    {
+      "name": "auth escapes",
+      "input": {
+        "op": "auth",
+        "auth": {
+          "principal": "https://issuer.test:q\"b\\n\u0000u\u001fdl e",
+          "subject": "q\"b\\n\u0000u\u001fdl e",
+          "role": "member",
+          "session": {
+            "tenant_id": "q\"b\\n\u0000u\u001fdl e",
+            "a_first": "\"",
+            "b_second": "\\",
+            "c_nul": "\u0000",
+            "d_us": "\u001f",
+            "e_del": "",
+            "f_ls": " "
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        }
+      },
+      "output": {
+        "fingerprint": "51c471f27b77b4fc8333e88ba4970fd98b62dacdd3ee7ff61b0b4789c116a70f"
+      }
+    },
+    {
+      "name": "request execute many-session-keys body 0",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "in-process:tenant_a",
+          "subject": "user_a",
+          "role": "admin",
+          "session": {
+            "z": "1",
+            "tenant_id": "t",
+            "a": "2",
+            "org_id": "o",
+            "a1": "3",
+            "a_b": "4"
+          },
+          "roles": [
+            "admin"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"statements\":[{\"sql\":\"SELECT id FROM projects WHERE id = :id\",\"params\":{\"id\":\"p1\"}}]}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "d400f232f99b57b5ddbe413c095e4f9069e2e0046349bf940cebd0fbf624869d",
+          "fingerprint": "1e9ae1a770ea1f4b89964204a28e8a8b31ef98bf1e67627c39a919b0f83c2266"
+        }
+      }
+    },
+    {
+      "name": "request execute many-session-keys body 1",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "in-process:tenant_a",
+          "subject": "user_a",
+          "role": "admin",
+          "session": {
+            "z": "1",
+            "tenant_id": "t",
+            "a": "2",
+            "org_id": "o",
+            "a1": "3",
+            "a_b": "4"
+          },
+          "roles": [
+            "admin"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": " { \"statements\" : [ { \"params\" : { \"n\" : 1.0 , \"m\" : -0 , \"e\" : 1e0 , \"f\" : 10E-1 , \"max\" : 9007199254740991 , \"min\" : -9007199254740991 } , \"sql\" : \"SELECT 1\" } ] } ",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "d400f232f99b57b5ddbe413c095e4f9069e2e0046349bf940cebd0fbf624869d",
+          "fingerprint": "44c849f7970fc3c0c20515cbeeb4812c1eedc68dc9ae88472274f625b87d9dfd"
+        }
+      }
+    },
+    {
+      "name": "request interactive-start many-session-keys body 2",
+      "input": {
+        "op": "request",
+        "endpoint": "interactive-start",
+        "auth": {
+          "principal": "in-process:tenant_a",
+          "subject": "user_a",
+          "role": "admin",
+          "session": {
+            "z": "1",
+            "tenant_id": "t",
+            "a": "2",
+            "org_id": "o",
+            "a1": "3",
+            "a_b": "4"
+          },
+          "roles": [
+            "admin"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"mode\":\"write\"}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "7437604fdf7dfc7389f3af444226a024794f554c1282396d57554ba855c322d9",
+          "fingerprint": "fcf14d9870537974f01ab27e86f54b1bba713592f5056eda76f5d31777cf71a8"
+        }
+      }
+    },
+    {
+      "name": "auth many-session-keys",
+      "input": {
+        "op": "auth",
+        "auth": {
+          "principal": "in-process:tenant_a",
+          "subject": "user_a",
+          "role": "admin",
+          "session": {
+            "z": "1",
+            "tenant_id": "t",
+            "a": "2",
+            "org_id": "o",
+            "a1": "3",
+            "a_b": "4"
+          },
+          "roles": [
+            "admin"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        }
+      },
+      "output": {
+        "fingerprint": "b8c17c7da707881d375a0fd4cdf4ecaf8b64d532377ecd3d1c8c506478502a2f"
+      }
+    },
+    {
+      "name": "request execute empty-session body 0",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "p",
+          "subject": "s",
+          "role": "r",
+          "session": {},
+          "roles": [
+            "r"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"statements\":[{\"sql\":\"SELECT id FROM projects WHERE id = :id\",\"params\":{\"id\":\"p1\"}}]}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "2560ae37a9efbc792bcbd32e6852b3227d5f5d5d4492847bf142bd4139f7173e",
+          "fingerprint": "2699bb9e5529938120e149bcbf0b10763f5d7b6f2c76e2fd5e96fce548e3de2d"
+        }
+      }
+    },
+    {
+      "name": "request execute empty-session body 1",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "p",
+          "subject": "s",
+          "role": "r",
+          "session": {},
+          "roles": [
+            "r"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": " { \"statements\" : [ { \"params\" : { \"n\" : 1.0 , \"m\" : -0 , \"e\" : 1e0 , \"f\" : 10E-1 , \"max\" : 9007199254740991 , \"min\" : -9007199254740991 } , \"sql\" : \"SELECT 1\" } ] } ",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "2560ae37a9efbc792bcbd32e6852b3227d5f5d5d4492847bf142bd4139f7173e",
+          "fingerprint": "717b39bddab0df5af325b7b57d364d733fe2e236d566216f604ee7c6cd8e0428"
+        }
+      }
+    },
+    {
+      "name": "request interactive-start empty-session body 2",
+      "input": {
+        "op": "request",
+        "endpoint": "interactive-start",
+        "auth": {
+          "principal": "p",
+          "subject": "s",
+          "role": "r",
+          "session": {},
+          "roles": [
+            "r"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"mode\":\"write\"}",
+        "key": "request-key-0001"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "f948c6fd85dbcf7482fbe79421246437fbc9baf3c0dfbefc2741d9de0804724c",
+          "fingerprint": "b20f87d805cfdc73cd7a33608fb5dfb78cec0454d4708eaadfbd74cc217be7e7"
+        }
+      }
+    },
+    {
+      "name": "auth empty-session",
+      "input": {
+        "op": "auth",
+        "auth": {
+          "principal": "p",
+          "subject": "s",
+          "role": "r",
+          "session": {},
+          "roles": [
+            "r"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        }
+      },
+      "output": {
+        "fingerprint": "54c1f10d0d2b1a4fd74defaf1bf36c3ed4d528ab176a32b0a2d5467df75b42cc"
+      }
+    },
+    {
+      "name": "request key aaaaaaaaaaaaaaaa",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:q\"b\\n\u0000u\u001fdl e",
+          "subject": "q\"b\\n\u0000u\u001fdl e",
+          "role": "member",
+          "session": {
+            "tenant_id": "q\"b\\n\u0000u\u001fdl e",
+            "a_first": "\"",
+            "b_second": "\\",
+            "c_nul": "\u0000",
+            "d_us": "\u001f",
+            "e_del": "",
+            "f_ls": " "
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"statements\":[]}",
+        "key": "aaaaaaaaaaaaaaaa"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "9caaf3a979ac6cc2de7243d8e71874d271d7adb6dfc615b4987319b17a25d3fc",
+          "fingerprint": "6adf7699e3ad3a07787690e1aecdffc3181e38a6d92fc77e3641f88f01a45dc4"
+        }
+      }
+    },
+    {
+      "name": "request key A.b_c:d-0123456789",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:q\"b\\n\u0000u\u001fdl e",
+          "subject": "q\"b\\n\u0000u\u001fdl e",
+          "role": "member",
+          "session": {
+            "tenant_id": "q\"b\\n\u0000u\u001fdl e",
+            "a_first": "\"",
+            "b_second": "\\",
+            "c_nul": "\u0000",
+            "d_us": "\u001f",
+            "e_del": "",
+            "f_ls": " "
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"statements\":[]}",
+        "key": "A.b_c:d-0123456789"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "700c3e8c0bb77dbf202023ed109757e3ffe56ec92c2d316b41e8ad10db793d78",
+          "fingerprint": "6adf7699e3ad3a07787690e1aecdffc3181e38a6d92fc77e3641f88f01a45dc4"
+        }
+      }
+    },
+    {
+      "name": "request key zzzzzzzzzzzzzzzzzzzz",
+      "input": {
+        "op": "request",
+        "endpoint": "execute",
+        "auth": {
+          "principal": "https://issuer.test:q\"b\\n\u0000u\u001fdl e",
+          "subject": "q\"b\\n\u0000u\u001fdl e",
+          "role": "member",
+          "session": {
+            "tenant_id": "q\"b\\n\u0000u\u001fdl e",
+            "a_first": "\"",
+            "b_second": "\\",
+            "c_nul": "\u0000",
+            "d_us": "\u001f",
+            "e_del": "",
+            "f_ls": " "
+          },
+          "roles": [
+            "member"
+          ],
+          "access": [
+            "execute"
+          ]
+        },
+        "binding": {
+          "version": 1,
+          "scope": "tenant",
+          "databaseId": "db_1",
+          "generation": "g1",
+          "snapshot": "policysql-sqlite-turso-v1:schema_1:policy_1:abi-4"
+        },
+        "body": "{\"statements\":[]}",
+        "key": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "output": {
+        "idempotency": {
+          "keyHash": "787ede952ff34df3619858397541fe1a54df650961534991e00f7d14e81fefe8",
+          "fingerprint": "6adf7699e3ad3a07787690e1aecdffc3181e38a6d92fc77e3641f88f01a45dc4"
+        }
+      }
+    },
+    {
+      "name": "start tx_00000000000000000000000000000000 body 0",
+      "input": {
+        "op": "start",
+        "transactionId": "tx_00000000000000000000000000000000",
+        "body": "{\"mode\":\"write\"}"
+      },
+      "output": {
+        "digest": "6a95689a3640a6efdd8578c9694a0fed9568cc3681a4dec3823e690d0ed7effb"
+      }
+    },
+    {
+      "name": "start tx_00000000000000000000000000000000 body 1",
+      "input": {
+        "op": "start",
+        "transactionId": "tx_00000000000000000000000000000000",
+        "body": "{\"mode\":\"read\"}"
+      },
+      "output": {
+        "digest": "9a4887d6b9738c6e76f23d7e7a36ab120a71d3bc8dfb58c067242b2d7207d506"
+      }
+    },
+    {
+      "name": "start tx_00000000000000000000000000000000 body 2",
+      "input": {
+        "op": "start",
+        "transactionId": "tx_00000000000000000000000000000000",
+        "body": "{\"mode\":\"read\",\"expected\":{\"schemaVersion\":\"schema_1\",\"policyVersion\":\"policy_1\"}}"
+      },
+      "output": {
+        "digest": "c78a7808784f6122f96696a9a3ee27fac031808897e023981878a5eb830d8a98"
+      }
+    },
+    {
+      "name": "start tx_00000000000000000000000000000000 body 3",
+      "input": {
+        "op": "start",
+        "transactionId": "tx_00000000000000000000000000000000",
+        "body": " {\"expected\" : {\"policyVersion\":\"policy_1\" , \"schemaVersion\":\"schema_1\"}, \"mode\":\"write\" } "
+      },
+      "output": {
+        "digest": "6aa0841c165e0a02396f13fb8bb448321ebacae5c3ee87bc4b468f59165778ef"
+      }
+    },
+    {
+      "name": "start tx_00000000000000000000000000000000 body 4",
+      "input": {
+        "op": "start",
+        "transactionId": "tx_00000000000000000000000000000000",
+        "body": "{\"mode\":\"write\",\"expected\":{\"schemaVersion\":\"s\\u00e9\",\"policyVersion\":\"\\u2028\\\"\"}}"
+      },
+      "output": {
+        "digest": "6c2c4473dcf0a52815b6e2402067e3905e6bcff2e4dd40f35c7043126ba84d6f"
+      }
+    },
+    {
+      "name": "start tx_0123456789abcdef0123456789abcdef body 0",
+      "input": {
+        "op": "start",
+        "transactionId": "tx_0123456789abcdef0123456789abcdef",
+        "body": "{\"mode\":\"write\"}"
+      },
+      "output": {
+        "digest": "f007401ab23095f2f94a52081d29bc1088cc1350574bffda2fee454cfc5d556d"
+      }
+    },
+    {
+      "name": "start tx_0123456789abcdef0123456789abcdef body 1",
+      "input": {
+        "op": "start",
+        "transactionId": "tx_0123456789abcdef0123456789abcdef",
+        "body": "{\"mode\":\"read\"}"
+      },
+      "output": {
+        "digest": "5c1bea04ea4632fc32e75aaa55ef8aed118e80495e48546b10ec4db06030ff6a"
+      }
+    },
+    {
+      "name": "start tx_0123456789abcdef0123456789abcdef body 2",
+      "input": {
+        "op": "start",
+        "transactionId": "tx_0123456789abcdef0123456789abcdef",
+        "body": "{\"mode\":\"read\",\"expected\":{\"schemaVersion\":\"schema_1\",\"policyVersion\":\"policy_1\"}}"
+      },
+      "output": {
+        "digest": "f30c090a7e6c3fb416f10fedffa35ee3e522d817241d582b2fe4ea12f9cb133d"
+      }
+    },
+    {
+      "name": "start tx_0123456789abcdef0123456789abcdef body 3",
+      "input": {
+        "op": "start",
+        "transactionId": "tx_0123456789abcdef0123456789abcdef",
+        "body": " {\"expected\" : {\"policyVersion\":\"policy_1\" , \"schemaVersion\":\"schema_1\"}, \"mode\":\"write\" } "
+      },
+      "output": {
+        "digest": "9bb9f5a391f7a7ca6b7ff17848ff7c8ebd5d980103e51f26d786c9610ae246d7"
+      }
+    },
+    {
+      "name": "start tx_0123456789abcdef0123456789abcdef body 4",
+      "input": {
+        "op": "start",
+        "transactionId": "tx_0123456789abcdef0123456789abcdef",
+        "body": "{\"mode\":\"write\",\"expected\":{\"schemaVersion\":\"s\\u00e9\",\"policyVersion\":\"\\u2028\\\"\"}}"
+      },
+      "output": {
+        "digest": "aa6d55de1685573ed3e6e1a779895d2871b5e24e7249badfbd3e8a657bc85691"
+      }
+    },
+    {
+      "name": "commit sequence 0",
+      "input": {
+        "op": "command",
+        "kind": "commit",
+        "command": {
+          "sequence": 0
+        }
+      },
+      "output": {
+        "digest": "82692b734937889646b12e1d22a8e2844efb1dff9c08028f05b96f2802bc5b86"
+      }
+    },
+    {
+      "name": "commit sequence 1",
+      "input": {
+        "op": "command",
+        "kind": "commit",
+        "command": {
+          "sequence": 1
+        }
+      },
+      "output": {
+        "digest": "498df1c8a77829ffbe2549e930756e92a2fffa9f96f2c050770c07f5aac32a61"
+      }
+    },
+    {
+      "name": "commit sequence 2",
+      "input": {
+        "op": "command",
+        "kind": "commit",
+        "command": {
+          "sequence": 2
+        }
+      },
+      "output": {
+        "digest": "806be012c6db52c5cffee1adca46c1128bf10caf970f231d6e7a7986e935bf3f"
+      }
+    },
+    {
+      "name": "commit sequence 9007199254740991",
+      "input": {
+        "op": "command",
+        "kind": "commit",
+        "command": {
+          "sequence": 9007199254740991
+        }
+      },
+      "output": {
+        "digest": "4aaccd1162d8394421aa9c1f7e9fab6b4359cc730adc3a8badeb7223d01012ec"
+      }
+    },
+    {
+      "name": "rollback sequence 0",
+      "input": {
+        "op": "command",
+        "kind": "rollback",
+        "command": {
+          "sequence": 0
+        }
+      },
+      "output": {
+        "digest": "15a9294297a887c704fc59cf61587c5df12daf8f861f91098e07d54c65317d41"
+      }
+    },
+    {
+      "name": "rollback sequence 1",
+      "input": {
+        "op": "command",
+        "kind": "rollback",
+        "command": {
+          "sequence": 1
+        }
+      },
+      "output": {
+        "digest": "368e6d36760365bdaae6ce9f076d1603a212d47d08c30641a60d2925d1dfdfeb"
+      }
+    },
+    {
+      "name": "rollback sequence 2",
+      "input": {
+        "op": "command",
+        "kind": "rollback",
+        "command": {
+          "sequence": 2
+        }
+      },
+      "output": {
+        "digest": "46d47d5db2dd77c85f547f6a872eba2fa494f99c751fb33c94529bc0c3b22015"
+      }
+    },
+    {
+      "name": "rollback sequence 9007199254740991",
+      "input": {
+        "op": "command",
+        "kind": "rollback",
+        "command": {
+          "sequence": 9007199254740991
+        }
+      },
+      "output": {
+        "digest": "825f6a8ce63336b4d813836509988a5b89d61e4c296372fcc150fdb4becc4216"
+      }
+    }
+  ]
+}
