@@ -9,6 +9,7 @@ import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { capabilities } from "../src/presenters.ts";
 import { MAX_BODY_BYTES } from "../src/request-body.ts";
 import { ENFORCED_LIMIT_KEYS, runtimeLimits, runtimeLimitsJson } from "../src/limits.ts";
+import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
 import { RUNTIME_DEFAULT_LIMITS, limitsJson } from "./helpers/limits.mjs";
 
@@ -95,6 +96,15 @@ test("the real runtime reports configured limits, fills defaults, and Capabiliti
       // never initialize WASM), so it is a constant of its own; it must equal what is advertised.
       assert.equal(MAX_BODY_BYTES, runtimeLimits(defaults).maxRequestBytes);
     } finally { defaults.free(); }
+  } finally { runtime.free(); }
+});
+
+test("the reference wrapper's limits are what its runtime enforces and advertises", () => {
+  const runtime = construct(RUNTIME_LIMITS);
+  try {
+    const enforced = runtimeLimits(runtime);
+    for (const [key, value] of Object.entries(RUNTIME_LIMITS)) assert.equal(enforced[key], value, key);
+    assertAdvertisesExactly(capabilities(runtime), runtime);
   } finally { runtime.free(); }
 });
 

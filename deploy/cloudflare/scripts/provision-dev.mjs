@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { connect } from "@tursodatabase/serverless";
 import { exportJWK, generateKeyPair, importJWK, SignJWT } from "jose";
 import { buildPhysicalSchema } from "./catalog-build.mjs";
+import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 
 const directory = fileURLToPath(new URL("..", import.meta.url));
 const deploymentDirectory = new URL("../.deployment/", import.meta.url);
@@ -71,11 +72,39 @@ const loadOrCreateIssuer = async () => {
   }
 };
 
+// What the deployed Capabilities must advertise: exactly the wrapper's configured limits
+// (ADR 0024). A mismatch means an advertised value is not the enforced one.
+const advertisedLimits = (capabilities) => ({
+  "limits.maxRows": capabilities.limits?.maxRows,
+  "limits.maxResultBytes": capabilities.limits?.maxResultBytes,
+  "limits.timeoutMs": capabilities.limits?.timeoutMs,
+  "limits.maxStatements": capabilities.limits?.maxStatements,
+  "transactions.maxInteractiveDurationMs": capabilities.transactions?.maxInteractiveDurationMs,
+  "transactions.maxStatements": capabilities.transactions?.maxStatements,
+  "transactions.maxResultBytes": capabilities.transactions?.maxResultBytes,
+  "transactions.maxCallbackQueriesPerCheck": capabilities.transactions?.maxCallbackQueriesPerCheck,
+  "transactions.maxCallbackRowsPerCheck": capabilities.transactions?.maxCallbackRowsPerCheck,
+  "transactions.maxCallbackBytesPerCheck": capabilities.transactions?.maxCallbackBytesPerCheck,
+});
+const configuredLimits = () => ({
+  "limits.maxRows": RUNTIME_LIMITS.maxRows,
+  "limits.maxResultBytes": RUNTIME_LIMITS.maxResultBytes,
+  "limits.timeoutMs": RUNTIME_LIMITS.timeoutMs,
+  "limits.maxStatements": RUNTIME_LIMITS.maxStatements,
+  "transactions.maxInteractiveDurationMs": RUNTIME_LIMITS.transactionMs,
+  "transactions.maxStatements": RUNTIME_LIMITS.maxTransactionStatements,
+  "transactions.maxResultBytes": RUNTIME_LIMITS.maxTransactionResultBytes,
+  "transactions.maxCallbackQueriesPerCheck": RUNTIME_LIMITS.maxTransactionStatements,
+  "transactions.maxCallbackRowsPerCheck": RUNTIME_LIMITS.maxCallbackRows,
+  "transactions.maxCallbackBytesPerCheck": RUNTIME_LIMITS.maxTransactionResultBytes,
+});
+
 const smoke = async (baseUrl, token) => {
   const headers = { authorization: `Bearer ${token}` };
   const health = await fetch(`${baseUrl}/healthz`).then((response) => response.json());
   const capabilitiesResponse = await fetch(`${baseUrl}/v1/capabilities`, { headers });
   const capabilities = await capabilitiesResponse.json();
+  const limitsMatch = JSON.stringify(advertisedLimits(capabilities)) === JSON.stringify(configuredLimits());
   const catalogResponse = await fetch(`${baseUrl}/v1/catalog`, { headers });
   const roleCatalog = await catalogResponse.json();
   const request = {
@@ -305,6 +334,7 @@ const smoke = async (baseUrl, token) => {
   if (
     !health.ready ||
     !capabilitiesResponse.ok ||
+    !limitsMatch ||
     !catalogResponse.ok ||
     !explainResponse.ok ||
     !executeResponse.ok ||
@@ -373,7 +403,9 @@ const smoke = async (baseUrl, token) => {
   }
   return {
     health: { ready: health.ready, snapshot: health.snapshot, profile: health.profile },
-    capabilities: { status: capabilitiesResponse.status, id: capabilities.id },
+    capabilities: {
+      status: capabilitiesResponse.status, id: capabilities.id, limitsMatch, limits: advertisedLimits(capabilities),
+    },
     catalog: { status: catalogResponse.status, resources: roleCatalog.resources.length },
     explain: { status: explainResponse.status, statements: explain.statements.length },
     execute: {
