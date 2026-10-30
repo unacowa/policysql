@@ -452,7 +452,10 @@ const waitForActiveRelease = async (baseUrl, token) => {
         headers: { authorization: `Bearer ${token}` },
       });
       const body = await response.json();
-      if (response.ok && body.transactions?.interactive === true) return;
+      // The snapshot does not change when only limits do, so this release is recognized by
+      // advertising the configured limits.
+      if (response.ok && body.transactions?.interactive === true &&
+        JSON.stringify(advertisedLimits(body)) === JSON.stringify(configuredLimits())) return;
     } catch { /* retry until the bounded release deadline */ }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
