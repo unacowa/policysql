@@ -6,6 +6,9 @@
 // request 7 they are discarded, not read (the one-time incompatibility), so only their commit
 // answer (unknown, never a rejection) is pinned here. The step machine's own records keep the
 // stability requirements: the control test shows what a changed digest would do.
+// #80 (ABI 9) removed the binding's snapshot from the request fingerprint: keyed atomic writes
+// retried across a real snapshot change (`h.redeploy`) replay on both placements and owner
+// adapters, while rows stored before #80 (the ABI 4 row below) still conflict.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -148,7 +151,9 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   // The row the ABI 4 direct path wrote, with the values the frozen ABI 4 rules computed. Since
   // ADR 0024 pull request 8 the snapshot check of an execute is core's (the step machine reads
   // the runtime's own snapshot), so the earlier release's row is planted rather than written by
-  // a runtime whose snapshot is faked.
+  // a runtime whose snapshot is faked. Its fingerprint has the binding's snapshot, which the
+  // request fingerprint no longer has since #80 (ABI 9): every row stored before #80 conflicts
+  // (the one-time incompatibility of that switch, ADR 0014), and never executes twice.
   test(`${ownerAdapter}: a keyed atomic retry across the bump finds its ABI 4 row and conflicts; it never executes twice`, async (t) => {
     const { h, send, credential } = await setup(t);
     const key = "abi-bump-key-000001";
@@ -169,13 +174,109 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(retry.body.error.code, "POLICYSQL_IDEMPOTENCY_CONFLICT");
     assert.equal(h.rows("a").some((row) => row.id === "abi_keyed"), false, "nothing executed");
     assert.equal(database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, 1);
-    // Control: the same row under the current snapshot's fingerprint replays.
-    const current = await legacyFingerprint(auth, "execute", h.binding("a"), body);
-    database.prepare("UPDATE policysql_idempotency SET fingerprint = ?").run(current);
+    // Control: an old-format fingerprint is not this release's, even under the current
+    // snapshot; this release's is the same construction over the binding without its snapshot.
+    const sameSnapshot = await legacyFingerprint(auth, "execute", h.binding("a"), body);
+    const current = JSON.parse(h.runtime.identity_json(JSON.stringify({
+      op: "request", endpoint: "execute", auth: { ...auth, roles: credential.roles, access: credential.access },
+      binding: h.binding("a"), body: JSON.stringify(body), key,
+    }))).idempotency;
+    assert.equal(current.keyHash, keyHash, "the key hash is unchanged");
+    assert.notEqual(current.fingerprint, sameSnapshot);
+    const { snapshot: _snapshot, ...withoutSnapshot } = h.binding("a");
+    assert.equal(current.fingerprint, await legacySha256(`${legacyIdentity(auth, "execute", h.binding("a"))}:${legacyStableJson(body)}:${legacyStableJson(withoutSnapshot)}`),
+      "the ABI 4 construction over the binding without its snapshot (#80)");
+    // The same row under this release's fingerprint replays.
+    database.prepare("UPDATE policysql_idempotency SET fingerprint = ?").run(current.fingerprint);
     const replay = await send("/v1/transactions:execute", body, key);
     assert.equal(replay.status, 200, JSON.stringify(replay.body));
     assert.equal(replay.body.meta.requestId, "abi4");
     assert.equal(h.rows("a").some((row) => row.id === "abi_keyed"), false, "a replay executes nothing");
+  });
+
+  // #80: a keyed atomic write committed before a deployment that changes the snapshot (here
+  // another policy version, as an ABI bump or a schema change would) is retried after it. The
+  // request fingerprint has no snapshot, so the retry replays the committed response instead of
+  // the IDEMPOTENCY_CONFLICT a client takes as a definite rejection (ADR 0007). Another body or
+  // another generation on the same key still conflicts. On both placements: direct (no commit
+  // check triggers) and owner (a commit check triggers, so the engine forwards to the owner).
+  for (const [placement, hooks] of [["direct", false], ["owner", true]]) {
+    test(`${ownerAdapter}: #80: a committed keyed write (${placement}) retried across a snapshot change replays; another body or generation conflicts`, async (t) => {
+      t.mock.method(console, "log", () => {});
+      let generation = "1";
+      const h = await harness(t, {
+        ownerAdapter, hooks,
+        customizeBinding: (binding) => ({ ...binding, generation }),
+        customizeProvider: (provider) => ({
+          check: (binding) => provider.check({ ...binding, generation: "1" }),
+          connect: (binding, ...args) => provider.connect({ ...binding, generation: "1" }, ...args),
+        }),
+      });
+      h.setValidator(async () => true);
+      const key = "snapshot-change-key-0001";
+      const body = { statements: [insert("across_snapshot")] };
+      const commits = () => h.events.filter(({ sql }) => sql === "COMMIT").length;
+      const first = await h.request("a", "/v1/transactions:execute", body, key);
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal(first.body.meta.commitChecks, hooks ? "passed" : "not_triggered", "the placement");
+      assert.equal(h.ownerNames().length, hooks ? 1 : 0, "the placement");
+      const before = h.runtime.snapshot;
+      const committed = commits();
+      const hooksBefore = h.hooksSeen.length;
+
+      const later = h.redeploy({ policyVersion: "policy_routing_2" });
+      assert.notEqual(later.snapshot, before, "the deployment changed the snapshot");
+      assert.equal(h.binding("a").snapshot, later.snapshot);
+      const retry = await h.request("a", "/v1/transactions:execute", body, key);
+      assert.equal(retry.status, 200, JSON.stringify(retry.body));
+      assert.deepEqual(retry.body.results, first.body.results, "the committed results");
+      assert.equal(retry.body.transactionId, first.body.transactionId);
+      assert.equal(retry.body.status, "committed");
+      assert.equal(retry.body.meta.requestId, first.body.meta.requestId, "the original request id");
+      assert.equal(retry.body.meta.commitChecks, first.body.meta.commitChecks);
+      // The replay reports the versions of the deployment that answered it.
+      assert.equal(retry.body.meta.policyVersion, "policy_routing_2");
+      assert.equal(commits(), committed, "no second COMMIT");
+      assert.equal(h.hooksSeen.length, hooksBefore, "no second commit check");
+      assert.equal(h.rows("a").filter((row) => row.id === "across_snapshot").length, 1, "never executed twice");
+      assert.deepEqual((await h.request("a", "/v1/transactions:execute", body, key)).body, retry.body, "replays again");
+
+      // Another body on the same key is another request.
+      const changed = await h.request("a", "/v1/transactions:execute", { statements: [insert("other_body")] }, key);
+      assert.equal(changed.status, 409, JSON.stringify(changed.body));
+      assert.equal(changed.body.error.code, "POLICYSQL_IDEMPOTENCY_CONFLICT");
+      // Another generation of the same database (its key hash has no generation) conflicts.
+      generation = "2";
+      const moved = await h.request("a", "/v1/transactions:execute", body, key);
+      assert.equal(moved.status, 409, JSON.stringify(moved.body));
+      assert.equal(moved.body.error.code, "POLICYSQL_IDEMPOTENCY_CONFLICT");
+      assert.equal(commits(), committed, "nothing else committed");
+      assert.equal(h.rows("a").some((row) => row.id === "other_body"), false);
+      assert.equal(h.rows("a").filter((row) => row.id === "across_snapshot").length, 1);
+      assert.equal(h.databases.get("a").database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, 1);
+    });
+  }
+
+  // #80, bypass: the snapshot is still checked before the lookup. A request whose binding
+  // names the earlier snapshot (a binding captured before the deployment) never reaches the
+  // row, so dropping the snapshot from the fingerprint lets no request of an earlier deployment
+  // execute or replay under the new one.
+  test(`${ownerAdapter}: #80: a keyed retry pinned to the earlier snapshot is stale, not replayed or executed`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await harness(t, { ownerAdapter, hooks: false });
+    const key = "snapshot-change-key-0002";
+    const body = { statements: [insert("stale_retry")] };
+    const first = await h.request("a", "/v1/transactions:execute", body, key);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const earlier = h.binding("a");
+    h.redeploy({ policyVersion: "policy_routing_2" });
+    const response = await h.app.fetch(new Request("https://worker.test/v1/transactions:execute", {
+      method: "POST", headers: { "content-type": "application/json", "idempotency-key": key }, body: JSON.stringify(body),
+    }), { database: earlier, session: h.session("a") }, h.background);
+    const stale = await response.json();
+    assert.equal(response.status, 409, JSON.stringify(stale));
+    assert.equal(stale.error.code, "POLICYSQL_STALE_OPERATION");
+    assert.equal(h.rows("a").filter((row) => row.id === "stale_retry").length, 1);
   });
 
   test(`${ownerAdapter}: a keyed begin retry across a deployment reaches the same owner and conflicts`, async (t) => {

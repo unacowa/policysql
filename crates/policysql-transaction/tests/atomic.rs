@@ -763,3 +763,168 @@ fn a_parameter_namespace_collision_executes_no_envelope_on_either_placement() {
         );
     }
 }
+
+// ---- #80: a keyed retry across a snapshot change ----------------------------------------------
+
+const NEXT_SNAPSHOT: &str = "sqlite-turso-v1:schema_2:policy_2:abi-9";
+
+/// `request` with its binding and snapshot set to `snapshot` and its binding's generation to
+/// `generation`, as a request after a deployment (or a database move) carries them.
+fn redeployed(mut request: Value, snapshot: &str, generation: &str) -> Value {
+    let operation = &mut request["operation"];
+    operation["snapshot"] = json!(snapshot);
+    operation["databaseBinding"]["snapshot"] = json!(snapshot);
+    operation["databaseBinding"]["generation"] = json!(generation);
+    request
+}
+
+/// The `idempotency` of the `forward` effect the engine emitted last.
+fn forwarded_idempotency(engine: &Engine) -> Value {
+    engine
+        .transcript
+        .iter()
+        .rev()
+        .find_map(|line| {
+            let output: Value = serde_json::from_str(&line.output).ok()?;
+            output["effects"]
+                .as_array()?
+                .iter()
+                .find(|effect| effect["type"] == "forward")
+                .map(|effect| effect["input"]["idempotency"].clone())
+        })
+        .unwrap_or(Value::Null)
+}
+
+#[test]
+fn a_committed_keyed_write_replays_across_a_snapshot_change_on_the_direct_placement() {
+    let mut engine = Engine::atomic(false);
+    let first = engine.run(&execute_request(&insert("p1"), Some(KEY)));
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(engine.observed.envelope_executes, 1);
+
+    // A deployment changes the snapshot (policy, schema, or ABI); the client retries.
+    engine.compiler.snapshot = NEXT_SNAPSHOT.to_owned();
+    engine.observed.awaited.clear();
+    let retry = engine.run(&redeployed(
+        execute_request(&insert("p1"), Some(KEY)),
+        NEXT_SNAPSHOT,
+        "1",
+    ));
+    assert_eq!(retry["ok"], true, "the committed write replays: {retry}");
+    assert_eq!(retry["value"]["results"], first["value"]["results"]);
+    assert_eq!(
+        retry["value"]["transactionId"],
+        first["value"]["transactionId"]
+    );
+    assert_eq!(retry["value"]["meta"]["requestId"], "req_1");
+    assert_eq!(
+        types(&engine),
+        ["checkBinding", "open", "execute", "rollback"],
+        "rolled back: nothing executes again"
+    );
+    assert_eq!(engine.observed.envelope_executes, 1, "never executes twice");
+    assert_eq!(engine.observed.commits_emitted, 1);
+    assert_eq!(engine.idempotency_rows.len(), 1);
+
+    // Another body on the same key still conflicts under the new snapshot.
+    let changed = engine.run(&redeployed(
+        execute_request(&insert("p2"), Some(KEY)),
+        NEXT_SNAPSHOT,
+        "1",
+    ));
+    assert_eq!(code(&changed), Some("POLICYSQL_IDEMPOTENCY_CONFLICT"));
+    // Another generation of the same database still conflicts: the key hash finds the row,
+    // the fingerprint keeps the generation.
+    let generation = engine.run(&redeployed(
+        execute_request(&insert("p1"), Some(KEY)),
+        NEXT_SNAPSHOT,
+        "2",
+    ));
+    assert_eq!(code(&generation), Some("POLICYSQL_IDEMPOTENCY_CONFLICT"));
+    assert_eq!(engine.observed.envelope_executes, 1);
+    assert_eq!(engine.observed.commits_emitted, 1);
+    assert_eq!(engine.compiler.live_handles(), 0);
+}
+
+#[test]
+fn a_request_whose_binding_and_snapshot_disagree_is_still_stale() {
+    // Removing the snapshot from the fingerprint does not relax the snapshot check: a
+    // request pinned to the earlier snapshot never reaches the lookup.
+    let mut engine = Engine::atomic(false);
+    engine.run(&execute_request(&insert("p1"), Some(KEY)));
+    engine.compiler.snapshot = NEXT_SNAPSHOT.to_owned();
+    let stale = engine.run(&execute_request(&insert("p1"), Some(KEY)));
+    assert_eq!(code(&stale), Some("POLICYSQL_STALE_OPERATION"), "{stale}");
+    let mut mixed = redeployed(
+        execute_request(&insert("p1"), Some(KEY)),
+        NEXT_SNAPSHOT,
+        "1",
+    );
+    mixed["operation"]["databaseBinding"]["snapshot"] = json!(common::SNAPSHOT);
+    let mixed = engine.run(&mixed);
+    assert_eq!(code(&mixed), Some("POLICYSQL_STALE_OPERATION"), "{mixed}");
+    assert_eq!(engine.observed.envelope_executes, 1);
+    assert_eq!(engine.compiler.live_handles(), 0);
+}
+
+#[test]
+fn the_forwarded_fingerprint_has_no_snapshot_and_the_owner_replays_across_a_snapshot_change() {
+    // The engine computes the identity it forwards: the same request under two snapshots
+    // reaches the same owner with the same fingerprint; another generation does not match.
+    let mut engine = Engine::atomic(false);
+    engine.run(&execute_request(&audit("a1"), Some(KEY)));
+    let before = forwarded_idempotency(&engine);
+    engine.compiler.snapshot = NEXT_SNAPSHOT.to_owned();
+    engine.run(&redeployed(
+        execute_request(&audit("a1"), Some(KEY)),
+        NEXT_SNAPSHOT,
+        "1",
+    ));
+    let after = forwarded_idempotency(&engine);
+    assert!(before["fingerprint"].is_string(), "{before}");
+    assert_eq!(before, after);
+    engine.run(&redeployed(
+        execute_request(&audit("a1"), Some(KEY)),
+        NEXT_SNAPSHOT,
+        "2",
+    ));
+    let generation = forwarded_idempotency(&engine);
+    assert_eq!(generation["keyHash"], before["keyHash"]);
+    assert_ne!(generation["fingerprint"], before["fingerprint"]);
+    let fingerprint = before["fingerprint"].as_str().unwrap_or("").to_owned();
+    let key_hash = before["keyHash"].as_str().unwrap_or("").to_owned();
+    assert_eq!(key_hash.len(), 64);
+
+    // On the owner: commit under the first snapshot, then the retry under the next one.
+    let owner = format!("tx_{}", &key_hash[..32]);
+    let mut owner_engine = owner_engine();
+    owner_engine.owner = Some(owner.clone());
+    let input = |snapshot: &str, body: &Value| {
+        let mut input = atomic_input(body, Some([&key_hash, &fingerprint]));
+        input["input"]["validationId"] = json!(format!("cval_{}", &key_hash[..32]));
+        input["input"]["snapshot"] = json!(snapshot);
+        input["input"]["databaseBinding"]["snapshot"] = json!(snapshot);
+        input
+    };
+    let first = owner_engine.run(&input(common::SNAPSHOT, &audit("a1")));
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(owner_engine.observed.commits_emitted, 1);
+    owner_engine.compiler.snapshot = NEXT_SNAPSHOT.to_owned();
+    owner_engine.observed.awaited.clear();
+    let retry = owner_engine.run(&input(NEXT_SNAPSHOT, &audit("a1")));
+    assert_eq!(retry["ok"], true, "{retry}");
+    assert_eq!(retry["value"]["results"], first["value"]["results"]);
+    assert_eq!(retry["value"]["meta"]["commitChecks"], "passed");
+    assert_eq!(owner_engine.observed.commits_emitted, 1, "no second COMMIT");
+    assert_eq!(owner_engine.observed.envelope_executes, 1);
+    assert_eq!(owner_engine.observed.validator_calls.len(), 1);
+    assert!(!types(&owner_engine).contains(&"commit".to_owned()));
+    // The generation's fingerprint conflicts on the owner too.
+    let other = generation["fingerprint"].as_str().unwrap_or("").to_owned();
+    let mut conflicting = input(NEXT_SNAPSHOT, &audit("a1"));
+    conflicting["input"]["idempotency"]["fingerprint"] = json!(other);
+    let conflict = owner_engine.run(&conflicting);
+    assert_eq!(code(&conflict), Some("POLICYSQL_IDEMPOTENCY_CONFLICT"));
+    assert_eq!(owner_engine.observed.commits_emitted, 1);
+    assert_eq!(owner_engine.compiler.live_handles(), 0);
+}

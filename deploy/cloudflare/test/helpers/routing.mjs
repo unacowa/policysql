@@ -87,7 +87,8 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     runtimeLimitsJson(runtimeLimits),
     fixture?.physicalSchema ?? example("physical-schema.json"),
   );
-  const runtime = makeRuntime();
+  // The deployed runtime; `redeploy` replaces it for the engine, every owner, and the registry.
+  let runtime = makeRuntime();
   const extraRuntimes = [];
   const databases = new Map();
   for (const tenant of ["a", "b"]) {
@@ -281,10 +282,16 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     rmSync(directory, { recursive: true, force: true });
   });
   return {
-    runtime, env, config, app, ctx, background, database, databases, events, hooksSeen, token, session, request, flush,
+    get runtime() { return runtime; },
+    env, config, app, ctx, background, database, databases, events, hooksSeen, token, session, request, flush,
     ownerAdapter, transactionOwners, workerApp, appWith,
     /** Another runtime over the same catalog and policy, e.g. with another policy version (another snapshot). */
     makeRuntime(versions) { const extra = makeRuntime(versions); extraRuntimes.push(extra); return extra; },
+    /**
+     * A deployment that changes the snapshot (e.g. another policy version): the engine, every
+     * owner, and the registry use the new runtime from now on. Returns it.
+     */
+    redeploy(versions) { extraRuntimes.push(runtime); runtime = makeRuntime(versions); return runtime; },
     binding: (tenant) => registry.binding(`db_${tenant}`, env),
     setValidator(value) { validator = value; },
     counts: () => ({ checks, connects }),

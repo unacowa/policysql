@@ -647,18 +647,23 @@ test("a slow commit authorization cannot extend the transaction deadline", async
   assert.equal(rolledBack, true);
 });
 
-test("database identity scopes retries while generation/snapshot changes conflict instead of making a fresh key", async () => {
+test("database identity scopes retries: a generation change conflicts, a snapshot change keeps the request fingerprint (#80)", async () => {
   const binding = { version: 1, scope: "test:tenant_a", databaseId: "db_a", generation: "1", snapshot: "snapshot_1" };
   const auth = { principal: "issuer:u", subject: "u", role: "member", session: { tenant_id: "a" } };
   const request = "same-idempotency-key";
-  const digest = (value) => requestIdentity(identityRuntime, {
-    key: request, auth, bodyText: JSON.stringify(envelope(read)), endpoint: "execute", databaseBinding: value,
+  const digest = (value, endpoint = "execute") => requestIdentity(identityRuntime, {
+    key: request, auth, bodyText: JSON.stringify(envelope(read)), endpoint, databaseBinding: value,
   });
   const first = digest(binding);
-  for (const changed of [{ ...binding, generation: "2" }, { ...binding, snapshot: "snapshot_2" }]) {
-    const next = digest(changed);
-    assert.equal(next.keyHash, first.keyHash);
-    assert.notEqual(next.fingerprint, first.fingerprint);
+  const generation = { ...binding, generation: "2" };
+  assert.equal(digest(generation).keyHash, first.keyHash);
+  assert.notEqual(digest(generation).fingerprint, first.fingerprint);
+  // A deployment that changes the snapshot keeps the request fingerprint, so a committed keyed
+  // write replays across it (ADR 0007); the auth fingerprint still has the snapshot.
+  const snapshot = { ...binding, snapshot: "snapshot_2" };
+  assert.deepEqual(digest(snapshot), first);
+  assert.deepEqual(digest(snapshot, "interactive-start").fingerprint, digest(binding, "interactive-start").fingerprint);
+  for (const changed of [generation, snapshot]) {
     assert.notEqual(authIdentity(identityRuntime, auth, binding), authIdentity(identityRuntime, auth, changed));
   }
   assert.notEqual(digest({ ...binding, databaseId: "db_b" }).keyHash, first.keyHash);

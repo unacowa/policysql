@@ -5,7 +5,7 @@
 //!
 //! | Operation | Used as | Result |
 //! | --- | --- | --- |
-//! | `request` | `policysql_idempotency` key and fingerprint; keyed transaction ids | `keyHash = sha256(identity + ":" + key)`, `fingerprint = sha256(identity + ":" + canonical(body) + ":" + canonical(binding))` |
+//! | `request` | `policysql_idempotency` key and fingerprint; keyed transaction ids | `keyHash = sha256(identity + ":" + key)`, `fingerprint = sha256(identity + ":" + canonical(body) + ":" + canonical(binding without snapshot))` |
 //! | `auth` | the owner record's caller fingerprint | `sha256(canonical({principal, subject, role, session, databaseBinding}))` |
 //! | `start` | the start fingerprint of an unkeyed begin | `sha256(canonical({transactionId, request: body}))` |
 //! | `command` | statement, commit, and rollback digests (`last`, `commitSent`) | `sha256(canonical({kind, command}))` |
@@ -15,7 +15,9 @@
 //! {scope, databaseId}})`. This construction is fixed by ADR 0025 (a): together with the
 //! canonical form's rules (b)-(d), it keeps `keyHash`, the auth and start fingerprints, and
 //! the `{sequence}` digests byte-identical to the values stored before ADR 0025
-//! (`tests/fixtures/identity-goldens.json`). Every identity field that reaches a hash is
+//! (`tests/fixtures/identity-goldens.json`). The request fingerprint is not among them: since
+//! #80 (ABI 9) its binding has no `snapshot`, so a keyed retry is recognized across a
+//! deployment that changed the snapshot. Every identity field that reaches a hash is
 //! checked to be a string (the session a map of strings, the binding of the ADR 0014 shape).
 //!
 //! Hashes are lowercase hexadecimal SHA-256 of the UTF-8 bytes of the text.
@@ -167,21 +169,14 @@ pub(crate) fn auth_fingerprint(auth: &Json, binding_value: &Json) -> Result<Stri
 /// across a deployment that changed the snapshot.
 pub(crate) fn replay_identity(auth: &Json, binding_value: &Json) -> Result<String, IdentityError> {
     let auth = Auth::read(Some(auth))?;
-    let Json::Object(parts) = binding(Some(binding_value))? else {
-        return Err(IdentityError::Internal);
-    };
-    let without_snapshot = parts
-        .iter()
-        .filter(|(name, _)| name != "snapshot")
-        .cloned()
-        .collect();
+    let database = without_snapshot(binding(Some(binding_value))?)?;
     let value = Json::Object(vec![
         member("replay", Json::string("v1")),
         member("principal", auth.principal),
         member("subject", auth.subject),
         member("role", auth.role),
         member("session", auth.session),
-        member("database", Json::Object(without_snapshot)),
+        member("database", database),
     ]);
     Ok(sha256_hex(canonical::to_canonical(&value).as_bytes()))
 }
@@ -239,16 +234,34 @@ fn request(input: &Json) -> Result<String, IdentityError> {
         ),
     ]));
     let key_hash = sha256_hex(format!("{identity}:{key}").as_bytes());
+    // The binding without its `snapshot` (#80): a retry of a committed keyed request must
+    // match its row across a deployment that changed the snapshot, as a commit retry matches
+    // its record by the replay identity. `version`, `scope`, `databaseId`, and `generation`
+    // stay, so another database or generation still conflicts.
     let fingerprint = sha256_hex(
         format!(
             "{identity}:{}:{}",
             canonical::to_canonical(&body),
-            canonical::to_canonical(binding)
+            canonical::to_canonical(&without_snapshot(binding)?)
         )
         .as_bytes(),
     );
     Ok(format!(
         r#"{{"idempotency":{{"keyHash":"{key_hash}","fingerprint":"{fingerprint}"}}}}"#
+    ))
+}
+
+/// A binding of the ADR 0014 shape with its `snapshot` member removed.
+fn without_snapshot(binding: &Json) -> Result<Json, IdentityError> {
+    let Json::Object(parts) = binding else {
+        return Err(IdentityError::Internal);
+    };
+    Ok(Json::Object(
+        parts
+            .iter()
+            .filter(|(name, _)| name != "snapshot")
+            .cloned()
+            .collect(),
     ))
 }
 
@@ -484,6 +497,60 @@ mod tests {
         let body = r#""{\"a\":1}""#;
         let input =
             request(r#","key":"request-key-0001""#, body).replace("\"execute\"", "\"explain\"");
+        assert!(identity_json(&input).contains("POLICYSQL_INTERNAL"));
+    }
+
+    /// `keyHash` and `fingerprint` of a keyed `execute` request under `binding` and `body`.
+    fn keyed(binding: &str, body: &str) -> (String, String) {
+        let input = format!(
+            r#"{{"op":"request","endpoint":"execute","auth":{AUTH},"binding":{binding},"body":{body},"key":"request-key-0001"}}"#
+        );
+        let output: serde_json::Value =
+            serde_json::from_str(&identity_json(&input)).unwrap_or(serde_json::Value::Null);
+        let part = |name: &str| {
+            let value = output["idempotency"][name].as_str().unwrap_or_default();
+            assert_eq!(value.len(), 64, "{output}");
+            value.to_owned()
+        };
+        (part("keyHash"), part("fingerprint"))
+    }
+
+    #[test]
+    fn request_fingerprint_has_no_snapshot_but_keeps_everything_else() {
+        // #80: a keyed retry across a deployment that changed the snapshot must find the same
+        // row and the same fingerprint, so a committed write replays instead of conflicting.
+        let body = r#""{\"statements\":[{\"sql\":\"INSERT INTO t (id) VALUES (:id)\",\"params\":{\"id\":\"a\"}}]}""#;
+        let base = keyed(BINDING, body);
+        let other_snapshot = keyed(&BINDING.replace(r#""snap""#, r#""snap:abi-9""#), body);
+        assert_eq!(base, other_snapshot);
+        // The fingerprint is the documented construction over the binding without snapshot.
+        let identity = r#"{"database":{"databaseId":"db_1","scope":"tenant"},"endpoint":"execute","principal":"https://issuer.test:user_1","role":"member","session":{"tenant_id":"tenant_a"},"subject":"user_1"}"#;
+        let expected = sha256_hex(
+            format!(
+                r#"{identity}:{{"statements":[{{"params":{{"id":"a"}},"sql":"INSERT INTO t (id) VALUES (:id)"}}]}}:{{"databaseId":"db_1","generation":"g1","scope":"tenant","version":1}}"#
+            )
+            .as_bytes(),
+        );
+        assert_eq!(base.1, expected);
+        // Another generation, body, or database is still another request.
+        let generation = keyed(&BINDING.replace(r#""g1""#, r#""g2""#), body);
+        assert_eq!(generation.0, base.0, "the key hash has no generation");
+        assert_ne!(generation.1, base.1, "a generation change conflicts");
+        let changed = keyed(BINDING, &body.replace(r#"\"a\""#, r#"\"b\""#));
+        assert_eq!(changed.0, base.0);
+        assert_ne!(changed.1, base.1, "a changed body conflicts");
+        for (from, to) in [(r#""db_1""#, r#""db_2""#), (r#""tenant""#, r#""tenant_b""#)] {
+            let other = keyed(&BINDING.replace(from, to), body);
+            assert_ne!(
+                other.0, base.0,
+                "{to}: another database has another key hash"
+            );
+            assert_ne!(other.1, base.1, "{to}");
+        }
+        // A binding without a snapshot is still not of the ADR 0014 shape.
+        let input = format!(
+            r#"{{"op":"request","endpoint":"execute","auth":{AUTH},"binding":{{"version":1,"scope":"tenant","databaseId":"db_1","generation":"g1"}},"body":{body},"key":"request-key-0001"}}"#
+        );
         assert!(identity_json(&input).contains("POLICYSQL_INTERNAL"));
     }
 

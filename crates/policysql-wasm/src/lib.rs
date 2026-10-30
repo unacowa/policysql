@@ -27,7 +27,11 @@ use wasm_bindgen::prelude::*;
 /// 7: commit checks and callbacks in `step_json` (ADR 0024 pull request 5): a commit whose
 /// mutations trigger checks now emits `callValidator` instead of being rejected, callback
 /// queries are served, and the `validatorReplied`/`validatorFailed` events are read.
-const ABI_VERSION: u32 = 8;
+/// 8: atomic execution in `step_json` (ADR 0024 pull request 6).
+/// 9: the request fingerprint of `identity_json` (and of keyed atomic execution in
+/// `step_json`) no longer includes the binding's `snapshot` (#80), so a committed keyed
+/// write retried after a snapshot-changing deployment replays instead of conflicting.
+const ABI_VERSION: u32 = 9;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -637,7 +641,8 @@ impl PolicySqlRuntime {
     /// ADR 0025 made core's canonical form the only definition, which changes this method's
     /// values for some inputs, so it bumped `ABI_VERSION` to 5. `keyHash`, the auth and start
     /// fingerprints, and the `{sequence}` digests are unchanged
-    /// (`tests/fixtures/identity-goldens.json`).
+    /// (`tests/fixtures/identity-goldens.json`). Removing the binding's `snapshot` from the
+    /// request fingerprint (#80) changed its values again and bumped `ABI_VERSION` to 9.
     #[must_use]
     #[allow(clippy::unused_self)]
     pub fn identity_json(&self, input_json: &str) -> String {
