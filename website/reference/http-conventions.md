@@ -88,9 +88,9 @@ transaction開始後はsnapshotが固定され、statementごとの`expected`は
 | `403` | role、resource、operation、column、policyによる拒否 |
 | `404` | 公開可能な範囲でtransactionなどが存在しない |
 | `409` | stale snapshot、idempotency conflict、transaction state conflict、commit conflict |
-| `413` | request bodyまたはSQL textが上限超過 |
+| `413` | request body、SQL text、result、対話型transactionの恒久的な上限超過（再送しても成功しない） |
 | `422` | type、format、constraint、operation check、expectationの不成立 |
-| `429` | ラッパーのrate limit（`POLICYSQL_RATE_LIMITED`）、ライブラリのusage budget・transaction上限 |
+| `429` | ラッパーのrate limit（`POLICYSQL_RATE_LIMITED`）のみ。ライブラリは429を返さない |
 | `500` | 安全に公開できない内部失敗 |
 | `503` | database、transaction owner、commit-check serviceなど一時的な依存先障害 |
 | `504` | compile、database、hookのtimeout |

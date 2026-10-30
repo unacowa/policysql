@@ -576,7 +576,7 @@ described as counting companion cells and column descriptors. `spec/openapi.yaml
 | Emitted SQL that fails to re-parse for any other reason | 500 `POLICYSQL_INTERNAL` | none started |
 | Bytes parameter malformed / over `maxBytesPerValue` | 400 `POLICYSQL_INVALID_PARAMETER` / 413 `POLICYSQL_LIMIT_EXCEEDED` | none started |
 | Rows, result bytes, result values, raw result bound, BLOB cell over the limit, response over `maxResponseBytes` | 413 `POLICYSQL_LIMIT_EXCEEDED` | rolled back before COMMIT; no idempotency record |
-| Interactive cumulative limits | 429 `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` (unchanged) | per ADR 0024 |
+| Interactive cumulative limits | 413 `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` (was 429, #62) | per ADR 0024 |
 | Control response or validator response over its fixed bound | 503 `POLICYSQL_DATABASE_UNAVAILABLE`, or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for COMMIT; validator: commit denied | per ADR 0007/0024 |
 | Session JSON over 65,536 | 500 `POLICYSQL_INTERNAL` (wrapper fault) | none started |
 | Invalid or inconsistent limits | construction error naming the field, never a value | no request served |

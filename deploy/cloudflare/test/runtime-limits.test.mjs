@@ -13,6 +13,7 @@ import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 import { createEngine } from "../src/engine.ts";
 import { testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
+import { PolicySqlClient, PolicySqlError, PolicySqlOutcomeUnknownError, createHttpTransport } from "../../../packages/client/index.js";
 import { RUNTIME_DEFAULT_LIMITS, limitsJson } from "./helpers/limits.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
@@ -249,9 +250,37 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     const path = `/v1/transactions/${id}/statements`;
     for (const sequence of [1, 2]) assert.equal((await h.request("a", path, { sequence, ...read }, null)).status, 200);
     const third = await h.request("a", path, { sequence: 3, ...read }, null);
-    assert.equal(third.status, 429, JSON.stringify(third.body));
+    assert.equal(third.status, 413, JSON.stringify(third.body));
     assert.equal(third.body.error.code, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
     assert.equal((await h.ownerRecord(id)).status, "failed");
+  });
+
+  // #62: the transaction limits are permanent, so they are 413 (as POLICYSQL_LIMIT_EXCEEDED), never
+  // 429, which tells a client or proxy to retry later. The client treats it as a definite rejection
+  // and sends the statement exactly once.
+  test(`${ownerAdapter}: a transaction limit is a permanent 413 that the client rejects without retrying`, async (t) => {
+    const h = await setup(t, { maxTransactionStatements: 1 }, { hooks: false });
+    const sent = [];
+    const fetchImpl = async (url, init) => {
+      const response = await h.app.fetch(new Request(url, init), { database: h.binding("a"), session: h.session("a") }, h.background);
+      sent.push({ path: new URL(url).pathname, status: response.status, retryAfter: response.headers.get("retry-after") });
+      return response;
+    };
+    const client = new PolicySqlClient({ transport: createHttpTransport({ endpoint: "https://worker.test", fetchImpl }) });
+    const tx = await client.beginTransaction({ mode: "read" });
+    await tx.execute(read.sql);
+    await assert.rejects(tx.execute(read.sql), (error) => {
+      assert.ok(error instanceof PolicySqlError);
+      assert.equal(error instanceof PolicySqlOutcomeUnknownError, false);
+      assert.equal(error.code, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
+      assert.equal(error.status, 413);
+      assert.equal(error.response.body.error.code, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
+      return true;
+    });
+    const statements = sent.filter((request) => request.path.endsWith("/statements"));
+    assert.deepEqual(statements.map((request) => request.status), [200, 413], "one attempt per statement, no retry");
+    assert.equal(statements[1].retryAfter, null);
+    assert.equal(sent.some((request) => request.status === 429), false);
   });
 
   test(`${ownerAdapter}: maxTransactionResultBytes bounds a transaction's cumulative result bytes`, async (t) => {
@@ -259,7 +288,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     const probed = await probe.request("a", `/v1/transactions/${await start(probe, "read")}/statements`, { sequence: 1, ...read }, null);
     assert.equal(probed.status, 200);
     const bytes = new TextEncoder().encode(JSON.stringify(probed.body.result)).byteLength;
-    for (const [limit, status] of [[bytes, 200], [bytes - 1, 429]]) {
+    for (const [limit, status] of [[bytes, 200], [bytes - 1, 413]]) {
       const h = await setup(t, { maxTransactionResultBytes: limit }, { hooks: false });
       const response = await h.request("a", `/v1/transactions/${await start(h, "read")}/statements`, { sequence: 1, ...read }, null);
       assert.equal(response.status, status, `limit=${limit}: ${JSON.stringify(response.body)}`);
@@ -268,7 +297,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
 
   test(`${ownerAdapter}: maxCallbackRows bounds a commit check's callback rows`, async (t) => {
     // The callback reads the seed row and the transaction's own row: two rows.
-    for (const [limit, callbackStatus, commitStatus] of [[2, 200, 200], [1, 429, 409]]) {
+    for (const [limit, callbackStatus, commitStatus] of [[2, 200, 200], [1, 413, 409]]) {
       const h = await setup(t, { maxCallbackRows: limit });
       const id = await start(h, "write");
       assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert(`rows_${limit}`) }, null)).status, 200);
