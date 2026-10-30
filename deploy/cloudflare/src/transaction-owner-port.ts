@@ -85,7 +85,16 @@ export interface TransactionOwnerPort {
   route(name: string): TransactionOwnerHandle;
 }
 
-/** Durable per-owner key/value state. Values are structured-clone copies. */
+/**
+ * Durable per-owner key/value state. Values are structured-clone copies.
+ *
+ * Port obligation (ADR 0022, ADR 0024 "State integrity"): an owner's store is readable and
+ * writable only by the live owner of that name, through the adapter. Core validates the
+ * stored transaction state for shape, version, bounds, owner name, and consistency, and does
+ * not authenticate it, so an adapter must never expose the store to anything else (another
+ * name, another tenant, a client). The Durable Objects adapter keeps it with storage that only
+ * the object can reach.
+ */
 export interface OwnerStore {
   get(key: string): Promise<unknown>;
   put(key: string, value: unknown): Promise<void>;

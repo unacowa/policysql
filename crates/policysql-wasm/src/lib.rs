@@ -22,7 +22,9 @@ use wasm_bindgen::prelude::*;
 /// 5: core-defined canonical JSON (ADR 0025) changes `identity_json` values for some inputs
 /// (non-integer numbers, integers beyond 2^53 - 1, non-ASCII object keys) and reads decimals
 /// correctly rounded.
-const ABI_VERSION: u32 = 5;
+/// 6: `step_json`, the transaction step machine (ADR 0024 pull request 4), and the runtime
+/// limits it requires to keep durable transaction state within its bound.
+const ABI_VERSION: u32 = 6;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -31,11 +33,14 @@ const MAX_ACTIVE_EXECUTIONS: usize = 64;
 
 mod limits;
 mod session;
+mod step;
 
 #[cfg(test)]
 mod bytes_tests;
 #[cfg(test)]
 mod nullable_tests;
+#[cfg(test)]
+mod step_tests;
 
 /// Compiler-resolved client parameter contracts (type and NULL proof), by name.
 type ParameterTypes = BTreeMap<ClientParameterName, policysql_sqlite::ClientParameterContract>;
@@ -395,6 +400,23 @@ fn build_runtime(
     .map_err(|message| js_error(&message))?;
     let max_statements = usize::try_from(limits.max_statements)
         .map_err(|_| js_error("runtime limits are invalid: `max_statements` is too large"))?;
+    // ADR 0024 "Bounds": a transaction record holds the last statement's reply and one
+    // mutation per statement, so these limits must keep it within the durable bound.
+    let longest_resource_name = catalog
+        .resources()
+        .map(|resource| resource.name.as_str().len())
+        .max()
+        .unwrap_or(0);
+    if !policysql_transaction::machine::durable_bound_holds(
+        snapshot.as_str().len() * 2 + schema_version.len() + policy_version.len(),
+        limits.max_transaction_statements,
+        limits.max_transaction_result_bytes,
+        longest_resource_name,
+    ) {
+        return Err(js_error(
+            "runtime limits are invalid: `max_transaction_statements` and `max_transaction_result_bytes` could make a transaction record exceed its bound",
+        ));
+    }
     Ok(PolicySqlRuntime {
         gateway: Gateway::new(
             catalog.clone(),
@@ -617,6 +639,35 @@ impl PolicySqlRuntime {
     #[allow(clippy::unused_self)]
     pub fn identity_json(&self, input_json: &str) -> String {
         policysql_transaction::identity_json(input_json)
+    }
+
+    /// One step of the transaction machine (ADR 0024): the current durable and volatile state
+    /// (the JSON texts a previous step returned, or `None`), one event, and the host facts.
+    /// Returns `{"durable": string|null, "volatile": string|null, "effects": [...]}`; the engine
+    /// keeps both texts verbatim, writes `durable` when an effect says `persist`, and passes
+    /// both back with the next event. Invalid host facts or an unreadable event give
+    /// `{"error":{"code":"POLICYSQL_INTERNAL",...}}` and no state. The contract is
+    /// [`policysql_transaction::machine`].
+    ///
+    /// Adding this method bumped `ABI_VERSION` to 6. No production path calls it before the
+    /// switch-over (ADR 0024 pull request 7).
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn step_json(
+        &self,
+        durable_json: Option<String>,
+        volatile_json: Option<String>,
+        event_json: &str,
+        host_json: &str,
+    ) -> String {
+        policysql_transaction::machine::step_json(
+            &step::RuntimeCompiler(self),
+            &self.machine_limits(),
+            durable_json.as_deref(),
+            volatile_json.as_deref(),
+            event_json,
+            host_json,
+        )
     }
 
     /// Returns the activated, role-visible logical Catalog.
