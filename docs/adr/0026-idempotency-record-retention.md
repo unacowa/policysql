@@ -97,7 +97,9 @@ them (not a size cap, not a snapshot change, not manual cleanup).
 **Client-facing guarantee.** For a keyed atomic write, let `t0` be the instant the client first
 sent it. A retry with the same key, authenticated context, endpoint, database binding (which
 includes `generation` and the runtime `snapshot`, ADR 0014), and payload, whose idempotency
-lookup runs within `W` of `t0`, is answered from the row when the original committed: it is
+lookup runs within `W` of `t0`, where `W` is the window the deployment advertised at `t0`
+(section 5 keeps that window honored when it is later lowered), is answered from the row when
+the original committed: it is
 replayed, and the write never executes a second time. A retry with the same key but another
 payload or another `generation` gets `POLICYSQL_IDEMPOTENCY_CONFLICT`, as today. If the
 original did not commit, no row exists and the retry executes, as today.
@@ -220,13 +222,19 @@ which the client never takes as a definite rejection.
 The value is advisory data from the wrapper, like `commitChecksConfigured`; changing it does
 not change the snapshot. A wrapper that lowers a numeric `W` must keep deleting by the larger
 of the old and new windows until the old one has elapsed, so a client that read the old value is
-still covered. Moving from `null` to a number is not a lowering (nothing was advertised); it
+still covered. A client therefore relies on the value it read when it first sent the write,
+not on a later one; the opt-in client enforcement (follow-up 4) persists that
+`retentionSeconds` together with `firstSentAt`, so a client holding an old `W` stays safe after
+`W` is lowered. Moving from `null` to a number is not a lowering (nothing was advertised); it
 follows the ordering rule of section 6.
 
 **Library helper (pending maintainer confirmation, open question 4).** The library exports
 decision-free text: `idempotencyCleanupStatements({ retentionSeconds, batchSize })`, which
 returns the parameterized `DELETE` of section 4 with its arguments, and constants for the
-canonical DDL and the rebuild script of section 6. Like an adapter (ADR 0019), it is fixed
+canonical DDL and the rebuild statements of section 6. It takes the configured value as is:
+`retentionSeconds: null` returns no statements (no window advertised, so nothing may be
+deleted), and it throws only for a type or range error (a `retentionSeconds` that is not `null`
+or an integer within the config bounds, or a `batchSize` that is not a positive integer). Like an adapter (ADR 0019), it is fixed
 translation with no decision: the wrapper still chooses the window, the schedule, the databases,
 and the credentials, and runs the statements itself. Wrappers then do not copy SQL whose
 correctness the guarantee depends on.
@@ -274,13 +282,29 @@ CREATE INDEX policysql_idempotency_created_at ON policysql_idempotency (created_
 COMMIT;
 ```
 
-When a driver cannot send `BEGIN`/`COMMIT` as statements, the statements between them are sent
-as one batch in the driver's explicit transactional mode. A plain batch is not enough:
-`@tursodatabase/serverless`'s `connection.batch(statements)` runs each statement in autocommit
-when no mode is passed (`provision-dev.mjs` passes `"write"`, which is transactional). The copy
-and the `DROP` being in one transaction is what keeps the rebuild safe: run without it, a
-failure between `DROP` and `RENAME` loses every tombstone (keyed retries could then execute
-twice), and a keyed write that commits between the copy and the `DROP` loses its row.
+A transaction alone is not enough: **the rebuild must stop at the first failed statement and
+roll back, and must never send `COMMIT` after a failed statement.** SQLite does not abort a
+transaction when one statement in it fails. Run statement by statement, the script above with a
+failing copy (`INSERT ... SELECT`) still executes the `DROP` and `RENAME`, and its `COMMIT`
+commits an empty `policysql_idempotency`: every tombstone is gone, and every keyed retry can then
+execute a committed write a second time (verified on SQLite 3.53.2). The same happens with
+`@tursodatabase/serverless`'s `connection.batch(statements)` without a mode when the statements
+include literal `BEGIN`/`COMMIT`, because such a batch runs each statement on its own and does
+not stop at an error. Therefore:
+
+- **`@tursodatabase/serverless`:** send the statements between `BEGIN IMMEDIATE` and `COMMIT`
+  (not those two) as `connection.batch(statements, "write")`. The driver opens the transaction,
+  stops at the first error, and rolls back (`provision-dev.mjs` already passes `"write"`).
+- **Any other client** (a driver, a shell, an admin console): execute the statements one by one,
+  stop at the first error, and send `ROLLBACK` instead of the remaining statements and `COMMIT`
+  (in the `sqlite3` shell, `.bail on` with the script stops, and the open transaction is
+  discarded when the connection closes without `COMMIT`). Send `COMMIT` only after every
+  statement succeeded.
+
+The copy and the `DROP` being in one transaction that commits only on full success is what
+keeps the rebuild safe: otherwise a failure between `DROP` and `RENAME`, or a failed copy
+followed by a `COMMIT`, loses every tombstone (keyed retries could then execute twice), and a
+keyed write that commits between the copy and the `DROP` loses its row.
 
 Every existing row gets the migration time as `created_at`, so it is kept for a full window
 from the migration: never shorter than the guarantee, at worst one window longer. Keyed writes
@@ -308,13 +332,17 @@ Each ships on its own; none changes core or the ABI.
 
 1. **Schema and documentation.** `examples/database-routing/idempotency.sql` and
    `examples/in-process/idempotency.sql` get the canonical DDL; the rebuild script (with
-   `BEGIN IMMEDIATE ... COMMIT`) ships as a separate, documented file. `provision-dev.mjs`
+   `BEGIN IMMEDIATE ... COMMIT` and the stop-at-first-error and `ROLLBACK` instructions of
+   section 6) ships as a separate, documented file. `provision-dev.mjs`
    creates the index and rebuilds an existing table that lacks `created_at` (in its `"write"`
    batch). Documentation of section 5. Tests: core's `INSERT_SQL` and `LOOKUP_SQL` never name
    `created_at` (pins section 3); the atomic differential harness
    (`step-atomic-differential.test.mjs`) runs its keyed cases against both table shapes; the
    rebuild keeps every row and its replay (a keyed retry before and after the rebuild replays
-   the same reply); a keyed write interleaved with the rebuild (one that commits just before
+   the same reply); a rebuild whose copy step fails (and one that fails at any later step)
+   leaves the original table and all its rows intact and commits nothing, both statement by
+   statement with stop-at-first-error and through the serverless driver's `"write"` batch; a
+   keyed write interleaved with the rebuild (one that commits just before
    the rebuild takes its lock, and one that waits on that lock) still replays after the
    rebuild.
 2. **Config, Capabilities, and the helper.** `idempotencyRetentionSeconds: number | null`,
@@ -322,7 +350,8 @@ Each ships on its own; none changes core or the ABI.
    type), `idempotency.retentionSeconds` in Capabilities, `spec/openapi.yaml`, the HTTP
    conformance suite, and `idempotencyCleanupStatements` with the DDL and rebuild constants
    (tests: the statements are exactly those of sections 4 and 6, parameters are bound, not
-   interpolated, and an invalid `retentionSeconds` or `batchSize` throws). The in-process example
+   interpolated, `retentionSeconds: null` returns no statements, and only a type or range error
+   in `retentionSeconds` or `batchSize` throws). The in-process example
    has no scheduler: it configures `null` and runs no cleanup.
 3. **Reference wrapper cleanup.** A `scheduled` handler in `deploy/cloudflare/wrapper/` with an
    hourly Cron Trigger, and the same in `examples/database-routing/worker.ts` over both tenant
@@ -340,7 +369,8 @@ Each ships on its own; none changes core or the ABI.
    back-dated row; a retry of the fresh write still replays.
 4. **Client guidance.** Documentation first (section 2's client rule). Enforcement in the client
    library is opt-in only: when the application passes `firstSentAt` for a persisted keyed
-   operation, the client reads `retentionSeconds` and refuses to resend past `W - M`, raising an
+   operation, the client persists the `retentionSeconds` it read at that first send together with
+   `firstSentAt`, and refuses to resend past that `W - M`, raising an
    error that says the outcome must be resolved by reading.
 
 ## Consequences
