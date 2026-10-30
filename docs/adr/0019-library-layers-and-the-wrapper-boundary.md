@@ -25,7 +25,8 @@ The current code shows the cost of that gap:
 - About 1,900 lines of TypeScript decide transaction, idempotency, commit-check, and
   cost-admission outcomes. ADR 0011 says the transaction safety state machine is
   authoritative Rust code. A synchronous Rust version (`execute_checked_transaction`)
-  exists but no production path uses it.
+  exists but no production path uses it. (Resolved by ADR 0024: the step machine in core
+  decides, and pull request 9 deleted both.)
 - Session shape is validated twice (TypeScript `auth.ts` and Rust `activate_auth`), and
   the error-code-to-status table lives in TypeScript while the codes are defined in Rust.
 - `README.md`, `docs/architecture.md`, and `docs/system-architecture.html` describe a

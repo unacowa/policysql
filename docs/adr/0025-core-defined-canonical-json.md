@@ -233,6 +233,9 @@ One pull request, before ADR 0024 pull request 4:
 3. Remove `identity.ts` and the identity computation in `idempotency.ts`; keep only key syntax
    validation where the engine needs it before calling core, or move it into core. Keep
    `stableJson` and `sha256` for `database.ts` and `commit-checks.ts` as stated above.
+   (ADR 0024 pull request 9 deleted `commit-checks.ts` and with it the last TypeScript
+   `sha256`; `stableJson` stays in `database.ts`, where it compares bindings and is never
+   hashed.)
 4. Reject escaped lone surrogates in the engine's body parser. Test the escaped form
    (`'{"a":"\\ud800"}'` and `'{"a":"\\udc00"}'` as JavaScript source, that is, six ASCII
    characters) alongside the raw form that `http.test.mjs` and `in-process-example.test.mjs`

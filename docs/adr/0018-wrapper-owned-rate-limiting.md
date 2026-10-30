@@ -34,7 +34,9 @@ Request-rate limiting is a wrapper responsibility, like database selection in AD
 - `POLICYSQL_RATE_LIMIT_UNAVAILABLE` is removed, and the library never returns
   `POLICYSQL_RATE_LIMITED`. Its remaining 429 codes, `POLICYSQL_USAGE_BUDGET_EXCEEDED`
   and `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`, are per-query and per-transaction limits,
-  not request-rate limits, and are unchanged.
+  not request-rate limits, and are unchanged. (Since ADR 0024 pull request 9,
+  `POLICYSQL_USAGE_BUDGET_EXCEEDED` is a log-only code of the cost observation; it is in no
+  reply.)
 - `POLICYSQL_RATE_LIMITED` (HTTP 429) stays in the public contract as the code a wrapper
   uses when it rejects a request for rate.
 - `@unacowa/policysql/cloudflare` exports

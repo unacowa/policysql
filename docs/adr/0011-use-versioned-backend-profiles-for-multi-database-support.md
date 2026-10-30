@@ -80,6 +80,8 @@ The policy metadata format remains portable where its closed operators have prov
 
 The backend-neutral model, binder contracts, policy kernel, protected plan, emission verification, result descriptors, and transaction safety state machine remain authoritative Rust code.
 
+This holds in the code since [ADR 0024](0024-transaction-step-machine.md) pull request 9: the transaction safety state machine is `policysql-transaction`'s `step`, reached through the WASM `step_json`, and the TypeScript transaction owner and engine only execute its effects (database calls, persistence, timers, validator calls) and relay its replies. The TypeScript decision path and the unused synchronous Rust coordinator (`execute_checked_transaction`) are deleted, and a test keeps engine modules from naming any decision code.
+
 TypeScript may implement generated clients, build-time generation through Explain, documentation tooling, and platform adapters such as a Cloudflare Worker or Durable Object host. A TypeScript platform adapter performs transport and platform lifecycle work; it does not reimplement policy selection, binding, SQL rewriting, or invariant verification.
 
 If a TypeScript runtime hosts a Rust/WASM compiler, raw database results return through the Rust-owned result descriptor validation path before a public response is encoded. Moving any authorization decision into TypeScript requires a separate ADR and equivalent security, fuzz, and differential test evidence.
