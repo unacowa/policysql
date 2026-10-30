@@ -34,8 +34,12 @@ const abortError = (signal: AbortSignal): Error => signal.reason instanceof Erro
   ? signal.reason
   : new DOMException("The operation was aborted.", "AbortError");
 
-const cancel = async (reader: ReadableStreamDefaultReader<Uint8Array>) => {
-  try { await reader.cancel(); } catch { /* the failure is already terminal */ }
+// Release a stream without waiting for it. Cancelling closes the stream at once (a pending
+// read resolves as done), but the source's own cancel may never settle; awaiting it would let
+// a hostile body hold the caller past its timeout. A rejection is ignored: the failure is
+// already terminal.
+const release = (target: { cancel(): Promise<void> } | null | undefined) => {
+  try { target?.cancel().catch(() => undefined); } catch { /* the failure is already terminal */ }
 };
 
 /**
@@ -52,14 +56,14 @@ export const readBoundedText = async (
   const body = response.body;
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
-    try { await body?.cancel(); } catch { /* the failure is already terminal */ }
+    release(body);
     throw new BodyTooLargeError();
   }
   if (!body) return "";
   const reader = body.getReader();
   // A pending read resolves as done when the reader is cancelled, so an abort ends the loop;
   // the abort check after each read turns that into the abort error, not a short body.
-  const onAbort = () => { void cancel(reader); };
+  const onAbort = () => { release(reader); };
   signal?.addEventListener("abort", onAbort, { once: true });
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let bytes = 0;
@@ -83,7 +87,7 @@ export const readBoundedText = async (
     try { text += decoder.decode(); } catch { throw new BodyReadError(); }
     return text;
   } catch (error) {
-    await cancel(reader);
+    release(reader);
     throw error;
   } finally {
     signal?.removeEventListener("abort", onAbort);

@@ -5,7 +5,8 @@
 // what it answers for any COMMIT transport failure today (503 POLICYSQL_DATABASE_UNAVAILABLE
 // direct, 500 POLICYSQL_INTERNAL on the owner), the interactive path
 // POLICYSQL_COMMIT_OUTCOME_UNKNOWN.
-// Either way the hostile body is cut at the bound and released.
+// Either way the hostile body is cut at the bound and released. A COMMIT reply that stalls
+// (timeout class) or carries malformed UTF-8 (unavailable class) is never a rejection either.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
@@ -31,12 +32,46 @@ const hostileBody = () => {
   }, { highWaterMark: 0 });
   return { state, response: new Response(stream) };
 };
+/** A reply that sends its first bytes and then stalls until it is cancelled. */
+const stalledBody = () => {
+  const state = { bytes: 0, cancelled: false, pulls: 0 };
+  const stream = new ReadableStream({
+    pull(controller) {
+      state.pulls++;
+      if (state.pulls > 1) return new Promise(() => {});
+      const chunk = new TextEncoder().encode('{"baton":null,"results":[');
+      state.bytes += chunk.byteLength;
+      controller.enqueue(chunk);
+      return undefined;
+    },
+    cancel() { state.cancelled = true; },
+  }, { highWaterMark: 0 });
+  return { state, response: new Response(stream) };
+};
+/** A COMMIT reply with one malformed UTF-8 sequence inside it, followed by endless data. */
+const invalidUtf8Body = () => {
+  const state = { bytes: 0, cancelled: false, pulls: 0 };
+  const chunks = [
+    new TextEncoder().encode('{"baton":null,"results":[{"type":"ok","response":{"type":"execute","result":{"cols":[{"name":"'),
+    Uint8Array.of(0xc3, 0x28),
+    new TextEncoder().encode('","decltype":"TEXT"}]'),
+  ];
+  const stream = new ReadableStream({
+    pull(controller) {
+      const chunk = chunks[state.pulls++] ?? new Uint8Array(STEP).fill(32);
+      state.bytes += chunk.byteLength;
+      controller.enqueue(chunk);
+    },
+    cancel() { state.cancelled = true; },
+  }, { highWaterMark: 0 });
+  return { state, response: new Response(stream) };
+};
 /**
  * Replace the reply to one pipeline: with `statement`, the first pipeline that runs the
  * project INSERT; with `commit`, the COMMIT of the transaction that ran it (not, for example,
  * the COMMIT of a validator's callback query).
  */
-const replaceOnce = (h, target) => {
+const replaceOnce = (h, target, make = hostileBody) => {
   const bodies = [];
   let armed = true;
   const writers = new Set();
@@ -52,7 +87,7 @@ const replaceOnce = (h, target) => {
     }
     if (!match) return undefined;
     armed = false;
-    const body = hostileBody();
+    const body = make();
     bodies.push(body.state);
     return body.response;
   });
@@ -122,6 +157,60 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal((await h.ownerRecord(started.body.transactionId)).status, "commit_unknown");
     assert.equal(h.rows("a").filter((row) => row.id === "oversized_interactive").length, 1);
   });
+
+  // PR #86 review: the other two failures of a COMMIT reply's body. A body that stalls is cut at
+  // the request timeout (the transport's 504 class); a body with malformed UTF-8 is a transport
+  // failure (503 class). Each is answered with today's post-COMMIT code for its class, never a
+  // rejection, and the COMMIT the database applied leaves exactly one row.
+  const COMMIT_REPLIES = {
+    stalled: {
+      make: stalledBody,
+      atomic: { direct: [504, "POLICYSQL_DATABASE_TIMEOUT"], owner: [500, "POLICYSQL_INTERNAL"] },
+    },
+    "invalid UTF-8": {
+      make: invalidUtf8Body,
+      atomic: { direct: [503, "POLICYSQL_DATABASE_UNAVAILABLE"], owner: [500, "POLICYSQL_INTERNAL"] },
+    },
+  };
+  for (const [kind, { make, atomic }] of Object.entries(COMMIT_REPLIES)) {
+    for (const [placement, hooks] of [["direct", false], ["owner", true]]) {
+      test(`${ownerAdapter}/${placement}: a ${kind} reply to an atomic COMMIT is never a rejection and writes one row`, async (t) => {
+        t.mock.method(console, "log", () => {});
+        const h = await setup(t, { hooks });
+        const bodies = replaceOnce(h, "commit", make);
+        const id = `${kind === "stalled" ? "stalled" : "invalid"}_atomic`;
+        const reply = await h.request("a", execute, { statements: [insert(id)] }, null);
+        const [status, code] = atomic[placement];
+        assert.equal(reply.status, status, JSON.stringify(reply.body));
+        assert.equal(reply.body.error.code, code);
+        await neverRejected(reply, "execute");
+        assert.equal(bodies.length, 1, "the reply was replaced");
+        assert.equal(bodies[0].cancelled, true, "the body is released");
+        assert.equal(h.rows("a").filter((row) => row.id === id).length, 1);
+      });
+    }
+
+    test(`${ownerAdapter}: a ${kind} reply to an interactive COMMIT is outcome-unknown and writes one row`, async (t) => {
+      t.mock.method(console, "log", () => {});
+      const h = await setup(t, { hooks: false });
+      const started = await h.request("a", "/v1/transactions", { mode: "write" }, null);
+      assert.equal(started.status, 201, JSON.stringify(started.body));
+      const path = `/v1/transactions/${started.body.transactionId}`;
+      const bodies = replaceOnce(h, "commit", make);
+      const id = `${kind === "stalled" ? "stalled" : "invalid"}_interactive`;
+      assert.equal((await h.request("a", `${path}/statements`, { sequence: 1, ...insert(id) }, null)).status, 200);
+      for (const label of ["first", "retry"]) {
+        const reply = await h.request("a", `${path}/commit`, { sequence: 2 }, null);
+        assert.equal(reply.status, 503, `${label}: ${JSON.stringify(reply.body)}`);
+        assert.equal(reply.body.error.code, "POLICYSQL_COMMIT_OUTCOME_UNKNOWN", label);
+        await neverRejected(reply, "commit");
+      }
+      assert.equal(bodies.length, 1, "the reply was replaced");
+      assert.equal(bodies[0].cancelled, true, "the body is released");
+      assert.equal((await h.ownerRecord(started.body.transactionId)).status, "commit_unknown");
+      assert.equal(h.rows("a").filter((row) => row.id === id).length, 1);
+    });
+  }
 
   test(`${ownerAdapter}: an oversized reply to an interactive statement is 413 and ends the transaction`, async (t) => {
     t.mock.method(console, "log", () => {});

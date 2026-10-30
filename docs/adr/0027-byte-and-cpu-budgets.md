@@ -29,7 +29,8 @@ by different ADRs, as constants in different layers (origin/main `f44fcdb`):
 | Expression height (upstream) | 100 | `turso_parser::parser::MAX_EXPR_DEPTH` (`=0.7.2`) | dependency constant |
 | Rows, result bytes per statement | required | `RuntimeLimits` (`maxRows`, `maxResultBytes`, up to 2^53 − 1) | configured |
 | Statements per envelope | required | `RuntimeLimits` (`maxStatements`, up to 2^32 − 1) | configured |
-| Turso HTTP response | 2,097,152 | `MAX_RESPONSE_BYTES`, `src/turso-http.ts`; read whole before the check (#53) | TS constant |
+| Turso HTTP response | 2,097,152 | `MAX_RESPONSE_BYTES`, `src/turso-http.ts`; streamed and counted in bytes, cancelled at the first chunk over it (#53, `src/bounded-body.ts`); the same cap for statement and control replies | TS constant |
+| Validator (commit-check) response | none | `src/adapters/commit-check-hook.ts` reads it with `response.json()`, unbounded | — |
 | Step event; volatile state | `max_statements` × 1 MiB + 64 KiB; 256 KiB + 4 × event | `policysql-transaction` machine | Rust, derived from `max_statements` |
 | `identity_json`, `cost_estimate_json` input | 4 MiB | `policysql-transaction` | Rust constant |
 | Durable owner record; interactive result bytes | 96 KiB; ≤ 65,536 | ADR 0024 | fixed / configured within a fixed max |
@@ -649,10 +650,13 @@ smoke (`deploy/cloudflare/scripts/provision-dev.mjs`) before merge.
    capturing them with `wrangler tail` during the run; it records `F`. Set the reference
    `cpu_ms` to 1,000 and check it against the formula, add the wrapper consistency test, update the runbook and
    `docs/configuration.md` (formulas, coefficients). No library behaviour change.
-2. **Streamed Turso response (#53).** Byte-counted streaming read with cancel, the 65,536
-   control-response bound; the statement cap stays 2 MiB until pull request 6. Regression
-   fixtures from #53 (no length, understated length, chunked, exact and one over, invalid
-   UTF-8).
+2. **Streamed Turso response (#53, done in #86).** Byte-counted streaming read with cancel
+   (`src/bounded-body.ts`, web streams only), with the existing 2 MiB cap for every reply and
+   today's classification (statement 413, control 503, never a rejection of a COMMIT); the
+   request timeout also bounds the body read. Regression fixtures from #53 (no length,
+   understated length, chunked, exact and one over, invalid UTF-8, a stalled body). The
+   statement cap stays 2 MiB until pull request 6. The 65,536 control-response bound is
+   **not** in this pull request; it moves to pull request 3.
 3. **Request budget and ABI 9.** `maxRequestBytes`, `maxJsonValues` (body side),
    `maxSqlBytes` in `RuntimeLimits`; the HTTP adapter and engine read them; derived WASM input,
    event, and hash-input bounds; session bound 65,536; SQL over limit becomes 413; the client
@@ -663,7 +667,13 @@ smoke (`deploy/cloudflare/scripts/provision-dev.mjs`) before merge.
    `PolicySqlRuntime.max_bytes_per_value` is removed (its readers switch to the field), so pull
    requests 4–6 only make existing fields configurable and change no host-visible ABI. Tests at each limit and one over, for ASCII,
    multi-byte UTF-8, a BOM, a body whose escaping doubles inside the event, and a value count
-   exactly at and one over the limit with the abort before `JSON.parse`.
+   exactly at and one over the limit with the abort before `JSON.parse`. The fixed 65,536
+   reply bounds also land here, read with the streamed reader of pull request 2: the
+   database control-response bound (BEGIN, COMMIT, ROLLBACK, close; over it 503, or
+   `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for an interactive COMMIT) and the validator response
+   bound, which replaces the unbounded `response.json()` in
+   `src/adapters/commit-check-hook.ts` (over it denies the commit as a failed validator).
+   Tests at each bound and one over, and a COMMIT reply over it is never a rejection.
 4. **Input-side parser limits and `POLICYSQL_SQL_TOO_COMPLEX` (#63).** `maxParameters`,
    `maxExpressionDepth`, `maxProjections`, `maxJoins` configurable in `RuntimeLimits`;
    `BindingLimits` built from them; Capabilities from `limits_json`, documented as input-side

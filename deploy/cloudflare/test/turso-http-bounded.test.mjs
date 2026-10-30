@@ -310,3 +310,41 @@ test("readBoundedText: bound, non-byte chunks, aborts and argument checks", asyn
     await assert.rejects(readBoundedText(of([]), bound), TypeError, String(bound));
   }
 });
+
+// Regression (PR #86 review): releasing a body never waits for the source's cancel. A hostile
+// stream whose cancel() never settles must not hold pipeline() past its error or its timeout.
+test("#53: a body whose cancel never settles does not hold the transport", async () => {
+  /** A stream whose `cancel()` never settles; `body(controller, pull)` drives its chunks. */
+  const stubborn = (body) => {
+    const state = { cancelCalls: 0, pulls: 0 };
+    const stream = new ReadableStream({
+      pull(controller) { state.pulls++; return body(controller, state.pulls); },
+      cancel() { state.cancelCalls++; return new Promise(() => {}); },
+    }, { highWaterMark: 0 });
+    return { state, stream };
+  };
+  /** Settles within `ms`, or fails the test instead of hanging it. */
+  const within = (promise, ms, label) => Promise.race([promise, new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}: still pending after ${ms} ms`)), ms);
+    timer.unref?.();
+  })]);
+  const cases = [
+    ["over the bound", (controller) => { controller.enqueue(new Uint8Array(65_536).fill(32)); }, {}, 200, "POLICYSQL_LIMIT_EXCEEDED", 1000],
+    ["declared over the bound", (controller) => { controller.enqueue(new Uint8Array(1)); }, { "content-length": String(MAX_RESPONSE_BYTES + 1) }, 200, "POLICYSQL_LIMIT_EXCEEDED", 1000],
+    ["malformed UTF-8", (controller) => { controller.enqueue(Uint8Array.of(0xff)); }, {}, 200, "POLICYSQL_DATABASE_UNAVAILABLE", 1000],
+    ["non-success status", (controller) => { controller.enqueue(new Uint8Array(1)); }, {}, 500, "POLICYSQL_DATABASE_UNAVAILABLE", 1000],
+    ["stalled until the timeout", (controller, pull) => {
+      if (pull === 1) { controller.enqueue(encoder.encode('{"baton":')); return undefined; }
+      return new Promise(() => {});
+    }, {}, 200, "POLICYSQL_DATABASE_TIMEOUT", 50],
+  ];
+  for (const [label, body, headers, status, code, timeoutMs] of cases) {
+    const { state, stream } = stubborn(body);
+    const run = runStatement(transportFor("statement", () => new Response(stream, { status, headers })), timeoutMs);
+    await assert.rejects(within(run, 1_500, label), safe(code), label);
+    assert.equal(state.cancelCalls, 1, `${label}: the body is released once`);
+  }
+  // The reader alone: an error with a stubborn cancel returns at once.
+  const { stream } = stubborn((controller) => { controller.enqueue(new Uint8Array(8)); });
+  await assert.rejects(within(readBoundedText({ headers: new Headers(), body: stream }, 4), 500, "reader"), BodyTooLargeError);
+});

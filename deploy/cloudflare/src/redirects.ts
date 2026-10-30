@@ -26,9 +26,10 @@ const isRedirectResponse = (response: Response): boolean =>
   response.type === "opaqueredirect" || (response.status >= 300 && response.status <= 399);
 
 // Release a response without reading it. The caller's failure is already terminal,
-// so a cancellation error is not reported.
+// so a cancellation error is not reported. The cancel is not awaited: a source whose
+// cancel never settles must not hold the caller past its timeout (#53 review).
 export const discardBody = async (response: Response): Promise<void> => {
-  try { await response.body?.cancel(); } catch { /* the failure is already terminal */ }
+  try { response.body?.cancel().catch(() => undefined); } catch { /* the failure is already terminal */ }
 };
 
 // Cloudflare requires the host fetch receiver, so the default calls through globalThis.
