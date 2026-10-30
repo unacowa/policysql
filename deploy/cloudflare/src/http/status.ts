@@ -45,6 +45,17 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = Object.freeze({
   POLICYSQL_DATABASE_TIMEOUT: 504,
 });
 
+/**
+ * Codes that appear only in structured logs (the cost observation's `cost_observation_failed`)
+ * and never in a reply (ADR 0024 pull request 9; the log-only table of website/api/errors.md).
+ * They have no status, and `createErrorResponse` refuses them.
+ */
+export const LOG_ONLY_CODES: ReadonlySet<string> = Object.freeze(new Set([
+  "POLICYSQL_COST_UNKNOWN",
+  "POLICYSQL_USAGE_BUDGET_EXCEEDED",
+  "POLICYSQL_COST_ADMISSION_UNAVAILABLE",
+]));
+
 /** The status for a code. A code outside the table is a library fault and is served as 500. */
 export const statusFor = (code: string): number =>
   typeof code === "string" && Object.hasOwn(ERROR_STATUS, code) ? ERROR_STATUS[code] : 500;

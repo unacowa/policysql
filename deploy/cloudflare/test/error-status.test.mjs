@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ERROR_STATUS, statusFor } from "../src/http/status.ts";
+import { ERROR_STATUS, LOG_ONLY_CODES, statusFor } from "../src/http/status.ts";
 import { createErrorResponse } from "../src/http/responses.ts";
 import { JwtAuthenticationError } from "../src/adapters/jwt.ts";
 
@@ -133,7 +133,10 @@ const rustSource = () => files("crates", ".rs")
 test("every log-only code is produced by the cost observation and by nothing else", () => {
   const where = new Set([join("crates", "policysql-transaction", "src", "cost.rs"), join("deploy/cloudflare/src", "step-effects.ts")]);
   const sources = [
-    ...files("deploy/cloudflare/src", ".ts").filter((path) => path !== join("deploy/cloudflare/src", "http", "conformance.ts")).map((path) => [path, read(path)]),
+    // The status module lists them only to refuse them (`LOG_ONLY_CODES`).
+    ...files("deploy/cloudflare/src", ".ts")
+      .filter((path) => ![join("deploy/cloudflare/src", "http", "conformance.ts"), join("deploy/cloudflare/src", "http", "status.ts")].includes(path))
+      .map((path) => [path, read(path)]),
     ...rustSource(),
   ];
   for (const code of logCodes()) {
@@ -161,4 +164,19 @@ test("every code in the library table is returned somewhere, so dead codes canno
   // Non-vacuity: a removed code is not found, and a code only Rust test code names is not either.
   assert.equal(emitted.has("POLICYSQL_ACCESS_DENIED"), false);
   assert.ok(read("crates/policysql-wasm/src/lib.rs").includes('assert_eq!(unknown["error"]["code"], "POLICYSQL_INTERNAL")'));
+});
+
+// `ERROR_STATUS` and `statusFor` are public exports of `@unacowa/policysql/cloudflare`. Since ADR
+// 0024 pull request 9 the log-only codes have no status (statusFor answers 500, as for any code
+// outside the table), and `createErrorResponse` refuses them at every status, so a wrapper
+// cannot put them into a reply.
+test("the log-only codes have no status and createErrorResponse refuses them", () => {
+  assert.deepEqual([...LOG_ONLY_CODES].sort(), [...logCodes()].sort(), "the adapter's set is the specification's table");
+  for (const code of LOG_ONLY_CODES) {
+    assert.equal(Object.hasOwn(ERROR_STATUS, code), false, code);
+    assert.equal(statusFor(code), 500, code);
+    for (const status of [400, 403, 429, 500, 503]) {
+      assert.throws(() => createErrorResponse(status, code, "m"), TypeError, `${code} at ${status}`);
+    }
+  }
 });

@@ -80,7 +80,7 @@ error codeはAPI versionごとの安定したcontractです。minor releaseで�
 
 ## logだけに現れるcode
 
-次のcodeはerror responseには現れず、構造化logの`code`にだけ現れます。HTTP statusはありません。
+次のcodeはerror responseには現れず、構造化logの`code`にだけ現れます。HTTP statusはありません。公開exportの`statusFor`はこれらに表外のcodeと同じ500を返し（以前は表のstatus）、`ERROR_STATUS`にも含まれません。`createErrorResponse`はどのstatusでもこれらのcodeを`TypeError`にします。
 
 <!-- policysql:log-code-table -->
 | Code | Log event | 意味 |
