@@ -109,6 +109,28 @@ export class PolicySqlRuntime {
         }
     }
     /**
+     * Evaluates the cost of one envelope from the `EXPLAIN QUERY PLAN` results an `Observe`
+     * effect's statements returned and the wrapper's cost catalog (ADR 0024 "Cost"). The
+     * engine only logs the result: cost admits or rejects nothing. The contract is
+     * [`policysql_transaction::cost`].
+     * @param {string} input_json
+     * @returns {string}
+     */
+    cost_estimate_json(input_json) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(input_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.policysqlruntime_cost_estimate_json(this.__wbg_ptr, ptr0, len0);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * Computes a request identity, fingerprint, or command digest with core's canonical
      * JSON and SHA-256 (ADR 0024 pull request 2, ADR 0025). The input and output contract is
      * [`policysql_transaction::identity_json`]; bodies are passed as their exact text.
@@ -279,8 +301,10 @@ export class PolicySqlRuntime {
      * [`policysql_transaction::machine`].
      *
      * Adding this method bumped `ABI_VERSION` to 6; commit checks and callbacks (pull request
-     * 5) changed what it returns for some inputs and bumped it to 7. No production path calls
-     * it before the switch-over (ADR 0024 pull request 7).
+     * 5) changed what it returns for some inputs and bumped it to 7; atomic execution (pull
+     * request 6: an `atomic` input is executed instead of answered `POLICYSQL_INTERNAL`, the
+     * `request` event, `Execute.trace`, and the `Observe` context) bumped it to 8. No
+     * production path calls it before the switch-over (ADR 0024 pull requests 7 and 8).
      * @param {string | null | undefined} durable_json
      * @param {string | null | undefined} volatile_json
      * @param {string} event_json

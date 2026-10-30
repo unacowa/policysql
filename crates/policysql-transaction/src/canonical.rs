@@ -116,6 +116,39 @@ pub fn to_canonical(value: &Json) -> String {
     out
 }
 
+/// The length of `value` printed with this module's numbers and strings, its members in any
+/// order (for byte limits that count `JSON.stringify` output: member order does not change a
+/// length).
+pub(crate) fn js_value_len(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(true) => 4,
+        serde_json::Value::Bool(false) => 5,
+        serde_json::Value::Number(number) => {
+            let mut out = String::new();
+            write_number(number, &mut out);
+            out.len()
+        }
+        serde_json::Value::String(text) => js_string_len(text),
+        serde_json::Value::Array(items) => {
+            2 + items.len().saturating_sub(1) + items.iter().map(js_value_len).sum::<usize>()
+        }
+        serde_json::Value::Object(members) => {
+            2 + members.len().saturating_sub(1)
+                + members
+                    .iter()
+                    .map(|(key, item)| js_string_len(key) + 1 + js_value_len(item))
+                    .sum::<usize>()
+        }
+    }
+}
+
+/// The length of a string as this module prints it.
+pub(crate) fn js_string_len(text: &str) -> usize {
+    let mut out = String::new();
+    write_string(text, &mut out);
+    out.len()
+}
+
 /// Builds a [`Json`] from `serde_json`'s events, rejecting duplicate keys.
 struct ValueSeed;
 

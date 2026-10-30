@@ -15,8 +15,8 @@ use super::super::io::{
     self, CapabilityGrant, Code, Effect, Event, core_error_reply, error_reply, value_reply,
 };
 use super::super::state::{
-    CallbackTask, CallbackWork, Capability, CommitChecks, Connection, Durable, Pending, Phase,
-    Record, Replay, Task, Versions, Volatile, Work, WorkLane,
+    CallbackTask, CallbackWork, Capability, CommitChecks, Connection, Durable, Kind, Pending,
+    Phase, Record, Replay, Task, Versions, Volatile, Work, WorkLane,
 };
 use super::super::{Compiled, MAX_SAFE_INTEGER};
 use super::{Fault, Result, ResultShape, Row, Step, codec_failure, driver_call, exact_object};
@@ -214,12 +214,17 @@ impl<C: Compiler> Step<'_, C> {
             .iter()
             .map(|mutation| mutation.resource.as_str())
             .collect();
+        self.sorted_checks(&resources)
+    }
+
+    /// The checks changed rows in `resources` trigger, by ascending id, each once.
+    pub(super) fn sorted_checks(&self, resources: &[&str]) -> Vec<TriggeredCheck> {
         if resources.is_empty() {
             return Vec::new();
         }
         // Ascending id order, each id once, is the machine's guarantee (ADR 0007), not only
         // the compiler's.
-        let mut checks = self.compiler.triggered_checks(&resources);
+        let mut checks = self.compiler.triggered_checks(resources);
         checks.sort_by(|left, right| left.id.cmp(&right.id));
         checks.dedup_by(|left, right| left.id == right.id);
         checks
@@ -286,7 +291,8 @@ impl<C: Compiler> Step<'_, C> {
 
     /// Issues the capability of `checks[index]` and calls its validator: a token from this
     /// step's entropy (only its hash is kept), expiring at `min(now + timeout, deadline)`.
-    fn issue(
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn issue(
         &mut self,
         lane: WorkLane,
         request_id: Option<String>,
@@ -300,13 +306,42 @@ impl<C: Compiler> Step<'_, C> {
             .ok_or(Fault("check_index"))?;
         let record = self.record().ok_or(Fault("checks_record"))?;
         let deadline = record.expires_at_ms.ok_or(Fault("checks_deadline"))?;
-        let versions = record.versions.clone().ok_or(Fault("checks_versions"))?;
-        let statements: Vec<(usize, Operation, String)> = record
-            .mutations
-            .iter()
-            .enumerate()
-            .map(|(index, mutation)| (index, mutation.operation, mutation.resource.clone()))
-            .collect();
+        let atomic = self
+            .volatile
+            .as_ref()
+            .and_then(|volatile| volatile.atomic.as_deref());
+        // An interactive commit lists its recorded mutations by position (the synthetic
+        // `affectedRows: 1` rule); an atomic envelope lists the statements that changed rows
+        // by their index in the envelope (`commit-checks.ts` `triggeredCommitChecks`).
+        let (versions, statements): (Versions, Vec<(usize, Operation, String)>) =
+            match (record.kind, atomic) {
+                (Kind::Atomic, Some(atomic)) => (
+                    atomic.versions.clone(),
+                    atomic
+                        .mutations
+                        .iter()
+                        .map(|mutation| {
+                            (
+                                mutation.index as usize,
+                                mutation.operation,
+                                mutation.resource.clone(),
+                            )
+                        })
+                        .collect(),
+                ),
+                (Kind::Interactive, _) => (
+                    record.versions.clone().ok_or(Fault("checks_versions"))?,
+                    record
+                        .mutations
+                        .iter()
+                        .enumerate()
+                        .map(|(index, mutation)| {
+                            (index, mutation.operation, mutation.resource.clone())
+                        })
+                        .collect(),
+                ),
+                (Kind::Atomic, None) => return Err(Fault("checks_atomic")),
+            };
         let now = self.host.now_ms;
         let expires_at_ms = now.saturating_add(check.timeout_ms).min(deadline);
         if expires_at_ms <= now || self.connection() != Connection::Open {
@@ -434,6 +469,15 @@ impl<C: Compiler> Step<'_, C> {
             };
             return self.issue(lane, request_id, next);
         }
+        if let Some(atomic) = self
+            .volatile
+            .as_mut()
+            .and_then(|volatile| volatile.atomic.as_deref_mut())
+        {
+            atomic.checks_passed = true;
+            let request = request_id.unwrap_or_else(|| self.request_id());
+            return self.atomic_commit_binding(lane, request);
+        }
         let record = self.record().ok_or(Fault("checks_record"))?;
         let binding = record.binding.clone();
         let deadline = record.expires_at_ms;
@@ -484,10 +528,11 @@ impl<C: Compiler> Step<'_, C> {
     fn capability_live(&self, token_hash: Option<&str>) -> Option<Capability> {
         let volatile = self.volatile.as_ref()?;
         let capability = volatile.capability.as_ref()?;
-        let validating = self
-            .record()
-            .is_some_and(|record| record.phase == Phase::Validating)
-            && volatile.connection == Connection::Open
+        // An atomic execution stays `active` while it validates (its record is never read).
+        let validating = self.record().is_some_and(|record| {
+            record.phase == Phase::Validating
+                || (record.kind == Kind::Atomic && record.phase == Phase::Active)
+        }) && volatile.connection == Connection::Open
             && matches!(
                 volatile.work.as_ref().map(|work| &work.task),
                 Some(Task::Validator(_))

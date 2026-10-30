@@ -12,11 +12,12 @@ use super::io::{
     error_reply, value_reply,
 };
 use super::state::{
-    Binding, Connection, Counters, Durable, Identity, MAX_DURABLE_BYTES, MAX_VOLATILE_BYTES, Mode,
-    Mutation, Pending, Phase, Record, Replay, TX_STATE_VERSION, Task, Unreadable, Usage, Versions,
-    Volatile, Work, WorkLane, awaited_by, hex64,
+    Binding, Connection, Counters, Durable, Identity, Kind, MAX_DURABLE_BYTES, Mode, Mutation,
+    Pending, Phase, Record, Replay, TX_STATE_VERSION, Task, Unreadable, Usage, Versions, Volatile,
+    Work, WorkLane, awaited_by, hex64,
 };
 
+mod atomic;
 mod checks;
 
 use super::{Limits, MAX_SAFE_INTEGER, Output};
@@ -53,7 +54,13 @@ pub(super) fn run<C: Compiler>(
     if !host.is_valid() {
         return None;
     }
-    let owner = host.owner.clone()?;
+    // The engine (no owner) holds no durable state: the request kind and direct atomic
+    // execution persist nothing.
+    let owner = match (host.owner.clone(), durable) {
+        (Some(owner), _) => owner,
+        (None, None) => String::new(),
+        (None, Some(_)) => return None,
+    };
     if event.len() > limits.max_event_bytes() {
         return None;
     }
@@ -65,7 +72,9 @@ pub(super) fn run<C: Compiler>(
             Err(reason) => Stored::Unreadable(reason),
         },
     };
-    let volatile_state = volatile.map(|text| Volatile::parse(text, &owner));
+    let owner_field = host.owner.as_deref();
+    let volatile_state =
+        volatile.map(|text| Volatile::parse(text, owner_field, limits.max_volatile_bytes()));
     let mut machine = Step {
         compiler,
         limits,
@@ -79,7 +88,18 @@ pub(super) fn run<C: Compiler>(
         allocated: Vec::new(),
         abandoned: false,
     };
+    let atomic_input = matches!(&event, Event::Forwarded { input } if input.get("kind").and_then(Value::as_str) == Some("atomic"));
     match (stored, volatile_state) {
+        (Stored::Unreadable(reason), None) if atomic_input => {
+            // An atomic request ignores the record (ADR 0024 "Fail-closed rules"): it is
+            // replaced when the execution persists its own.
+            machine.log(&json!({
+                "event": "tx_state_discarded",
+                "transactionId": owner,
+                "reason": reason.as_str(),
+            }));
+            machine.run_dispatch(&event);
+        }
         (Stored::Unreadable(reason), volatile) => {
             machine.volatile = volatile.flatten();
             machine.discard(reason, &event);
@@ -87,7 +107,7 @@ pub(super) fn run<C: Compiler>(
         (stored, Some(None)) => {
             // Invalid volatile state is an engine fault: Abandon applied to the durable state.
             // Its handles are released when they can still be read.
-            for handle in readable_handles(volatile.unwrap_or_default(), &owner) {
+            for handle in readable_handles(volatile.unwrap_or_default(), owner_field) {
                 compiler.release(handle);
             }
             machine.durable = match stored {
@@ -102,19 +122,7 @@ pub(super) fn run<C: Compiler>(
                 Stored::Absent | Stored::Unreadable(_) => None,
             };
             machine.volatile = volatile.flatten();
-            let before = (machine.durable.clone(), machine.volatile.clone());
-            let outcome = machine
-                .dispatch(&event)
-                .and_then(|()| machine.check_output());
-            if let Err(Fault(reason)) = outcome {
-                // Plans compiled by this step are released; the state is the one it started from.
-                for handle in std::mem::take(&mut machine.allocated) {
-                    compiler.release(handle);
-                }
-                (machine.durable, machine.volatile) = before;
-                machine.reset = false;
-                machine.fail_closed(reason, &event, false);
-            }
+            machine.run_dispatch(&event);
         }
     }
     Some(machine.finish_output())
@@ -166,6 +174,28 @@ struct Envelope<'a> {
 impl<C: Compiler> Step<'_, C> {
     // ---- plumbing -------------------------------------------------------------------------
 
+    /// Dispatches `event` on readable state; a fault restores the state the step started from
+    /// and fails closed.
+    fn run_dispatch(&mut self, event: &Event) {
+        let before = (self.durable.clone(), self.volatile.clone());
+        let outcome = self.dispatch(event).and_then(|()| self.check_output());
+        if let Err(Fault(reason)) = outcome {
+            // Plans compiled by this step are released; the state is the one it started from.
+            for handle in std::mem::take(&mut self.allocated) {
+                self.compiler.release(handle);
+            }
+            (self.durable, self.volatile) = before;
+            self.effects.clear();
+            self.reset = false;
+            self.fail_closed(reason, event, false);
+        }
+    }
+
+    /// This step runs on an owner (not in the engine).
+    fn on_owner(&self) -> bool {
+        !self.owner.is_empty()
+    }
+
     fn finish_output(mut self) -> Output {
         if self.reset {
             self.release_all();
@@ -199,7 +229,9 @@ impl<C: Compiler> Step<'_, C> {
             return Err(Fault("durable_bound"));
         }
         if let Some(volatile) = &self.volatile {
-            if volatile.to_json().len() > MAX_VOLATILE_BYTES || !volatile.is_consistent() {
+            if volatile.to_json().len() > self.limits.max_volatile_bytes()
+                || !volatile.is_consistent()
+            {
                 return Err(Fault("volatile_bound"));
             }
         }
@@ -255,9 +287,10 @@ impl<C: Compiler> Step<'_, C> {
 
     fn volatile_mut(&mut self) -> &mut Volatile {
         let seed = self.seed_id();
+        let owner = (!self.owner.is_empty()).then(|| self.owner.to_owned());
         self.volatile.get_or_insert_with(|| Volatile {
             v: TX_STATE_VERSION,
-            owner: self.owner.to_owned(),
+            owner,
             next_effect_id: seed,
             connection: Connection::None,
             handles: Vec::new(),
@@ -268,6 +301,7 @@ impl<C: Compiler> Step<'_, C> {
             capability: None,
             deferred: None,
             revoked_validator: None,
+            atomic: None,
         })
     }
 
@@ -374,8 +408,15 @@ impl<C: Compiler> Step<'_, C> {
                 self.abandon();
                 Ok(())
             }
-            Event::Forwarded { input } => self.forwarded(input),
-            Event::TimerFired => self.timer(),
+            Event::Request { operation } => self.request_event(operation),
+            Event::Forwarded { input } if self.on_owner() => self.forwarded(input),
+            Event::TimerFired if self.on_owner() => self.timer(),
+            Event::Forwarded { .. } => {
+                // Owner input reaches only an owner.
+                self.respond(error_reply(Code::Internal));
+                Ok(())
+            }
+            Event::TimerFired => Ok(()),
             outcome => self.outcome(outcome),
         }
     }
@@ -443,6 +484,9 @@ impl<C: Compiler> Step<'_, C> {
         }
         if callback {
             self.respond_callback(error_reply(Code::Internal));
+        }
+        if let Event::Request { .. } = event {
+            self.respond(error_reply(Code::Internal));
         }
         if let Event::Forwarded { input } = event {
             match input.get("kind").and_then(Value::as_str) {
@@ -609,6 +653,9 @@ impl<C: Compiler> Step<'_, C> {
         }
         self.revoke();
         self.release_all();
+        if let Some(volatile) = &mut self.volatile {
+            volatile.atomic = None;
+        }
         let request_id = match lane {
             WorkLane::Client => Some(self.request.clone().unwrap_or_else(|| self.request_id())),
             WorkLane::Background => None,
@@ -687,7 +734,11 @@ impl<C: Compiler> Step<'_, C> {
         let lane = work.lane;
         let request_id = work.request_id;
         self.request.clone_from(&request_id);
-        let result = self.consume(lane, request_id, work.task, event);
+        let result = if is_atomic_task(&work.task) {
+            self.atomic_outcome(lane, request_id, work.task, event)
+        } else {
+            self.consume(lane, request_id, work.task, event)
+        };
         // A task that did not wait again leaves no work behind.
         if let Some(volatile) = &mut self.volatile
             && volatile.pending.is_none()
@@ -777,6 +828,7 @@ impl<C: Compiler> Step<'_, C> {
                     counters: Counters::default(),
                     mutations: Vec::new(),
                     versions: None,
+                    atomic: None,
                 })));
                 self.wait(lane, request_id, Task::BeginPersist, |id| Effect::Persist {
                     id,
@@ -828,6 +880,7 @@ impl<C: Compiler> Step<'_, C> {
                     operation,
                     resource,
                     versions,
+                    explain_resource,
                 },
                 Event::BindingChecked { allowed: true, .. },
             ) => {
@@ -853,6 +906,7 @@ impl<C: Compiler> Step<'_, C> {
                         resource,
                         versions,
                         started_at_ms: self.host.now_ms,
+                        explain_resource,
                     },
                     |id| Effect::Execute {
                         id,
@@ -1232,6 +1286,7 @@ impl<C: Compiler> Step<'_, C> {
             operation,
             resource,
             versions,
+            explain_resource,
             ..
         } = task
         else {
@@ -1276,13 +1331,21 @@ impl<C: Compiler> Step<'_, C> {
             self.effects.push(Effect::Observe {
                 statements: vec![call],
                 context: ObserveContext {
-                    operation: operation.as_str(),
-                    resource: resource.clone(),
+                    request_id: request_id.clone().unwrap_or_else(|| self.request_id()),
+                    binding: self
+                        .record()
+                        .map(|record| record.binding.clone())
+                        .ok_or(Fault("statement_record"))?,
+                    statements: vec![io::ObservedStatement {
+                        operation: operation.as_str(),
+                        resource: resource.clone(),
+                        explain_resource,
+                    }],
                 },
             });
         }
         let request = request_id.unwrap_or_else(|| self.request_id());
-        let shaped = shape_result(sequence, operation, &validated)?;
+        let shaped = shape_statement(Some(sequence), operation, &validated)?;
         let record = self.record().ok_or(Fault("statement_record"))?;
         let result_bytes = record
             .counters
@@ -1379,6 +1442,9 @@ impl<C: Compiler> Step<'_, C> {
         let due = record
             .expires_at_ms
             .is_some_and(|at| self.host.now_ms >= at);
+        if record.kind == Kind::Atomic {
+            return self.atomic_timer(due && phase == Phase::Active);
+        }
         // `committing`: before COMMIT the step consuming `Persisted` decides; after it,
         // nothing expires the transaction.
         if !due || !matches!(phase, Phase::Active | Phase::Validating) {
@@ -1435,11 +1501,7 @@ impl<C: Compiler> Step<'_, C> {
                 self.command(kind, input)
             }
             Some("callbackQuery") => self.callback_query(input),
-            // Atomic execution runs in the machine from pull request 6.
-            Some("atomic") => {
-                self.respond(error_reply(Code::Internal));
-                Ok(())
-            }
+            Some("atomic") => self.atomic_input(input),
             _ => {
                 self.respond(error_reply(Code::Invalid));
                 Ok(())
@@ -1572,7 +1634,8 @@ impl<C: Compiler> Step<'_, C> {
                 Ok(())
             }
             Some(Durable::Live(record)) => {
-                if record.identity.start_fingerprint != identity.start_fingerprint
+                if record.kind != Kind::Interactive
+                    || record.identity.start_fingerprint != identity.start_fingerprint
                     || record.identity.auth_fingerprint != identity.auth_fingerprint
                     || record.snapshot != snapshot
                     || record.binding != binding
@@ -1730,7 +1793,9 @@ impl<C: Compiler> Step<'_, C> {
         self.request = Some(request.clone());
         let owned = input.get("transactionId").and_then(Value::as_str) == Some(self.owner);
         let record = match &self.durable {
-            Some(Durable::Live(record)) if owned => record.clone(),
+            Some(Durable::Live(record)) if owned && record.kind == Kind::Interactive => {
+                record.clone()
+            }
             Some(Durable::Tombstone { .. }) if owned => {
                 // Nothing in a discarded record proves COMMIT was not sent.
                 self.respond(error_reply(if kind == "commit" {
@@ -1952,6 +2017,7 @@ impl<C: Compiler> Step<'_, C> {
                 schema: compiled.schema_version.clone(),
                 policy: compiled.policy_version.clone(),
             },
+            explain_resource: summary.explain_resource,
         };
         self.wait(WorkLane::Client, Some(request), task, |id| {
             Effect::CheckBinding {
@@ -2016,14 +2082,14 @@ impl<C: Compiler> Step<'_, C> {
 
 /// The `handles` of a volatile text that is otherwise invalid, when it is still JSON of this
 /// owner: what `Abandon` would release.
-fn readable_handles(text: &str, owner: &str) -> Vec<u64> {
-    if text.len() > MAX_VOLATILE_BYTES {
+fn readable_handles(text: &str, owner: Option<&str>) -> Vec<u64> {
+    if text.len() > super::state::MAX_VOLATILE_BYTES {
         return Vec::new();
     }
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return Vec::new();
     };
-    if value.get("owner").and_then(Value::as_str) != Some(owner) {
+    if value.get("owner").and_then(Value::as_str) != owner {
         return Vec::new();
     }
     value
@@ -2271,7 +2337,8 @@ struct ResultMeta<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StatementResult<'a> {
-    sequence: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sequence: Option<u64>,
     columns: &'a [String],
     rows: Vec<Row<'a>>,
     row_count: usize,
@@ -2301,9 +2368,29 @@ fn redactions_of(validated: &Validated) -> Result<Vec<Redaction<'_>>> {
     Ok(redactions)
 }
 
-/// The public result of one statement (`turso.ts` `validateDriverResults`), with its sequence.
-fn shape_result(
-    sequence: u64,
+/// Whether a task belongs to atomic execution (`atomic.rs` consumes its outcomes).
+const fn is_atomic_task(task: &Task) -> bool {
+    matches!(
+        task,
+        Task::RequestBinding { .. }
+            | Task::AtomicForward
+            | Task::AtomicBinding { .. }
+            | Task::AtomicOpen
+            | Task::AtomicPersist
+            | Task::AtomicTimer
+            | Task::AtomicLookup
+            | Task::AtomicExecute
+            | Task::AtomicCommitBinding
+            | Task::AtomicInsert
+            | Task::AtomicCommit
+            | Task::AtomicReplay { .. }
+    )
+}
+
+/// The public result of one statement (`turso.ts` `validateDriverResults`), with its sequence
+/// for an interactive statement.
+fn shape_statement(
+    sequence: Option<u64>,
     operation: Operation,
     validated: &Validated,
 ) -> Result<Box<RawValue>> {

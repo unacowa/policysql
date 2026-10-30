@@ -8,8 +8,8 @@
 
 use super::{PolicySqlRuntime, RuntimeError, compiled_statement, error_body};
 use policysql_transaction::machine::{
-    Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, StatementSummary,
-    TriggeredCheck, Validated,
+    Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, StatementLimits,
+    StatementSummary, TriggeredCheck, Validated,
 };
 use serde::Serialize;
 
@@ -97,6 +97,12 @@ impl Compiler for RuntimeCompiler<'_> {
                 .map(|statement| StatementSummary {
                     operation: operation(statement.operation),
                     resource: statement.resource.clone(),
+                    limits: StatementLimits {
+                        max_rows: statement.limits.max_rows,
+                        max_result_bytes: statement.limits.max_result_bytes,
+                        timeout_ms: statement.limits.timeout_ms,
+                    },
+                    explain_resource: statement.explain.resource,
                 })
                 .collect(),
             schema_version: response.schema_version,
