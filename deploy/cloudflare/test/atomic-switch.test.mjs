@@ -136,9 +136,12 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     });
 
     // Rows the previous release wrote: the direct path's (no `status`, no `commitChecks`) and
-    // the TypeScript owner path's. The key hash and the fingerprint are unchanged (ADR 0025,
-    // and this pull request keeps the ABI and so the snapshot), so the retry replays.
-    test(`${ownerAdapter}: a keyed retry (${placement}) replays the row the previous release wrote`, async (t) => {
+    // the TypeScript owner path's. The key hash is unchanged (ADR 0025). Pull request 8 kept the
+    // ABI and so the snapshot, and the retry replayed; #80 (ABI 9) removed the snapshot from the
+    // request fingerprint, so a fingerprint stored before #80 no longer matches: the retry gets
+    // POLICYSQL_IDEMPOTENCY_CONFLICT, as on every snapshot change before #80 (the one-time
+    // incompatibility of the switch, ADR 0014). It never executes twice, and the row is kept.
+    test(`${ownerAdapter}: a keyed retry (${placement}) of the row the previous release wrote conflicts (#80) and never executes twice`, async (t) => {
       const h = await setup(t, { hooks });
       h.setValidator(async () => true);
       const body = { statements: [insert("across_deploy")] };
@@ -152,16 +155,29 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       // The object kept the TypeScript owner's record across the deployment.
       if (hooks) h.plantOwnerRecord(wrote.owner.name, wrote.owner.record);
       const retry = await h.request("a", execute, body, KEY);
-      assert.equal(retry.status, 200, JSON.stringify(retry.body));
-      assert.deepEqual(retry.body, before.value, "the same response as the previous release gave");
-      assert.equal(retry.body.meta.requestId, "req_origin_main");
+      assert.equal(retry.status, 409, JSON.stringify(retry.body));
+      assert.equal(retry.body.error.code, "POLICYSQL_IDEMPOTENCY_CONFLICT", "a fingerprint stored before #80");
       assert.equal(h.rows("a").filter((item) => item.id === "across_deploy").length, 1, "never executed twice");
       assert.deepEqual(idempotencyRows(h), [row], "the row is untouched");
       if (hooks) {
         const { name } = wrote.owner;
         assert.equal(typeof await h.ownerRecordRaw(name), "string", "the machine replaced the old-format record");
-        assert.equal((await h.ownerRecord(name)).status, "committed");
+        assert.notEqual((await h.ownerRecord(name)).status, "active");
       }
+      // Control: the same row under this release's fingerprint (the binding without its
+      // snapshot) replays the previous release's response.
+      const database = h.databases.get("a").database;
+      const auth = JSON.parse(h.runtime.authorize_session_json(JSON.stringify(h.session("a")), undefined, "execute")).auth;
+      const identity = JSON.parse(h.runtime.identity_json(JSON.stringify({
+        op: "request", endpoint: "execute", auth, binding: h.binding("a"), body: JSON.stringify(body), key: KEY,
+      }))).idempotency;
+      assert.equal(identity.keyHash, row.key_hash);
+      database.prepare("UPDATE policysql_idempotency SET fingerprint = ?").run(identity.fingerprint);
+      const replay = await h.request("a", execute, body, KEY);
+      assert.equal(replay.status, 200, JSON.stringify(replay.body));
+      assert.deepEqual(replay.body, before.value, "the same response as the previous release gave");
+      assert.equal(replay.body.meta.requestId, "req_origin_main");
+      assert.equal(h.rows("a").filter((item) => item.id === "across_deploy").length, 1, "never executed twice");
     });
   }
 
@@ -350,8 +366,11 @@ test("durable-objects: a Worker of this version never turns the previous object'
   const replayed = await after.fetch(new Request(`https://worker.test${execute}`, {
     method: "POST", headers: { "content-type": "application/json", "idempotency-key": KEY }, body: JSON.stringify(body),
   }), context, h.background);
-  assert.equal(replayed.status, 200);
-  assert.deepEqual(await replayed.json(), committed.value, "the previous release's response");
+  // The previous release stored its fingerprint with the snapshot; since #80 (ABI 9) the
+  // fingerprint has none, so the row of before #80 conflicts once (ADR 0014), never executes
+  // twice.
+  assert.equal(replayed.status, 409);
+  assert.equal((await replayed.json()).error.code, "POLICYSQL_IDEMPOTENCY_CONFLICT");
   assert.equal(h.rows("a").filter((row) => row.id === "skewed").length, 1, "executed once");
 });
 

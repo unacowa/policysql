@@ -71,7 +71,28 @@ export const ALLOWLIST = Object.freeze({
     "COMMIT (the transport's check before COMMIT) is a COMMIT failure of class `rejected`, which core answers " +
     "INTERNAL (500) for execute, because COMMIT may have been sent. The TypeScript direct path answered " +
     "DATABASE_BINDING_REJECTED (403). Neither is a rejection in the client; no COMMIT reaches the database.",
+  "request-fingerprint-without-snapshot":
+    "#80 (ABI 9): the request fingerprint no longer includes the binding's snapshot, so a committed keyed write " +
+    "retried after a snapshot-changing deployment replays. Every stored fingerprint therefore differs from the " +
+    "recorded one. The comparison names each fingerprint by its order of first appearance in the scenario, on " +
+    "each side, so which rows and calls share a fingerprint is still compared; the value itself is pinned by " +
+    "core's tests (crates/policysql-transaction/src/identity.rs, tests/fixtures/identity-goldens.json).",
 });
+
+/**
+ * `request-fingerprint-without-snapshot`: replaces every `fingerprint` member below `value`
+ * with `<fingerprint N>`, N its order of first appearance in `names` (one map per side and
+ * scenario).
+ */
+const relabelFingerprints = (names, value) => {
+  if (Array.isArray(value)) return value.map((item) => relabelFingerprints(names, item));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    if (key !== "fingerprint" || typeof item !== "string") return [key, relabelFingerprints(names, item)];
+    if (!names.has(item)) names.set(item, `<fingerprint ${names.size + 1}>`);
+    return [key, names.get(item)];
+  }));
+};
 
 const CATALOG = `version: 1
 resources:
@@ -336,6 +357,7 @@ const environment = (t, { limits = {}, trace = false, engineConfig = config } = 
   };
   let request = 0;
   env.nextRequest = () => `req-${++request}`;
+  env.fingerprints = { ts: new Map(), step: new Map() };
   return env;
 };
 
@@ -403,6 +425,8 @@ const both = async (env, op) => {
   const ts = env.reference.take("execute");
   const step = asRecorded(await runSide(env, "step", op, requestId, start));
   env.clock.now = Math.max(ts.end, step.end);
+  ts.seen.calls = relabelFingerprints(env.fingerprints.ts, ts.seen.calls);
+  step.seen.calls = relabelFingerprints(env.fingerprints.step, step.seen.calls);
   return { ts: ts.seen, step: step.seen };
 };
 
@@ -422,7 +446,11 @@ const assertSameEnd = async (env, label, ownerPath = false) => {
     const value = env.rows(side);
     return { ...value, idempotency: value.idempotency.map((row) => ({ ...row, record: ownerPath ? row.record : normalizeStored(side, row.record) })) };
   };
-  assert.deepEqual(asRecorded(rows("step")), env.reference.take("rows"), `${label}: rows`);
+  assert.deepEqual(
+    relabelFingerprints(env.fingerprints.step, asRecorded(rows("step"))),
+    relabelFingerprints(env.fingerprints.ts, env.reference.take("rows")),
+    `${label}: rows`,
+  );
 };
 
 const agree = async (t, ops, prepare = () => {}, options = {}) => {
