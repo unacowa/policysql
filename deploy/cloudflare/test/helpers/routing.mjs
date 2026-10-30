@@ -322,6 +322,10 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     delayNextOwnerBody: (ms) => owners.delayNextBody(ms),
     /** Durable Objects only: every raw reply the object sent over its wire. */
     ownerWire: () => owners.wire,
+    /** Durable Objects only: the simulated namespace, for a Worker of another version. */
+    ownerNamespace: () => owners.namespace,
+    /** The ports a new owner gets (ADR 0021), for an owner of another version. */
+    ownerDependencies,
     rotateCredential(tenant, value) {
       env[`TENANT_${tenant.toUpperCase()}_TOKEN`] = value;
       acceptedTokens.get(tenant).add(value);
