@@ -357,3 +357,15 @@ test("rejection pairs follow the public status table: 403 PRESET_COLUMN is defin
     await assert.rejects(u.client.execute(select), error => error instanceof PolicySqlOutcomeUnknownError, code);
   }
 });
+
+test("TRANSACTION_LIMIT_EXCEEDED is a permanent 413 rejection, sent once; the former 429 pairing is unknown (#62)", async () => {
+  const body = errorBody("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
+  let calls = 0;
+  const h = setup({}, () => async () => { calls++; return { status: 413, body }; });
+  await assert.rejects(h.client.execute(select), error =>
+    !(error instanceof PolicySqlOutcomeUnknownError) && error.code === "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED" && error.status === 413);
+  assert.equal(calls, 1);
+  // 429 asks for a later retry; the server no longer sends it for this code, so it proves nothing.
+  const retryable = setup({}, () => async () => ({ status: 429, body }));
+  await assert.rejects(retryable.client.execute(select), error => error instanceof PolicySqlOutcomeUnknownError);
+});
