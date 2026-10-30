@@ -589,6 +589,11 @@ today.
   JSON is accepted and enforced exactly as before, and the new `limits_json` method only
   reports values. Limits were never part of the snapshot, so a later change of a configured
   limit does not change it either. (Decided in pull request 3; it was planned as the bump.)
+  Pull request 5 bumps to 7: it changes what `step_json` returns for existing inputs (a commit
+  whose mutations trigger a check now emits `callValidator` instead of a rejection, and a
+  `callbackQuery` input is served instead of answered unavailable), which is the rule ADR 0025
+  applied to `identity_json`. Nothing in production calls `step_json` yet, so the deployment
+  is one more snapshot change.
 - **In-flight transactions** do not survive any deployment: owners restart, so their
   connections are gone, and they fail closed as today.
 - **Keyed atomic retries across a snapshot change** get `POLICYSQL_IDEMPOTENCY_CONFLICT`,
@@ -811,13 +816,13 @@ it yet.
   is computed from the text (#70). Core computes the auth fingerprint and the replay identity
   itself (`sha256(canonical({replay:"v1", principal, subject, role, session, database}))`, the
   binding without `snapshot`); `begin` takes `startFingerprint` from the engine until the
-  `request` kind (pull request 7). `atomic` is answered with `POLICYSQL_INTERNAL` and
-  `callbackQuery` with `POLICYSQL_TRANSACTION_UNAVAILABLE`, without effects, until pull
-  requests 6 and 5.
+  `request` kind (pull request 7). `atomic` is answered with `POLICYSQL_INTERNAL`, without
+  effects, until pull request 6. (`callbackQuery` was answered unavailable until pull
+  request 5; see its notes below.)
 - **Commit checks.** `Compiler::triggered_checks` recomputes the checks from the recorded
-  mutations; until pull request 5 any triggered check rejects the commit with
-  `POLICYSQL_COMMIT_CHECK_REJECTED` before `Persist(committing)`. `validating` records are read
-  and handled by the successor rules (commands unavailable, the timer expires them).
+  mutations. (In pull request 4 any triggered check rejected the commit; pull request 5 runs
+  them.) `validating` records are read and handled by the successor rules (commands
+  unavailable, the timer expires them).
 - **Order of checks for a command.** Shape, then the record and the replay identity, then an
   exact retry (replayed from `last`), then `committing`/`commit_unknown` (a commit at the
   committing sequence is outcome-unknown, any other command unavailable), then the snapshot,
@@ -863,6 +868,94 @@ it yet.
 - **Not yet in the engine's codec.** The test executor passes integers beyond 2^53 − 1 from
   the step output as `BigInt`; `TursoHttpTransport` does not encode `BigInt` yet, which the
   switch-over (pull request 7) adds.
+
+Recorded by pull request 5 (ABI 7), which adds commit checks and callbacks to the machine
+(`crates/policysql-transaction/src/machine/step/checks.rs`); no production path calls it yet.
+
+- **Flow.** A commit whose recorded mutations trigger checks (`Compiler::triggered_checks`, by
+  ascending id, with each check's callback role and `hook.timeout_ms`; the machine sorts and
+  deduplicates them itself, so the order does not rest on the compiler) checks the binding,
+  then requires every triggered id in `HostFacts.configuredChecks` (the ids with an endpoint,
+  empty without `publicBaseUrl`); a missing one logs `commit_check_unconfigured` and rejects
+  with `POLICYSQL_COMMIT_CHECK_REJECTED` before any capability or validator call (ADR 0021). It
+  then persists `validating` and, for each check in turn, issues a capability and emits
+  `CallValidator`. After the last allow it checks the binding again (the property "a
+  `BindingChecked { allowed: true }` after the last validator") and continues to `committing`
+  with `meta.commitChecks: "passed"`. `TransactionOwnerCore` persists `active` between checks;
+  the machine stays `validating` until `committing`, which no successor rule distinguishes.
+- **Effect and events.** `callValidator { id, check, payload, capability: { token, expiresAtMs },
+  timeoutMs }`; `payload` is the hook body without `query`, in the wire order of today
+  (`version`, `validationId`, `check`, `requestId` of the commit, `policyVersion`,
+  `schemaVersion`, `role`, `session`, `statements`). `statements` lists every recorded mutation
+  with its position as `index` (the synthetic `affectedRows: 1` rule), as today. The hook
+  adapter adds `query` and signs, so the HMAC inputs are unchanged. The outcome is
+  `validatorReplied { id, ok, decision }` (`ok`: 2xx; `decision`: the JSON body or `null`) or
+  `validatorFailed { id, class }`. Only an exact decision (`commit-checks.ts` `exactDecision`)
+  with `allowed: true` and `ok` allows; anything else rejects before COMMIT.
+- **Capability.** The token is the base64url form of all 32 entropy bytes of the step that
+  issues it; that step never seeds a volatile part (a commit has an open connection), so no
+  bytes are reused. Only its SHA-256 is kept, in volatile state (`capability.tokenHash`); the
+  token appears only in the `callValidator` effect. It expires at
+  `min(now + timeout, expiresAtMs)`; a check whose capability would already be expired rejects.
+  It is revoked at the verdict, at an expiry, and by any close; a callback query in progress
+  continues only while the capability that authorized it (by token hash) is the live one. The
+  TypeScript `sha256` in `commit-checks.ts` stays for `TransactionOwnerCore` until pull
+  request 9 deletes that path.
+- **Callback queries.** The forwarded input is `{kind: "callbackQuery", validationId,
+  capability, command}`, where `command` is the verified body text (#70): compile builds the
+  envelope from its raw members and the digest is `sha256(canonical(command))` of the text.
+  Order: the validation id must name this owner; with no live capability (no validation
+  running, a successor, after the verdict) the reply is `POLICYSQL_TRANSACTION_UNAVAILABLE` and
+  nothing changes. Otherwise the token (syntax, expiry, constant-time hash comparison), the
+  command shape (exactly `sequence`, `sql`, `params`), the snapshot, and the deadline are
+  checked; an exact retry is replayed; then the sequence (the next one, at most
+  `max_transaction_statements`), the compile under the callback session (the commit's session
+  with the check's role, that role added to `roles`, `access: ["execute"]`), one read-only
+  statement, `CheckBinding` (deadline `min(expiresAtMs, capability expiry)`), `Execute`, result
+  validation, and the cumulative `max_callback_rows` and `max_transaction_result_bytes`. Any
+  failure after the capability is found ends the open transaction (rollback, `failed`) and
+  answers the waiting commit `POLICYSQL_COMMIT_CHECK_REJECTED` at once, not when the validator
+  returns; its late verdict is logged and ignored (`revokedValidator`).
+- **Lanes.** Volatile state gains the callback lane (`callback`: its pending effect, request id,
+  token hash, and task), `capability`, `deferred`, and `revokedValidator`, all omitted when
+  empty, so the volatile texts of pull request 4's transcripts are unchanged. The client lane
+  awaits `CallValidator` (not on the connection) while the callback lane may hold the
+  connection with `Execute`; a verdict that arrives meanwhile is kept as `deferred` and runs
+  when that `Execute` returns (whose rows are then not returned: the capability was revoked).
+- **Expiry while validating.** `TimerFired` answers the waiting commit
+  `POLICYSQL_COMMIT_CHECK_REJECTED` in its own step, sets `expired` in memory (so commands are
+  unavailable and the late verdict is ignored), and rolls back, after a callback query's
+  `Execute` if one holds the connection, then persists `expired`. A timer during the `validating`
+  persist or the binding check after the last verdict is deferred as for statements.
+- **Differential harness.** The `commit-checks` allowlist entry is removed. New entries:
+  `expiry-during-validator` (inconsistency 5) and `callback-without-validation` (a callback that
+  reaches an owner with no live capability changes nothing; `TransactionOwnerCore` fails that
+  owner's open transaction, so anyone holding the validation id of an active transaction
+  could end it; ADR 0007 "Callback rules of the step machine" scopes its rollback rule to a
+  running validation accordingly, and `docs/commit-checks.md` says the same; while a capability
+  is live, a malformed or wrong token still rolls back, as today. A separate fix aligns the
+  TypeScript owner; that entry goes when it merges), and `loss-between-checks` (the machine writes nothing between checks, so an
+  owner lost during one check still calls the next validator before its `Persist(committing)`
+  fails; no COMMIT either way, and both answer `POLICYSQL_INTERNAL`). The harness compares validator calls (the signed hook body with the token
+  masked, and the signature) and callback replies as well, and adds generated commit-check
+  sequences with random validator scripts.
+- **Obligations for the production executor (pull request 7).** Run `callValidator` through
+  `callCommitCheckHook` with the endpoint and secret looked up by `check` in the validated
+  configuration (re-checking the URL and secret at the exit, `rejected` when that fails), map
+  a timeout to `timeout` and any other failure to `unavailable`, supply `configuredChecks` from
+  the configuration, and serialize the callback lane as today. The payload may carry
+  integers beyond 2^53 − 1 in `session`; the hook adapter must not round them (today's
+  `JSON.parse` of the session rounds them already).
+- **Tests.** `tests/commit_checks.rs` (scenarios), `tests/check_properties.rs` (proptest over
+  one or two triggered checks: at most one COMMIT; validators called once each in ascending id
+  order, the next only after the previous allowed; stale verdicts never advance; COMMIT only
+  after every check was called and allowed and a binding check after the last allow; a
+  callback executes only with the live capability before its verdict; callback rows within the
+  limit; one effect on the connection at a time; determinism), transcripts of an
+  allowed check with callbacks, a deny, a validator timeout and transport error, owner loss and
+  expiry while validating, a late verdict after expiry, a callback after revocation, callback
+  limit exhaustion, and capability tampering, and `step_tests.rs` in `policysql-wasm` with the
+  real compiler.
 
 ## Decided during review
 

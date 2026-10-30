@@ -1,10 +1,10 @@
 //! Test support for the step machine: a fake compiler and a model of the engine that runs
 //! effects (ADR 0024 "Effect execution contract") and records a transcript.
-#![allow(dead_code, clippy::missing_panics_doc)]
+#![allow(dead_code, clippy::missing_panics_doc, clippy::too_many_lines)]
 
 use policysql_transaction::machine::{
     Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, StatementSummary,
-    Validated, step_json,
+    TriggeredCheck, Validated, step_json,
 };
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
@@ -20,6 +20,7 @@ pub const LIMITS: Limits = Limits {
     max_transaction_statements: 8,
     max_transaction_result_bytes: 64_000,
     begin_timeout_ms: 1_000,
+    max_callback_rows: 100,
     max_statements: 8,
 };
 
@@ -40,8 +41,10 @@ pub struct FakeCompiler {
     plans: RefCell<BTreeMap<u64, Plan>>,
     next: Cell<u64>,
     pub snapshot: String,
-    /// Resources whose changed rows trigger the commit check `consistency`.
+    /// Resources whose changed rows trigger [`Self::checks`].
     pub triggers: BTreeSet<String>,
+    /// The checks a trigger runs (by default `consistency`, as role `auditor`, 1,000 ms).
+    pub checks: Vec<TriggeredCheck>,
     pub compiles: Cell<usize>,
 }
 
@@ -52,7 +55,13 @@ impl FakeCompiler {
             plans: RefCell::default(),
             next: Cell::new(1),
             snapshot: SNAPSHOT.to_owned(),
-            triggers: BTreeSet::new(),
+            // No PR 4 scenario writes `audited`, so their transcripts are unchanged.
+            triggers: BTreeSet::from(["audited".to_owned()]),
+            checks: vec![TriggeredCheck {
+                id: "consistency".to_owned(),
+                role: Some("auditor".to_owned()),
+                timeout_ms: 1_000,
+            }],
             compiles: Cell::new(0),
         }
     }
@@ -198,12 +207,12 @@ impl Compiler for FakeCompiler {
         self.plans.borrow_mut().remove(&handle);
     }
 
-    fn triggered_checks(&self, resources: &[&str]) -> Vec<String> {
+    fn triggered_checks(&self, resources: &[&str]) -> Vec<TriggeredCheck> {
         if resources
             .iter()
             .any(|resource| self.triggers.contains(*resource))
         {
-            vec!["consistency".to_owned()]
+            self.checks.clone()
         } else {
             Vec::new()
         }
@@ -272,6 +281,12 @@ pub struct Observed {
     /// Every client reply with the kind of the command it answers (best effort: replies
     /// arrive in order on the client lane).
     pub replies: Vec<(String, Value)>,
+    /// Every callback lane reply, in order.
+    pub callback_replies: Vec<Value>,
+    /// Every `callValidator` effect, in order.
+    pub validator_calls: Vec<Value>,
+    /// Callback `execute` effects run on the connection.
+    pub callback_executes: usize,
 }
 
 /// A model of the engine: in-memory state, a store, and the outstanding awaited effect.
@@ -286,6 +301,10 @@ pub struct Engine {
     pub entropy: u64,
     pub requests: u64,
     pub outstanding: Option<Value>,
+    /// The callback lane's outstanding awaited effect.
+    pub callback_outstanding: Option<Value>,
+    /// `configuredChecks` of the host facts.
+    pub configured: Vec<String>,
     /// The durable text a pending `Persist` writes.
     pub persist_text: Option<String>,
     pub transcript: Vec<TranscriptLine>,
@@ -320,6 +339,8 @@ impl Engine {
             entropy: 0,
             requests: 0,
             outstanding: None,
+            callback_outstanding: None,
+            configured: Vec::new(),
             persist_text: None,
             transcript: Vec::new(),
             observed: Observed::default(),
@@ -337,14 +358,25 @@ impl Engine {
             "entropy": format!("{:064x}", self.entropy.wrapping_mul(0x9e37_79b9_7f4a_7c15)),
             "requestId": format!("req_{}", self.requests),
             "owner": OWNER,
-            "configuredChecks": [],
+            "configuredChecks": self.configured,
         })
         .to_string()
     }
 
+    /// The id of the callback lane's pending effect in the current volatile state.
+    fn callback_pending(&self) -> Option<u64> {
+        let volatile: Value = serde_json::from_str(self.volatile.as_deref()?).ok()?;
+        volatile["callback"]["pending"]["id"].as_u64()
+    }
+
     /// Feeds one event and runs the immediate effects; an awaited effect stays outstanding.
     pub fn feed(&mut self, event: &Value) -> Value {
-        if let Some(kind) = event["input"]["kind"].as_str() {
+        // A callback query, or the outcome of the callback lane's pending effect.
+        let callback_lane = event["input"]["kind"] == "callbackQuery"
+            || (event["id"].is_u64() && self.callback_pending() == event["id"].as_u64());
+        if let Some(kind) = event["input"]["kind"].as_str()
+            && kind != "callbackQuery"
+        {
             // `kind` or `kind:sequence`, so a reply can be matched to the command it answers.
             let sequence = event["input"]["command"]
                 .as_str()
@@ -393,9 +425,21 @@ impl Engine {
         let reset = effects.iter().any(|effect| effect["type"] == "reset");
         self.durable = parsed["durable"].as_str().map(str::to_owned);
         self.volatile = parsed["volatile"].as_str().map(str::to_owned);
-        self.outstanding = None;
+        if callback_lane {
+            self.callback_outstanding = None;
+        } else {
+            self.outstanding = None;
+        }
+        let callback_pending = self.callback_pending();
         for effect in &effects {
             match effect["type"].as_str() {
+                Some("respond") if effect["lane"] == "callback" => {
+                    self.observed.callback_replies.push(effect["reply"].clone());
+                }
+                Some("callValidator") => self.observed.validator_calls.push(effect.clone()),
+                Some("execute") if callback_pending == effect["id"].as_u64() => {
+                    self.observed.callback_executes += 1;
+                }
                 Some("respond") => {
                     let kind = if self.waiting.is_empty() {
                         "unknown".to_owned()
@@ -414,21 +458,84 @@ impl Engine {
                 _ => {}
             }
             if is_awaited(effect) {
-                self.outstanding = Some(effect.clone());
+                if callback_pending.is_some() && callback_pending == effect["id"].as_u64() {
+                    self.callback_outstanding = Some(effect.clone());
+                } else {
+                    self.outstanding = Some(effect.clone());
+                }
             }
         }
         if reset {
             self.durable.clone_from(&self.store);
             self.volatile = None;
             self.outstanding = None;
+            self.callback_outstanding = None;
         }
         self.last_effects.clone_from(&effects);
         parsed
     }
 
     /// Runs the outstanding effect successfully (`ok`) or with a failure, and feeds its outcome.
+    /// A validator call succeeds with an allowing decision.
     pub fn resolve(&mut self, ok: bool, class: &str) -> Option<Value> {
         let effect = self.outstanding.take()?;
+        self.resolve_effect(&effect, ok, class)
+    }
+
+    /// Runs the callback lane's outstanding effect.
+    pub fn resolve_callback(&mut self, ok: bool, class: &str) -> Option<Value> {
+        let effect = self.callback_outstanding.take()?;
+        self.resolve_effect(&effect, ok, class)
+    }
+
+    /// Answers the outstanding validator call with `ok` (a 2xx status) and `decision`.
+    pub fn decide(&mut self, ok: bool, decision: &Value) -> Option<Value> {
+        let effect = self.outstanding.take()?;
+        assert_eq!(
+            effect["type"], "callValidator",
+            "no validator call outstanding"
+        );
+        let event =
+            json!({"type": "validatorReplied", "id": effect["id"], "ok": ok, "decision": decision});
+        Some(self.feed(&event))
+    }
+
+    /// The capability token of the last validator call.
+    #[must_use]
+    pub fn token(&self) -> String {
+        self.observed
+            .validator_calls
+            .last()
+            .and_then(|call| call["capability"]["token"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Feeds a callback query with the exact body `text` and `token`.
+    pub fn callback(&mut self, token: &str, text: &str) -> Value {
+        let validation = format!("cval_{}", &OWNER[3..]);
+        self.feed(&json!({"type": "forwarded", "input": {
+            "kind": "callbackQuery", "validationId": validation, "capability": token, "command": text,
+        }}))
+    }
+
+    /// Runs a callback query to completion and returns its reply.
+    pub fn run_callback(&mut self, token: &str, text: &str) -> Value {
+        let before = self.observed.callback_replies.len();
+        self.callback(token, text);
+        for _ in 0..8 {
+            if self.resolve_callback(true, "unknown").is_none() {
+                break;
+            }
+        }
+        self.observed
+            .callback_replies
+            .get(before)
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    pub fn resolve_effect(&mut self, effect: &Value, ok: bool, class: &str) -> Option<Value> {
         let id = effect["id"].clone();
         let event = match (effect["type"].as_str(), ok) {
             (Some("open"), true) => json!({"type": "opened", "id": id}),
@@ -477,6 +584,13 @@ impl Engine {
                 self.persist_text = None;
                 json!({"type": "persistFailed", "id": id})
             }
+            (Some("callValidator"), true) => json!({
+                "type": "validatorReplied", "id": id, "ok": true,
+                "decision": {"version": "1", "allowed": true},
+            }),
+            (Some("callValidator"), false) => {
+                json!({"type": "validatorFailed", "id": id, "class": class})
+            }
             _ => return None,
         };
         Some(self.feed(&event))
@@ -484,8 +598,10 @@ impl Engine {
 
     /// Resolves every outstanding effect successfully.
     pub fn settle(&mut self) {
-        for _ in 0..32 {
-            if self.resolve(true, "unknown").is_none() {
+        for _ in 0..64 {
+            if self.resolve(true, "unknown").is_none()
+                && self.resolve_callback(true, "unknown").is_none()
+            {
                 break;
             }
         }
@@ -497,9 +613,11 @@ impl Engine {
         self.durable.clone_from(&self.store);
         self.volatile = None;
         self.outstanding = None;
+        self.callback_outstanding = None;
         self.persist_text = None;
         self.compiler = FakeCompiler {
             triggers: self.compiler.triggers.clone(),
+            checks: self.compiler.checks.clone(),
             ..FakeCompiler::new()
         };
         self.waiting.clear();
@@ -527,7 +645,16 @@ impl Engine {
 pub fn is_awaited(effect: &Value) -> bool {
     matches!(
         effect["type"].as_str(),
-        Some("open" | "checkBinding" | "execute" | "commit" | "rollback" | "setTimer" | "persist")
+        Some(
+            "open"
+                | "checkBinding"
+                | "execute"
+                | "commit"
+                | "rollback"
+                | "setTimer"
+                | "persist"
+                | "callValidator"
+        )
     )
 }
 

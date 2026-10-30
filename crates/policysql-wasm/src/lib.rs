@@ -24,7 +24,10 @@ use wasm_bindgen::prelude::*;
 /// correctly rounded.
 /// 6: `step_json`, the transaction step machine (ADR 0024 pull request 4), and the runtime
 /// limits it requires to keep durable transaction state within its bound.
-const ABI_VERSION: u32 = 6;
+/// 7: commit checks and callbacks in `step_json` (ADR 0024 pull request 5): a commit whose
+/// mutations trigger checks now emits `callValidator` instead of being rejected, callback
+/// queries are served, and the `validatorReplied`/`validatorFailed` events are read.
+const ABI_VERSION: u32 = 7;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -649,8 +652,9 @@ impl PolicySqlRuntime {
     /// `{"error":{"code":"POLICYSQL_INTERNAL",...}}` and no state. The contract is
     /// [`policysql_transaction::machine`].
     ///
-    /// Adding this method bumped `ABI_VERSION` to 6. No production path calls it before the
-    /// switch-over (ADR 0024 pull request 7).
+    /// Adding this method bumped `ABI_VERSION` to 6; commit checks and callbacks (pull request
+    /// 5) changed what it returns for some inputs and bumped it to 7. No production path calls
+    /// it before the switch-over (ADR 0024 pull request 7).
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn step_json(

@@ -1,10 +1,10 @@
-// A test-only effect executor for the transaction step machine (ADR 0024 pull request 4).
+// A test-only effect executor for the transaction step machine (ADR 0024 pull requests 4 and 5).
 // TEST ONLY: no production path uses the machine before the switch-over (pull request 7).
 //
 // `StepOwnerCore` has the owner-side shape of `TransactionOwnerCore` (the same facilities and
-// ports), but makes no decision: every client command, timer, and effect outcome is one call
-// of `runtime.step_json`, and the executor only runs the effects it returns, in order
-// (ADR 0024 "Effect execution contract"):
+// ports), but makes no decision: every client command, callback query, timer, and effect
+// outcome is one call of `runtime.step_json`, and the executor only runs the effects it
+// returns, in order (ADR 0024 "Effect execution contract"):
 //
 // 1. call `step_json` with the current state, the event, and fresh host facts, and keep the
 //    returned state as current;
@@ -12,14 +12,24 @@
 // 3. run the awaited effect, map its outcome (or exception) to exactly one outcome event with
 //    a class, and go to 1.
 //
-// Client commands run one at a time on the client lane, as in `TransactionOwnerCore`;
-// `onTimer` is fed immediately. Unlike `TransactionOwnerCore`, every command carries the
-// session (`auth`) and the verified body text (`bodyText`) the engine would forward (#70): the
-// machine compiles and hashes that text, never a re-serialization.
+// Client commands run one at a time on the client lane and callback queries one at a time on
+// the callback lane, as in `TransactionOwnerCore`; `onTimer` is fed immediately. A lane's
+// caller gets its reply as soon as a `respond` effect for that lane runs (a commit that waits
+// on its validator is answered at expiry), while the lane's effects run to completion before
+// its next event. Unlike `TransactionOwnerCore`, every command carries the session (`auth`)
+// and the verified body text (`bodyText`) the engine would forward (#70), and so does a
+// callback query: the machine compiles and hashes that text, never a re-serialization.
+//
+// `callValidator` runs through the real hook adapter (`callCommitCheckHook`, which adds the
+// `query` block and signs), with the endpoint and secret looked up by check id in the
+// validated configuration; the host facts' `configuredChecks` are the configured ids when the
+// configuration has a `publicBaseUrl` (ADR 0021).
 import { EngineError } from "../../src/errors.ts";
 import { checkDatabaseBinding, databaseTransportFactory } from "../../src/database.ts";
 import { driverArgs, rawDriverValue, rowValues } from "../../src/driver-values.ts";
 import { runtimeBytesLimit } from "../../src/binary.ts";
+import { validateConfig } from "../../src/engine-config.ts";
+import { callCommitCheckHook } from "../../src/adapters/commit-check-hook.ts";
 
 const KEY = "transaction";
 
@@ -33,6 +43,10 @@ export const failureClass = (error) => {
   }
   return "unknown";
 };
+
+/** The class of a validator call that produced no answer. */
+const validatorFailureClass = (error) =>
+  error?.name === "TimeoutError" || error?.name === "AbortError" ? "timeout" : "unavailable";
 
 // Integers beyond 2^53 - 1 keep their exact digits from the step output (BigInt).
 const parseExact = (text) => JSON.parse(text, (_key, value, context) =>
@@ -52,25 +66,36 @@ const randomHex = () => [...crypto.getRandomValues(new Uint8Array(32))]
 
 const internalReply = () => ({ ok: false, error: { code: "POLICYSQL_INTERNAL", message: "The request could not be completed.", path: null } });
 
+/** The re-check at the outbound exit (`commit-checks.ts` `secureUrl`). */
+const secureUrl = (raw) => {
+  const url = new URL(raw);
+  if (url.protocol !== "https:" || url.username || url.password) throw new TypeError("insecure validator URL");
+  return url;
+};
+
 export class StepOwnerCore {
   /**
-   * `name` is the owner name the adapter routes to; `dependencies` are `getRuntime` and
-   * `database`, as for `TransactionOwnerCore`.
+   * `name` is the owner name the adapter routes to; `dependencies` are `getRuntime`,
+   * `database`, `config`, and `fetchImpl`, as for `TransactionOwnerCore`.
    */
-  constructor(facilities, { getRuntime, database }, name) {
+  constructor(facilities, { getRuntime, database, config = { environment: "test" }, fetchImpl = undefined }, name) {
     this.facilities = facilities;
     this.getRuntime = getRuntime;
     this.database = database;
+    this.config = validateConfig(config);
+    this.configuredChecks = this.config.publicBaseUrl === undefined ? [] : Object.keys(config.commitChecks ?? {});
+    this.fetchImpl = fetchImpl;
     this.name = name;
     this.loaded = false;
     this.durable = null;
     this.volatile = null;
     this.transaction = null;
     this.queue = Promise.resolve();
-    this.waiter = null;
+    this.callbackQueue = Promise.resolve();
+    this.waiters = { client: null, callback: null };
     /** Every step: the four inputs and the output text (a transcript, ADR 0024). */
     this.transcript = [];
-    /** Replies the machine sent with no client waiting (must stay empty). */
+    /** Replies the machine sent with no caller waiting on that lane (must stay empty). */
     this.unrouted = [];
   }
 
@@ -86,7 +111,7 @@ export class StepOwnerCore {
 
   step(event, requestId) {
     const host = JSON.stringify({
-      nowMs: Date.now(), entropy: randomHex(), requestId, owner: this.name, configuredChecks: [],
+      nowMs: Date.now(), entropy: randomHex(), requestId, owner: this.name, configuredChecks: this.configuredChecks,
     });
     const eventText = JSON.stringify(event);
     const outputText = this.getRuntime().step_json(this.durable ?? undefined, this.volatile ?? undefined, eventText, host);
@@ -103,14 +128,17 @@ export class StepOwnerCore {
   async drive(event, requestId) {
     let next = event;
     while (next) {
+      // A `reset` on another lane drops the state: reload it, as a successor would.
+      await this.load();
       const output = this.step(next, requestId);
       next = null;
       for (const effect of output.effects) {
         switch (effect.type) {
           case "respond": {
-            const waiter = this.waiter;
-            this.waiter = null;
-            if (waiter) waiter(effect.reply); else this.unrouted.push(effect.reply);
+            const lane = effect.lane === "callback" ? "callback" : "client";
+            const waiter = this.waiters[lane];
+            this.waiters[lane] = null;
+            if (waiter) waiter(effect.reply); else this.unrouted.push({ lane, reply: effect.reply });
             break;
           }
           case "log":
@@ -214,42 +242,80 @@ export class StepOwnerCore {
         } catch {
           return { type: "persistFailed", id };
         }
+      case "callValidator": {
+        // The endpoint and secret are looked up by check id; core never sees them. The hook
+        // adapter adds `query` (token, callback URL, expiry) and signs.
+        const endpoint = this.config.commitCheck(effect.check);
+        let url;
+        let publicBaseUrl;
+        try {
+          if (endpoint === undefined || this.config.publicBaseUrl === undefined) throw new TypeError("unconfigured");
+          url = secureUrl(endpoint.url);
+          publicBaseUrl = secureUrl(this.config.publicBaseUrl);
+          if (typeof endpoint.hmacSecret !== "string" || endpoint.hmacSecret.length < 16) throw new TypeError("secret");
+        } catch {
+          return { type: "validatorFailed", id, class: "rejected" };
+        }
+        try {
+          const reply = await callCommitCheckHook({
+            url,
+            hmacSecret: endpoint.hmacSecret,
+            publicBaseUrl,
+            validationId: effect.payload.validationId,
+            payload: effect.payload,
+            capability: effect.capability,
+            timeoutMs: effect.timeoutMs,
+            fetchImpl: this.fetchImpl,
+          });
+          return { type: "validatorReplied", id, ok: reply.ok, decision: reply.decision ?? null };
+        } catch (error) {
+          return { type: "validatorFailed", id, class: validatorFailureClass(error) };
+        }
+      }
       default:
         throw new Error(`unknown effect ${effect.type}`);
     }
   }
 
-  clientLane(event, requestId) {
-    const run = this.queue.then(async () => {
-      await this.load();
-      const reply = new Promise((resolve) => { this.waiter = resolve; });
+  /**
+   * Runs `event` on `lane` (`client` or `callback`) after the lane's previous event has run
+   * all its effects, and resolves with the lane's reply as soon as the machine sends it.
+   */
+  lane(lane, event, requestId) {
+    const queue = lane === "client" ? "queue" : "callbackQueue";
+    let resolveReply;
+    const reply = new Promise((resolve) => { resolveReply = resolve; });
+    const run = this[queue].then(async () => {
+      this.waiters[lane] = resolveReply;
       try {
         await this.drive(event, requestId);
       } catch {
         // Invalid host facts or an engine fault: 500, then Abandon with the previous state.
         try { await this.drive({ type: "abandon" }, requestId); } catch { /* discarded */ }
-        if (this.waiter) this.waiter(internalReply());
+        if (this.waiters[lane] === resolveReply) {
+          this.waiters[lane] = null;
+          resolveReply(internalReply());
+        }
       }
-      // Every client event is answered by the step that decides it.
-      if (this.waiter) {
-        this.unrouted.push("no reply");
-        this.waiter(internalReply());
+      // Every event is answered by the step that decides it.
+      if (this.waiters[lane] === resolveReply) {
+        this.waiters[lane] = null;
+        this.unrouted.push({ lane, reply: "no reply" });
+        resolveReply(internalReply());
       }
-      this.waiter = null;
-      return await reply;
     });
-    this.queue = run.catch(() => undefined);
-    return run;
+    this[queue] = run.catch(() => undefined);
+    return reply;
   }
 
   begin(input, requestId) {
     const { authFingerprint: _computedByCore, ...fields } = input;
-    return this.clientLane({ type: "forwarded", input: { kind: "begin", ...fields } }, requestId);
+    return this.lane("client", { type: "forwarded", input: { kind: "begin", ...fields } }, requestId);
   }
 
   /** `input` is the owner command plus the session (`auth`) and verified text (`bodyText`). */
   command(kind, input, requestId) {
-    return this.clientLane({
+    return this.lane("client", {
       type: "forwarded",
       input: {
         kind, transactionId: input.transactionId, auth: input.auth, command: input.bodyText,
@@ -258,7 +324,27 @@ export class StepOwnerCore {
     }, requestId);
   }
 
-  /** Called by the adapter when this owner's timer fires; not queued behind the client lane. */
+  /** `input` is `{ validationId, capability, bodyText }`: the verified callback text (#70). */
+  callbackQuery(input, requestId) {
+    return this.lane("callback", {
+      type: "forwarded",
+      input: {
+        kind: "callbackQuery", validationId: input.validationId,
+        capability: typeof input.capability === "string" ? input.capability : "", command: input.bodyText,
+      },
+    }, requestId);
+  }
+
+  /** Resolves once both lanes have run every effect of every event they were given. */
+  async settled() {
+    let lanes;
+    do {
+      lanes = [this.queue, this.callbackQueue];
+      await Promise.all(lanes);
+    } while (lanes[0] !== this.queue || lanes[1] !== this.callbackQueue);
+  }
+
+  /** Called by the adapter when this owner's timer fires; not queued behind either lane. */
   async onTimer() {
     await this.load();
     await this.drive({ type: "timerFired" }, crypto.randomUUID());

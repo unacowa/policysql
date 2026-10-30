@@ -3,8 +3,9 @@ import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import type { ValidatedConfig } from "./engine-config.ts";
 
-// The capability token's hash. Computed and compared here only, over a random token, not over
-// canonical JSON; it moves to core with capability verification (ADR 0024 pull request 5).
+// The capability token's hash for `TransactionOwnerCore`, over a random token, not over
+// canonical JSON. The step machine hashes and verifies its capabilities in core (ADR 0024
+// pull request 5); this copy goes when pull request 9 deletes the TypeScript path.
 const sha256 = async (value: string): Promise<string> => {
   const bytes = new TextEncoder().encode(value);
   const hash = await crypto.subtle.digest("SHA-256", bytes);

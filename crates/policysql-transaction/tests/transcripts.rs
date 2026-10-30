@@ -201,9 +201,151 @@ fn statement_completion_put_failed() -> Engine {
     engine
 }
 
+const CALLBACK: &str = r#"{"sequence":1,"sql":"SELECT id FROM projects","params":{}}"#;
+
+/// A write transaction whose insert into `audited` triggers `consistency`, with the commit fed
+/// and run to its validator call.
+fn validating() -> Engine {
+    let mut engine = Engine::new();
+    engine.configured = vec!["consistency".to_owned()];
+    engine.run(&begin("write"));
+    engine.run(&command(
+        "statement",
+        &statement_text(1, "INSERT INTO audited (id) VALUES (:id)"),
+    ));
+    engine.feed(&command("commit", &sequence_text(2)));
+    engine.resolve(true, "unknown"); // binding checked: Persist(validating)
+    engine.resolve(true, "unknown"); // validating stored: CallValidator
+    engine
+}
+
+/// The validator queries the open transaction twice (the second an exact retry) and allows.
+fn check_allowed_with_callbacks() -> Engine {
+    let mut engine = validating();
+    let token = engine.token();
+    engine.run_callback(&token, CALLBACK);
+    engine.run_callback(&token, CALLBACK);
+    engine.settle();
+    engine.run(&command("commit", &sequence_text(2)));
+    engine
+}
+
+fn check_denied() -> Engine {
+    let mut engine = validating();
+    engine.decide(true, &json!({"version": "1", "allowed": false}));
+    engine.settle();
+    engine.run(&command("commit", &sequence_text(2)));
+    engine
+}
+
+fn check_validator_timeout() -> Engine {
+    let mut engine = validating();
+    engine.resolve(false, "timeout");
+    engine.settle();
+    engine
+}
+
+fn check_validator_transport_error() -> Engine {
+    let mut engine = validating();
+    engine.resolve(false, "unavailable");
+    engine.settle();
+    engine
+}
+
+/// The owner is lost while its validator runs: the successor holds no capability, commands
+/// are unavailable, and the timer expires the record.
+fn check_owner_loss_while_validating() -> Engine {
+    let mut engine = validating();
+    let token = engine.token();
+    engine.lose();
+    engine.run_callback(&token, CALLBACK);
+    engine.run(&command("commit", &sequence_text(2)));
+    engine.now += 4_000;
+    engine.run(&json!({"type": "timerFired"}));
+    engine
+}
+
+/// The deadline passes while the validator runs: the commit is answered at once, the
+/// transaction rolls back, and the validator's late allow is ignored.
+fn check_expiry_and_late_verdict() -> Engine {
+    let mut engine = validating();
+    let validator = engine.outstanding.clone();
+    engine.now += 4_000;
+    engine.feed(&json!({"type": "timerFired"}));
+    engine.settle();
+    engine.outstanding = validator;
+    engine.resolve(true, "unknown");
+    engine.run(&command("commit", &sequence_text(2)));
+    engine
+}
+
+/// After the verdict the capability is revoked: a callback with it is unavailable.
+fn check_callback_after_revoke() -> Engine {
+    let mut engine = validating();
+    let token = engine.token();
+    engine.settle();
+    engine.run_callback(&token, CALLBACK);
+    engine
+}
+
+/// Callback queries past the per-check limit (the statement limit, 8) end the transaction.
+fn check_callback_limit_exhaustion() -> Engine {
+    let mut engine = validating();
+    let token = engine.token();
+    for sequence in 1..=9 {
+        let text = json!({"sequence": sequence, "sql": "SELECT id FROM projects", "params": {}});
+        engine.run_callback(&token, &text.to_string());
+    }
+    engine.settle();
+    engine
+}
+
+/// A callback with a token other than the live capability ends the transaction.
+fn check_capability_tampering() -> Engine {
+    let mut engine = validating();
+    let token = engine.token();
+    let mut tampered = token.clone().into_bytes();
+    tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
+    let tampered = String::from_utf8(tampered).unwrap_or_default();
+    engine.run_callback(&tampered, CALLBACK);
+    engine.settle();
+    engine.run_callback(&token, CALLBACK);
+    engine
+}
+
 type Scenario = fn() -> Engine;
 
-const SCENARIOS: [(&str, Scenario); 11] = [
+const SCENARIOS: [(&str, Scenario); 20] = [
+    (
+        "commit-check-allowed-with-callbacks",
+        check_allowed_with_callbacks,
+    ),
+    ("commit-check-denied", check_denied),
+    ("commit-check-validator-timeout", check_validator_timeout),
+    (
+        "commit-check-validator-transport-error",
+        check_validator_transport_error,
+    ),
+    (
+        "commit-check-owner-loss-while-validating",
+        check_owner_loss_while_validating,
+    ),
+    (
+        "commit-check-expiry-and-late-verdict",
+        check_expiry_and_late_verdict,
+    ),
+    (
+        "commit-check-callback-after-revoke",
+        check_callback_after_revoke,
+    ),
+    (
+        "commit-check-callback-limit-exhaustion",
+        check_callback_limit_exhaustion,
+    ),
+    (
+        "commit-check-capability-tampering",
+        check_capability_tampering,
+    ),
     (
         "inconsistency-3-owner-lost-after-commit",
         owner_lost_after_commit,
@@ -271,6 +413,7 @@ fn transcripts_replay_byte_for_byte() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn transcripts_record_the_decided_answers() {
     let answers = |engine: &Engine| -> Vec<String> {
         engine
@@ -332,6 +475,85 @@ fn transcripts_record_the_decided_answers() {
             "POLICYSQL_TRANSACTION_UNAVAILABLE"
         ]
     );
+    let callbacks = |engine: &Engine| -> Vec<String> {
+        engine
+            .observed
+            .callback_replies
+            .iter()
+            .map(|reply| {
+                reply["error"]["code"]
+                    .as_str()
+                    .map_or_else(|| "ok".to_owned(), str::to_owned)
+            })
+            .collect()
+    };
+    let allowed = check_allowed_with_callbacks();
+    assert_eq!(
+        answers(&allowed),
+        ["active", "active", "committed", "committed"]
+    );
+    assert_eq!(callbacks(&allowed), ["ok", "ok"]);
+    assert_eq!(
+        answers(&check_denied()),
+        [
+            "active",
+            "active",
+            "POLICYSQL_COMMIT_CHECK_REJECTED",
+            "POLICYSQL_TRANSACTION_UNAVAILABLE"
+        ]
+    );
+    for engine in [check_validator_timeout(), check_validator_transport_error()] {
+        assert_eq!(
+            answers(&engine),
+            ["active", "active", "POLICYSQL_COMMIT_CHECK_REJECTED"]
+        );
+    }
+    let lost = check_owner_loss_while_validating();
+    assert_eq!(
+        answers(&lost),
+        ["active", "active", "POLICYSQL_TRANSACTION_UNAVAILABLE"]
+    );
+    assert_eq!(callbacks(&lost), ["POLICYSQL_TRANSACTION_UNAVAILABLE"]);
+    assert_eq!(
+        answers(&check_expiry_and_late_verdict()),
+        [
+            "active",
+            "active",
+            "POLICYSQL_COMMIT_CHECK_REJECTED",
+            "POLICYSQL_TRANSACTION_UNAVAILABLE"
+        ]
+    );
+    let revoked = check_callback_after_revoke();
+    assert_eq!(answers(&revoked), ["active", "active", "committed"]);
+    assert_eq!(callbacks(&revoked), ["POLICYSQL_TRANSACTION_UNAVAILABLE"]);
+    let exhausted = check_callback_limit_exhaustion();
+    assert_eq!(
+        callbacks(&exhausted).last().map(String::as_str),
+        Some("POLICYSQL_TRANSACTION_CONFLICT")
+    );
+    assert_eq!(callbacks(&exhausted).len(), 9);
+    assert_eq!(
+        answers(&exhausted).last().map(String::as_str),
+        Some("POLICYSQL_COMMIT_CHECK_REJECTED")
+    );
+    let tampered = check_capability_tampering();
+    assert_eq!(
+        callbacks(&tampered),
+        [
+            "POLICYSQL_TRANSACTION_UNAVAILABLE",
+            "POLICYSQL_TRANSACTION_UNAVAILABLE"
+        ]
+    );
+    assert_eq!(
+        answers(&tampered).last().map(String::as_str),
+        Some("POLICYSQL_COMMIT_CHECK_REJECTED")
+    );
+    for engine in [&allowed, &revoked] {
+        assert_eq!(engine.observed.commits_emitted, 1);
+    }
+    for engine in [&lost, &exhausted, &tampered] {
+        assert_eq!(engine.observed.commits_emitted, 0);
+    }
     assert_eq!(
         answers(&statement_completion_put_failed()),
         [
