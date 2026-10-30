@@ -2,10 +2,7 @@
 
 use policysql_catalog::Catalog;
 use policysql_core::{ClientParameterName, LogicalValue, SnapshotId, TrustedSession};
-use policysql_execution::{
-    CommitCheck, DatabaseExecutor, ExecutionLimits, TransactionFactory, TransactionOutputs,
-    VerifiedExecutionPlan, execute_checked_transaction,
-};
+use policysql_execution::{DatabaseExecutor, ExecutionLimits, VerifiedExecutionPlan};
 use policysql_ir::BoundStatement;
 use policysql_parser::{BindError, SqliteFrontend};
 use policysql_policy::{Explain, PolicyBundle, PolicyError};
@@ -272,34 +269,6 @@ impl Gateway {
             );
         }
         Ok(results)
-    }
-
-    /// Compiles the whole envelope and executes it inside one owned transaction.
-    ///
-    /// # Errors
-    ///
-    /// Any compile, execute, commit-check, commit, or rollback failure suppresses all results.
-    pub fn execute_transactional<Factory, Check>(
-        &self,
-        auth: &AuthContext,
-        precondition: Option<&SnapshotId>,
-        requests: &[StatementRequest],
-        factory: &Factory,
-        checks: &[Check],
-    ) -> Result<TransactionOutputs<SqliteProfile, Factory>, GatewayError>
-    where
-        Factory: TransactionFactory<SqliteProfile>,
-        Check: CommitCheck<SqliteProfile, Factory::Session>,
-    {
-        let compiled =
-            self.compile_envelope(auth, EndpointPermission::Execute, precondition, requests)?;
-        let plans = compiled
-            .statements
-            .into_iter()
-            .map(|statement| statement.plan)
-            .collect::<Vec<_>>();
-        execute_checked_transaction(factory, &plans, checks)
-            .map_err(|_| GatewayError::ExecutionFailed)
     }
 }
 
