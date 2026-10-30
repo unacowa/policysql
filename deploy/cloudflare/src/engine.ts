@@ -22,6 +22,7 @@ import {
 } from "./database.ts";
 import type { DatabaseBinding } from "./database.ts";
 import { runtimeBytesLimit } from "./binary.ts";
+import { runtimeLimits } from "./limits.ts";
 import { POLICY_VERSION, SCHEMA_VERSION } from "./config.ts";
 import { validateConfig } from "./engine-config.ts";
 import {
@@ -306,6 +307,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       const { requestId } = checked;
       const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, runtime.snapshot);
       const maxBytesPerValue = runtimeBytesLimit(runtime);
+      const { costTimeoutMs } = runtimeLimits(runtime);
       const transportFactory = databaseTransportFactory(dependencies.database, databaseBinding, maxBytesPerValue);
       const body = await parseBodyText(fields.bodyText);
       const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body.text, "execute"));
@@ -369,7 +371,9 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       );
       runInBackground(
         checked.background,
-        observeCostEnvelope(compiled, dependencies.config.costCatalog, `${requestId}-cost`, transportFactory, maxBytesPerValue),
+        observeCostEnvelope(
+          compiled, dependencies.config.costCatalog, `${requestId}-cost`, transportFactory, maxBytesPerValue, costTimeoutMs,
+        ),
         requestId,
       );
       return {

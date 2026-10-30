@@ -10,6 +10,7 @@ import { createWorkerEntrypoints } from "../../src/worker.ts";
 import { createMemoryTransactionOwners } from "./memory-owner.mjs";
 import { createSimulatedDurableObjects } from "./durable-object-owner.mjs";
 import { TursoHttpTransport } from "../../src/turso-http.ts";
+import { runtimeLimitsJson } from "../../src/limits.ts";
 import { createErrorResponse } from "../../src/http/responses.ts";
 import { createJwtSessionVerifier } from "../../src/adapters/jwt.ts";
 import { createDatabaseRegistry } from "../../../../examples/database-routing/provider.ts";
@@ -27,7 +28,7 @@ const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
 export const MAX_BYTES_PER_VALUE = (() => {
   const runtime = PolicySqlRuntime.newWithPhysicalSchema(
     example("catalog.yaml"), example("policy.yaml"), schemaVersion, policyVersion,
-    JSON.stringify({ max_rows: limits.maxRows, max_result_bytes: limits.maxResultBytes, timeout_ms: limits.timeoutMs, max_statements: limits.maxStatements }),
+    runtimeLimitsJson(limits),
     example("physical-schema.json"),
   );
   try { return runtime.max_bytes_per_value; } finally { runtime.free(); }
@@ -56,7 +57,8 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   const runtime = PolicySqlRuntime.newWithPhysicalSchema(
     fixture?.catalog ?? example("catalog.yaml"), customizePolicy(hooks ? (fixture?.policy ?? example("policy.yaml")) : (fixture?.policy ?? example("policy.yaml")).split("commit_checks:")[0]),
     schemaVersion, policyVersion,
-    JSON.stringify({ max_rows: runtimeLimits.maxRows, max_result_bytes: runtimeLimits.maxResultBytes, timeout_ms: runtimeLimits.timeoutMs, max_statements: runtimeLimits.maxStatements }),
+    // The wrapper's `RuntimeLimits`, mapped exactly as `createRuntimeFactory` maps them.
+    runtimeLimitsJson(runtimeLimits),
     fixture?.physicalSchema ?? example("physical-schema.json"),
   );
   const databases = new Map();
@@ -178,7 +180,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     ? createMemoryTransactionOwners(ownerDependencies, { background })
     : createSimulatedDurableObjects(ownerDependencies, { background });
   const transactionOwners = owners.port;
-  const publicConfig = { schemaVersion, policyVersion, limits: runtimeLimits };
+  const publicConfig = { schemaVersion, policyVersion };
   const appWith = (ports) => createApp({ getRuntime: () => runtime, database, config, transactionOwners: ports, publicConfig });
   app = appWith(transactionOwners);
   // The Worker-shaped entry point a wrapper calls, built from a fixed deployment. Tests that

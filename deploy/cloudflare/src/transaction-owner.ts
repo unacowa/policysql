@@ -8,6 +8,7 @@ import { checkDatabaseBinding, databaseTransportFactory, sameDatabaseBinding, va
 import type { DatabaseProvider } from "./database.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { runtimeBytesLimit } from "./binary.ts";
+import { runtimeLimits } from "./limits.ts";
 import { validateConfig } from "./engine-config.ts";
 import type { PolicySqlConfig, ValidatedConfig } from "./engine-config.ts";
 import { runInBackground, validateOwnerFacilities } from "./transaction-owner-port.ts";
@@ -15,10 +16,6 @@ import type {
   OwnerAtomicInput, OwnerBeginInput, OwnerCallbackInput, OwnerCommandInput, OwnerCommandKind,
   OwnerFacilities, OwnerReply, TransactionOwnerHandle,
 } from "./transaction-owner-port.ts";
-
-const MAX_TRANSACTION_MS = 4_000;
-const MAX_STATEMENTS = 8;
-const MAX_RESULT_BYTES = 64_000;
 
 const COMMAND_KINDS: readonly OwnerCommandKind[] = ["statement", "commit", "rollback"];
 
@@ -150,7 +147,10 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
 
   observeCost(compiled, requestId, binding) {
     runInBackground(this.facilities.background,
-      observeCostEnvelope(compiled, this.config.costCatalog, `${requestId}-cost`, this.connectionFactory(binding), runtimeBytesLimit(this.getRuntime())),
+      observeCostEnvelope(
+        compiled, this.config.costCatalog, `${requestId}-cost`, this.connectionFactory(binding),
+        runtimeBytesLimit(this.getRuntime()), runtimeLimits(this.getRuntime()).costTimeoutMs,
+      ),
       requestId);
   }
 
@@ -345,9 +345,10 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       }
       return this.publicState(previous, requestId);
     }
-    const expiresAtMs = Date.now() + MAX_TRANSACTION_MS;
+    const limits = runtimeLimits(this.getRuntime());
+    const expiresAtMs = Date.now() + limits.transactionMs;
     const transport = await this.connectionFactory(bindingContext.databaseBinding, expiresAtMs)(requestId);
-    this.transaction = await transport.begin(body.mode, 1_000);
+    this.transaction = await transport.begin(body.mode, limits.beginTimeoutMs);
     const value = await this.persist({
       ...bindingContext,
       transactionId: body.transactionId,
@@ -462,7 +463,8 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     const prepared = await this.prepareCommand(body, "statement", requestId);
     if (prepared.replay) return prepared.replay;
     const { current } = prepared;
-    if (current.statementCount >= MAX_STATEMENTS) {
+    const limits = runtimeLimits(this.getRuntime());
+    if (current.statementCount >= limits.maxTransactionStatements) {
       await this.close("failed");
       throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
     }
@@ -509,7 +511,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       meta: { requestId },
     };
     const resultBytes = current.resultBytes + new TextEncoder().encode(JSON.stringify(response.result)).byteLength;
-    if (resultBytes > MAX_RESULT_BYTES) {
+    if (resultBytes > limits.maxTransactionResultBytes) {
       await this.close("failed");
       throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
     }
@@ -731,8 +733,9 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       digest = await callbackDigest(this.getRuntime(), command, requestId);
       if (session.last.digest === digest) return session.last.response;
     }
-    if (command.sequence !== session.nextSequence || command.sequence > MAX_STATEMENTS) throw conflict();
     const runtime = this.getRuntime();
+    const limits = runtimeLimits(runtime);
+    if (command.sequence !== session.nextSequence || command.sequence > limits.maxTransactionStatements) throw conflict();
     const compiled = JSON.parse(runtime.compile_json(JSON.stringify(session.auth), envelope, "execute"));
     const compileError = wasmError(compiled);
     if (compileError) throw compileError;
@@ -762,7 +765,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     };
     const rowsReturned = session.rowsReturned + executed.results[0].rowCount;
     const resultBytes = session.resultBytes + new TextEncoder().encode(JSON.stringify(response)).byteLength;
-    if (rowsReturned > 100 || resultBytes > MAX_RESULT_BYTES) {
+    if (rowsReturned > limits.maxCallbackRows || resultBytes > limits.maxTransactionResultBytes) {
       throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
     }
     this.validation = {
@@ -796,7 +799,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       throw invalid();
     }
     let released = false;
-    const expiresAtMs = Date.now() + MAX_TRANSACTION_MS;
+    const expiresAtMs = Date.now() + runtimeLimits(runtime).transactionMs;
     try {
       const transport = await this.connectionFactory(bindingContext.databaseBinding, expiresAtMs)(requestId);
       this.transaction = await transport.begin("write", Math.min(...compiled.statements.map((item) => item.limits.timeoutMs)));

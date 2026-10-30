@@ -1,5 +1,6 @@
 import { wasmError } from "./errors.ts";
-import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "./config.ts";
+import { POLICY_VERSION, SCHEMA_VERSION } from "./config.ts";
+import { runtimeLimits } from "./limits.ts";
 import { runtimeBytesLimit } from "./binary.ts";
 import type { AuthContext } from "./types.ts";
 
@@ -77,8 +78,20 @@ export const explainResponse = (compiled: any, auth: AuthContext, id: string) =>
   },
 });
 
+// Every advertised limit is a value the runtime reports and the engine or core enforces;
+// nothing here is a constant or an override (ADR 0024, "One place for limits").
 export const capabilities = (runtime: any, publicConfig: any = {}) => {
-  const limits = { ...LIMITS, ...(publicConfig.limits ?? {}), maxBytesPerValue: runtimeBytesLimit(runtime) };
+  const enforced = runtimeLimits(runtime);
+  const limits = {
+    maxRows: enforced.maxRows,
+    maxResultBytes: enforced.maxResultBytes,
+    timeoutMs: enforced.timeoutMs,
+    maxStatements: enforced.maxStatements,
+    maxSqlBytes: enforced.maxSqlBytes,
+    maxRequestBytes: enforced.maxRequestBytes,
+    maxJoins: enforced.maxJoins,
+    maxBytesPerValue: runtimeBytesLimit(runtime),
+  };
   return ({
   id: runtime.snapshot,
   profile: runtime.profile,
@@ -107,12 +120,14 @@ export const capabilities = (runtime: any, publicConfig: any = {}) => {
     commitChecks: true,
     commitChecksConfigured: runtime.commit_checks_enabled,
     commitCheckQueries: true,
-    maxCommitChecks: 4,
-    maxCallbackQueriesPerCheck: limits.maxStatements,
-    maxCallbackRowsPerCheck: limits.maxRows,
-    maxCallbackBytesPerCheck: limits.maxResultBytes,
-    maxHookDurationMs: 1500,
-    maxInteractiveDurationMs: 4000,
+    maxStatements: enforced.maxTransactionStatements,
+    maxResultBytes: enforced.maxTransactionResultBytes,
+    maxCommitChecks: enforced.maxCommitChecks,
+    maxCallbackQueriesPerCheck: enforced.maxTransactionStatements,
+    maxCallbackRowsPerCheck: enforced.maxCallbackRows,
+    maxCallbackBytesPerCheck: enforced.maxTransactionResultBytes,
+    maxHookDurationMs: enforced.maxHookDurationMs,
+    maxInteractiveDurationMs: enforced.transactionMs,
   },
   idempotency: {
     mutationsRequired: false,

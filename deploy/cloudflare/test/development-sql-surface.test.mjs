@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
-import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
+import { POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
+import { CONSTRUCTOR_LIMITS } from "./helpers/limits.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 
@@ -11,12 +12,7 @@ const runtime = PolicySqlRuntime.newWithPhysicalSchema(
   readFileSync(new URL("../config/policy.compiled.yaml", import.meta.url), "utf8"),
   SCHEMA_VERSION,
   POLICY_VERSION,
-  JSON.stringify({
-    max_rows: LIMITS.maxRows,
-    max_result_bytes: LIMITS.maxResultBytes,
-    timeout_ms: LIMITS.timeoutMs,
-    max_statements: LIMITS.maxStatements,
-  }),
+  CONSTRUCTOR_LIMITS,
   readFileSync(new URL("../config/schema-introspection.json", import.meta.url), "utf8"),
 );
 

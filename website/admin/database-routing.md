@@ -41,6 +41,8 @@ export default {
 };
 ```
 
+`limits`（`RuntimeLimits`）は上限を設定する唯一の場所です。対話型transactionの期限、文の数、累積結果bytes、callbackの行数なども省略時は既定値で、Capabilitiesは実際に強制する値を返します。項目、既定値、範囲はリポジトリの`docs/configuration.md`にあります。
+
 ここではラッパーの設定から固定DBを選んでいます。要求単位で選ぶ場合は、アプリケーションが認可したDBのbindingを同じ引数へ渡します。クライアントが指定したIDやURLだけではDB利用の許可になりません。
 
 | 渡し忘れ・不整合 | 挙動 |

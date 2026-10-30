@@ -8,6 +8,7 @@ export const policysqlruntime_catalog_json: (a: number, b: number, c: number) =>
 export const policysqlruntime_commit_checks_enabled: (a: number) => number;
 export const policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const policysqlruntime_identity_json: (a: number, b: number, c: number) => [number, number];
+export const policysqlruntime_limits_json: (a: number) => [number, number];
 export const policysqlruntime_max_bytes_per_value: (a: number) => number;
 export const policysqlruntime_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
 export const policysqlruntime_newWithPhysicalSchema: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number];

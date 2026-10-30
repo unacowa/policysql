@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { testBinding, testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { createApp } from "../src/app.ts";
 import { capabilities } from "../src/presenters.ts";
+import { limitsJson } from "./helpers/limits.mjs";
 
 const runtime = {
   abi_version: 1,
@@ -10,6 +11,7 @@ const runtime = {
   snapshot: "sqlite-turso-v1:schema_dev_2:policy_dev_2:abi-1",
   commit_checks_enabled: false,
   max_bytes_per_value: 1_024,
+  limits_json: limitsJson(),
 };
 
 test("Hono health route preserves the public response and security headers", async () => {
@@ -44,11 +46,13 @@ test("Hono not-found handler preserves the safe error contract", async () => {
   assert.equal(runtimeCalls, 0, "routes that do not compile SQL must not initialize Wasm");
 });
 
-test("packaged deployments advertise their injected snapshot versions and limits", () => {
-  const result = capabilities(runtime, {
+test("packaged deployments advertise their injected snapshot versions and the runtime's limits", () => {
+  const limited = { ...runtime, limits_json: limitsJson({ maxRows: 17 }) };
+  const result = capabilities(limited, {
     schemaVersion: "schema_demo_1",
     policyVersion: "policy_demo_1",
-    limits: { maxRows: 17 },
+    // No longer a setting (ADR 0024): an override here is ignored, never advertised.
+    limits: { maxRows: 99, maxStatements: 99 },
   });
   assert.equal(result.schemaVersion, "schema_demo_1");
   assert.equal(result.policyVersion, "policy_demo_1");

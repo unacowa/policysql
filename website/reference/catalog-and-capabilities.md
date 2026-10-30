@@ -114,6 +114,7 @@ Catalogはroleとpolicyに依存します。clientがCatalogや生成型をcache
     "commitCheckQueries": true,
     "modes": ["read", "write"],
     "maxStatements": 20,
+    "maxResultBytes": 64000,
     "maxInteractiveDurationMs": 4000,
     "maxCommitChecks": 4,
     "maxCallbackQueriesPerCheck": 8,
@@ -146,6 +147,8 @@ Catalogはroleとpolicyに依存します。clientがCatalogや生成型をcache
 code generatorやquery builderは、固定された想定ではなくCapabilitiesを参照して利用機能を決定できます。ただし、Capabilitiesに掲載された機能でも、resource policyが許可するとは限りません。
 
 `idempotency.mutationsRequired`と`interactiveStartRequired`はともに`false`です。`persistent: true`はキーを指定した要求の再送処理を表します。キーなしの更新は冪等性テーブルを使用せず、要求間の重複排除を保証しません。キーの形式とDBテーブルの要件は[Atomic Execute](../api/execute#transaction-mode)を参照してください。
+
+Capabilitiesに掲載する上限は、deploymentが実際に強制している値そのものです。値はdeploymentのruntime設定 (`RuntimeLimits`) と、coreが固定で強制するprotocol上の定数から得ます。掲載用に別の値を設定する方法はありません。`transactions.maxStatements`と`transactions.maxResultBytes`は1つの対話型transactionの文の数と累積結果bytes、`maxInteractiveDurationMs`は開始からの期限、`maxCallbackQueriesPerCheck`、`maxCallbackRowsPerCheck`、`maxCallbackBytesPerCheck`は1つのcommit checkのcallback queryの数、累積行数、累積bytesです。
 
 `maxAstDepth`、`maxExpressionNodes`、`maxJoins`などはcompile前後に検査する構造上限です。`executionTimeoutMs`、`maxRows`、`maxResultBytes`はruntimeにも強制します。SQLite/Tursoが正確なscan row数やcostを事前提供しない場合、その値を保証するfieldは掲載せず、timeoutと結果上限でfail closedにします。
 

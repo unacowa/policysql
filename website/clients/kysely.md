@@ -138,7 +138,7 @@ await trx.commit().execute()
 // 破棄する場合は commit の代わりに await trx.rollback().execute()
 ```
 
-既定は write transaction です。read-only transaction の更新は Server が実行前に拒否し、`POLICYSQL_TRANSACTION_MODE_VIOLATION` を返して transaction を終了します。現在の server 上限は **4 秒、8 statements、累積結果 64,000 bytes** です。アプリケーションの待機と commit checks の時間も含みます。
+既定は write transaction です。read-only transaction の更新は Server が実行前に拒否し、`POLICYSQL_TRANSACTION_MODE_VIOLATION` を返して transaction を終了します。server 上限は deployment の設定で決まり、Capabilities の `transactions.maxInteractiveDurationMs`、`maxStatements`、`maxResultBytes` が実際に強制される値を示します。既定は **4 秒、8 statements、累積結果 64,000 bytes** です。期限にはアプリケーションの待機と commit checks の時間も含みます。
 
 対話型では、利用 DB に `policysql_idempotency` テーブルは不要です。開始キーを指定する補助 API はなく、開始時のキー自動生成も行いません。transaction 内のクエリに `idempotencyKey` を付けると送信前エラーになります。`expect` は利用できます。
 

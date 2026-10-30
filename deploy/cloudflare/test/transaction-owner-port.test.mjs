@@ -9,6 +9,7 @@ import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
 import { createApp } from "../src/app.ts";
 import { durableObjectTransactionOwners, durableObjectTransactionOwnerClass, executionContextTasks } from "../src/adapters/durable-objects.ts";
 import { testBinding, testConfig, testOwners, testProvider } from "./helpers/database.mjs";
+import { limitsJson } from "./helpers/limits.mjs";
 
 const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
 const insert = (id) => ({ sql: "INSERT INTO projects (id, name) VALUES (:id, :name) RETURNING id, name", params: { id, name: id } });
@@ -611,7 +612,7 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
 test("durable-objects: a non-JSON object reply is a safe 500, never forwarded", async (t) => {
   t.mock.method(console, "log", () => {});
   const namespace = { idFromName: (name) => name, get: () => ({ fetch: async () => new Response("<html>internal detail</html>", { status: 500 }) }) };
-  const runtime = { snapshot: "test-snapshot", max_bytes_per_value: 1_024, authorize_session_json: () => JSON.stringify({ ok: true }) };
+  const runtime = { snapshot: "test-snapshot", max_bytes_per_value: 1_024, limits_json: limitsJson(), authorize_session_json: () => JSON.stringify({ ok: true }) };
   const app = createApp({ getRuntime: () => runtime, database: testProvider(), config: testConfig(), transactionOwners: durableObjectTransactionOwners(namespace) });
   const response = await app.fetchCallback(new Request(`https://worker.test/v1/commit-checks/cval_${"0".repeat(32)}/query`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sequence: 1, ...read }),
@@ -630,7 +631,7 @@ test("durable-objects: the object class decodes the internal messages and fails 
     storage: { async get(key) { return values.get(key); }, async put(key, value) { values.set(key, value); }, async setAlarm(at) { alarm = at; } },
   };
   const OwnerObject = durableObjectTransactionOwnerClass(() => ({
-    getRuntime: () => ({ snapshot: "test-snapshot", max_bytes_per_value: 1_024 }),
+    getRuntime: () => ({ snapshot: "test-snapshot", max_bytes_per_value: 1_024, limits_json: limitsJson() }),
     database: testProvider(() => ({ begin: async () => ({ open: true, usage: [], async rollback() { this.open = false; } }) })),
     config: testConfig(),
   }));
@@ -669,7 +670,7 @@ test("durable-objects: ExecutionContext.waitUntil backs per-request BackgroundTa
 
 test("createApp requires a TransactionOwner port, and app.fetch rejects malformed BackgroundTasks before any work", async (t) => {
   t.mock.method(console, "log", () => {});
-  const runtime = { snapshot: "test-snapshot", max_bytes_per_value: 1_024 };
+  const runtime = { snapshot: "test-snapshot", max_bytes_per_value: 1_024, limits_json: limitsJson() };
   for (const transactionOwners of [undefined, null, {}, { route: 1 }]) {
     assert.throws(() => createApp({ getRuntime: () => runtime, database: testProvider(), config: testConfig(), transactionOwners }), TypeError);
   }

@@ -5,6 +5,7 @@ import { testBinding, testProvider } from "./helpers/database.mjs";
 import { identity_json } from "./helpers/identity.mjs";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { statusFor } from "../src/http/status.ts";
+import { limitsJson } from "./helpers/limits.mjs";
 
 // Unit tests of the owner core through the port's owner-side facilities (ADR 0022): an
 // in-memory store, a recorded timer, and background tasks. No platform object is involved.
@@ -58,6 +59,7 @@ const ownerProvider = (database) => {
 const runtime = () => ({
   snapshot: "test-snapshot",
   max_bytes_per_value: 1_024,
+  limits_json: limitsJson(),
   identity_json,
   released: 0,
   compile_json() {
@@ -182,6 +184,7 @@ test("fails closed after owner replacement and on alarm expiry", async () => {
 const commitRuntime = () => ({
   snapshot: "test-snapshot",
   max_bytes_per_value: 1_024,
+  limits_json: limitsJson(),
   identity_json,
   released: 0,
   compile_json(_auth, envelope) {
