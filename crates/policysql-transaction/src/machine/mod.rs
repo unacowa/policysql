@@ -9,13 +9,13 @@
 //! Atomic execution (pull request 6) and the engine-side `request` kind (pull request 7) are not
 //! implemented: their events are answered without effects.
 //!
-//! This module holds the state, events, effects, and the compiler port; the transitions and
-//! the JSON entry point follow. The machine is not used by production paths before the
-//! switch-over (pull request 7).
+//! The JSON entry point is [`step_json`]; `policysql-wasm` exports it as `step_json`. The
+//! machine is not used by production paths before the switch-over (pull request 7).
 
 pub mod compiler;
 pub mod io;
 pub mod state;
+mod step;
 pub mod time;
 
 pub use compiler::{
@@ -58,4 +58,69 @@ impl Limits {
             .saturating_mul(EVENT_RESULT_BYTES)
             .saturating_add(EVENT_FIXED_BYTES)
     }
+}
+
+/// The result of one step.
+#[derive(Debug)]
+pub struct Output {
+    /// The durable state to keep in memory and, when `effects` holds `Persist`, to write.
+    /// `None` with `Reset` among the effects: reload from the store.
+    pub durable: Option<String>,
+    /// The volatile state to pass back with the next event; `None` when the owner holds no
+    /// connection and awaits nothing.
+    pub volatile: Option<String>,
+    pub effects: Vec<Effect>,
+}
+
+/// Runs one step on JSON inputs and returns the output JSON:
+/// `{"durable": string|null, "volatile": string|null, "effects": [...]}`, where `durable` and
+/// `volatile` are the JSON texts the engine keeps verbatim and passes back. Invalid host facts
+/// or an unreadable event envelope give `{"error":{"code":"POLICYSQL_INTERNAL",...}}` and no
+/// state; the engine then replies 500 and sends `Abandon` with the previous state.
+#[must_use]
+pub fn step_json<C: Compiler>(
+    compiler: &C,
+    limits: &Limits,
+    durable: Option<&str>,
+    volatile: Option<&str>,
+    event: &str,
+    host: &str,
+) -> String {
+    match step::run(compiler, limits, durable, volatile, event, host) {
+        Some(output) => output_json(&output),
+        None => INTERNAL_OUTPUT.to_owned(),
+    }
+}
+
+/// [`step_json`] with a typed result; `None` is the `{"error":…}` output.
+#[must_use]
+pub fn step<C: Compiler>(
+    compiler: &C,
+    limits: &Limits,
+    durable: Option<&str>,
+    volatile: Option<&str>,
+    event: &str,
+    host: &str,
+) -> Option<Output> {
+    step::run(compiler, limits, durable, volatile, event, host)
+}
+
+const INTERNAL_OUTPUT: &str = r#"{"error":{"code":"POLICYSQL_INTERNAL","message":"The request could not be completed.","path":null}}"#;
+
+#[derive(serde::Serialize)]
+struct OutputWire<'a> {
+    durable: Option<&'a str>,
+    volatile: Option<&'a str>,
+    effects: &'a [Effect],
+}
+
+/// The output JSON of a step.
+#[must_use]
+pub fn output_json(output: &Output) -> String {
+    serde_json::to_string(&OutputWire {
+        durable: output.durable.as_deref(),
+        volatile: output.volatile.as_deref(),
+        effects: &output.effects,
+    })
+    .unwrap_or_else(|_| INTERNAL_OUTPUT.to_owned())
 }

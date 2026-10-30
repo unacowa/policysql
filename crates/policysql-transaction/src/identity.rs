@@ -148,6 +148,54 @@ pub fn compute(input: &str) -> Result<String, IdentityError> {
     }
 }
 
+/// The auth fingerprint of a canonical session and a binding (the `auth` operation).
+pub(crate) fn auth_fingerprint(auth: &Json, binding_value: &Json) -> Result<String, IdentityError> {
+    let auth = Auth::read(Some(auth))?;
+    let binding = binding(Some(binding_value))?;
+    let value = Json::Object(vec![
+        member("principal", auth.principal),
+        member("subject", auth.subject),
+        member("role", auth.role),
+        member("session", auth.session),
+        member("databaseBinding", binding.clone()),
+    ]);
+    Ok(sha256_hex(canonical::to_canonical(&value).as_bytes()))
+}
+
+/// The replay identity (ADR 0024 "Replay identity"): the auth fingerprint's members with the
+/// binding's `snapshot` removed, so an exact retry of a completed command is recognized
+/// across a deployment that changed the snapshot.
+pub(crate) fn replay_identity(auth: &Json, binding_value: &Json) -> Result<String, IdentityError> {
+    let auth = Auth::read(Some(auth))?;
+    let Json::Object(parts) = binding(Some(binding_value))? else {
+        return Err(IdentityError::Internal);
+    };
+    let without_snapshot = parts
+        .iter()
+        .filter(|(name, _)| name != "snapshot")
+        .cloned()
+        .collect();
+    let value = Json::Object(vec![
+        member("replay", Json::string("v1")),
+        member("principal", auth.principal),
+        member("subject", auth.subject),
+        member("role", auth.role),
+        member("session", auth.session),
+        member("database", Json::Object(without_snapshot)),
+    ]);
+    Ok(sha256_hex(canonical::to_canonical(&value).as_bytes()))
+}
+
+/// The digest of an interactive command parsed from its exact body text (the `command`
+/// operation): `sha256(canonical({kind, command}))`.
+pub(crate) fn command_digest(kind: &str, command: Json) -> String {
+    let value = Json::Object(vec![
+        member("kind", Json::string(kind)),
+        member("command", command),
+    ]);
+    sha256_hex(canonical::to_canonical(&value).as_bytes())
+}
+
 /// `requestIdempotency`: no identity without a key, else `keyHash` and `fingerprint`.
 fn request(input: &Json) -> Result<String, IdentityError> {
     exact_keys(

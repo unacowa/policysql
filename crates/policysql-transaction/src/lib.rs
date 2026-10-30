@@ -42,6 +42,7 @@ mod purity_tests {
             include_str!("machine/compiler.rs"),
             include_str!("machine/io.rs"),
             include_str!("machine/state.rs"),
+            include_str!("machine/step.rs"),
             include_str!("machine/time.rs"),
         ] {
             for forbidden in [
