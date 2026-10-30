@@ -57,7 +57,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_DATABASE_BINDING_REJECTED` | 403 | DB bindingが不正、未登録、または現在の経路設定で許可されていない |
 | `POLICYSQL_NOT_FOUND` | 404 | endpointが存在しない |
 | `POLICYSQL_STALE_OPERATION` | 409 | policyまたはcatalog versionが古い |
-| `POLICYSQL_IDEMPOTENCY_CONFLICT` | 409 | Atomic Execute（commit checkを行うDO経路を含む）で同じkeyが異なるrequestに使われた |
+| `POLICYSQL_IDEMPOTENCY_CONFLICT` | 409 | Atomic Execute（commit checkを行うDO経路を含む）で同じkeyが異なるrequest（payloadまたはDBのgenerationが違う）に使われた。deployでsnapshotが変わっただけの再送は衝突しない |
 | `POLICYSQL_TRANSACTION_CONFLICT` | 409 | 対話型transactionのcommandが現在の状態（sequenceなど）と矛盾する |
 | `POLICYSQL_TRANSACTION_UNAVAILABLE` | 409 | transactionが存在しない、利用者に属していない、期限切れ、または失敗状態 |
 | `POLICYSQL_COMMIT_CHECK_REJECTED` | 409 | commit checkがtransactionを拒否した、または安全に完了できない |

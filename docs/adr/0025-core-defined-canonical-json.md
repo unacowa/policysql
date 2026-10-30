@@ -1,6 +1,7 @@
 # ADR 0025: Core-defined canonical JSON, without byte equality with TypeScript
 
-- Status: accepted
+- Status: accepted (the request fingerprint amended by #80, see
+  [Amendment: the request fingerprint has no snapshot](#amendment-the-request-fingerprint-has-no-snapshot-80))
 - Issues: #35
 - Amends: [ADR 0024](0024-transaction-step-machine.md) ("Where byte-equal hashing is
   load-bearing", "ABI 5", migration pull requests 2, 4, and 9)
@@ -32,7 +33,7 @@ computations (`crates/policysql-transaction/src/identity.rs`, `deploy/cloudflare
 | Value | Stored in | Computed as |
 | --- | --- | --- |
 | `keyHash` | `policysql_idempotency.key_hash` (application database); its first 32 hex digits are the keyed transaction id | `sha256(identity + ":" + key)` |
-| request fingerprint | `policysql_idempotency.fingerprint` | `sha256(identity + ":" + stable(body) + ":" + stable(databaseBinding))` |
+| request fingerprint | `policysql_idempotency.fingerprint` | `sha256(identity + ":" + stable(body) + ":" + stable(databaseBinding))` (since #80 the binding without `snapshot`) |
 | auth fingerprint | owner record (Durable Object storage) | `sha256(stable({principal, subject, role, session, databaseBinding}))` |
 | start fingerprint, unkeyed begin | owner record | `sha256(stable({transactionId, request: body}))`: the begin body, no identity, no binding |
 | start fingerprint, keyed begin | owner record | the request fingerprint (endpoint `interactive-start`) |
@@ -49,7 +50,8 @@ body, which the engine restricts to `mode` and `expected` (`schemaVersion`, `pol
 before hashing.
 
 The request and auth fingerprints include the database binding, and the binding includes the
-runtime snapshot, which includes the ABI version (ADR 0014). Every deployment that changes the
+runtime snapshot, which includes the ABI version (ADR 0014). (Since #80 the request fingerprint
+leaves out the snapshot; see the amendment at the end.) Every deployment that changes the
 snapshot therefore already makes earlier fingerprints unmatchable; a keyed retry straddling it
 gets `POLICYSQL_IDEMPOTENCY_CONFLICT` today. `keyHash` and the command digests do not include
 the snapshot. Owner records live for one transaction (seconds). PolicySQL is in beta, and
@@ -94,7 +96,9 @@ them. They are requirements, not examples, and the follow-up pull request must m
   table above stay exactly as they are: the identity object and its members (`role`, not `roles`
   or `access`; `database` with `scope` and `databaseId` only), `identity + ":" + key`,
   `identity + ":" + body + ":" + binding`, `{principal, subject, role, session, databaseBinding}`,
-  `{transactionId, request: body}`, `{kind, command}`, and the bare callback command. Hashes
+  `{transactionId, request: body}`, `{kind, command}`, and the bare callback command (#80 later
+  removed `snapshot` from the binding in the request fingerprint, which is not among the values
+  these requirements keep; see the amendment). Hashes
   remain lowercase hexadecimal SHA-256 of the UTF-8 bytes of the text.
 - **(b) Integers are printed as today.** A number whose value is an integer of magnitude at
   most 2^53 − 1 is printed as its decimal digits with an optional leading `-`, without a
@@ -162,8 +166,8 @@ ADR 0024's ABI numbering shifts by one: pull request 4 (`step_json`) bumps to 6.
 
 - **`keyHash`** does not include the snapshot. By (a)–(d) it stays byte-identical, so a keyed
   atomic retry straddling the deployment finds its row (and then, because the fingerprint
-  includes the new snapshot, gets `POLICYSQL_IDEMPOTENCY_CONFLICT`, as on every snapshot
-  change today), and a keyed begin retry reaches the same owner (the transaction id is derived
+  included the new snapshot, got `POLICYSQL_IDEMPOTENCY_CONFLICT`, as on every snapshot
+  change before #80), and a keyed begin retry reaches the same owner (the transaction id is derived
   from `keyHash`). No committed keyed request executes twice.
 - **Commit retries** (ADR 0007). A commit whose COMMIT may have been sent leaves a `committing`
   or `committed` record with `commitSent` (#48). A retry after the deployment carries the new
@@ -175,7 +179,8 @@ ADR 0024's ABI numbering shifts by one: pull request 4 (`step_json`) bumps to 6.
   `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. If either value changed, the retry would get 409
   `POLICYSQL_TRANSACTION_UNAVAILABLE` from `prepareCommand`, a definite rejection after COMMIT
   that ADR 0007 forbids. This is why the requirements are needed with the bump as well.
-- **Request fingerprints** change with the snapshot, as on every snapshot change.
+- **Request fingerprints** change with the snapshot, as on every snapshot change before #80.
+  Since #80 they no longer include the snapshot, so later snapshot changes keep them.
 - **Statement, rollback, and callback digests, and start fingerprints** are not compared across
   the deployment: a statement or rollback retry with a changed snapshot is unavailable in
   `owned()`, a keyed begin retry with a changed snapshot already conflicts in
@@ -196,6 +201,25 @@ the engine answers that with `POLICYSQL_INVALID_REQUEST`. The observable differe
 - A begin whose `expected` values contain one gets `POLICYSQL_INVALID_REQUEST` instead of
   `POLICYSQL_STALE_OPERATION`.
 - The error message of other rejected bodies may change; their code does not.
+
+### Amendment: the request fingerprint has no snapshot (#80)
+
+The conflict this ADR accepted for keyed atomic retries was meant as the cost of one deployment
+(the one that switched the hashing rule). Because the request fingerprint hashed the whole
+binding, it recurred on every snapshot-changing deployment within the retention of the rows: a
+committed keyed write retried after such a deployment got `POLICYSQL_IDEMPOTENCY_CONFLICT`, a
+definite rejection in the client, against ADR 0007. Since ABI 9 the request fingerprint is
+
+`sha256(identity + ":" + canonical(body) + ":" + canonical(databaseBinding without snapshot))`
+
+with `identity` and the rest of the construction unchanged, so a same-key retry that differs
+only in the snapshot replays its row, and another body or generation still conflicts. Request
+fingerprints were never stability goldens (Follow-up 1): the request goldens in
+`tests/fixtures/identity-goldens.json` were recomputed, their `keyHash` values are unchanged,
+and every other golden (auth and start fingerprints, `{sequence}` digests) is unchanged. The
+change is an ABI bump (8 to 9) by the rule above. Rows written before it keep the old
+fingerprint and conflict once on a retry after the deployment; the reasons for not matching
+them are in [ADR 0014](0014-wrapper-provided-database-bindings.md#amendment-the-request-fingerprint-has-no-snapshot-80).
 
 ## Consequences for ADR 0024
 

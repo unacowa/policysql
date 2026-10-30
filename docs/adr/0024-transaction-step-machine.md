@@ -606,7 +606,9 @@ today.
   connections are gone, and they fail closed as today.
 - **Keyed atomic retries across a snapshot change** get `POLICYSQL_IDEMPOTENCY_CONFLICT`,
   because the fingerprint includes the binding's snapshot (ADR 0014). This is today's behavior
-  for every snapshot change and is unchanged by this ADR.
+  for every snapshot change and is unchanged by this ADR. (Amended by #80, ABI 9: the request
+  fingerprint no longer includes the snapshot, so such a retry replays its stored response; see
+  [ADR 0014](0014-wrapper-provided-database-bindings.md#amendment-the-request-fingerprint-has-no-snapshot-80).)
 - **Where byte-equal hashing is load-bearing.** (Superseded by
   [ADR 0025](0025-core-defined-canonical-json.md), which drops byte equality with TypeScript
   and states the stability requirements for `keyHash`, the auth and start fingerprints, and

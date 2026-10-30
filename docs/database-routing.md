@@ -190,8 +190,11 @@ sent in callback payloads. Remote timeout remains necessary after owner eviction
 ## Retry, registration, and migration
 
 Idempotency identity includes `scope` and `databaseId`; the payload fingerprint includes
-all binding fields. Generation/snapshot changes conflict on an existing key instead of
-silently creating another operation. Credentials are not included in these identities.
+every binding field except `snapshot` (#80). A generation change conflicts on an existing key
+instead of silently creating another operation; a snapshot change (a deployment of another
+ABI, policy, or schema) does not, so a committed keyed write retried after the deployment
+replays its stored response. Rows written before ABI 9 carry a fingerprint with the snapshot
+and conflict on such a retry (the one-time transition of ADR 0014's #80 amendment). Credentials are not included in these identities.
 For keyed atomic mutations, retry records are stored in `policysql_idempotency` in the
 selected database within the mutation transaction. `Idempotency-Key` is optional: without
 it, both direct and commit-check DO execution skip every access to this table, so it need
