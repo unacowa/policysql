@@ -1,5 +1,4 @@
 import { EngineError } from "./errors.ts";
-import { stableJson } from "./idempotency.ts";
 import { bytesLimit } from "./binary.ts";
 
 /** Server-owned identity. Never put credentials or a client-selected URL here. */
@@ -102,6 +101,17 @@ export const validateDatabaseBinding = (value: unknown, snapshot: string): Datab
       typeof part === "string" && /^[A-Za-z0-9_.:-]{1,256}$/.test(part))) throw denied();
   if (typeof snapshot !== "string" || binding.snapshot !== snapshot) throw stale();
   return Object.freeze({ ...binding });
+};
+
+// Key-sorted JSON text, to compare two bindings as values. Nothing is hashed or stored, and the
+// text is never compared with a value core computed (ADR 0025), so it need not be core's
+// canonical form.
+const stableJson = (value) => {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 };
 
 export const sameDatabaseBinding = (left, right) => stableJson(left ?? null) === stableJson(right ?? null);

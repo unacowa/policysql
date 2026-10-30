@@ -1,5 +1,5 @@
 import { EngineError, operationError, wasmError } from "./errors.ts";
-import { authIdentity, callbackDigest, commandDigest } from "./identity.ts";
+import { authIdentity, callbackDigest, commandDigest } from "./core-identity.ts";
 import { observeCostEnvelope } from "./cost.ts";
 import { executeSealedOnTransaction } from "./turso.ts";
 import { enforceCumulativeLimits } from "./turso.ts";
@@ -236,13 +236,13 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
    * is false only for a commit whose caller differs from the record in nothing but the
    * snapshot (a deployment between the commit and its retry); see `sameExceptSnapshot`.
    */
-  async owned(body, kind, requestId = undefined) {
+  async owned(body, kind) {
     const current = await this.stored();
     if (!current || current.transactionId !== body.transactionId) throw unavailable();
     if (current.authFingerprint === body.authFingerprint && sameDatabaseBinding(current.databaseBinding, body.databaseBinding)) {
       return { current, sameSnapshot: true };
     }
-    if (kind === "commit" && await this.sameExceptSnapshot(current, body, requestId)) return { current, sameSnapshot: false };
+    if (kind === "commit" && this.sameExceptSnapshot(current, body)) return { current, sameSnapshot: false };
     throw unavailable();
   }
 
@@ -253,7 +253,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
    * the caller must present under the caller's snapshot, after checking that the stored
    * `auth` still produces the stored fingerprint.
    */
-  async sameExceptSnapshot(current, body, requestId) {
+  sameExceptSnapshot(current, body) {
     const binding = body.databaseBinding;
     const stored = current.databaseBinding;
     if (!binding || typeof binding !== "object" || Array.isArray(binding) || typeof binding.snapshot !== "string" ||
@@ -261,8 +261,8 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     if (binding.snapshot === stored.snapshot) return false;
     if (!sameDatabaseBinding({ ...stored, snapshot: null }, { ...binding, snapshot: null })) return false;
     const runtime = this.getRuntime();
-    if (await authIdentity(runtime, current.auth, stored, requestId) !== current.authFingerprint) return false;
-    return await authIdentity(runtime, current.auth, binding, requestId) === body.authFingerprint;
+    if (authIdentity(runtime, current.auth, stored) !== current.authFingerprint) return false;
+    return authIdentity(runtime, current.auth, binding) === body.authFingerprint;
   }
 
   /**
@@ -274,9 +274,9 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
    * live owner holds a reply whose put failed), or with POLICYSQL_COMMIT_OUTCOME_UNKNOWN,
    * never with a rejection. Any other command returns null and is checked as usual.
    */
-  async commitRetry(current, command, requestId) {
+  async commitRetry(current, command) {
     if (!Number.isSafeInteger(command?.sequence)) return null;
-    const digest = await commandDigest(this.getRuntime(), "commit", command, requestId);
+    const digest = commandDigest(this.getRuntime(), "commit", command);
     const sent = current.commitSent
       ? current.commitSent.sequence === command.sequence && current.commitSent.digest === digest
       // A record of the previous release, which wrote nothing before COMMIT: `committed` with
@@ -389,9 +389,9 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   }
 
   async prepareCommand(body, kind, requestId) {
-    const { current: owned, sameSnapshot } = await this.owned(body, kind, requestId);
+    const { current: owned, sameSnapshot } = await this.owned(body, kind);
     if (kind === "commit") {
-      const replay = await this.commitRetry(owned, body.command, requestId);
+      const replay = await this.commitRetry(owned, body.command);
       if (replay) return { replay };
     }
     // Across a snapshot change only a commit whose COMMIT was sent is answered.
@@ -402,15 +402,13 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     // retry, possible only at `nextSequence - 1`), and what a successful statement records.
     // So a statement's digest is computed here only for a possible retry that compiles
     // (see `mayRepeat`), and otherwise after its compile succeeds, before it executes
-    // (`statement`). The two hashes of the gate are still both computed and compared before
-    // any digest is used and before any database work, and a body that cannot compile is
-    // never hashed (#55 review: a 1 MB body of numbers cost two hashes before compile). A
-    // body that compiles is hashed in full; core's canonicalization keeps that cost near the
-    // reference's.
+    // (`statement`), before any database work. A body that cannot compile is never hashed
+    // (#55 review: a 1 MB body of numbers cost hashes before compile). A body that compiles is
+    // hashed in full, by core's canonicalization, in time linear in its size.
     const retry = body.command.sequence === current.nextSequence - 1 && current.last !== undefined && current.last !== null;
     let digest = null;
     if (kind !== "statement" || (retry && this.mayRepeat(current.auth, statementEnvelope(body.command)))) {
-      digest = await commandDigest(this.getRuntime(), kind, body.command, requestId);
+      digest = commandDigest(this.getRuntime(), kind, body.command);
       if (retry && current.last.digest === digest) return { replay: current.last.response };
     }
     if (current.status !== "active") throw unavailable();
@@ -480,11 +478,11 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       await this.close("failed");
       throw new EngineError("POLICYSQL_TRANSACTION_MODE_VIOLATION", "A read transaction cannot execute a mutation.");
     }
-    // The digest this statement records, through the identity gate, before any database work.
+    // The digest this statement records, computed by core before any database work.
     let digest = prepared.digest;
     if (digest === null) {
       try {
-        digest = await commandDigest(runtime, "statement", body.command, requestId);
+        digest = commandDigest(runtime, "statement", body.command);
       } catch (error) {
         runtime.release_execution(BigInt(compiled.executionHandle));
         throw error;
@@ -730,7 +728,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     const envelope = statementEnvelope(command);
     let digest = null;
     if (command.sequence === session.nextSequence - 1 && session.last && this.mayRepeat(session.auth, envelope)) {
-      digest = await callbackDigest(this.getRuntime(), command, requestId);
+      digest = callbackDigest(this.getRuntime(), command);
       if (session.last.digest === digest) return session.last.response;
     }
     const runtime = this.getRuntime();
@@ -745,7 +743,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     }
     if (digest === null) {
       try {
-        digest = await callbackDigest(runtime, command, requestId);
+        digest = callbackDigest(runtime, command);
       } catch (error) {
         runtime.release_execution(BigInt(compiled.executionHandle));
         throw error;

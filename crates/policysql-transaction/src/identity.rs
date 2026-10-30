@@ -369,8 +369,7 @@ mod tests {
 
     #[test]
     fn identity_fields_must_be_strings_before_hashing() {
-        // The negative case of the corpus: `stableJson` prints an absent field as `undefined`.
-        // Core rejects every such input instead of hashing it.
+        // An absent or non-string identity field is rejected, never hashed.
         let body = r#""{}""#;
         for auth in [
             r#"{"subject":"user_1","role":"member","session":{}}"#,

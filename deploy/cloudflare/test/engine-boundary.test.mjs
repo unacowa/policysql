@@ -32,7 +32,7 @@ const scan = (name) => scanHttp(name, readFileSync(join(root, name), "utf8"));
 
 test("engine modules contain no HTTP status, Request/Response, header name, or route", () => {
   for (const name of NOT_ENGINE.keys()) assert.ok(existsSync(join(root, name)), `${name} is listed but does not exist`);
-  for (const name of ["engine.ts", "app.ts", "request-body.ts", "errors.ts", "session.ts", "idempotency.ts",
+  for (const name of ["engine.ts", "app.ts", "request-body.ts", "errors.ts", "session.ts", "core-identity.ts",
     "transaction-owner.ts", "transaction-owner-port.ts", "commit-checks.ts", "database.ts", "turso.ts", "cost.ts", "presenters.ts"]) {
     assert.ok(engine.includes(name), `${name} is scanned as an engine module`);
   }

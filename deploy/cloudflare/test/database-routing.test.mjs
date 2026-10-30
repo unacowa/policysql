@@ -6,7 +6,8 @@ import { createApp } from "../src/app.ts";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { createMemoryTransactionOwners } from "./helpers/memory-owner.mjs";
 import { validateDatabaseBinding, databaseTransportFactory } from "../src/database.ts";
-import { requestIdempotency, authFingerprint } from "../src/idempotency.ts";
+import { authIdentity, requestIdentity } from "../src/core-identity.ts";
+import { identityRuntime } from "./helpers/identity.mjs";
 
 const schemaVersion = "schema_routing_1";
 const policyVersion = "policy_routing_1";
@@ -503,15 +504,17 @@ test("database identity scopes retries while generation/snapshot changes conflic
   const binding = { version: 1, scope: "test:tenant_a", databaseId: "db_a", generation: "1", snapshot: "snapshot_1" };
   const auth = { principal: "issuer:u", subject: "u", role: "member", session: { tenant_id: "a" } };
   const request = "same-idempotency-key";
-  const digest = (value) => requestIdempotency(request, auth, envelope(read), "execute", value);
-  const first = await digest(binding);
+  const digest = (value) => requestIdentity(identityRuntime, {
+    key: request, auth, bodyText: JSON.stringify(envelope(read)), endpoint: "execute", databaseBinding: value,
+  });
+  const first = digest(binding);
   for (const changed of [{ ...binding, generation: "2" }, { ...binding, snapshot: "snapshot_2" }]) {
-    const next = await digest(changed);
+    const next = digest(changed);
     assert.equal(next.keyHash, first.keyHash);
     assert.notEqual(next.fingerprint, first.fingerprint);
-    assert.notEqual(await authFingerprint(auth, binding), await authFingerprint(auth, changed));
+    assert.notEqual(authIdentity(identityRuntime, auth, binding), authIdentity(identityRuntime, auth, changed));
   }
-  assert.notEqual((await digest({ ...binding, databaseId: "db_b" })).keyHash, first.keyHash);
+  assert.notEqual(digest({ ...binding, databaseId: "db_b" }).keyHash, first.keyHash);
 });
 
 test("binding validation rejects extra credentials and snapshots and captures an immutable copy", () => {
