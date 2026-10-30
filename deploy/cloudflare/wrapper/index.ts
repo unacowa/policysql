@@ -4,8 +4,9 @@ import physicalSchema from "../config/schema-introspection.json";
 import {
   createPolicySqlWorker, durableObjectTransactionOwnerClass, durableObjectTransactionOwners,
 } from "../src/package.ts";
-import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
+import { POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
 import { configFromEnv } from "./config.ts";
+import { RUNTIME_LIMITS } from "./limits.ts";
 import { createDeploymentDatabase } from "./database.ts";
 import { createWrapperFetch } from "./fetch.ts";
 import type { RateLimitedBindings } from "./rate-limit.ts";
@@ -20,12 +21,7 @@ const worker = createPolicySqlWorker<RateLimitedBindings>({
   physicalSchema,
   schemaVersion: SCHEMA_VERSION,
   policyVersion: POLICY_VERSION,
-  limits: {
-    maxRows: LIMITS.maxRows,
-    maxResultBytes: LIMITS.maxResultBytes,
-    timeoutMs: LIMITS.timeoutMs,
-    maxStatements: LIMITS.maxStatements,
-  },
+  limits: RUNTIME_LIMITS,
   // This wrapper's env convention becomes the library's explicit configuration (ADR 0021),
   // and its Durable Object binding becomes the TransactionOwner port (ADR 0022). The
   // library calls this for the Worker and for each Durable Object with its env.

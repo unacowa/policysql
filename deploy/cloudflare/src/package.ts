@@ -4,6 +4,8 @@ import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 // @ts-ignore
 import wasm from "../pkg/policysql_wasm_bg.wasm";
 import { runtimeBytesLimit } from "./binary.ts";
+import { runtimeLimits, runtimeLimitsJson } from "./limits.ts";
+import type { RuntimeLimits } from "./limits.ts";
 import { createWorkerEntrypoints } from "./worker.ts";
 import type { PolicySqlDeployment } from "./worker.ts";
 
@@ -24,6 +26,7 @@ export type { PolicySqlHttpApp } from "./http/adapter.ts";
 export { ERROR_STATUS, statusFor } from "./http/status.ts";
 export { TransactionOwnerCore } from "./transaction-owner.ts";
 export type { PolicySqlDeployment, PolicySqlWorkerApp } from "./worker.ts";
+export type { EnforcedLimits } from "./limits.ts";
 export type { TransactionOwnerDependencies } from "./transaction-owner.ts";
 // The TransactionOwner port (ADR 0022) and its Cloudflare Durable Objects adapter, which
 // the wrapper assembles. A custom adapter implements the port types instead.
@@ -58,12 +61,7 @@ export type {
   ExecutionTraceStatement,
 } from "./types.ts";
 
-export type RuntimeLimits = {
-  maxRows: number;
-  maxResultBytes: number;
-  timeoutMs: number;
-  maxStatements: number;
-};
+export type { RuntimeLimits } from "./limits.ts";
 
 export type RuntimeConfiguration = {
   catalog: string;
@@ -85,6 +83,8 @@ let wasmInitialized = false;
  * Configuration belongs to the deployment; authorization and SQL compilation remain in Rust/Wasm.
  */
 export const createRuntimeFactory = (configuration: RuntimeConfiguration) => {
+  // Shape errors surface when the wrapper is built; ranges when the runtime is constructed.
+  const limitsJson = runtimeLimitsJson(configuration?.limits);
   let runtime: PolicySqlRuntime | undefined;
   return () => {
     if (runtime) return runtime;
@@ -100,17 +100,15 @@ export const createRuntimeFactory = (configuration: RuntimeConfiguration) => {
       configuration.policy,
       configuration.schemaVersion,
       configuration.policyVersion,
-      JSON.stringify({
-        max_rows: configuration.limits.maxRows,
-        max_result_bytes: configuration.limits.maxResultBytes,
-        timeout_ms: configuration.limits.timeoutMs,
-        max_statements: configuration.limits.maxStatements,
-      }),
+      limitsJson,
       physicalSchema,
     );
-    // The adapter takes the per-value BLOB limit only from the runtime. Reject
-    // malformed metadata at construction rather than on a request's BLOB path.
-    try { runtimeBytesLimit(candidate); } catch (error) { candidate.free(); throw error; }
+    // The adapter takes the per-value BLOB limit and every other limit only from the
+    // runtime. Reject malformed metadata at construction rather than on a request's path.
+    try {
+      runtimeBytesLimit(candidate);
+      runtimeLimits(candidate);
+    } catch (error) { candidate.free(); throw error; }
     runtime = candidate;
     return runtime;
   };
@@ -147,7 +145,6 @@ export const createPolicySqlWorker = <Env extends object>(configuration: PolicyS
     publicConfig: {
       schemaVersion: configuration.schemaVersion,
       policyVersion: configuration.policyVersion,
-      limits: configuration.limits,
     },
   });
 };

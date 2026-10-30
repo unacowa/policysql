@@ -4,6 +4,11 @@ import { fileURLToPath } from "node:url";
 import { connect } from "@tursodatabase/serverless";
 import { exportJWK, generateKeyPair, importJWK, SignJWT } from "jose";
 import { buildPhysicalSchema } from "./catalog-build.mjs";
+import { readFileSync } from "node:fs";
+import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
+import { POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
+import { runtimeLimits, runtimeLimitsJson } from "../src/limits.ts";
+import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 
 const directory = fileURLToPath(new URL("..", import.meta.url));
 const deploymentDirectory = new URL("../.deployment/", import.meta.url);
@@ -71,11 +76,56 @@ const loadOrCreateIssuer = async () => {
   }
 };
 
+// What the deployed Capabilities must advertise: exactly the wrapper's configured limits
+// (ADR 0024). A mismatch means an advertised value is not the enforced one.
+const advertisedLimits = (capabilities) => ({
+  "limits.maxRows": capabilities.limits?.maxRows,
+  "limits.maxResultBytes": capabilities.limits?.maxResultBytes,
+  "limits.timeoutMs": capabilities.limits?.timeoutMs,
+  "limits.maxStatements": capabilities.limits?.maxStatements,
+  "transactions.maxInteractiveDurationMs": capabilities.transactions?.maxInteractiveDurationMs,
+  "transactions.maxStatements": capabilities.transactions?.maxStatements,
+  "transactions.maxResultBytes": capabilities.transactions?.maxResultBytes,
+  "transactions.maxCallbackQueriesPerCheck": capabilities.transactions?.maxCallbackQueriesPerCheck,
+  "transactions.maxCallbackRowsPerCheck": capabilities.transactions?.maxCallbackRowsPerCheck,
+  "transactions.maxCallbackBytesPerCheck": capabilities.transactions?.maxCallbackBytesPerCheck,
+});
+// The effective limits: `RUNTIME_LIMITS` as the runtime fills and validates them, so a key
+// the wrapper omits is expected at its runtime default, not as `undefined`.
+let effective;
+const effectiveLimits = () => {
+  if (effective) return effective;
+  initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
+  const config = (name) => readFileSync(new URL(`../config/${name}`, import.meta.url), "utf8");
+  const runtime = PolicySqlRuntime.newWithPhysicalSchema(
+    config("catalog.yaml"), config("policy.compiled.yaml"), SCHEMA_VERSION, POLICY_VERSION,
+    runtimeLimitsJson(RUNTIME_LIMITS), config("schema-introspection.json"),
+  );
+  try { effective = runtimeLimits(runtime); } finally { runtime.free(); }
+  return effective;
+};
+const configuredLimits = () => {
+  const limits = effectiveLimits();
+  return {
+    "limits.maxRows": limits.maxRows,
+    "limits.maxResultBytes": limits.maxResultBytes,
+    "limits.timeoutMs": limits.timeoutMs,
+    "limits.maxStatements": limits.maxStatements,
+    "transactions.maxInteractiveDurationMs": limits.transactionMs,
+    "transactions.maxStatements": limits.maxTransactionStatements,
+    "transactions.maxResultBytes": limits.maxTransactionResultBytes,
+    "transactions.maxCallbackQueriesPerCheck": limits.maxTransactionStatements,
+    "transactions.maxCallbackRowsPerCheck": limits.maxCallbackRows,
+    "transactions.maxCallbackBytesPerCheck": limits.maxTransactionResultBytes,
+  };
+};
+
 const smoke = async (baseUrl, token) => {
   const headers = { authorization: `Bearer ${token}` };
   const health = await fetch(`${baseUrl}/healthz`).then((response) => response.json());
   const capabilitiesResponse = await fetch(`${baseUrl}/v1/capabilities`, { headers });
   const capabilities = await capabilitiesResponse.json();
+  const limitsMatch = JSON.stringify(advertisedLimits(capabilities)) === JSON.stringify(configuredLimits());
   const catalogResponse = await fetch(`${baseUrl}/v1/catalog`, { headers });
   const roleCatalog = await catalogResponse.json();
   const request = {
@@ -305,6 +355,7 @@ const smoke = async (baseUrl, token) => {
   if (
     !health.ready ||
     !capabilitiesResponse.ok ||
+    !limitsMatch ||
     !catalogResponse.ok ||
     !explainResponse.ok ||
     !executeResponse.ok ||
@@ -373,7 +424,9 @@ const smoke = async (baseUrl, token) => {
   }
   return {
     health: { ready: health.ready, snapshot: health.snapshot, profile: health.profile },
-    capabilities: { status: capabilitiesResponse.status, id: capabilities.id },
+    capabilities: {
+      status: capabilitiesResponse.status, id: capabilities.id, limitsMatch, limits: advertisedLimits(capabilities),
+    },
     catalog: { status: catalogResponse.status, resources: roleCatalog.resources.length },
     explain: { status: explainResponse.status, statements: explain.statements.length },
     execute: {
@@ -420,7 +473,10 @@ const waitForActiveRelease = async (baseUrl, token) => {
         headers: { authorization: `Bearer ${token}` },
       });
       const body = await response.json();
-      if (response.ok && body.transactions?.interactive === true) return;
+      // The snapshot does not change when only limits do, so this release is recognized by
+      // advertising the configured limits.
+      if (response.ok && body.transactions?.interactive === true &&
+        JSON.stringify(advertisedLimits(body)) === JSON.stringify(configuredLimits())) return;
     } catch { /* retry until the bounded release deadline */ }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }

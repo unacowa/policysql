@@ -85,7 +85,6 @@ export type AppDependencies = {
   publicConfig?: {
     schemaVersion: string;
     policyVersion: string;
-    limits: Record<string, number>;
   };
 };
 

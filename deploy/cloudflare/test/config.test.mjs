@@ -10,6 +10,7 @@ import { observeCostEnvelope } from "../src/cost.ts";
 import { configFromEnv as referenceConfig } from "../wrapper/config.ts";
 import { configFromEnv as exampleConfig } from "../../../examples/database-routing/config.ts";
 import { testBinding, testProvider } from "./helpers/database.mjs";
+import { limitsJson } from "./helpers/limits.mjs";
 
 // ADR 0021: deployment settings are an explicit, typed `PolicySqlConfig`, validated once
 // before any database, Durable Object, or validator call. Errors and logs name the
@@ -25,6 +26,7 @@ const valid = () => ({
 
 const runtime = {
   abi_version: 4, profile: "sqlite-turso-v1", snapshot: "test-snapshot", commit_checks_enabled: true, max_bytes_per_value: 1_024,
+  limits_json: limitsJson(),
 };
 
 const leaks = (text) => text.includes(SECRET) || text.includes("sentinel-validator");
@@ -194,7 +196,7 @@ test("without a cost catalog, cost observation is logged as unknown and opens no
   t.mock.method(console, "log", (line) => logs.push(JSON.parse(line)));
   let connected = 0;
   const compiled = { statements: [{ operation: "select", costExplainSql: "EXPLAIN QUERY PLAN SELECT 1", clientParameters: {}, serverParameters: {}, explain: { resource: 1 } }] };
-  await observeCostEnvelope(compiled, validateConfig({ environment: "test" }).costCatalog, "req", () => { connected++; }, 1_024);
+  await observeCostEnvelope(compiled, validateConfig({ environment: "test" }).costCatalog, "req", () => { connected++; }, 1_024, 1_000);
   assert.equal(connected, 0);
   assert.deepEqual(logs, [{ event: "cost_observation_failed", requestId: "req", code: "POLICYSQL_COST_UNKNOWN" }]);
 });

@@ -88,10 +88,15 @@ export const estimateSealedEnvelope = async (
   requestId,
   transportFactory: (...args: any[]) => any,
   maxBytes: number,
+  timeoutMs: number,
 ) => {
   if (typeof transportFactory !== "function") throw databaseRequired();
   // A malformed injected limit is a wiring defect: fail before BEGIN, not as a 503.
   bytesLimit(maxBytes);
+  // The runtime's `costTimeoutMs`; there is no default of this module's own.
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new TypeError("cost observation requires the runtime's positive timeout");
+  }
   const catalog = requireCatalog(costCatalog);
   let transaction;
   try {
@@ -100,8 +105,8 @@ export const estimateSealedEnvelope = async (
       .filter(({ statement }) => statement.operation !== "insert");
     let results = [];
     if (planned.length > 0) {
-      const transport = await transportFactory(`${requestId}-cost`, Date.now() + 1_000);
-      transaction = await transport.begin("read", 1_000);
+      const transport = await transportFactory(`${requestId}-cost`, Date.now() + timeoutMs);
+      transaction = await transport.begin("read", timeoutMs);
       results = await transaction.execute(planned.map(({ statement }) => ({
         sql: statement.costExplainSql,
         args: driverArgs(statement, maxBytes),
@@ -142,9 +147,10 @@ export const observeCostEnvelope = async (
   requestId,
   transportFactory: (...args: any[]) => any,
   maxBytes: number,
+  timeoutMs: number,
 ) => {
   try {
-    const observation = await estimateSealedEnvelope(compiled, costCatalog, requestId, transportFactory, maxBytes);
+    const observation = await estimateSealedEnvelope(compiled, costCatalog, requestId, transportFactory, maxBytes, timeoutMs);
     console.log(JSON.stringify({
       event: "cost_observation",
       requestId,

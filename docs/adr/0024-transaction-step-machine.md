@@ -573,15 +573,20 @@ today.
 ### ABI impact and rollout
 
 - **ABI 5.** `ABI_VERSION` goes from 4 to 5 in the first pull request that changes the ABI
-  surface: pull request 3 adds fields to `RuntimeLimits` (`transaction_ms`,
-  `max_transaction_statements`, `max_transaction_result_bytes`, `max_callback_rows`,
-  `begin_timeout_ms`, `cost_timeout_ms`), and pull request 4 adds `step_json`; each later pull
-  request that changes the ABI bumps it again. The snapshot is
+  surface: pull request 4 adds `step_json`; each later pull request that changes the ABI bumps
+  it again. The snapshot is
   `{profile}:{schema}:{policy}:abi-{ABI_VERSION}` (`crates/policysql-wasm/src/lib.rs` 382), so it
   changes on the deployments of those pull requests, not necessarily on the switch-over
   deployments (pull requests 7 and 8). Pull request 2 adds the `identity_json` method without a
   bump: no existing method, value, or limit changes, the engine and the module ship in one
   bundle, and keeping the snapshot is what keeps the hashes equal across that deployment.
+  Pull request 3 is additive for the same reasons and does not bump either: the fields it adds
+  to `RuntimeLimits` (`transaction_ms`, `max_transaction_statements`,
+  `max_transaction_result_bytes`, `max_callback_rows`, `begin_timeout_ms`, `cost_timeout_ms`)
+  are optional with defaults equal to the constants they replace, so every existing limits
+  JSON is accepted and enforced exactly as before, and the new `limits_json` method only
+  reports values. Limits were never part of the snapshot, so a later change of a configured
+  limit does not change it either. (Decided in pull request 3; it was planned as the bump.)
 - **In-flight transactions** do not survive any deployment: owners restart, so their
   connections are gone, and they fail closed as today.
 - **Keyed atomic retries across a snapshot change** get `POLICYSQL_IDEMPOTENCY_CONFLICT`,
@@ -656,7 +661,11 @@ see no regression at the switch-over. For a commit that #48 could still replay f
 3. **Limits into runtime configuration.** Extend `RuntimeLimits` and `createRuntimeFactory`;
    `transaction-owner.ts`, `commit-checks.ts`, `cost.ts`, and `presenters.ts` read the runtime.
    Defaults equal today's constants. `publicConfig.limits` and the `LIMITS` merge in
-   `presenters.ts` are removed, so Capabilities advertises exactly the enforced values.
+   `presenters.ts` are removed, so Capabilities advertises exactly the enforced values. The
+   runtime reports the effective limits and the fixed protocol constants core enforces through
+   `limits_json`; the new fields are optional, so this needs no ABI bump (see
+   [ABI impact](#abi-impact-and-rollout)). The fields and their ranges are listed in
+   `docs/configuration.md`.
 4. **The machine for interactive transactions, unused.** `TxState`, `TxEvent`, `Effect`,
    `HostFacts`, `step` for begin, statement, commit, rollback, expiry, and owner loss, without
    commit checks; `step_json` (ABI 5); property tests. A test-only `StepOwnerCore` (an effect

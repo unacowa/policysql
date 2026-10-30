@@ -14,8 +14,10 @@ use serde_yaml::{Mapping, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-const MAX_COMMIT_CHECKS: usize = 4;
-const MAX_COMMIT_CHECK_TIMEOUT_MS: u64 = 1_500;
+/// Commit checks one policy bundle may declare; activation rejects more.
+pub const MAX_COMMIT_CHECKS: usize = 4;
+/// Largest `hook.timeout_ms` a commit check may declare; activation rejects more.
+pub const MAX_COMMIT_CHECK_TIMEOUT_MS: u64 = 1_500;
 
 #[derive(Clone, Debug)]
 pub struct PolicyBundle {

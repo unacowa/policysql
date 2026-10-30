@@ -404,7 +404,7 @@
         </article>
         <article class="card">
           <div class="card-top"><h3>Transaction Owner</h3><span class="tag">DOで検証済み</span></div>
-          <p>1つのopen Turso transactionを所有し、client操作、commit / rollbackを直列化。auth/session fingerprint、sequence、exact retry、4秒期限を固定し、ownerやconnectionの喪失をterminal failureとして扱います。外部commit checkは未advertiseです。</p>
+          <p>1つのopen Turso transactionを所有し、client操作、commit / rollbackを直列化。auth/session fingerprint、sequence、exact retry、runtime設定の期限 (既定4秒) を固定し、ownerやconnectionの喪失をterminal failureとして扱います。外部commit checkは未advertiseです。</p>
         </article>
       </div>
     </section>

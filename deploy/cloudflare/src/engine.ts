@@ -22,6 +22,7 @@ import {
 } from "./database.ts";
 import type { DatabaseBinding } from "./database.ts";
 import { runtimeBytesLimit } from "./binary.ts";
+import { runtimeLimits } from "./limits.ts";
 import { POLICY_VERSION, SCHEMA_VERSION } from "./config.ts";
 import { validateConfig } from "./engine-config.ts";
 import {
@@ -186,6 +187,20 @@ const fromOwner = (reply: unknown, requestId: string): OperationResult => {
  * configuration are validated here, before any operation can reach a database, owner, or
  * validator.
  */
+// The snapshot versions Capabilities and `expected` report. Any other key is rejected, so a
+// removed setting (`limits`, ADR 0024: limits come only from the runtime) cannot linger.
+const validatePublicConfig = (publicConfig: unknown) => {
+  if (publicConfig === undefined) return;
+  if (!publicConfig || Array.isArray(publicConfig) || typeof publicConfig !== "object") {
+    throw new TypeError("publicConfig must be { schemaVersion, policyVersion }");
+  }
+  for (const key of Object.keys(publicConfig)) {
+    if (key === "limits") throw new TypeError("publicConfig.limits was removed; limits are configured only as RuntimeLimits");
+    if (key !== "schemaVersion" && key !== "policyVersion") throw new TypeError(`publicConfig.${key} is not a setting`);
+    if (typeof publicConfig[key] !== "string") throw new TypeError(`publicConfig.${key} must be a string`);
+  }
+};
+
 export const createEngine = (input: AppDependencies): PolicySqlEngine => {
   if (typeof input?.getRuntime !== "function") {
     throw new TypeError("getRuntime is required");
@@ -195,6 +210,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
     throw new TypeError("transportFactory overrides were removed; supply database explicitly");
   }
   validateTransactionOwnerPort(input.transactionOwners);
+  validatePublicConfig(input.publicConfig);
   const dependencies: EngineDependencies = { ...input, config: validateConfig(input.config) };
 
   /**
@@ -306,6 +322,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       const { requestId } = checked;
       const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, runtime.snapshot);
       const maxBytesPerValue = runtimeBytesLimit(runtime);
+      const { costTimeoutMs } = runtimeLimits(runtime);
       const transportFactory = databaseTransportFactory(dependencies.database, databaseBinding, maxBytesPerValue);
       const body = await parseBodyText(fields.bodyText);
       const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body.text, "execute"));
@@ -369,7 +386,9 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       );
       runInBackground(
         checked.background,
-        observeCostEnvelope(compiled, dependencies.config.costCatalog, `${requestId}-cost`, transportFactory, maxBytesPerValue),
+        observeCostEnvelope(
+          compiled, dependencies.config.costCatalog, `${requestId}-cost`, transportFactory, maxBytesPerValue, costTimeoutMs,
+        ),
         requestId,
       );
       return {

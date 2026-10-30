@@ -54,6 +54,51 @@ name, not the library's: the library reads no property of `env`. `createApp`'s
 to `deployment(env)`. `DatabaseProvider.check(binding)` and `connect(binding, requestId)`
 receive no `env`.
 
+## Runtime limits (`RuntimeLimits`)
+
+Limits are configured in exactly one place: the `limits` object the wrapper passes to
+`createPolicySqlWorker` (or `createRuntimeFactory`), typed `RuntimeLimits`
+(`deploy/cloudflare/src/limits.ts`). The runtime validates them when it is constructed,
+fills the defaults, and reports the effective values (`PolicySqlRuntime.limits_json()`). The
+engine enforces exactly those values, and Capabilities advertises exactly them; there is no
+separate public override ([ADR 0024](adr/0024-transaction-step-machine.md), "One place for
+limits").
+
+| `RuntimeLimits` key | Constructor field | Default | Range | Enforced where |
+| --- | --- | --- | --- | --- |
+| `maxRows` | `max_rows` | required | 1 to 2^53 - 1 | core, per statement (policy `limit` may lower it) |
+| `maxResultBytes` | `max_result_bytes` | required | 1 to 2^53 - 1 | core, per statement; the engine, cumulatively per atomic envelope |
+| `timeoutMs` | `timeout_ms` | required | 1 to 2^53 - 1 | the engine's database deadline per statement |
+| `maxStatements` | `max_statements` | required | 1 to 2^32 - 1 | core, statements per atomic envelope |
+| `transactionMs` | `transaction_ms` | 4,000 | 1 to 60,000 | owner: interactive deadline from begin (and its expiry timer); atomic owner execution deadline |
+| `maxTransactionStatements` | `max_transaction_statements` | 8 | 1 to 256 | owner: statements per interactive transaction; callback query sequence per commit check |
+| `maxTransactionResultBytes` | `max_transaction_result_bytes` | 64,000 | 1 to 65,536 | owner: cumulative result bytes per interactive transaction and per commit check's callbacks |
+| `maxCallbackRows` | `max_callback_rows` | 100 | 1 to 10,000 | owner: cumulative callback rows per commit check |
+| `beginTimeoutMs` | `begin_timeout_ms` | 1,000 | 1 to 60,000 | owner: BEGIN of an interactive transaction |
+| `costTimeoutMs` | `cost_timeout_ms` | 1,000 | 1 to 10,000 | engine and owner: connection deadline and BEGIN of the after-response cost observation |
+
+The `maxTransactionResultBytes` ceiling keeps an owner record, which stores the last
+response, inside a Durable Object value. Ranges keep every value an exact JavaScript integer.
+
+Fixed protocol constants are enforced by core and not configurable; the runtime reports them
+with the limits so Capabilities reads them from the same place: `maxRequestBytes` (1,048,576;
+the HTTP adapter's body bound `MAX_BODY_BYTES` must equal it), `maxSqlBytes` (65,536),
+`maxJoins` (8), `maxCommitChecks` (4), `maxHookDurationMs` (1,500), and `maxBytesPerValue`
+(262,144, from `max_bytes_per_value`). The provider timeout of 1,000 ms in `database.ts` is an
+adapter bound, not a limit, and stays there.
+
+Failures, all at construction and before any request is served:
+
+- `createRuntimeFactory` (and so `createPolicySqlWorker`) throws a `TypeError` naming the key
+  for a non-object, an unknown key (`limits.<key> is not a runtime limit`), or a value that is
+  not a positive safe integer (`limits.<key> must be a positive integer`). A misspelled key
+  never falls back to a default.
+- Runtime construction, on the first request, rejects a missing required field or an
+  out-of-range value with an error that starts `runtime limits are invalid:` and names the
+  constructor field. The Worker answers 500 `POLICYSQL_INTERNAL`; the message is never sent to a client.
+- Changing a limit does not change the deployment snapshot, as before: limits are not part
+  of it.
+
 ## Validation and failures
 
 - Validated once, at construction (`createEngine`, `createApp`, `TransactionOwnerCore`), or with
