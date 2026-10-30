@@ -25,7 +25,11 @@
 //   new body shapes with POLICYSQL_INVALID_REQUEST) into POLICYSQL_COMMIT_OUTCOME_UNKNOWN for a
 //   commit (a retry of a COMMIT that applied must never be a rejection, ADR 0007) and
 //   POLICYSQL_INTERNAL otherwise.
-// Neither code is a rejection in the client. `/atomic` did not change and is not checked.
+// Neither code is a rejection in the client. The `/atomic` message did not change and is not
+// checked, but an atomic execute with a commit check is affected too: its validator's
+// callback crosses `/validation-query`, which the skew answers 500, so the validator denies
+// and the execute gets 409 POLICYSQL_COMMIT_CHECK_REJECTED before COMMIT (nothing is stored
+// under its idempotency key; the same key succeeds once the skew ends).
 // A reply is a 2xx response whose body
 // is the value, or a non-2xx response whose body is `{ error: { code, message, path,
 // requestId } }`. A Worker of this version reads only that distinction. The object still

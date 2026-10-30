@@ -1162,7 +1162,12 @@ production to the machine (`deploy/cloudflare/src/transaction-owner.ts`).
     anything else 500 `POLICYSQL_INTERNAL`. Neither is a rejection in the client.
 
   Interactive transactions are therefore unavailable while the versions are skewed (the first
-  deployment of this pull request showed one such window), but never misreported. A later
+  deployment of this pull request showed one such window), but never misreported. So is an
+  atomic execute with a commit check whose validator calls back: the `/atomic` message itself
+  is unchanged, but the callback crosses `/validation-query`, which the skew answers 500, so a
+  validator that fails closed denies and the execute gets 409
+  `POLICYSQL_COMMIT_CHECK_REJECTED`. That rejection is true: COMMIT was never sent and nothing
+  is stored under its idempotency key, so the same key succeeds once the skew ends. A later
   change of the owner wire bumps the marker. The object still answers with the statuses and
   bodies of ADR 0023. A test freezes origin/main's object (`serve` over
   `LegacyTransactionOwnerCore`) and drives the production port against it, and another sends

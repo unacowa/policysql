@@ -85,6 +85,8 @@ in it, not in `authorization`), every message names the owner it was routed to i
 `x-policysql-owner`, and both sides mark the wire version (`x-policysql-owner-wire`) so that a
 Worker and an object of different versions answer each other's interactive messages with
 `POLICYSQL_INTERNAL` (or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for a commit), never a rejection.
+An atomic execute whose commit-check validator calls back crosses the changed callback path too,
+so during such a skew it is answered 409 `POLICYSQL_COMMIT_CHECK_REJECTED` before COMMIT (ADR 0024).
 
 ### The Durable Objects adapter (`src/adapters/durable-objects.ts`)
 
