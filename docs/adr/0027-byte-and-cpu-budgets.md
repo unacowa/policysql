@@ -1,4 +1,4 @@
-# ADR 0026: One model for byte and CPU budgets
+# ADR 0027: One model for byte and CPU budgets
 
 - Status: proposed
 - Issues: #56, #52, #63 (also #53, #42)
