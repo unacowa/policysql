@@ -15,6 +15,7 @@ import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { durableObjectTransactionOwnerClass, durableObjectTransactionOwners } from "../src/adapters/durable-objects.ts";
 import { statusFor } from "../src/http/status.ts";
+import { referenceTranscript } from "./helpers/reference-transcript.mjs";
 
 const fixtureFile = (name) => readFileSync(new URL(`../../../tests/fixtures/nullable/${name}`, import.meta.url), "utf8");
 // Nullable 64-bit integer columns (#70): `count` as an int64.
@@ -64,6 +65,54 @@ const previousOwners = (h) => {
     record: (name) => structuredClone(slots.get(name)?.data.get("transaction")),
     names: () => [...slots.keys()],
   };
+};
+
+// What the previous release did is recorded (ADR 0024 pull request 9,
+// test/helpers/reference-transcript.mjs): its execute's reply, the rows it wrote, its owner's
+// record, its objects' replies, and its Worker's messages. The tests replay them against this
+// version.
+const reference = referenceTranscript(new URL("./fixtures/reference/atomic-switch.json", import.meta.url));
+
+/**
+ * A keyed execute of `body` committed by the previous release: its reply, the rows it wrote
+ * (the idempotency row and the project row), and on the owner placement its owner's name and
+ * record. Replaying plants them where the previous release wrote them.
+ */
+const committedByPreviousRelease = async (recorded, h, body, port, owner) => {
+  const wrote = await recorded.take("previous release committed", async () => {
+    const before = await previousRelease(h, port())({ bodyText: JSON.stringify(body), idempotencyKey: KEY },
+      { database: h.binding("a"), session: h.session("a"), requestId: "req_origin_main" });
+    const ids = body.statements.map((statement) => statement.params.id);
+    return {
+      before,
+      idempotency: idempotencyRows(h),
+      projects: stored(h, `SELECT * FROM projects WHERE id IN (${ids.map(() => "?").join(", ")}) ORDER BY id`, ...ids),
+      owner: owner(),
+    };
+  });
+  if (!reference.recording) {
+    const database = h.databases.get("a").database;
+    for (const row of wrote.idempotency) {
+      database.prepare("INSERT INTO policysql_idempotency (key_hash, fingerprint, response_json) VALUES (?, ?, ?)")
+        .run(row.key_hash, row.fingerprint, row.response_json);
+    }
+    for (const row of wrote.projects) {
+      const columns = Object.keys(row);
+      database.prepare(`INSERT INTO projects (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`)
+        .run(...columns.map((column) => row[column]));
+    }
+  }
+  return wrote;
+};
+
+/** An object that answers with the previous release's recorded replies, in order. */
+const recordedObject = (recorded, live) => async (url, init) => {
+  const path = new URL(url).pathname;
+  const reply = await recorded.take(`previous object ${path}`, async () => {
+    const response = await live(url, init);
+    return { status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() };
+  });
+  return new Response(reply.body, { status: reply.status, headers: reply.headers });
 };
 
 for (const ownerAdapter of OWNER_ADAPTERS) {
@@ -136,19 +185,20 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     test(`${ownerAdapter}: a keyed retry (${placement}) replays the row the previous release wrote`, async (t) => {
       const h = await setup(t, { hooks });
       h.setValidator(async () => true);
-      const owners = previousOwners(h);
+      let owners;
       const body = { statements: [insert("across_deploy")] };
-      const before = await previousRelease(h, owners.port)({ bodyText: JSON.stringify(body), idempotencyKey: KEY },
-        { database: h.binding("a"), session: h.session("a"), requestId: "req_origin_main" });
+      const wrote = await committedByPreviousRelease(reference.of(t), h, body, () => (owners = previousOwners(h)).port, () => {
+        const [name] = owners.names();
+        return name === undefined ? null : { name, record: owners.record(name) };
+      });
+      const { before } = wrote;
       assert.equal(before.ok, true, JSON.stringify(before));
       const [row] = idempotencyRows(h);
       const record = JSON.parse(row.response_json);
       assert.equal(Object.hasOwn(record, "status"), hooks, "the owner path's row has a status, the direct path's none");
-      if (hooks) {
-        // The object kept the TypeScript owner's record across the deployment.
-        const [name] = owners.names();
-        h.plantOwnerRecord(name, owners.record(name));
-      }
+      assert.equal(wrote.owner !== null, hooks, "the placement");
+      // The object kept the TypeScript owner's record across the deployment.
+      if (hooks) h.plantOwnerRecord(wrote.owner.name, wrote.owner.record);
       const retry = await h.request("a", execute, body, KEY);
       assert.equal(retry.status, 200, JSON.stringify(retry.body));
       assert.deepEqual(retry.body, before.value, "the same response as the previous release gave");
@@ -156,7 +206,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       assert.equal(h.rows("a").filter((item) => item.id === "across_deploy").length, 1, "never executed twice");
       assert.deepEqual(idempotencyRows(h), [row], "the row is untouched");
       if (hooks) {
-        const [name] = owners.names();
+        const { name } = wrote.owner;
         assert.equal(typeof await h.ownerRecordRaw(name), "string", "the machine replaced the old-format record");
         assert.equal((await h.ownerRecord(name)).status, "committed");
       }
@@ -316,20 +366,30 @@ test("durable-objects: a Worker of this version never turns the previous object'
     timer: { async schedule() {} },
     background: { run() {} },
   });
-  const previous = new Map();
-  const namespace = {
-    idFromName: (name) => ({ name }),
-    get: ({ name }) => {
-      if (!previous.has(name)) previous.set(name, previousObject(new LegacyTransactionOwnerCore(facilities(name), h.ownerDependencies())));
-      return { fetch: previous.get(name) };
-    },
+  const recorded = reference.of(t);
+  const live = new Map();
+  const liveObject = (name) => {
+    if (!live.has(name)) live.set(name, previousObject(new LegacyTransactionOwnerCore(facilities(name), h.ownerDependencies())));
+    return live.get(name);
   };
+  const previousObjects = (wrap) => ({
+    idFromName: (name) => ({ name }),
+    get: ({ name }) => ({ fetch: wrap(name) }),
+  });
   const context = { database: h.binding("a"), session: h.session("a") };
-  // The previous release commits a keyed execute through its own wire.
+  // The previous release commits a keyed execute through its own wire; its object's storage
+  // keeps the record it wrote.
   const body = { statements: [insert("skewed")] };
-  const committed = await previousRelease(h, previousPort(namespace))({ bodyText: JSON.stringify(body), idempotencyKey: KEY }, { ...context, requestId: "req_previous" });
+  const wrote = await committedByPreviousRelease(recorded, h, body, () => previousPort(previousObjects(liveObject)), () => {
+    const [name, ...others] = storage.keys();
+    assert.deepEqual(others, [], "one object");
+    return { name, record: structuredClone(data(name).get("transaction")) };
+  });
+  const committed = wrote.before;
   assert.equal(committed.ok, true, JSON.stringify(committed));
-  assert.equal(previous.size, 1);
+  if (!reference.recording) data(wrote.owner.name).set("transaction", wrote.owner.record);
+  // The previous release's objects answer this version's Worker (their replies recorded).
+  const namespace = previousObjects((name) => recordedObject(recorded, (url, init) => liveObject(name)(url, init)));
   // Its response is lost; the client retries through a Worker of this version during the skew.
   const app = h.appWith(durableObjectTransactionOwners(namespace));
   const send = async (payload, key = null) => {
@@ -383,19 +443,41 @@ test("durable-objects: an object of this version answers the previous Worker's /
   const [name] = h.ownerNames();
   const record = await h.ownerRecordRaw(name);
   const events = h.events.length;
-  // The previous release's Worker: its atomic input and wire marker 1.
-  const previous = previousRelease(h, previousPort(h.ownerNamespace()));
+  // The previous release's Worker: its atomic input and wire marker 1. What it sent is recorded
+  // (each `/atomic` message: the owner it routed to, its input, and its request id) with what it
+  // answered its client; the messages are sent to this version's objects again on replay.
+  const recorded = reference.of(t);
   const context = { database: h.binding("a"), session: h.session("a") };
   for (const [label, input] of [
     ["keyed retry of a committed execute", { bodyText: JSON.stringify(body), idempotencyKey: KEY }],
     ["another keyed execute", { bodyText: JSON.stringify({ statements: [insert("previous_keyed")] }), idempotencyKey: "atomic-switch-key-0009" }],
     ["unkeyed", { bodyText: JSON.stringify({ statements: [insert("previous_unkeyed")] }) }],
   ]) {
-    const reply = await previous(input, context);
-    assert.equal(reply.ok, false, label);
-    assert.equal(reply.error.code, "POLICYSQL_INTERNAL", label);
-    assert.equal(REJECTIONS.get(statusFor(reply.error.code)) ?? null, null, `${label}: no rejection status`);
-    await neverRejected({ status: statusFor(reply.error.code), body: { error: { ...reply.error, requestId: reply.requestId } } });
+    const port = previousPort(h.ownerNamespace());
+    const sent = await recorded.take(`previous Worker: ${label}`, async () => {
+      const messages = [];
+      const recording = { route: (name) => ({
+        atomic: async (message, requestId) => {
+          const reply = await port.route(name).atomic(message, requestId);
+          messages.push({ name, input: message, requestId, reply });
+          return reply;
+        },
+      }) };
+      const answered = await previousRelease(h, recording)(input, context);
+      return { messages, answered };
+    });
+    assert.equal(sent.messages.length, 1, label);
+    if (!reference.recording) {
+      for (const message of sent.messages) {
+        assert.deepEqual(await port.route(message.name).atomic(message.input, message.requestId), message.reply, `${label}: this object's reply`);
+      }
+    }
+    for (const reply of [sent.messages[0].reply, sent.answered]) {
+      assert.equal(reply.ok, false, label);
+      assert.equal(reply.error.code, "POLICYSQL_INTERNAL", label);
+      assert.equal(REJECTIONS.get(statusFor(reply.error.code)) ?? null, null, `${label}: no rejection status`);
+    }
+    await neverRejected({ status: statusFor(sent.answered.error.code), body: { error: { ...sent.answered.error, requestId: sent.answered.requestId } } });
   }
   assert.deepEqual(h.events.slice(events), [], "nothing reached the database");
   assert.equal(await h.ownerRecordRaw(name), record, "nothing reached the machine");

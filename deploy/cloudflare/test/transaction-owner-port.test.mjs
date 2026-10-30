@@ -13,6 +13,7 @@ import { limitsJson } from "./helpers/limits.mjs";
 import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
 import { authIdentity } from "../src/core-identity.ts";
 import { statusFor } from "../src/http/status.ts";
+import { referenceTranscript } from "./helpers/reference-transcript.mjs";
 
 const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
 const insert = (id) => ({ sql: "INSERT INTO projects (id, name) VALUES (:id, :name) RETURNING id, name", params: { id, name: id } });
@@ -823,9 +824,22 @@ const earlierObject = (core) => async (url, init) => {
   });
 };
 
+// The earlier object's replies are recorded (ADR 0024 pull request 9,
+// test/helpers/reference-transcript.mjs) and answered in order on replay.
+const reference = referenceTranscript(new URL("./fixtures/reference/transaction-owner-port.json", import.meta.url));
+const recordedEarlierObject = (recorded, live) => async (url, init) => {
+  const path = new URL(url).pathname;
+  const reply = await recorded.take(`earlier object ${path}`, async () => {
+    const response = await live(url, init);
+    return { status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() };
+  });
+  return new Response(reply.body, { status: reply.status, headers: reply.headers });
+};
+
 test("durable-objects: a Worker of this version never turns an earlier object's answer into a rejection", async (t) => {
   t.mock.method(console, "log", () => {});
   const h = await harness(t, { ownerAdapter: "durable-objects", hooks: false });
+  const recorded = reference.of(t);
   const objects = new Map();
   const namespace = {
     idFromName: (name) => ({ name }),
@@ -837,26 +851,37 @@ test("durable-objects: a Worker of this version never turns an earlier object's 
           timer: { async schedule() {} },
           background: { run() {} },
         };
-        objects.set(id.name, earlierObject(new LegacyTransactionOwnerCore(facilities, { getRuntime: () => h.runtime, database: h.database, config: h.config })));
+        const live = earlierObject(new LegacyTransactionOwnerCore(facilities, { getRuntime: () => h.runtime, database: h.database, config: h.config }));
+        objects.set(id.name, { live, recorded: recordedEarlierObject(recorded, live) });
       }
-      return { fetch: objects.get(id.name) };
+      const object = objects.get(id.name);
+      return { fetch: object.recorded, live: object.live };
     },
   };
   const id = `tx_${"e".repeat(32)}`;
   const runtime = h.runtime;
   const auth = JSON.parse(runtime.authorize_session_json(JSON.stringify(h.session("a")), undefined, "execute")).auth;
   const databaseBinding = h.binding("a");
-  const old = (path, body) => namespace.get({ name: id }).fetch(`https://owner${path}`, {
+  const old = (path, body) => namespace.get({ name: id }).live(`https://owner${path}`, {
     method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": `old${path}` }, body: JSON.stringify(body),
   });
   const authFingerprint = authIdentity(runtime, auth, databaseBinding);
   const base = { transactionId: id, authFingerprint, databaseBinding, snapshot: runtime.snapshot };
   // An earlier Worker begins, writes, and commits through the earlier wire: COMMIT applies.
-  assert.equal((await old("/begin", { ...base, startFingerprint: "c".repeat(64), mode: "write", auth })).status, 201);
-  assert.equal((await old("/statement", { ...base, command: { sequence: 1, ...insert("skewed") } })).status, 200);
-  const applied = await old("/commit", { ...base, command: { sequence: 2 } });
-  assert.equal(applied.status, 200);
-  assert.equal((await applied.json()).status, "committed");
+  // (Recorded: replaying writes the committed row the earlier object wrote.)
+  const applied = await recorded.take("earlier Worker committed", async () => {
+    const begun = await old("/begin", { ...base, startFingerprint: "c".repeat(64), mode: "write", auth });
+    const statement = await old("/statement", { ...base, command: { sequence: 1, ...insert("skewed") } });
+    const commit = await old("/commit", { ...base, command: { sequence: 2 } });
+    return { statuses: [begun.status, statement.status, commit.status], commit: await commit.json(), rows: h.rows("a").filter((row) => row.id === "skewed") };
+  });
+  assert.deepEqual(applied.statuses, [201, 200, 200]);
+  assert.equal(applied.commit.status, "committed");
+  if (!reference.recording) {
+    for (const row of applied.rows) {
+      h.databases.get("a").database.prepare("INSERT INTO projects (id, tenant_id, name) VALUES (?, ?, ?)").run(row.id, "tenant_a", row.name);
+    }
+  }
   // The client's commit response was lost; it retries through a Worker of this version.
   const app = h.appWith(durableObjectTransactionOwners(namespace));
   const send = async (path, body) => {
