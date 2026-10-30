@@ -87,7 +87,8 @@ Idempotency-Key: <optional replay key>
 An explicitly supplied key must be 16–128 ASCII characters from letters, digits, `.`, `_`, `:`,
 `-`, `+`, `/`, and `=` (so standard and URL-safe base64, padded or not, is accepted as is); a
 key that is empty, malformed, or repeated (a repeated header is comma-joined) is rejected on those
-entry points with `400 POLICYSQL_IDEMPOTENCY_KEY_INVALID` before any database work. With a key, atomic mutations
+entry points with `400 POLICYSQL_IDEMPOTENCY_KEY_INVALID` before any database work. Leading and trailing spaces and tabs of the header value are removed by
+Fetch `Headers` before the key is read. With a key, atomic mutations
 use `policysql_idempotency` in the selected database to look up and persist results in
 the same transaction as the mutation. Without a key, no lookup, insert, existence check,
 or automatic creation of that table occurs. Each unkeyed request is a new execution and

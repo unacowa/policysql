@@ -120,8 +120,8 @@ const rejectsCommand = ({ error, status }, kind) => {
   if (!REJECTIONS.get(status)?.includes(code)) return false;
   if (sqlRejections.has(code)) return kind === "execute" || kind === "statement";
   if (code === "IDEMPOTENCY_CONFLICT") return kind === "execute";
-  // A key rejected before any database work: only a request that carries a key can get it.
-  if (code === "IDEMPOTENCY_KEY_INVALID") return kind === "execute" || kind === "begin";
+  // A key rejected before any database work: the client sends a key only on execute (default deny for other kinds).
+  if (code === "IDEMPOTENCY_KEY_INVALID") return kind === "execute";
   if (code === "COMMIT_CHECK_REJECTED") return kind === "execute" || kind === "commit";
   if (code === "TRANSACTION_MODE_VIOLATION") return kind === "statement";
   // Atomic commit checks also run through a transaction owner.

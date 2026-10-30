@@ -139,7 +139,9 @@ export class PolicySqlRuntime {
      * values for some inputs, so it bumped `ABI_VERSION` to 5. `keyHash`, the auth and start
      * fingerprints, and the `{sequence}` digests are unchanged
      * (`tests/fixtures/identity-goldens.json`). Removing the binding's `snapshot` from the
-     * request fingerprint (#80) changed its values again and bumped `ABI_VERSION` to 9.
+     * request fingerprint (#80) changed its values again and bumped `ABI_VERSION` to 9. The key syntax of #65 (`+ / =` accepted,
+     * a malformed key answered `POLICYSQL_IDEMPOTENCY_KEY_INVALID`) bumped it to 10; `keyHash` and
+     * every golden are unchanged.
      * @param {string} input_json
      * @returns {string}
      */
@@ -310,7 +312,9 @@ export class PolicySqlRuntime {
      * outcome class `limit` without a bump: every input this method read before is answered
      * byte for byte as before (the transcripts replay unchanged), only an `executeFailed` it
      * rejected as unreadable is now read, and keeping the snapshot is what keeps keyed atomic
-     * retries replaying across that deployment.
+     * retries replaying across that deployment. #65 changed what an atomic `request` with a
+     * malformed key is answered (`POLICYSQL_IDEMPOTENCY_KEY_INVALID`, a new message) and which keys
+     * it accepts (`+ / =`), and bumped `ABI_VERSION` to 10.
      * @param {string | null | undefined} durable_json
      * @param {string | null | undefined} volatile_json
      * @param {string} event_json

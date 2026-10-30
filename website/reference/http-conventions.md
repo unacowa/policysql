@@ -17,7 +17,7 @@ requestとresponseのmedia typeは`application/json`です。request bodyはUTF-
 | --- | --- | --- |
 | `Authorization: Bearer` | request | 参考ラッパーのJWT access token。認証方式はdeploymentが決める |
 | `PolicySQL-Role` | request | trusted sessionで許可されたroleの選択。省略時はdefault role |
-| `Idempotency-Key` | request | 任意。更新・対話型開始の再送識別子。指定時は16〜128文字の英数字と`._:-` |
+| `Idempotency-Key` | request | 任意。更新・対話型開始の再送識別子。指定時は16〜128文字のASCII英数字と`. _ : - + / =`（base64のキーをそのまま使える） |
 | `Traceparent` | request | 任意のW3C trace context。認可情報には使用しない |
 | `PolicySQL-Request-Id` | response | serverが生成した問い合わせ識別子 |
 | `ETag` | response | CatalogまたはCapabilities representationのcache validator |

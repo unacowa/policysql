@@ -66,11 +66,11 @@ clientは`mode`を指定しません。PolicySQLが全statementを実行前にpa
 
 `Idempotency-Key` headerは更新を含むrequestでも任意です。キーを指定した更新は、利用DBの`policysql_idempotency`で既存結果を照合し、更新と同じtransactionに結果を保存します。キーを省略すると同テーブルの参照・追記・存在確認を行わないため、テーブルがなくても実行できます。通常経路とcommit checkを行うDO経路の両方に適用します。
 
-キーは16〜128文字のASCII英数字と`. _ : - + / =`です。base64（標準・URL-safe、paddingあり・なし）のキーをそのまま使えます。空、範囲外の長さ、カンマ・空白・非ASCIIを含むキー、重複したheaderは、DB処理の前に`400 POLICYSQL_IDEMPOTENCY_KEY_INVALID`で拒否します。
+キーは16〜128文字のASCII英数字と`. _ : - + / =`です。base64（標準・URL-safe、paddingあり・なし）のキーをそのまま使えます。空、範囲外の長さ、カンマ・途中の空白・非ASCIIを含むキー、重複したheaderは、DB処理の前に`400 POLICYSQL_IDEMPOTENCY_KEY_INVALID`で拒否します。headerの前後の空白とtabはHTTP層（Fetchの`Headers`）が取り除くため、キーには含まれません。
 
 キーなしの要求はそれぞれ新しい実行です。同じ内容を再送すると更新が再実行される可能性があります。安全な再送が必要な場合は、初回からキーを指定し、同じキー・payload・認証context・DB bindingで再送してください。キー付きの更新では引き続き同テーブルが必要で、未作成時に冪等性を無効化して続行することはありません。
 
-キーを指定する場合は16〜128文字の英数字と`._:-`を使用します。空値・形式不正・重複キーはエラーです。SELECTだけのrequestはこのテーブルを使用しません。
+キーを指定する場合は16〜128文字のASCII英数字と`. _ : - + / =`を使用します。空値・形式不正・重複キーは`POLICYSQL_IDEMPOTENCY_KEY_INVALID`（400）です。SELECTだけのrequestはこのテーブルを使用しません。
 
 ```http
 Idempotency-Key: 0198f8f1-0f64-7000-8000-000000000001

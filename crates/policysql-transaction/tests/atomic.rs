@@ -766,7 +766,7 @@ fn a_parameter_namespace_collision_executes_no_envelope_on_either_placement() {
 
 // ---- #80: a keyed retry across a snapshot change ----------------------------------------------
 
-const NEXT_SNAPSHOT: &str = "sqlite-turso-v1:schema_2:policy_2:abi-9";
+const NEXT_SNAPSHOT: &str = "sqlite-turso-v1:schema_2:policy_2:abi-10";
 
 /// `request` with its binding and snapshot set to `snapshot` and its binding's generation to
 /// `generation`, as a request after a deployment (or a database move) carries them.

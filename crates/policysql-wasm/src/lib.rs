@@ -31,7 +31,10 @@ use wasm_bindgen::prelude::*;
 /// 9: the request fingerprint of `identity_json` (and of keyed atomic execution in
 /// `step_json`) no longer includes the binding's `snapshot` (#80), so a committed keyed
 /// write retried after a snapshot-changing deployment replays instead of conflicting.
-const ABI_VERSION: u32 = 9;
+/// 10: the `Idempotency-Key` syntax of `identity_json` and `step_json` accepts `+`, `/`, and `=`
+/// (so such keys now hash instead of being rejected), and a malformed key is answered
+/// `POLICYSQL_IDEMPOTENCY_KEY_INVALID` with a new message instead of `..._KEY_REQUIRED` (#65).
+const ABI_VERSION: u32 = 10;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -642,7 +645,9 @@ impl PolicySqlRuntime {
     /// values for some inputs, so it bumped `ABI_VERSION` to 5. `keyHash`, the auth and start
     /// fingerprints, and the `{sequence}` digests are unchanged
     /// (`tests/fixtures/identity-goldens.json`). Removing the binding's `snapshot` from the
-    /// request fingerprint (#80) changed its values again and bumped `ABI_VERSION` to 9.
+    /// request fingerprint (#80) changed its values again and bumped `ABI_VERSION` to 9. The key syntax of #65 (`+ / =` accepted,
+    /// a malformed key answered `POLICYSQL_IDEMPOTENCY_KEY_INVALID`) bumped it to 10; `keyHash` and
+    /// every golden are unchanged.
     #[must_use]
     #[allow(clippy::unused_self)]
     pub fn identity_json(&self, input_json: &str) -> String {
@@ -666,7 +671,9 @@ impl PolicySqlRuntime {
     /// outcome class `limit` without a bump: every input this method read before is answered
     /// byte for byte as before (the transcripts replay unchanged), only an `executeFailed` it
     /// rejected as unreadable is now read, and keeping the snapshot is what keeps keyed atomic
-    /// retries replaying across that deployment.
+    /// retries replaying across that deployment. #65 changed what an atomic `request` with a
+    /// malformed key is answered (`POLICYSQL_IDEMPOTENCY_KEY_INVALID`, a new message) and which keys
+    /// it accepts (`+ / =`), and bumped `ABI_VERSION` to 10.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn step_json(

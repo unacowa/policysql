@@ -363,6 +363,9 @@ test("a key the server rejects as malformed (400 IDEMPOTENCY_KEY_INVALID) is a d
   const h = setup({}, () => async () => ({ status: 400, body }));
   await assert.rejects(h.client.execute("UPDATE posts SET title = 'x'", {}, { idempotencyKey: "request-key-0001" }), error =>
     !(error instanceof PolicySqlOutcomeUnknownError) && error.code === "POLICYSQL_IDEMPOTENCY_KEY_INVALID" && error.status === 400);
+  // The client sends a key only on execute, so the code on any other kind is not a rejection.
+  const started = setup({}, () => async () => ({ status: 400, body }));
+  await assert.rejects(started.client.beginTransaction(), error => error instanceof PolicySqlOutcomeUnknownError);
   // The retired name and any other status cannot establish an outcome.
   for (const [status, code] of [[400, "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED"], [409, "POLICYSQL_IDEMPOTENCY_KEY_INVALID"]]) {
     const u = setup({}, () => async () => ({ status, body: errorBody(code) }));
