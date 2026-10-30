@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod probes;
+
 pub const OWNER: &str = "tx_0123456789abcdef0123456789abcdef";
 pub const SNAPSHOT: &str = "sqlite-turso-v1:schema_1:policy_1:abi-6";
 pub const START: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -518,7 +520,10 @@ impl Engine {
             assert!(text.len() <= 96 * 1024, "durable bound");
         }
         if let Some(text) = parsed["volatile"].as_str() {
-            assert!(text.len() <= 256 * 1024, "volatile bound");
+            assert!(
+                text.len() <= self.limits.max_volatile_bytes(),
+                "volatile bound"
+            );
         }
         let reset = effects.iter().any(|effect| effect["type"] == "reset");
         self.durable = parsed["durable"].as_str().map(str::to_owned);

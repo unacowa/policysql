@@ -514,3 +514,151 @@ fn owner_inputs_are_validated() {
     );
     assert_eq!(OWNER.len(), 35);
 }
+
+// ---- the review's probes (#75), deterministic --------------------------------------------------
+
+use common::probes;
+
+fn answers(engine: &Engine) -> Vec<String> {
+    engine
+        .observed
+        .replies
+        .iter()
+        .map(|(_, reply)| {
+            code(reply).map_or_else(
+                || reply["value"]["status"].as_str().unwrap_or("").to_owned(),
+                str::to_owned,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn an_invalid_volatile_text_beyond_256_kib_still_releases_its_handles() {
+    // A direct execution waits for `Open` with its plan live.
+    let mut engine = Engine::atomic(false);
+    engine.feed(&execute_request(&select(), None));
+    engine.resolve(true, "unknown");
+    let open = engine.outstanding.clone().unwrap_or(Value::Null);
+    assert_eq!(open["type"], "open");
+    assert_eq!(engine.compiler.live_handles(), 1);
+    // The engine hands back a volatile text that is no longer valid (an unknown member) and
+    // larger than 256 KiB, but within the runtime's volatile bound.
+    let mut volatile: Value =
+        serde_json::from_str(engine.volatile.as_deref().unwrap_or("{}")).unwrap_or(Value::Null);
+    volatile["padding"] = json!("x".repeat(300 * 1024));
+    let text = volatile.to_string();
+    assert!(text.len() > 256 * 1024 && text.len() <= engine.limits.max_volatile_bytes());
+    engine.volatile = Some(text);
+    engine.feed(&json!({"type": "opened", "id": open["id"]}));
+    assert!(
+        engine
+            .last_effects
+            .iter()
+            .any(|effect| effect["type"] == "reset"),
+        "fails closed"
+    );
+    assert_eq!(engine.compiler.live_handles(), 0, "the plan is released");
+}
+
+#[test]
+fn p1_a_prior_record_of_another_binding_is_ignored_and_replaced() {
+    let engine = probes::prior_record_of_another_binding();
+    assert_eq!(answers(&engine), ["committed", "committed"]);
+    assert_eq!(
+        engine.observed.envelope_executes, 1,
+        "the retry replays from the row"
+    );
+    assert_eq!(
+        engine.observed.commits_emitted, 1,
+        "no COMMIT for the retry"
+    );
+    let awaited = &engine.observed.awaited;
+    assert_eq!(
+        awaited[awaited.len() - 7..],
+        [
+            "checkBinding",
+            "open",
+            "persist",
+            "setTimer",
+            "execute",
+            "rollback",
+            "persist"
+        ]
+    );
+    let record: Value =
+        serde_json::from_str(engine.store.as_deref().unwrap_or("{}")).unwrap_or(Value::Null);
+    assert_eq!(record["phase"], "committed");
+    assert_eq!(
+        record["binding"]["databaseId"], "db_a",
+        "the record is replaced"
+    );
+    assert_eq!(record["binding"]["generation"], "1");
+    assert_eq!(engine.compiler.live_handles(), 0);
+}
+
+#[test]
+fn p2_a_timer_while_a_callback_holds_the_connection_answers_now_and_rolls_back_after_it() {
+    let engine = probes::timer_while_callback_holds_the_connection();
+    assert_eq!(answers(&engine), ["POLICYSQL_COMMIT_CHECK_REJECTED"]);
+    // The callback query's rows are not returned: its capability was revoked.
+    let callbacks: Vec<Option<&str>> = engine.observed.callback_replies.iter().map(code).collect();
+    assert_eq!(callbacks, [Some("POLICYSQL_TRANSACTION_UNAVAILABLE")]);
+    assert_eq!(engine.observed.commits_emitted, 0);
+    assert_eq!(engine.observed.rollbacks_emitted, 1);
+    assert_eq!(
+        phase_of(engine.store.as_deref()).as_deref(),
+        Some("expired")
+    );
+    // The late verdict is ignored.
+    assert!(
+        engine
+            .transcript
+            .last()
+            .is_some_and(|line| line.output.contains("tx_outcome_ignored"))
+    );
+    assert_eq!(engine.compiler.live_handles(), 0);
+}
+
+#[test]
+fn p3_a_successor_timer_does_not_expire_a_keyed_retry_that_has_no_record_yet() {
+    let engine = probes::successor_timer_races_a_keyed_retry();
+    assert_eq!(answers(&engine), ["committed"]);
+    assert_eq!(engine.observed.envelope_commits, 1);
+    assert_eq!(engine.idempotency_rows.len(), 1);
+    assert_eq!(
+        phase_of(engine.store.as_deref()).as_deref(),
+        Some("committed")
+    );
+    assert_eq!(engine.compiler.live_handles(), 0);
+}
+
+#[test]
+fn p4_a_timer_during_the_idempotency_insert_sends_no_commit() {
+    let engine = probes::timer_during_the_idempotency_insert();
+    assert_eq!(answers(&engine), ["POLICYSQL_TRANSACTION_UNAVAILABLE"]);
+    assert_eq!(engine.observed.commits_emitted, 0);
+    assert_eq!(engine.observed.rollbacks_emitted, 1);
+    assert_eq!(engine.idempotency_rows.len() + engine.pending_rows.len(), 0);
+    assert_eq!(
+        phase_of(engine.store.as_deref()).as_deref(),
+        Some("expired")
+    );
+    assert_eq!(engine.compiler.live_handles(), 0);
+}
+
+#[test]
+fn p5_a_direct_abandon_during_commit_then_the_retry_resolves_through_the_row() {
+    let applied = probes::direct_abandon_during_commit(true);
+    assert_eq!(answers(&applied), ["committed"], "the retry replays");
+    assert_eq!(applied.observed.envelope_executes, 1);
+    assert_eq!(applied.observed.envelope_commits, 1);
+    let lost = probes::direct_abandon_during_commit(false);
+    assert_eq!(answers(&lost), ["committed"], "the retry executes once");
+    assert_eq!(lost.observed.envelope_executes, 2);
+    assert_eq!(lost.observed.envelope_commits, 1);
+    for engine in [&applied, &lost] {
+        assert_eq!(engine.idempotency_rows.len(), 1);
+        assert_eq!(engine.compiler.live_handles(), 0);
+    }
+}

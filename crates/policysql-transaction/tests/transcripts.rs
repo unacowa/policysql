@@ -315,7 +315,7 @@ fn check_capability_tampering() -> Engine {
 
 type Scenario = fn() -> Engine;
 
-const SCENARIOS: [(&str, Scenario); 24] = [
+const SCENARIOS: [(&str, Scenario); 29] = [
     (
         "commit-check-allowed-with-callbacks",
         check_allowed_with_callbacks,
@@ -370,7 +370,32 @@ const SCENARIOS: [(&str, Scenario); 24] = [
     ("atomic-expectation-rollback", atomic_expectation_rollback),
     ("atomic-commit-failure", atomic_commit_failure),
     ("atomic-owner-commit-check", atomic_owner_commit_check),
+    (
+        "atomic-prior-record-of-another-binding",
+        common::probes::prior_record_of_another_binding,
+    ),
+    (
+        "atomic-timer-while-callback-holds-connection",
+        common::probes::timer_while_callback_holds_the_connection,
+    ),
+    (
+        "atomic-successor-timer-races-keyed-retry",
+        common::probes::successor_timer_races_a_keyed_retry,
+    ),
+    (
+        "atomic-timer-during-idempotency-insert",
+        common::probes::timer_during_the_idempotency_insert,
+    ),
+    (
+        "atomic-direct-abandon-during-commit",
+        direct_abandon_applied,
+    ),
 ];
+
+/// P5 with a COMMIT that applied: the retry replays.
+fn direct_abandon_applied() -> Engine {
+    common::probes::direct_abandon_during_commit(true)
+}
 
 // ---- atomic execution (pull request 6) ------------------------------------------------------
 

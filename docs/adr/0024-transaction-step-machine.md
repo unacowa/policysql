@@ -258,8 +258,10 @@ struct Volatile {
   lost commit response can still be confirmed after a deployment changed the snapshot. Every
   command that does work still requires the full fingerprint and the current snapshot.
 - **Bounds.** Durable JSON is at most 96 KiB, so it fits a Durable Object value (128 KiB) with
-  room for the key and framing; volatile JSON is at most 256 KiB; an event is at most
-  `max_statements` × 1 MiB of raw results plus 64 KiB. `last.response` is bounded by the
+  room for the key and framing; an event is at most `max_statements` × 1 MiB of raw results
+  plus 64 KiB; volatile JSON is at most 256 KiB plus four times that event bound (pull request
+  6: an atomic execution keeps its validated results until COMMIT; 256 KiB before it), and the
+  handles of a volatile text that fails validation within that bound are still released. `last.response` is bounded by the
   transaction result-byte limit; runtime construction rejects a limit that could make durable
   state exceed its bound. Core never emits a state over its bound: the transition fails
   closed instead.
@@ -1062,16 +1064,25 @@ switches atomic execution).
   callback replies, trace-sink calls, cost observations, and final rows. Allowlist:
   `idempotency-conflict-code` (inconsistency 1), `duplicate-idempotency-rows` (inconsistency 2),
   and `stored-record-shape` (core's direct-path record also carries `status` and `commitChecks`;
-  normalized after asserting their values). Not exercised: `TransactionOwnerCore` answers a
-  previous record of another binding or snapshot with `POLICYSQL_TRANSACTION_CONFLICT`, which core
-  ignores (a keyed retry then gets `POLICYSQL_IDEMPOTENCY_CONFLICT` from its row, inconsistency 1),
-  and owner timers during an atomic execution.
+  normalized after asserting their values). Not exercised by the harness, but pinned by core's
+  tests and transcripts (below): `TransactionOwnerCore` answers a previous record of another
+  binding or snapshot with `POLICYSQL_TRANSACTION_CONFLICT`, which core ignores (the request
+  resolves through its row: a replay when the row's fingerprint is the request's, else
+  `POLICYSQL_IDEMPOTENCY_CONFLICT`, inconsistency 1), and owner timers during an atomic
+  execution. Owner-path cost observations are not compared: `TransactionOwnerCore` observes
+  after the envelope also when a check later rejects, core only after COMMIT, and
+  `StepOwnerCore` does not run them.
 - **Tests.** `tests/atomic.rs` (scenarios on both placements), `tests/atomic_properties.rs`
   (proptest over effect outcomes, verdicts, timers, `Abandon`, and duplicated and stale outcomes:
   at most one COMMIT per execution; a keyed retry never executes twice; no definite rejection after
   COMMIT; a failed expectation never commits and stores nothing; every handle released;
   determinism), transcripts `atomic-direct-keyed-replay`, `atomic-expectation-rollback`,
-  `atomic-commit-failure`, and `atomic-owner-commit-check`, and `step_tests.rs` in
+  `atomic-commit-failure`, and `atomic-owner-commit-check`, the review's probes of #75 as
+  scenarios and transcripts (`atomic-prior-record-of-another-binding`,
+  `atomic-timer-while-callback-holds-connection`, `atomic-successor-timer-races-keyed-retry`,
+  `atomic-timer-during-idempotency-insert`, `atomic-direct-abandon-during-commit`), a volatile
+  text between 256 KiB and the runtime's bound that fails validation and still releases its
+  handles, and `step_tests.rs` in
   `policysql-wasm` with the real compiler (#70 digits, the trace). The one transcript of pull
   request 4 with an `observe` effect (`owner-loss-and-expiry`) was regenerated for its new
   context.
@@ -1080,7 +1091,10 @@ switches atomic execution).
   else `unavailable`); publish `execute.trace` to the sink before the statements; run `observe`
   in the background on a read connection named `${requestId}-cost` with the runtime's
   `costTimeoutMs` and log `cost_estimate_json`'s answer as `cost_observation` or
-  `cost_observation_failed`; relay `forward` through the owner port's `atomic`.
+  `cost_observation_failed`; relay `forward` through the owner port's `atomic`, passing the
+  engine's request id as the owner's request id, which becomes the owner's
+  `HostFacts.request_id`, so the owner's reply keeps `meta.requestId` (and the stored
+  `originalRequestId`) equal to the engine's request id, as today.
 
 ## Decided during review
 

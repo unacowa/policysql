@@ -107,7 +107,11 @@ pub(super) fn run<C: Compiler>(
         (stored, Some(None)) => {
             // Invalid volatile state is an engine fault: Abandon applied to the durable state.
             // Its handles are released when they can still be read.
-            for handle in readable_handles(volatile.unwrap_or_default(), owner_field) {
+            for handle in readable_handles(
+                volatile.unwrap_or_default(),
+                owner_field,
+                limits.max_volatile_bytes(),
+            ) {
                 compiler.release(handle);
             }
             machine.durable = match stored {
@@ -2082,8 +2086,10 @@ impl<C: Compiler> Step<'_, C> {
 
 /// The `handles` of a volatile text that is otherwise invalid, when it is still JSON of this
 /// owner: what `Abandon` would release.
-fn readable_handles(text: &str, owner: Option<&str>) -> Vec<u64> {
-    if text.len() > super::state::MAX_VOLATILE_BYTES {
+/// `bound` is the volatile bound `Volatile::parse` applies, so a text that is invalid for
+/// another reason still releases its handles.
+fn readable_handles(text: &str, owner: Option<&str>, bound: usize) -> Vec<u64> {
+    if text.len() > bound {
         return Vec::new();
     }
     let Ok(value) = serde_json::from_str::<Value>(text) else {
