@@ -1144,13 +1144,29 @@ production to the machine (`deploy/cloudflare/src/transaction-owner.ts`).
   same question, so both are resolved together. Until then the begin body checks (`mode`,
   `expected`) and the transaction id and start fingerprint (both from core's `identity_json`)
   stay in `engine.ts`; the owner validates the forwarded input again.
-- **Wire.** The Durable Objects paths are unchanged; the body of an interactive command or a
-  callback query is the owner input above (the callback capability moved from the
-  `authorization` header into the body). A message in the earlier wire shape (with
-  `authFingerprint`, which only an earlier Worker sends during a rollout) is answered
-  `POLICYSQL_INTERNAL`, which no client takes as a rejection, rather than the machine's
-  `POLICYSQL_INVALID_REQUEST`. The object still answers with the statuses and bodies of ADR
-  0023.
+- **Wire and version skew.** The Durable Objects paths are unchanged; the body of an
+  interactive command or a callback query is the owner input above (the callback capability
+  moved from the `authorization` header into the body). During a rollout a Worker and an
+  object of different versions can meet, in either direction, so both sides mark the wire
+  version (`x-policysql-owner-wire: 1`): the Worker on every message, the object on every
+  reply. On the changed paths (`/begin`, `/statement`, `/commit`, `/rollback`,
+  `/validation-query`; `/atomic` did not change):
+  - **earlier Worker, this object**: a message without the marker (the earlier body shapes,
+    with `authFingerprint`, or the earlier callback with the capability in `authorization`)
+    is answered `POLICYSQL_INTERNAL` and never reaches the machine (which would answer the
+    old shape `POLICYSQL_INVALID_REQUEST`, a definite rejection);
+  - **this Worker, earlier object**: the earlier object rejects the new body shape with 400
+    `POLICYSQL_INVALID_REQUEST`, and its reply carries no marker. The Worker does not read such
+    a reply: a commit becomes 503 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (its COMMIT may have
+    applied through the earlier wire, and a retry of it must never be a rejection, ADR 0007),
+    anything else 500 `POLICYSQL_INTERNAL`. Neither is a rejection in the client.
+
+  Interactive transactions are therefore unavailable while the versions are skewed (the first
+  deployment of this pull request showed one such window), but never misreported. A later
+  change of the owner wire bumps the marker. The object still answers with the statuses and
+  bodies of ADR 0023. A test freezes origin/main's object (`serve` over
+  `LegacyTransactionOwnerCore`) and drives the production port against it, and another sends
+  origin/main's Worker messages to this object.
 - **BigInt in the transport.** `TursoHttpTransport` encodes a `BigInt` argument within the
   signed 64-bit range as a Hrana `integer` with its digits; anything else stays
   `POLICYSQL_INTERNAL`. With that, #70 holds through the HTTP path: `1e400` gets the compile

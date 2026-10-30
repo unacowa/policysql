@@ -10,6 +10,9 @@ import { createApp } from "../src/app.ts";
 import { durableObjectTransactionOwners, durableObjectTransactionOwnerClass, executionContextTasks } from "../src/adapters/durable-objects.ts";
 import { testBinding, testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { limitsJson } from "./helpers/limits.mjs";
+import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
+import { authIdentity } from "../src/core-identity.ts";
+import { statusFor } from "../src/http/status.ts";
 
 const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
 const insert = (id) => ({ sql: "INSERT INTO projects (id, name) VALUES (:id, :name) RETURNING id, name", params: { id, name: id } });
@@ -584,10 +587,11 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
     get: (id) => ({
       async fetch(url, init) {
         sent.push({ name: id.name, url, method: init.method, headers: init.headers, body: JSON.parse(init.body) });
+        const marked = { headers: { "x-policysql-owner-wire": "1" } };
         if (new URL(url).pathname === "/rollback") {
-          return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null, requestId: "old" } }, { status: 409 });
+          return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null, requestId: "old" } }, { status: 409, ...marked });
         }
-        return Response.json({ started: true }, { status: 201 });
+        return Response.json({ started: true }, { status: 201, ...marked });
       },
     }),
   };
@@ -602,6 +606,7 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
   assert.ok(sent.every(({ name, method }) => name === `tx_${"a".repeat(32)}` && method === "POST"));
   // Every message names the owner it was routed to (ADR 0024: the machine checks it).
   assert.ok(sent.every(({ headers }) => headers["x-policysql-owner"] === `tx_${"a".repeat(32)}`));
+  assert.ok(sent.every(({ headers }) => headers["x-policysql-owner-wire"] === "1"), "every message carries the wire version");
   // The callback is the forwarded owner input, the capability and the verified text included.
   assert.equal(sent[3].headers.authorization, undefined);
   assert.equal(sent[3].headers["x-policysql-request-id"], "req_4");
@@ -643,13 +648,14 @@ test("durable-objects: the object class decodes the internal messages and fails 
   const object = new OwnerObject(state, {});
   const name = `tx_${"a".repeat(32)}`;
   const send = (path, body, headers = {}) => object.fetch(new Request(`https://owner${path}`, {
-    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, ...headers }, body,
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": "1", ...headers }, body,
   }));
   for (const [path, body] of [["/begin", "{"], ["/atomic", "null"], ["/statement", "[]"], ["/unknown", "{}"]]) {
     const response = await send(path, body);
     // The same status and body as earlier objects, which an earlier Worker forwards (ADR 0023).
     assert.equal(response.status, 400, path);
     assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("x-policysql-owner-wire"), "1", "every reply carries the wire version");
     const reply = await response.json();
     assert.deepEqual(reply, { error: { code: "POLICYSQL_INVALID_REQUEST", message: "The request is invalid.", path: null, requestId: "req_obj" } }, path);
   }
@@ -807,4 +813,134 @@ test("durable-objects: an earlier Worker forwarding this object's replies shows 
   const replayConflict = await forwarded("atomic key reuse", "/atomic",
     () => h.request("a", "/v1/transactions:execute", { statements: [insert("atomic_other")] }, "rollout-atomic-key-01"), { atomic: true });
   assert.equal(replayConflict.status, 409);
+});
+
+// Mixed-version rollout (ADR 0024 pull request 7): the owner input of the interactive paths
+// changed, so a Worker and an object of different versions cannot understand each other there.
+// The earlier object below is origin/main's (8e597cf) `serve` (Bearer capability, body as is)
+// over its TypeScript owner, `LegacyTransactionOwnerCore`, and its reply framing (no wire
+// marker). The production port must never turn what it answers into a definite rejection.
+const earlierObject = (core) => async (url, init) => {
+  const request = new Request(url, init);
+  const requestId = request.headers.get("x-policysql-request-id") || crypto.randomUUID();
+  let body = null;
+  try { body = await request.json(); } catch { body = null; }
+  const path = new URL(request.url).pathname;
+  const kinds = { "/statement": "statement", "/commit": "commit", "/rollback": "rollback" };
+  let reply;
+  if (path === "/begin") reply = await core.begin(body, requestId);
+  else if (path === "/atomic") reply = await core.atomic(body, requestId);
+  else if (path === "/validation-query") {
+    const capability = request.headers.get("authorization")?.match(/^Bearer (.*)$/su)?.[1] ?? "";
+    reply = await core.callbackQuery({ capability, command: body }, requestId);
+  } else reply = await core.command(kinds[path] ?? path, body, requestId);
+  return new Response(JSON.stringify(reply.ok ? reply.value : { error: { ...reply.error, requestId } }), {
+    status: reply.ok ? (path === "/begin" ? 201 : 200) : statusFor(reply.error.code),
+    headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+  });
+};
+
+test("durable-objects: a Worker of this version never turns an earlier object's answer into a rejection", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const h = await harness(t, { ownerAdapter: "durable-objects", hooks: false });
+  const objects = new Map();
+  const namespace = {
+    idFromName: (name) => ({ name }),
+    get: (id) => {
+      if (!objects.has(id.name)) {
+        const data = new Map();
+        const facilities = {
+          store: { async get(key) { return structuredClone(data.get(key)); }, async put(key, value) { data.set(key, structuredClone(value)); } },
+          timer: { async schedule() {} },
+          background: { run() {} },
+        };
+        objects.set(id.name, earlierObject(new LegacyTransactionOwnerCore(facilities, { getRuntime: () => h.runtime, database: h.database, config: h.config })));
+      }
+      return { fetch: objects.get(id.name) };
+    },
+  };
+  const id = `tx_${"e".repeat(32)}`;
+  const runtime = h.runtime;
+  const auth = JSON.parse(runtime.authorize_session_json(JSON.stringify(h.session("a")), undefined, "execute")).auth;
+  const databaseBinding = h.binding("a");
+  const old = (path, body) => namespace.get({ name: id }).fetch(`https://owner${path}`, {
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": `old${path}` }, body: JSON.stringify(body),
+  });
+  const authFingerprint = authIdentity(runtime, auth, databaseBinding);
+  const base = { transactionId: id, authFingerprint, databaseBinding, snapshot: runtime.snapshot };
+  // An earlier Worker begins, writes, and commits through the earlier wire: COMMIT applies.
+  assert.equal((await old("/begin", { ...base, startFingerprint: "c".repeat(64), mode: "write", auth })).status, 201);
+  assert.equal((await old("/statement", { ...base, command: { sequence: 1, ...insert("skewed") } })).status, 200);
+  const applied = await old("/commit", { ...base, command: { sequence: 2 } });
+  assert.equal(applied.status, 200);
+  assert.equal((await applied.json()).status, "committed");
+  // The client's commit response was lost; it retries through a Worker of this version.
+  const app = h.appWith(durableObjectTransactionOwners(namespace));
+  const send = async (path, body) => {
+    const response = await app.fetch(new Request(`https://worker.test${path}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    }), { database: databaseBinding, session: h.session("a") }, h.background);
+    return { status: response.status, body: await response.json() };
+  };
+  const { sendCommand, PolicySqlOutcomeUnknownError } = await import("../../../packages/client/protocol.js");
+  const neverRejected = async (kind, reply) => {
+    await assert.rejects(sendCommand(async () => reply, { kind }, {}, () => {}), PolicySqlOutcomeUnknownError, kind);
+  };
+  const retry = await send(`/v1/transactions/${id}/commit`, { sequence: 2 });
+  assert.equal(retry.status, 503, JSON.stringify(retry.body));
+  assert.equal(retry.body.error.code, "POLICYSQL_COMMIT_OUTCOME_UNKNOWN");
+  await neverRejected("commit", retry);
+  for (const [kind, path, body] of [
+    ["begin", "/v1/transactions", { mode: "write" }],
+    ["statement", `/v1/transactions/${id}/statements`, { sequence: 3, sql: "SELECT id, name FROM projects", params: {} }],
+    ["rollback", `/v1/transactions/${id}/rollback`, { sequence: 3 }],
+  ]) {
+    const reply = await send(path, body);
+    assert.equal(reply.status, 500, `${kind}: ${JSON.stringify(reply.body)}`);
+    assert.equal(reply.body.error.code, "POLICYSQL_INTERNAL", kind);
+    await neverRejected(kind, reply);
+  }
+  const callback = await app.fetchCallback(new Request(`https://worker.test/v1/commit-checks/cval_${"e".repeat(32)}/query`, {
+    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${"A".repeat(43)}` },
+    body: JSON.stringify({ sequence: 1, sql: "SELECT id, name FROM projects", params: {} }),
+  }));
+  assert.equal(callback.status, 500);
+  assert.equal(h.rows("a").filter((row) => row.id === "skewed").length, 1, "the commit applied exactly once");
+});
+
+test("durable-objects: an object of this version answers an earlier Worker's messages without a rejection", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const h = await harness(t, { ownerAdapter: "durable-objects", hooks: false });
+  const id = await (async () => {
+    const begun = await h.request("a", "/v1/transactions", { mode: "write" }, null);
+    return begun.body.transactionId;
+  })();
+  assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("new_object") }, null)).status, 200);
+  const committed = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 }, null);
+  assert.equal(committed.status, 200);
+  const OwnerObject = durableObjectTransactionOwnerClass(() => ({ getRuntime: () => h.runtime, database: h.database, config: h.config }));
+  const values = new Map();
+  const object = new OwnerObject({
+    waitUntil() {},
+    storage: { async get(key) { return values.get(key); }, async put(key, value) { values.set(key, value); }, async setAlarm() {} },
+  }, {});
+  values.set("transaction", await h.ownerRecordRaw(id));
+  const { REJECTIONS } = await import("../../../packages/client/protocol.js");
+  // origin/main's Worker: the earlier bodies, the capability as Bearer, no wire marker.
+  for (const [path, body, headers] of [
+    ["/commit", { transactionId: id, authFingerprint: "b".repeat(64), command: { sequence: 2 } }, {}],
+    ["/statement", { transactionId: id, authFingerprint: "b".repeat(64), command: { sequence: 3, sql: "SELECT id FROM projects", params: {} } }, {}],
+    ["/rollback", { transactionId: id, authFingerprint: "b".repeat(64), command: { sequence: 3 } }, {}],
+    ["/begin", { transactionId: id, authFingerprint: "b".repeat(64), startFingerprint: "c".repeat(64), mode: "write", auth: {} }, {}],
+    ["/validation-query", { sequence: 1, sql: "SELECT id FROM projects", params: {} }, { authorization: `Bearer ${"A".repeat(43)}` }],
+  ]) {
+    const response = await object.fetch(new Request(`https://owner${path}`, {
+      method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_old", ...headers }, body: JSON.stringify(body),
+    }));
+    const reply = await response.json();
+    assert.equal(response.status, 500, `${path}: ${JSON.stringify(reply)}`);
+    assert.equal(reply.error.code, "POLICYSQL_INTERNAL", path);
+    assert.equal([...REJECTIONS.values()].flat().includes(reply.error.code.slice("POLICYSQL_".length)), false);
+  }
+  assert.equal(JSON.parse(values.get("transaction")).phase, "committed", "nothing reached the machine");
 });

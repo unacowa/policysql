@@ -5,6 +5,7 @@ import { testBinding, testProvider } from "./helpers/database.mjs";
 import { identity_json } from "./helpers/identity.mjs";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
+import { checkBatch } from "../src/transaction-owner.ts";
 import { statusFor } from "../src/http/status.ts";
 import { limitsJson } from "./helpers/limits.mjs";
 
@@ -450,4 +451,38 @@ test("atomic replay rejects malformed database-owned response JSON", async () =>
   assert.equal(response.status, 500);
   assert.equal((await response.json()).error.code, "POLICYSQL_INTERNAL");
   assert.equal(database.rolledBack, true);
+});
+
+// ADR 0024 "Effects": a batch holds immediate effects and at most one awaited effect, last.
+// A step output that breaks the rule is an engine fault: nothing of the batch runs, the owner
+// abandons its state and answers POLICYSQL_INTERNAL, so no outcome is ever dropped.
+test("an awaited effect that is not last in its batch is an engine fault, and nothing of it runs", async (t) => {
+  t.mock.method(console, "log", () => {});
+  assert.doesNotThrow(() => checkBatch([{ type: "log" }, { type: "respond" }, { type: "persist", id: 1 }]));
+  assert.doesNotThrow(() => checkBatch([]));
+  assert.throws(() => checkBatch([{ type: "persist", id: 1 }, { type: "log" }]));
+  assert.throws(() => checkBatch([{ type: "setTimer", id: 1, atMs: 1 }, { type: "persist", id: 2 }]));
+  const storage = makeStorage();
+  const puts = [];
+  storage.store.put = async (key, value) => { puts.push(value); };
+  let timers = 0;
+  storage.timer.schedule = async () => { timers += 1; };
+  const steps = [];
+  const fake = {
+    ...runtime(),
+    step_json(_durable, _volatile, event) {
+      const type = JSON.parse(event).type;
+      steps.push(type);
+      if (type === "abandon") return JSON.stringify({ durable: null, volatile: null, effects: [] });
+      return JSON.stringify({ durable: '{"v":1}', volatile: '{"v":1}', effects: [
+        { type: "setTimer", id: 7, atMs: 1 }, { type: "persist", id: 8 }, { type: "respond", lane: "client", reply: { ok: true, value: {} } },
+      ] });
+    },
+  };
+  const owner = new TransactionOwnerCore({ ...storage, name: txId }, { config, getRuntime: () => fake, database: ownerProvider(transaction()) });
+  const reply = await owner.begin({ transactionId: txId, startFingerprint, mode: "read", auth, databaseBinding: testBinding(), snapshot: "test-snapshot" }, "req");
+  assert.deepEqual(reply, { ok: false, error: { code: "POLICYSQL_INTERNAL", message: "The request could not be completed.", path: null } });
+  assert.deepEqual(steps, ["forwarded", "abandon"]);
+  assert.equal(timers, 0, "no effect of the faulty batch ran");
+  assert.deepEqual(puts, []);
 });

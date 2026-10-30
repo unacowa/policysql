@@ -91,6 +91,21 @@ const recordOwner = (stored: unknown): string | null => {
   return typeof name === "string" && OWNER_NAME.test(name) ? name : null;
 };
 
+const IMMEDIATE = new Set(["respond", "log", "observe", "reset"]);
+
+/**
+ * The batch rule (ADR 0024 "Effects"): any number of immediate effects, then at most one
+ * awaited effect, last. Anything else is an engine fault (Abandon follows), checked before any
+ * effect of the batch runs, so no outcome is ever dropped.
+ */
+export const checkBatch = (effects: unknown) => {
+  if (!Array.isArray(effects)) throw new Error("step output without effects");
+  const awaited = effects.flatMap((effect, index) => (IMMEDIATE.has(effect?.type) ? [] : [index]));
+  if (awaited.length > 1 || (awaited.length === 1 && awaited[0] !== effects.length - 1)) {
+    throw new Error("an awaited effect is not last in its batch");
+  }
+};
+
 /** The re-check at the outbound exit (`commit-checks.ts` `secureUrl`). */
 const secureUrl = (raw: string) => {
   const url = new URL(raw);
@@ -319,6 +334,7 @@ export class StepTransactionOwner implements TransactionOwnerHandle {
       await this.load();
       const output = this.step(next, requestId);
       next = null;
+      checkBatch(output.effects);
       for (const effect of output.effects) {
         switch (effect.type) {
           case "respond": {

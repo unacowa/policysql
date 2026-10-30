@@ -14,10 +14,19 @@
 // always used (`https://owner/<command>`, JSON body, request id header), plus the owner name
 // the Worker routed to (`x-policysql-owner`). Since ADR 0024 pull request 7 the body of an
 // interactive command or a callback query is the step machine's forwarded owner input
-// without its `kind` (the path names it); the callback capability travels in that body. A
-// message in the earlier wire shape (an `authFingerprint` member, which only an earlier
-// Worker sends during a rollout) is answered POLICYSQL_INTERNAL, which no client takes as a
-// rejection. A reply is a 2xx response whose body
+// without its `kind` (the path names it); the callback capability travels in that body.
+//
+// Both sides mark the wire version (`x-policysql-owner-wire: 1`): the Worker on every message,
+// the object on every reply. During a rollout a Worker and an object of different versions
+// can meet, and on the changed paths each side treats an unmarked counterpart as that skew:
+// - an object answers an unmarked message on a changed path (an earlier Worker; its old body
+//   shapes and the callback capability in `authorization`) with POLICYSQL_INTERNAL;
+// - a Worker turns an unmarked reply on a changed path (an earlier object, which rejects the
+//   new body shapes with POLICYSQL_INVALID_REQUEST) into POLICYSQL_COMMIT_OUTCOME_UNKNOWN for a
+//   commit (a retry of a COMMIT that applied must never be a rejection, ADR 0007) and
+//   POLICYSQL_INTERNAL otherwise.
+// Neither code is a rejection in the client. `/atomic` did not change and is not checked.
+// A reply is a 2xx response whose body
 // is the value, or a non-2xx response whose body is `{ error: { code, message, path,
 // requestId } }`. A Worker of this version reads only that distinction. The object still
 // sends exactly the statuses and bodies of earlier versions (201 for a started transaction,
@@ -25,7 +34,7 @@
 // because an earlier Worker forwards them to the client unchanged during a rollout
 // (ADR 0023). The wire needs no `cloudflare:workers` import (RPC
 // stubs), so the adapter also runs in the Node test harness.
-import { internalError, operationError } from "../errors.ts";
+import { EngineError, internalError, operationError } from "../errors.ts";
 import { stringifyExact } from "../exact-json.ts";
 import { statusFor } from "../http/status.ts";
 import { TransactionOwnerCore } from "../transaction-owner.ts";
@@ -38,6 +47,10 @@ import { OWNER_NAME } from "../transaction-owner-port.ts";
 const OWNER_ORIGIN = "https://owner";
 const REQUEST_ID_HEADER = "x-policysql-request-id";
 const OWNER_HEADER = "x-policysql-owner";
+const WIRE_HEADER = "x-policysql-owner-wire";
+const WIRE_VERSION = "1";
+// The paths whose body changed with ADR 0024 pull request 7.
+const CHANGED_PATHS = new Set(["/begin", "/statement", "/commit", "/rollback", "/validation-query"]);
 const COMMAND_PATHS: Readonly<Record<OwnerCommandKind, string>> = Object.freeze({
   statement: "/statement", commit: "/commit", rollback: "/rollback",
 });
@@ -49,6 +62,17 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
+  if (CHANGED_PATHS.has(path) && response.headers.get(WIRE_HEADER) !== WIRE_VERSION) {
+    // An object of an earlier version: it cannot read this message, and its answer (a 400 for
+    // the new body shape) is not an answer to it. Never a rejection; a commit may have applied
+    // through the earlier wire, so its outcome is unknown.
+    await response.body?.cancel().catch(() => undefined);
+    console.log(JSON.stringify({ event: "owner_wire_skew", path, requestId: headers[REQUEST_ID_HEADER] ?? null }));
+    const error = path === "/commit"
+      ? new EngineError("POLICYSQL_COMMIT_OUTCOME_UNKNOWN", "The commit outcome is unknown.")
+      : internalError();
+    return { ok: false, error: operationError(error) };
+  }
   let parsed: any;
   try { parsed = await response.json(); } catch { throw internalError(); }
   if (response.ok) return { ok: true, value: parsed };
@@ -64,7 +88,7 @@ const replyResponse = (reply: OwnerReply, path: string, requestId: string) => {
     stringifyExact(reply.ok ? reply.value : { error: { ...failure.error, requestId } }),
     {
       status: reply.ok ? (path === "/begin" ? 201 : 200) : statusFor(failure.error.code),
-      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8", [WIRE_HEADER]: WIRE_VERSION },
     },
   );
 };
@@ -77,7 +101,7 @@ export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace
   return {
     route(name: string): TransactionOwnerHandle {
       const stub = namespace.get(namespace.idFromName(name));
-      const headers = (requestId: string) => ({ [REQUEST_ID_HEADER]: requestId, [OWNER_HEADER]: name });
+      const headers = (requestId: string) => ({ [REQUEST_ID_HEADER]: requestId, [OWNER_HEADER]: name, [WIRE_HEADER]: WIRE_VERSION });
       return {
         begin: (input, requestId) => send(stub, "/begin", input, headers(requestId)),
         atomic: (input, requestId) => send(stub, "/atomic", input, headers(requestId)),
@@ -114,8 +138,10 @@ const serve = async (core: TransactionOwnerCore, request: Request): Promise<Resp
   const path = new URL(request.url).pathname;
   let reply: OwnerReply;
   const owner = request.headers.get(OWNER_HEADER);
-  if ((owner !== null && !core.bindName(owner)) || (body !== null && typeof body === "object" && Object.hasOwn(body, "authFingerprint"))) {
-    // Routed to another name, or the earlier wire shape: an adapter or rollout fault.
+  const earlierWire = CHANGED_PATHS.has(path) && (request.headers.get(WIRE_HEADER) !== WIRE_VERSION ||
+    (body !== null && typeof body === "object" && Object.hasOwn(body, "authFingerprint")));
+  if ((owner !== null && !core.bindName(owner)) || earlierWire) {
+    // Routed to another name, or a message of an earlier Worker: an adapter or rollout fault.
     console.log(JSON.stringify({ event: "owner_message_rejected", requestId, path }));
     reply = { ok: false, error: operationError(internalError()) };
   } else if (path === "/begin") reply = await core.begin(body, requestId);

@@ -82,8 +82,9 @@ only the adapter.
 Since [ADR 0024](0024-transaction-step-machine.md) pull request 7 the body of an interactive
 command or callback query is the step machine's owner input (the callback capability travels
 in it, not in `authorization`), every message names the owner it was routed to in
-`x-policysql-owner`, and a message in the earlier body shape (with `authFingerprint`) is
-answered `POLICYSQL_INTERNAL`.
+`x-policysql-owner`, and both sides mark the wire version (`x-policysql-owner-wire`) so that a
+Worker and an object of different versions answer each other's interactive messages with
+`POLICYSQL_INTERNAL` (or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for a commit), never a rejection.
 
 ### The Durable Objects adapter (`src/adapters/durable-objects.ts`)
 
