@@ -10,9 +10,6 @@ import { createApp } from "../src/app.ts";
 import { durableObjectTransactionOwners, durableObjectTransactionOwnerClass, executionContextTasks } from "../src/adapters/durable-objects.ts";
 import { testBinding, testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { limitsJson } from "./helpers/limits.mjs";
-import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
-import { authIdentity } from "../src/core-identity.ts";
-import { statusFor } from "../src/http/status.ts";
 import { referenceTranscript } from "./helpers/reference-transcript.mjs";
 
 const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
@@ -801,38 +798,14 @@ test("durable-objects: an earlier Worker forwarding this object's replies shows 
 
 // Mixed-version rollout (ADR 0024 pull request 7): the owner input of the interactive paths
 // changed, so a Worker and an object of different versions cannot understand each other there.
-// The earlier object below is origin/main's (8e597cf) `serve` (Bearer capability, body as is)
-// over its TypeScript owner, `LegacyTransactionOwnerCore`, and its reply framing (no wire
-// marker). The production port must never turn what it answers into a definite rejection.
-const earlierObject = (core) => async (url, init) => {
-  const request = new Request(url, init);
-  const requestId = request.headers.get("x-policysql-request-id") || crypto.randomUUID();
-  let body = null;
-  try { body = await request.json(); } catch { body = null; }
-  const path = new URL(request.url).pathname;
-  const kinds = { "/statement": "statement", "/commit": "commit", "/rollback": "rollback" };
-  let reply;
-  if (path === "/begin") reply = await core.begin(body, requestId);
-  else if (path === "/atomic") reply = await core.atomic(body, requestId);
-  else if (path === "/validation-query") {
-    const capability = request.headers.get("authorization")?.match(/^Bearer (.*)$/su)?.[1] ?? "";
-    reply = await core.callbackQuery({ capability, command: body }, requestId);
-  } else reply = await core.command(kinds[path] ?? path, body, requestId);
-  return new Response(JSON.stringify(reply.ok ? reply.value : { error: { ...reply.error, requestId } }), {
-    status: reply.ok ? (path === "/begin" ? 201 : 200) : statusFor(reply.error.code),
-    headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
-  });
-};
-
-// The earlier object's replies are recorded (ADR 0024 pull request 9,
-// test/helpers/reference-transcript.mjs) and answered in order on replay.
+// The earlier object is origin/main's (8e597cf) `serve` (Bearer capability, body as is) over its
+// TypeScript owner, `LegacyTransactionOwnerCore`, and its reply framing (no wire marker). What it
+// did is recorded (ADR 0024 pull request 9, test/helpers/reference-transcript.mjs): an earlier
+// Worker's transaction committed through it, and its replies to this version's messages, in
+// order. The production port must never turn what it answers into a definite rejection.
 const reference = referenceTranscript(new URL("./fixtures/reference/transaction-owner-port.json", import.meta.url));
-const recordedEarlierObject = (recorded, live) => async (url, init) => {
-  const path = new URL(url).pathname;
-  const reply = await recorded.take(`earlier object ${path}`, async () => {
-    const response = await live(url, init);
-    return { status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() };
-  });
+const recordedEarlierObject = (recorded) => async (url) => {
+  const reply = recorded.take(`earlier object ${new URL(url).pathname}`);
   return new Response(reply.body, { status: reply.status, headers: reply.headers });
 };
 
@@ -840,47 +813,17 @@ test("durable-objects: a Worker of this version never turns an earlier object's 
   t.mock.method(console, "log", () => {});
   const h = await harness(t, { ownerAdapter: "durable-objects", hooks: false });
   const recorded = reference.of(t);
-  const objects = new Map();
-  const namespace = {
-    idFromName: (name) => ({ name }),
-    get: (id) => {
-      if (!objects.has(id.name)) {
-        const data = new Map();
-        const facilities = {
-          store: { async get(key) { return structuredClone(data.get(key)); }, async put(key, value) { data.set(key, structuredClone(value)); } },
-          timer: { async schedule() {} },
-          background: { run() {} },
-        };
-        const live = earlierObject(new LegacyTransactionOwnerCore(facilities, { getRuntime: () => h.runtime, database: h.database, config: h.config }));
-        objects.set(id.name, { live, recorded: recordedEarlierObject(recorded, live) });
-      }
-      const object = objects.get(id.name);
-      return { fetch: object.recorded, live: object.live };
-    },
-  };
+  const namespace = { idFromName: (name) => ({ name }), get: () => ({ fetch: recordedEarlierObject(recorded) }) };
   const id = `tx_${"e".repeat(32)}`;
-  const runtime = h.runtime;
-  const auth = JSON.parse(runtime.authorize_session_json(JSON.stringify(h.session("a")), undefined, "execute")).auth;
   const databaseBinding = h.binding("a");
-  const old = (path, body) => namespace.get({ name: id }).live(`https://owner${path}`, {
-    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": `old${path}` }, body: JSON.stringify(body),
-  });
-  const authFingerprint = authIdentity(runtime, auth, databaseBinding);
-  const base = { transactionId: id, authFingerprint, databaseBinding, snapshot: runtime.snapshot };
-  // An earlier Worker begins, writes, and commits through the earlier wire: COMMIT applies.
-  // (Recorded: replaying writes the committed row the earlier object wrote.)
-  const applied = await recorded.take("earlier Worker committed", async () => {
-    const begun = await old("/begin", { ...base, startFingerprint: "c".repeat(64), mode: "write", auth });
-    const statement = await old("/statement", { ...base, command: { sequence: 1, ...insert("skewed") } });
-    const commit = await old("/commit", { ...base, command: { sequence: 2 } });
-    return { statuses: [begun.status, statement.status, commit.status], commit: await commit.json(), rows: h.rows("a").filter((row) => row.id === "skewed") };
-  });
+  // An earlier Worker began transaction `id`, inserted `skewed`, and committed it through the
+  // earlier wire: COMMIT applied (recorded; the committed row is written where it applied).
+  const applied = recorded.take("earlier Worker committed");
   assert.deepEqual(applied.statuses, [201, 200, 200]);
   assert.equal(applied.commit.status, "committed");
-  if (!reference.recording) {
-    for (const row of applied.rows) {
-      h.databases.get("a").database.prepare("INSERT INTO projects (id, tenant_id, name) VALUES (?, ?, ?)").run(row.id, "tenant_a", row.name);
-    }
+  assert.equal(applied.commit.transactionId, id);
+  for (const row of applied.rows) {
+    h.databases.get("a").database.prepare("INSERT INTO projects (id, tenant_id, name) VALUES (?, ?, ?)").run(row.id, "tenant_a", row.name);
   }
   // The client's commit response was lost; it retries through a Worker of this version.
   const app = h.appWith(durableObjectTransactionOwners(namespace));

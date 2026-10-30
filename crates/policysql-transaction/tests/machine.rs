@@ -126,6 +126,22 @@ fn compile_errors_close_the_transaction() {
     assert_eq!(phase_of(engine.store.as_deref()).as_deref(), Some("failed"));
 }
 
+/// The client and server parameter namespaces are merged by core, which fails closed on a
+/// collision before any `execute` (ADR 0024 pull request 9 removed the second check from the
+/// engine's `driverArgs`). The fake compiler's server parameter is `session_tenant_id`.
+#[test]
+fn a_parameter_namespace_collision_executes_nothing() {
+    let mut engine = begun("write");
+    let text = r#"{"sequence":1,"sql":"INSERT INTO projects (id) VALUES (:session_tenant_id)","params":{"session_tenant_id":"other"}}"#;
+    let reply = engine.run(&command("statement", text));
+    assert_eq!(code(&reply), Some("POLICYSQL_INTERNAL"), "{reply}");
+    assert!(
+        !effect_types(&engine).contains(&"execute".to_owned()),
+        "nothing executes"
+    );
+    assert_eq!(engine.compiler.live_handles(), 0);
+}
+
 #[test]
 fn issue_70_overflow_is_rejected_from_the_body_text() {
     // `{"value": 1e400}`: JSON.stringify would send `null`; the machine compiles the text.

@@ -26,7 +26,7 @@ const files = sources(join(repository, library))
   .filter((file) => !excluded.some((prefix) => file.startsWith(prefix)));
 
 test("library code reads no platform env property, TRANSACTION_OWNER included", () => {
-  for (const required of ["app.ts", "engine.ts", "http/adapter.ts", "commit-checks.ts", "cost.ts",
+  for (const required of ["app.ts", "engine.ts", "http/adapter.ts", "request-step.ts", "step-effects.ts",
     "transaction-owner.ts", "transaction-owner-port.ts", "worker.ts", "package.ts", "engine-config.ts",
     "adapters/durable-objects.ts"]) {
     assert.ok(files.includes(`${library}/${required}`), `the scan covers ${required}`);

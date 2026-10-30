@@ -32,11 +32,48 @@ const scan = (name) => scanHttp(name, readFileSync(join(root, name), "utf8"));
 
 test("engine modules contain no HTTP status, Request/Response, header name, or route", () => {
   for (const name of NOT_ENGINE.keys()) assert.ok(existsSync(join(root, name)), `${name} is listed but does not exist`);
-  for (const name of ["engine.ts", "app.ts", "request-body.ts", "errors.ts", "session.ts", "core-identity.ts",
-    "transaction-owner.ts", "transaction-owner-port.ts", "commit-checks.ts", "database.ts", "turso.ts", "cost.ts", "presenters.ts"]) {
-    assert.ok(engine.includes(name), `${name} is scanned as an engine module`);
-  }
+  for (const name of ENGINE_MODULES) assert.ok(engine.includes(name), `${name} is scanned as an engine module`);
   assert.deepEqual(engine.flatMap(scan), [], "map HTTP in src/http/, outbound HTTP in an adapter");
+});
+
+const ENGINE_MODULES = ["engine.ts", "app.ts", "request-body.ts", "errors.ts", "session.ts", "core-identity.ts",
+  "transaction-owner.ts", "transaction-owner-port.ts", "request-step.ts", "step-effects.ts", "database.ts",
+  "driver-values.ts", "presenters.ts"];
+
+// ADR 0011 and ADR 0024 pull request 9: no TypeScript decides a transaction outcome. Core
+// (`step_json`) answers every outcome the specification determines; an engine module names
+// only POLICYSQL_INTERNAL and the codes of the adapter classes it reports, each listed with its
+// reason. A decision code (a conflict, an unavailable or expired transaction, a commit check
+// verdict, an idempotency answer, an expectation, a transaction limit, an unknown commit
+// outcome) in an engine module fails this test.
+const ENGINE_CODES = new Map([
+  ["POLICYSQL_INTERNAL", "a fault of the engine or of its inputs"],
+  ["POLICYSQL_INVALID_REQUEST", "request framing checked before core (ADR 0023 order), and the begin body checks that stay in the engine while interactive commands have no `request` kind (ADR 0024 pull request 7)"],
+  ["POLICYSQL_REQUEST_TOO_LARGE", "the request byte limit, checked before the body is read"],
+  ["POLICYSQL_STALE_OPERATION", "a binding or begin precondition naming another snapshot, checked before core"],
+  ["POLICYSQL_DATABASE_REQUIRED", "database adapter class: the wrapper supplied no provider"],
+  ["POLICYSQL_DATABASE_BINDING_REJECTED", "database adapter class: the provider rejected the binding"],
+  ["POLICYSQL_DATABASE_UNAVAILABLE", "database adapter class: the provider or transport failed"],
+  ["POLICYSQL_DATABASE_TIMEOUT", "database adapter class: the deadline passed"],
+  ["POLICYSQL_LIMIT_EXCEEDED", "database adapter class: a value or response over the transport's byte bound"],
+  ["POLICYSQL_SCHEMA_MISMATCH", "driver codec: a driver value the codec cannot carry"],
+  ["POLICYSQL_COST_ADMISSION_UNAVAILABLE", "a cost observation log record whose connection failed; never a reply"],
+]);
+
+const codesNamed = (text) => new Set([...text.matchAll(/"(POLICYSQL_[A-Z0-9_]+)"/gu)].map((match) => match[1]));
+
+test("engine modules name no POLICYSQL_* code but POLICYSQL_INTERNAL and adapter-class codes", () => {
+  for (const name of engine) {
+    const named = [...codesNamed(readFileSync(join(root, name), "utf8"))].filter((code) => !ENGINE_CODES.has(code));
+    assert.deepEqual(named, [], `${name} names a code core decides; return core's answer instead`);
+  }
+  // Non-vacuity: the scanned modules do name adapter-class codes, and a decision code is caught.
+  const all = new Set(engine.flatMap((name) => [...codesNamed(readFileSync(join(root, name), "utf8"))]));
+  for (const code of ["POLICYSQL_INTERNAL", "POLICYSQL_DATABASE_UNAVAILABLE", "POLICYSQL_SCHEMA_MISMATCH"]) assert.ok(all.has(code), code);
+  for (const code of ["POLICYSQL_TRANSACTION_CONFLICT", "POLICYSQL_COMMIT_CHECK_REJECTED", "POLICYSQL_IDEMPOTENCY_CONFLICT"]) {
+    assert.ok(codesNamed(`throw new EngineError("${code}", "m");`).has(code));
+    assert.equal(ENGINE_CODES.has(code), false, code);
+  }
 });
 
 test("the HTTP adapter is where these forms live, so the scan sees real code", () => {

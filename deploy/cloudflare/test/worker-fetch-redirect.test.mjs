@@ -27,7 +27,7 @@ const files = workerTrees.flatMap((tree) => sources(join(repository, tree)))
   .map((path) => relative(repository, path));
 
 test("only redirects.ts sets a redirect mode or calls the global fetch in Worker source", () => {
-  for (const required of [exit, "deploy/cloudflare/src/turso-http.ts", "deploy/cloudflare/src/commit-checks.ts",
+  for (const required of [exit, "deploy/cloudflare/src/turso-http.ts", "deploy/cloudflare/src/adapters/commit-check-hook.ts",
     "deploy/cloudflare/wrapper/index.ts", "examples/database-routing/worker.ts"]) {
     assert.ok(files.includes(required), `the scan covers ${required}`);
   }

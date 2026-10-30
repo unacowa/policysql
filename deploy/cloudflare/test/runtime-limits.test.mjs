@@ -182,7 +182,7 @@ test("no limit the runtime reports is left as a literal in the engine", () => {
   for (const pattern of [/MAX_(TRANSACTION_MS|STATEMENTS|RESULT_BYTES)/u, /\b4_?000\b/u, /\b64_?000\b/u, /[<>]=? *100\b/u, /begin\([^)]*\b1_?000\)/u]) {
     assert.doesNotMatch(owner, pattern);
   }
-  assert.doesNotMatch(source("cost.ts"), /\b1_?000\b/u);
+  for (const name of ["step-effects.ts", "request-step.ts"]) assert.doesNotMatch(source(name), /\b1_?000\b/u, name);
   assert.doesNotMatch(source("presenters.ts"), /\bLIMITS\b|publicConfig\.limits|max\w+: \d/u);
   assert.doesNotMatch(source("config.ts"), /\bLIMITS\b|\d_\d{3}/u, "config.ts holds no limit");
 });

@@ -55,3 +55,37 @@ test("a rejected session is reported before the database is checked or the body 
   }
   assert.equal(checks, 0);
 });
+
+// Regression (PR #24 review, formerly turso.test.mjs): a runtime with a malformed per-value
+// limit is a host wiring defect. An execute fails as 500 before its body is read and before
+// any connection, so a misconfiguration is neither a retryable 503 nor a transaction opened and
+// rolled back per retry.
+test("a malformed runtime per-value limit fails an execute before the body and before any connection", async (t) => {
+  t.mock.method(console, "log", () => {});
+  // Control: the same proxy with the runtime's own limit reads the body and gets past it.
+  const valid = getRuntime().max_bytes_per_value;
+  for (const max_bytes_per_value of [valid, undefined, 0, -1, 1.5, "262144", Infinity]) {
+    const runtime = getRuntime();
+    const broken = new Proxy(runtime, {
+      get: (target, key) => (key === "max_bytes_per_value" ? max_bytes_per_value : Reflect.get(target, key)),
+    });
+    let reads = 0;
+    let connects = 0;
+    const engine = createEngine({
+      getRuntime: () => broken,
+      database: { check: () => true, connect: () => { connects++; assert.fail("never connects"); } },
+      config: testConfig(),
+      transactionOwners: testOwners(),
+    });
+    const result = await engine.execute({ bodyText: async () => { reads++; return '{"statements":[]}'; } }, { database: binding(), session });
+    assert.equal(result.ok, false, String(max_bytes_per_value));
+    if (max_bytes_per_value === valid) {
+      assert.equal(reads, 1, "control: the body was read");
+      assert.notEqual(result.error.code, "POLICYSQL_INTERNAL", "control");
+      continue;
+    }
+    assert.equal(result.error.code, "POLICYSQL_INTERNAL", String(max_bytes_per_value));
+    assert.equal(reads, 0, "the body was not read");
+    assert.equal(connects, 0);
+  }
+});
