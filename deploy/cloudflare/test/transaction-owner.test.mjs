@@ -147,7 +147,9 @@ test("runs a sequenced statement, exact-retries it, and commits", async () => {
   const replay = await call(owner, "statement", body);
   assert.equal(first.status, 200);
   assert.deepEqual(await replay.json(), await first.clone().json());
-  assert.equal(compiler.released, 1);
+  // The statement's plan, and the retry's: a possible exact retry is compiled (and released at
+  // once) before it is hashed, so a body that cannot compile is never hashed (#55 review).
+  assert.equal(compiler.released, 2);
   const committed = await call(owner, "commit", { transactionId: txId, authFingerprint: fingerprint, command: { sequence: 2 } });
   assert.equal((await committed.json()).status, "committed");
   assert.equal(database.committed, true);

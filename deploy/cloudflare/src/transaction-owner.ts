@@ -39,6 +39,17 @@ const exactKeys = (value, keys, required = keys) => {
   return actual.every((key) => keys.includes(key)) && required.every((key) => actual.includes(key));
 };
 
+/** The one-statement envelope a statement or callback command compiles as. */
+const statementEnvelope = (command) => JSON.stringify({ statements: [{
+  sql: command.sql,
+  params: command.params,
+  ...(command.expect === undefined ? {} : { expect: command.expect }),
+}] });
+
+// Compile errors that depend on the runtime's state rather than on the command: the plan
+// table is full (POLICYSQL_DATABASE_UNAVAILABLE) or the runtime failed.
+const STATE_DEPENDENT_COMPILE_ERRORS = new Set(["POLICYSQL_DATABASE_UNAVAILABLE", "POLICYSQL_INTERNAL"]);
+
 const storedAtomicTerminal = (responseJson) => {
   let stored;
   try { stored = JSON.parse(responseJson); } catch { throw internal(); }
@@ -386,9 +397,18 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     if (!sameSnapshot) throw unavailable();
     const current = await this.active(body, owned);
     if (!Number.isSafeInteger(body.command?.sequence) || body.command.sequence < 1) throw invalid();
-    const digest = await commandDigest(this.getRuntime(), kind, body.command, requestId);
-    if (body.command.sequence === current.nextSequence - 1 && current.last?.digest === digest) {
-      return { replay: current.last.response };
+    // A statement's digest decides only two things: whether it repeats `last` (an exact
+    // retry, possible only at `nextSequence - 1`), and what a successful statement records.
+    // So a statement's digest is computed here only for a possible retry that compiles
+    // (see `mayRepeat`), and otherwise after its compile succeeds, before it executes
+    // (`statement`). The two hashes of the gate are still both computed and compared before
+    // any digest is used and before any database work, and a body that cannot compile is
+    // never hashed (#55 review: a 1 MB body of numbers cost two hashes before compile).
+    const retry = body.command.sequence === current.nextSequence - 1 && current.last !== undefined && current.last !== null;
+    let digest = null;
+    if (kind !== "statement" || (retry && this.mayRepeat(current.auth, statementEnvelope(body.command)))) {
+      digest = await commandDigest(this.getRuntime(), kind, body.command, requestId);
+      if (retry && current.last.digest === digest) return { replay: current.last.response };
     }
     if (current.status !== "active") throw unavailable();
     if (body.command.sequence !== current.nextSequence) {
@@ -396,6 +416,29 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       throw conflict();
     }
     return { current, digest };
+  }
+
+  /**
+   * Whether a command may equal the recorded `last` one, judged by compiling it (a pure call
+   * whose plan is released at once). `last` compiled under the same `auth`, and every caller
+   * first requires the record's snapshot to equal the runtime's, so the same command compiles
+   * again: a compile that rejects the command for a reason of its own proves that it is not
+   * `last` without hashing it. Compile is bounded by the body and SQL limits (a few ms for
+   * 1 MB), where the two hashes of the gate are not. A state-dependent failure is
+   * inconclusive and the caller hashes as before.
+   */
+  mayRepeat(auth, envelope) {
+    const runtime = this.getRuntime();
+    let compiled;
+    try {
+      compiled = JSON.parse(runtime.compile_json(JSON.stringify(auth), envelope, "execute"));
+    } catch {
+      return true;
+    }
+    const error = wasmError(compiled);
+    if (error) return STATE_DEPENDENT_COMPILE_ERRORS.has(error.code);
+    runtime.release_execution(BigInt(compiled.executionHandle));
+    return true;
   }
 
   async saveCommand(current, digest, response, usage) {
@@ -415,18 +458,13 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       !body.command.params || Array.isArray(body.command.params) || typeof body.command.params !== "object") throw invalid();
     const prepared = await this.prepareCommand(body, "statement", requestId);
     if (prepared.replay) return prepared.replay;
-    const { current, digest } = prepared;
+    const { current } = prepared;
     if (current.statementCount >= MAX_STATEMENTS) {
       await this.close("failed");
       throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
     }
     const runtime = this.getRuntime();
-    const envelope = JSON.stringify({ statements: [{
-      sql: body.command.sql,
-      params: body.command.params,
-      ...(body.command.expect === undefined ? {} : { expect: body.command.expect }),
-    }] });
-    const compiled = JSON.parse(runtime.compile_json(JSON.stringify(current.auth), envelope, "execute"));
+    const compiled = JSON.parse(runtime.compile_json(JSON.stringify(current.auth), statementEnvelope(body.command), "execute"));
     const compileError = wasmError(compiled);
     if (compileError) {
       await this.close("failed");
@@ -436,6 +474,16 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       runtime.release_execution(BigInt(compiled.executionHandle));
       await this.close("failed");
       throw new EngineError("POLICYSQL_TRANSACTION_MODE_VIOLATION", "A read transaction cannot execute a mutation.");
+    }
+    // The digest this statement records, through the identity gate, before any database work.
+    let digest = prepared.digest;
+    if (digest === null) {
+      try {
+        digest = await commandDigest(runtime, "statement", body.command, requestId);
+      } catch (error) {
+        runtime.release_execution(BigInt(compiled.executionHandle));
+        throw error;
+      }
     }
     let executed;
     try {
@@ -672,19 +720,30 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     if (!sameDatabaseBinding(session.databaseBinding, current.databaseBinding) || session.snapshot !== current.snapshot) throw unavailable();
     await this.checkCurrent(current, Math.min(current.expiresAtMs, session.expiresAtMs));
     if (Date.now() >= session.expiresAtMs) throw unavailable();
-    const digest = await callbackDigest(this.getRuntime(), command, requestId);
-    if (command.sequence === session.nextSequence - 1 && session.last?.digest === digest) {
-      return session.last.response;
+    // As for statements (`prepareCommand`): hashed for a possible exact retry that compiles,
+    // otherwise after the compile succeeds and before the query executes.
+    const envelope = statementEnvelope(command);
+    let digest = null;
+    if (command.sequence === session.nextSequence - 1 && session.last && this.mayRepeat(session.auth, envelope)) {
+      digest = await callbackDigest(this.getRuntime(), command, requestId);
+      if (session.last.digest === digest) return session.last.response;
     }
     if (command.sequence !== session.nextSequence || command.sequence > MAX_STATEMENTS) throw conflict();
     const runtime = this.getRuntime();
-    const envelope = JSON.stringify({ statements: [{ sql: command.sql, params: command.params }] });
     const compiled = JSON.parse(runtime.compile_json(JSON.stringify(session.auth), envelope, "execute"));
     const compileError = wasmError(compiled);
     if (compileError) throw compileError;
     if (compiled.transactionMode !== "read" || compiled.statements.length !== 1) {
       runtime.release_execution(BigInt(compiled.executionHandle));
       throw conflict();
+    }
+    if (digest === null) {
+      try {
+        digest = await callbackDigest(runtime, command, requestId);
+      } catch (error) {
+        runtime.release_execution(BigInt(compiled.executionHandle));
+        throw error;
+      }
     }
     const executed = await executeSealedOnTransaction(runtime, compiled, this.transaction, requestId);
     const response = {

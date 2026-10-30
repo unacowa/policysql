@@ -368,21 +368,37 @@ test("the gate fails closed: a core result that differs from the reference is a 
   ], "one more for the gated commit, none when core and the reference agree");
 });
 
-// #55 review: canonicalization must stay near linear up to the body limit. The owner computes
-// the command digest before it compiles, so a slow canonicalizer would let an authenticated
-// client spend an owner's CPU (Workers: 50 ms per request). 20,000 equal-length keys that
-// share a 40-character prefix took 11 s with the earlier per-key duplicate scan.
-const CPU_LIMIT_MS = 50;
+// #55 review: canonicalization must not be super-linear up to the body limit, and the owner
+// must not hash a body that cannot compile. 20,000 equal-length keys that share a 40-character
+// prefix took 11 s with the earlier per-key duplicate scan, and a 1 MB body of numbers cost
+// two hashes before compile. The bounds below catch those regressions, not the platform's CPU
+// limit, which only a measurement on Workers can show: core is held to a multiple of the
+// in-process reference and to an absolute bound far below the quadratic case.
+const ABSOLUTE_BOUND_MS = 500;
+const RATIO_BOUND = 10;
 const wideParams = (count = 20_000) =>
   `{${Array.from({ length: count }, (_, index) => `"${"a".repeat(40)}${String(index).padStart(6, "0")}":0`).join(",")}}`;
-// The fastest of a few runs, so a busy test machine does not fail the bound by chance.
-const fastest = (runs, work) => Math.min(...Array.from({ length: runs }, () => {
-  const started = performance.now();
-  work();
-  return performance.now() - started;
-}));
+// The fastest of a few runs (after one warm-up), so a busy test machine does not fail a bound
+// by chance.
+const fastest = async (runs, work) => {
+  await work();
+  let best = Number.POSITIVE_INFINITY;
+  for (let run = 0; run < runs; run++) {
+    const started = performance.now();
+    await work();
+    best = Math.min(best, performance.now() - started);
+  }
+  return best;
+};
+const assertNotSuperLinear = async (label, core, reference) => {
+  const coreMs = await fastest(5, core);
+  const referenceMs = await fastest(5, reference);
+  assert.ok(coreMs < ABSOLUTE_BOUND_MS, `${label}: core took ${coreMs.toFixed(1)} ms`);
+  assert.ok(coreMs <= Math.max(referenceMs, 1) * RATIO_BOUND,
+    `${label}: core ${coreMs.toFixed(1)} ms against the reference's ${referenceMs.toFixed(1)} ms`);
+};
 
-test("a wide object near the body limit hashes like the reference, well within the Worker CPU limit", async () => {
+test("a wide object near the body limit hashes like the reference, in time linearithmic in its keys", async () => {
   const params = wideParams();
   const body = `{"sequence":1,"sql":"SELECT id FROM projects","params":${params}}`;
   assert.ok(body.length > 1_000_000 && body.length < MAX_BODY_BYTES, `${body.length}`);
@@ -392,30 +408,50 @@ test("a wide object near the body limit hashes like the reference, well within t
   assert.equal(coreDigestOfText(body), await referenceDigestOfText(body));
   const request = JSON.stringify({ op: "request", endpoint: "execute", auth, binding, body, key: KEY });
   assert.deepEqual(core(request).idempotency, await requestIdempotency(KEY, auth, command, "execute", binding));
-  const elapsed = fastest(3, () => runtime.identity_json(input));
-  assert.ok(elapsed < CPU_LIMIT_MS, `command digest of a 20,000-key body took ${elapsed.toFixed(1)} ms`);
-  const requestElapsed = fastest(3, () => runtime.identity_json(request));
-  assert.ok(requestElapsed < CPU_LIMIT_MS, `request identity took ${requestElapsed.toFixed(1)} ms`);
+  await assertNotSuperLinear("command digest", () => runtime.identity_json(input),
+    () => sha256(stableJson({ kind: "statement", command: JSON.parse(body) })));
+  await assertNotSuperLinear("request identity", () => runtime.identity_json(request),
+    () => requestIdempotency(KEY, auth, JSON.parse(body), "execute", binding));
   // A duplicate key among them is still rejected (the engine rejects it before core runs).
   const duplicate = `{"op":"callback","command":${params.slice(0, -1)},"${"a".repeat(40)}000000":1}}`;
   assert.equal(core(duplicate).error.code, "POLICYSQL_INTERNAL");
-  const duplicateElapsed = fastest(3, () => runtime.identity_json(duplicate));
-  assert.ok(duplicateElapsed < CPU_LIMIT_MS, `duplicate detection took ${duplicateElapsed.toFixed(1)} ms`);
+  await assertNotSuperLinear("duplicate detection", () => runtime.identity_json(duplicate),
+    () => sha256(stableJson(JSON.parse(body))));
 });
 
-test("the owner digests a wide statement body within the Worker CPU limit and answers it definitely", async (t) => {
+test("numbers canonicalize from their digits like the reference, in time linear in the body", async () => {
+  const shapes = {
+    "short decimals": (index) => `${index % 100}.${index % 10}`,
+    "small integers": (index) => String(index % 1000),
+    "17-digit decimals": (index) => `${90071992547409 + index * 7}.${String(index % 1000).padStart(3, "0")}`,
+    "exponents": (index) => `${(index % 9) + 1}.${index % 97}e${(index % 600) - 300}`,
+  };
+  for (const [name, make] of Object.entries(shapes)) {
+    const items = [];
+    let length = 2;
+    for (let index = 0; length < 1_000_000; index++) {
+      const item = make(index);
+      items.push(item);
+      length += item.length + 1;
+    }
+    const text = `[${items.join(",")}]`;
+    assert.equal(coreDigestOfText(text), await referenceDigestOfText(text), name);
+    await assertNotSuperLinear(name, () => coreDigestOfText(text), () => referenceDigestOfText(text));
+  }
+});
+
+// The in-process engine and owner over the real runtime, recording every identity
+// computation the engine and the owner ask core for.
+const recordingEngine = (t) => {
   t.mock.method(console, "log", () => {});
   const real = loadRuntime()();
-  const timings = [];
-  // The real runtime, timing each identity computation the engine and the owner make.
+  const calls = [];
   const runtimeProxy = new Proxy(real, {
     get(target, key) {
       if (key === "identity_json") {
         return (input) => {
-          const started = performance.now();
-          const output = target.identity_json(input);
-          timings.push({ op: JSON.parse(input).op, ms: performance.now() - started });
-          return output;
+          calls.push(JSON.parse(input).op);
+          return target.identity_json(input);
         };
       }
       const value = Reflect.get(target, key, target);
@@ -428,18 +464,90 @@ test("the owner digests a wide statement body within the Worker CPU limit and an
     principal: "in-process:tenant_a", subject: "user_a", roles: ["member"], defaultRole: "member",
     access: ["execute"], session: { tenant_id: "tenant_a" },
   };
-  const context = { database: p.binding, session, requestId: "req_wide" };
+  return { p, calls, context: { database: p.binding, session, requestId: "req_wide" } };
+};
+
+const numberArrayBody = (sequence, make) => {
+  const head = `{"sequence":${sequence},"sql":"SELECT id FROM projects WHERE name = :name","params":{"p":[`;
+  const items = [];
+  let length = head.length + 3;
+  for (let index = 0; length < 1_030_000; index++) {
+    const item = make(index);
+    items.push(item);
+    length += item.length + 1;
+  }
+  return `${head}${items.join(",")}]}}`;
+};
+
+// Regression fixture (#55 re-review): ~1 MB number arrays in `params`. On main the owner hashed
+// each of these once before compile, and this pull request at d307a44 twice (core and the
+// reference), 45-90 ms more per request on the reviewer's machine. The responses below are
+// main's, byte for byte (measured with the same bodies against an export of origin/main).
+const INVALID_PARAMETER = { code: "POLICYSQL_INVALID_PARAMETER", message: "A statement parameter is missing or invalid.", path: "/statements/0" };
+// Re-serialized, these exponents (`1e300` as `1e+300`) make the envelope exceed core's request
+// limit, so compile rejects the envelope before its parameters, on main as here.
+const INVALID_ENVELOPE = { code: "POLICYSQL_INVALID_REQUEST", message: "Request envelope is invalid.", path: null };
+const CONFLICT = { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "The transaction command conflicts with its current state.", path: null };
+const NUMBER_SHAPES = {
+  "17-digit decimals": [(index) => `${90071992547409 + index * 7}.${String(index % 1000).padStart(3, "0")}`, INVALID_PARAMETER],
+  "short decimals": [(index) => `${index % 100}.${index % 10}`, INVALID_PARAMETER],
+  "small integers": [(index) => String(index % 1000), INVALID_PARAMETER],
+  "exponents": [(index) => `${(index % 9) + 1}.${index % 97}e${(index % 600) - 300}`, INVALID_ENVELOPE],
+};
+
+test("regression: a statement of ~1 MB of numbers that cannot compile is answered as on main and never hashed", async (t) => {
+  for (const [name, [make, compileError]] of Object.entries(NUMBER_SHAPES)) {
+    for (const mode of ["next sequence", "possible exact retry"]) {
+      const { p, calls, context } = recordingEngine(t);
+      const begun = await p.engine.begin({ bodyText: "{\"mode\":\"read\"}" }, context);
+      assert.equal(begun.ok, true, JSON.stringify(begun));
+      const { transactionId } = begun.value;
+      if (mode === "possible exact retry") {
+        const first = await p.engine.statement({ transactionId, bodyText: JSON.stringify({ sequence: 1, sql: "SELECT id FROM projects WHERE name = :name", params: { name: "x" } }) }, context);
+        assert.equal(first.ok, true, JSON.stringify(first));
+      }
+      const bodyText = numberArrayBody(1, make);
+      assert.ok(bodyText.length > 1_000_000 && bodyText.length < MAX_BODY_BYTES);
+      calls.length = 0;
+      const started = performance.now();
+      const result = await p.engine.statement({ transactionId, bodyText }, context);
+      const elapsed = performance.now() - started;
+      assert.deepEqual(result.error, mode === "next sequence" ? compileError : CONFLICT, `${name}, ${mode}`);
+      // The engine's caller fingerprint only: the owner computed no command digest.
+      assert.deepEqual(calls, ["auth"], `${name}, ${mode}`);
+      assert.ok(elapsed < ABSOLUTE_BOUND_MS, `${name}, ${mode}: ${elapsed.toFixed(1)} ms`);
+      // As on main, the transaction is closed.
+      const after = await p.engine.statement({ transactionId, bodyText: JSON.stringify({ sequence: 2, sql: "SELECT id FROM projects", params: {} }) }, context);
+      assert.equal(after.error?.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", `${name}, ${mode}`);
+    }
+  }
+});
+
+test("a wide statement body that cannot compile is answered definitely and never hashed by the owner", async (t) => {
+  const { p, calls, context } = recordingEngine(t);
   const begun = await p.engine.begin({ bodyText: "{\"mode\":\"read\"}" }, context);
   assert.equal(begun.ok, true, JSON.stringify(begun));
   const bodyText = `{"sequence":1,"sql":"SELECT id FROM projects","params":${wideParams()}}`;
   assert.ok(bodyText.length < MAX_BODY_BYTES);
+  calls.length = 0;
   const result = await p.engine.statement({ transactionId: begun.value.transactionId, bodyText }, context);
-  // The compiler rejects parameters the statement does not use: a definite client error, not
-  // an internal one, so no gate mismatch either.
+  // The compiler rejects parameters the statement does not use: a definite client error.
   assert.equal(result.ok, false);
   assert.notEqual(result.error.code, "POLICYSQL_INTERNAL", JSON.stringify(result.error));
-  const owner = timings.filter(({ op }) => op === "command");
-  assert.equal(owner.length, 1, "the owner computed the command digest once");
-  // One run, not the fastest of several: allow for a cold call on a busy machine.
-  assert.ok(owner[0].ms < CPU_LIMIT_MS * 2, `the owner's command digest took ${owner[0].ms.toFixed(1)} ms`);
+  assert.deepEqual(calls, ["auth"]);
+});
+
+test("a statement that compiles is still hashed through the gate, and its exact retry still replays", async (t) => {
+  const { p, calls, context } = recordingEngine(t);
+  const begun = await p.engine.begin({ bodyText: "{\"mode\":\"read\"}" }, context);
+  const { transactionId } = begun.value;
+  const bodyText = JSON.stringify({ sequence: 1, sql: "SELECT id FROM projects WHERE name = :name", params: { name: "x" } });
+  calls.length = 0;
+  const first = await p.engine.statement({ transactionId, bodyText }, context);
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.deepEqual(calls, ["auth", "command"], "hashed after compile, before execution");
+  calls.length = 0;
+  const retried = await p.engine.statement({ transactionId, bodyText }, context);
+  assert.deepEqual(retried, { ...first, requestId: retried.requestId });
+  assert.deepEqual(calls, ["auth", "command"], "a retry that compiles is hashed before it is answered");
 });
