@@ -105,9 +105,10 @@ deploy/cloudflare/
   wrapper/index.ts             deployment fetch wrapper with explicit DB injection
   src/auth.ts                  JWKS/JWT transport adapter
   src/config.ts                immutable snapshot/config loader
-  src/turso.ts                 sealed-plan-only remote transport
-  src/cost.ts                  EXPLAIN and historical usage adapter
-  src/transaction-owner.ts     Durable Object transaction owner
+  src/turso-http.ts            sealed-plan-only remote transport
+  src/step-effects.ts          effect execution helpers, background cost observation
+  src/request-step.ts          executor of core's step machine for execute
+  src/transaction-owner.ts     transaction owner: executor of core's step machine
   src/errors.ts                safe HTTP error mapping
   src/observability.ts         logs, metrics, request IDs
   wrangler.jsonc               bindings, limits, environments

@@ -1,6 +1,7 @@
 # ADR 0024: Transaction decisions as a pure `step` machine in core
 
-- Status: accepted (design; implemented by the pull requests under [Migration](#migration))
+- Status: accepted; implemented by the pull requests under [Migration](#migration) (the last,
+  pull request 9, deleted the TypeScript decision path)
 - Issue: #35 (stage 4 of [ADR 0019](0019-library-layers-and-the-wrapper-boundary.md))
 - Amended by: [ADR 0025](0025-core-defined-canonical-json.md) (canonical JSON is defined by
   core; byte equality with TypeScript and the dual-hash gate are dropped)
@@ -725,7 +726,8 @@ see no regression at the switch-over. For a commit that #48 could still replay f
    machine's tests. `VerifiedExecutionPlan`, `PlanVerifier`, and `DatabaseExecutor` stay. The
    engine-boundary guard gains a rule that engine modules construct no `POLICYSQL_*` code other
    than `POLICYSQL_INTERNAL` and adapter-class codes. `docs/architecture.md` and ADR 0011's
-   statement are updated.
+   statement are updated. (Implemented; see its notes below: the harnesses' remaining value is
+   kept as recorded transcripts of the TypeScript side, and the cost codes became log-only.)
 
 ## Testing strategy
 
@@ -768,7 +770,8 @@ see no regression at the switch-over. For a commit that #48 could still replay f
   single owner, owner loss, timer expiry, expiry and loss during a validator, exact retry,
   callback routing, binding pinning) runs unchanged against both adapters through every
   migration step; its scenarios also produce the checked-in transcripts.
-- **Differential harness** during pull requests 4-8, as described above.
+- **Differential harness** during pull requests 4-8, as described above; from pull request 9
+  against the recorded transcripts of the TypeScript side (see its notes).
 - **Smoke.** `provision-dev.mjs` after pull requests 7 and 8, covering begin, statement,
   commit, rollback, a commit check with a callback query, and a keyed atomic retry.
 
@@ -1361,6 +1364,93 @@ pull request 9 deletes it.
   (`src/http/status.ts`, `website/api/errors.md`) consistently with the ADR 0023 round-trip test
   that requires every code in the table to be returned somewhere and to appear in exactly one
   table.
+
+Recorded by pull request 9 (ABI unchanged at 8), which deletes the superseded decision code.
+With it, ADR 0011's statement is true in the code: the transaction safety state machine is
+authoritative Rust (`policysql-transaction`), and no TypeScript decides a transaction outcome.
+
+- **Deleted (TypeScript).** `src/transaction-owner-legacy.ts` (`LegacyTransactionOwnerCore`),
+  `src/turso.ts` (`executeSealedEnvelope`, `executeSealedOnTransaction`,
+  `enforceCumulativeLimits`, result shaping), `src/cost.ts` (`evaluate`,
+  `estimateSealedEnvelope`, `estimateSealedOnTransaction`, `observeCostEnvelope`),
+  `src/commit-checks.ts` (`runCommitChecks`, the capability and its `sha256`, `exactDecision`,
+  `secureUrl`), `driverArgs`' namespace check (core merges the namespaces and fails closed on a
+  collision before any `execute`; `tests/machine.rs` now pins it), and the test helper
+  `test/helpers/legacy-engine.mjs`. The hook adapter (`src/adapters/commit-check-hook.ts`)
+  needed nothing from `commit-checks.ts`; the owner re-checks the endpoint itself. Of
+  ADR 0025's helpers, `stableJson` stays in `database.ts` (it compares two bindings as values
+  and is never hashed or stored); the TypeScript `sha256` had its last caller in
+  `commit-checks.ts` and is gone.
+- **Deleted (Rust).** `execute_checked_transaction`, `TransactionFactory`,
+  `TransactionSession`, `CommitCheck`, `CheckDecision`, `ReadOnlyCallback`, `CallbackError`,
+  `TransactionError` (with `TransactionOutputs` and `CoordinatedTransactionError`) from
+  `policysql-execution`; `Gateway::execute_transactional`; and the Turso transaction adapter
+  (`TursoTransaction`, `TursoTransactionTransport`, `TursoTransactionFactory`,
+  `TursoTransactionSession`) that only they used. Their tests moved to the machine (an
+  accepted check commits, a denied one rolls back, a callback mutation is refused, a COMMIT
+  failure never commits: `tests/commit_checks.rs`, `tests/check_properties.rs`,
+  `tests/atomic.rs`, transcript `atomic-commit-failure`); `policysql-turso`'s mutation-result
+  cases test `validate_sealed_result` directly. `VerifiedExecutionPlan`, `PlanVerifier`,
+  `DatabaseExecutor`, and `Gateway::execute_atomic` stay. The WASM module did not link the
+  coordinator (2,595,297 to 2,595,262 bytes).
+- **The differential harnesses became recorded transcripts.** Before the deletion, one commit
+  recorded everything the TypeScript side produced in every scenario of
+  `step-differential.test.mjs` and `step-atomic-differential.test.mjs` (replies, database calls,
+  log events, validator calls, callback replies, trace-sink calls, records, rows, `cost.ts`'s
+  estimates), and in the version-skew tests of `atomic-switch.test.mjs` and
+  `transaction-owner-port.test.mjs` (the previous release's committed rows and owner record, its
+  objects' replies, and its Worker's `/atomic` messages), into
+  `deploy/cloudflare/test/fixtures/reference/*.json` (`test/helpers/reference-transcript.mjs`).
+  The tests now run production only and compare it with the recording, observation by
+  observation (a label that drifts, or an unused observation, fails). Every allowlist entry
+  keeps its assertions of both sides, the reference side read from the recording, so each
+  intentional difference stays pinned. The recordings cannot be regenerated: a scenario whose
+  reference behavior is no longer wanted asserts the machine directly instead. The checked-in
+  machine transcripts (`tests/fixtures/transactions/`) are unchanged.
+- **Tests that tested the deleted code** were replaced by tests of the production path: the nine
+  `LegacyTransactionOwnerCore` cases of `transaction-owner.test.mjs` are harness scenarios;
+  `turso.test.mjs` was deleted (its envelope, limit, and idempotency cases are atomic-harness
+  scenarios; the per-value limit of #22, the codec's invalid marker of #19, and the malformed
+  runtime limit of #24 test `request-step.ts` and `engine.ts`); `cost.test.mjs` tests
+  `observeCost` with core's `cost_estimate_json`; `commit-checks.test.mjs` tests the hook
+  adapter (the redirect regression of #36 included) and the owner's endpoint lookup by check id.
+- **Engine boundary.** `engine-boundary.test.mjs` adds the rule of this stage: an engine module
+  names no `POLICYSQL_*` code but `POLICYSQL_INTERNAL` and adapter-class codes (request framing
+  before core, database adapter classes, the driver codec, and the cost observation's log
+  fallback), each listed with its reason.
+- **The cost codes are log-only.** `POLICYSQL_COST_UNKNOWN`, `POLICYSQL_USAGE_BUDGET_EXCEEDED`,
+  and `POLICYSQL_COST_ADMISSION_UNAVAILABLE` appear in no reply (cost is an observation). They
+  left the status table (`src/http/status.ts`, the library table of `website/api/errors.md`)
+  for a log-only table in `errors.md`; the ADR 0023 test now requires every code in the source
+  to be in exactly one of the three tables and each log-only code to be produced only by the
+  cost observation. The client no longer lists `USAGE_BUDGET_EXCEEDED` as a definite rejection;
+  the server never sends it. This changes two public exports of `@unacowa/policysql/cloudflare`:
+  `ERROR_STATUS` no longer has the three keys, and `statusFor` answers them 500 (as any code
+  outside the table); `createErrorResponse` refuses them at every status (`LOG_ONLY_CODES` in
+  `src/http/status.ts`), so a wrapper cannot put them into a reply either.
+- **The namespace collision is pinned on every path** that builds an `execute`: an interactive
+  statement (`tests/machine.rs`), an atomic envelope on both placements, keyed and unkeyed
+  (`tests/atomic.rs`), and a callback query (`tests/commit_checks.rs`); each asserts no
+  `execute` of the statement, no COMMIT, and every handle released.
+- **Kept for rollout safety.** The discard of old-format records is the machine's own rule
+  (no TypeScript), and it stays: Durable Object storage outlives deployments, so a deployment
+  upgrading from a release before pull request 7 or 8 may still hold records the TypeScript
+  owner wrote, and the rule is what answers them without a false rejection. The per-path wire
+  markers (`1` on the interactive paths, `2` on `/atomic`) and the checks that never read an
+  unmarked or mismatched reply stay for the same reason: this pull request changes no wire,
+  so its own deployment has no skew, but an installation that upgrades from an earlier release
+  meets the skews of pull requests 7 and 8, and those checks keep them unavailable rather than
+  misreported. Their tests replay the recorded earlier objects and Worker.
+- **Not changed (observed while porting `turso.test.mjs`).** On the direct placement, a driver
+  row whose shape does not match its columns fails the `execute` effect (`executeFailed`,
+  class `unavailable`, so 503), where the TypeScript path answered 422
+  `POLICYSQL_SCHEMA_MISMATCH`; a single value the codec cannot carry is the `invalid` marker,
+  which core answers 422 as before. This has been so since pull request 8 and only a custom
+  provider can produce such a row; it is left as is here (no behavior change) and noted for a
+  follow-up.
+- **`noImplicitAny` (#44).** With the deletions, `tsc --noImplicitAny` over the deployment
+  reports 57 implicit-any errors (244 before), 20 of them in `src/turso-http.ts`; enabling the
+  flag is left to #44.
 
 ## Decided during review
 

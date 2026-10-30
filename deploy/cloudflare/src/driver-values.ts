@@ -16,11 +16,11 @@ const driverValue = (value, maxBytes: number) => {
   try { return decodeBlob(value.base64, maxBytes); } catch { throw internal(); }
 };
 
-export const driverArgs = (statement, maxBytes: number) => {
+// An `execute` effect's arguments: core has already merged the client and server namespaces
+// and rejected any overlap (ADR 0024 pull request 9 removed the second check here).
+export const driverArgs = (args: Record<string, unknown>, maxBytes: number) => {
   bytesLimit(maxBytes);
-  if (Object.keys(statement.clientParameters).some(name => Object.hasOwn(statement.serverParameters, name))) throw internal();
-  return Object.fromEntries(Object.entries({ ...statement.clientParameters, ...statement.serverParameters })
-    .map(([name, value]) => [name, driverValue(value, maxBytes)]));
+  return Object.fromEntries(Object.entries(args).map(([name, value]) => [name, driverValue(value, maxBytes)]));
 };
 
 export const rawDriverValue = (value, maxBytes: number) => {

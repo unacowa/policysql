@@ -704,3 +704,62 @@ fn p5_a_direct_abandon_during_commit_then_the_retry_resolves_through_the_row() {
         assert_eq!(engine.compiler.live_handles(), 0);
     }
 }
+
+/// An envelope whose client parameter collides with a server parameter (the fake compiler's
+/// `session_tenant_id`): core merges the namespaces and fails closed before the envelope's
+/// `execute` on both placements, keyed and unkeyed, and releases every handle (ADR 0024 pull
+/// request 9 removed the engine's second check in `driverArgs`).
+#[test]
+fn a_parameter_namespace_collision_executes_no_envelope_on_either_placement() {
+    let colliding = envelope(&[(
+        "INSERT INTO projects (id) VALUES (:session_tenant_id)",
+        json!({"session_tenant_id": "other"}),
+    )]);
+    let audited = envelope(&[(
+        "INSERT INTO audited (id) VALUES (:session_tenant_id)",
+        json!({"session_tenant_id": "other"}),
+    )]);
+    for (label, mut engine, event) in [
+        (
+            "direct unkeyed",
+            Engine::atomic(false),
+            execute_request(&colliding, None),
+        ),
+        (
+            "direct keyed",
+            Engine::atomic(false),
+            execute_request(&colliding, Some(KEY)),
+        ),
+        (
+            "owner unkeyed",
+            owner_engine(),
+            atomic_input(&audited, None),
+        ),
+        (
+            "owner keyed",
+            owner_engine(),
+            atomic_input(&audited, Some([KEY_HASH, FINGERPRINT])),
+        ),
+    ] {
+        let reply = engine.run(&event);
+        assert_eq!(reply["ok"], false, "{label}: {reply}");
+        assert_eq!(
+            engine.observed.envelope_executes, 0,
+            "{label}: no envelope executes"
+        );
+        assert_eq!(engine.observed.envelope_commits, 0, "{label}");
+        assert!(
+            !types(&engine).contains(&"commit".to_owned()),
+            "{label}: no COMMIT"
+        );
+        if label.ends_with("unkeyed") {
+            // Without a key there is no idempotency lookup either: no execute effect at all.
+            assert!(!types(&engine).contains(&"execute".to_owned()), "{label}");
+        }
+        assert_eq!(
+            engine.compiler.live_handles(),
+            0,
+            "{label}: handles released"
+        );
+    }
+}

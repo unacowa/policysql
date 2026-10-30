@@ -637,3 +637,25 @@ fn expiry_before_the_first_validator_rejects_the_commit() {
         Some("expired")
     );
 }
+
+/// A callback query whose client parameter collides with a server parameter (the fake
+/// compiler's `session_tenant_id`): core fails closed before the callback's `execute` (an
+/// invariant fault: the waiting commit gets `POLICYSQL_INTERNAL`, never a COMMIT) and releases
+/// its handle (ADR 0024 pull request 9 removed the engine's second check in `driverArgs`).
+#[test]
+fn a_callback_parameter_namespace_collision_executes_nothing() {
+    let mut engine = checked();
+    validating(&mut engine);
+    let token = engine.token();
+    let text = r#"{"sequence":1,"sql":"SELECT id FROM projects WHERE id = :session_tenant_id","params":{"session_tenant_id":"other"}}"#;
+    let reply = engine.run_callback(&token, text);
+    assert_eq!(reply["ok"], false, "{reply}");
+    assert_eq!(engine.observed.callback_executes, 0, "nothing executes");
+    engine.settle();
+    assert_eq!(code(&last_reply(&engine)), Some("POLICYSQL_INTERNAL"));
+    assert!(
+        !engine.observed.awaited.contains(&"commit".to_owned()),
+        "no COMMIT"
+    );
+    assert_eq!(engine.compiler.live_handles(), 0);
+}

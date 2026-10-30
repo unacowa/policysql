@@ -1,19 +1,22 @@
-// The differential harness of ADR 0024 pull requests 6 and 8: atomic `execute` through the
-// engine of before pull request 8 (`createLegacyExecute`, test/helpers/legacy-engine.mjs:
-// `executeSealedEnvelope` on the direct path, `LegacyTransactionOwnerCore` on the owner path)
-// and through production (`createEngine`, whose `request` step runs the direct placement and
-// forwards to production `TransactionOwnerCore` owners behind the in-memory port), side by side
-// with the same fake clock, the same kind of database (one SQLite file each,
-// `policysql_idempotency` included), the same store faults, and the same scripted validator. It
-// asserts equal results, database calls (SQL and arguments; the stored `response_json` compared
-// as JSON), validator calls (the signed hook body with the token masked), callback replies,
-// trace-sink calls, cost observations, and final rows (the idempotency table included), except
-// the differences in `ALLOWLIST`, each named with its reason.
+// The differential harness of ADR 0024 pull requests 6 and 8, against its recorded reference
+// since pull request 9. It ran atomic `execute` through the engine of before pull request 8
+// (`createLegacyExecute`: `executeSealedEnvelope` on the direct path, `LegacyTransactionOwnerCore`
+// on the owner path) and through production (`createEngine`, whose `request` step runs the
+// direct placement and forwards to production `TransactionOwnerCore` owners behind the in-memory
+// port), with the same fake clock, the same kind of database (one SQLite file each,
+// `policysql_idempotency` included), the same store faults, and the same scripted validator.
+// Pull request 9 deleted the TypeScript path; what it did in every scenario is recorded in
+// test/fixtures/reference/step-atomic-differential.json (the "ts" side,
+// test/helpers/reference-transcript.mjs). The harness runs production and asserts equal
+// results, database calls (SQL and arguments; the stored `response_json` compared as JSON),
+// validator calls (the signed hook body with the token masked), callback replies, trace-sink
+// calls, cost observations, and final rows (the idempotency table included), except the
+// differences in `ALLOWLIST`, each named with its reason.
 //
-// It covers the scenarios of turso.test.mjs, execute-egress.test.mjs, idempotency.test.mjs, and
-// cost.test.mjs that reach execution, on both placements, keyed and unkeyed. The owner-level
-// scenarios of interactive transactions are in step-differential.test.mjs. Pull request 9
-// deletes both; the transcripts replace them.
+// It covers the scenarios of the former turso.test.mjs, execute-egress.test.mjs,
+// idempotency.test.mjs, and cost.test.mjs that reach execution, on both placements, keyed and
+// unkeyed. The owner-level scenarios of interactive transactions are in
+// step-differential.test.mjs.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHmac } from "node:crypto";
@@ -25,13 +28,16 @@ import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { createEngine } from "../src/engine.ts";
 import { EngineError } from "../src/errors.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
-import { estimateSealedEnvelope } from "../src/cost.ts";
 import { validateConfig } from "../src/engine-config.ts";
-import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
 import { createMemoryTransactionOwners } from "./helpers/memory-owner.mjs";
-import { createLegacyExecute } from "./helpers/legacy-engine.mjs";
+import { asRecorded, referenceTranscript } from "./helpers/reference-transcript.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
+
+// What the previous release's `execute` and `LegacyTransactionOwnerCore` did in every scenario
+// below (the "ts" side), and what `cost.ts` estimated, recorded before pull request 9 deleted
+// them.
+const reference = referenceTranscript(new URL("./fixtures/reference/step-atomic-differential.json", import.meta.url));
 
 /**
  * The intentional differences (ADR 0024 "Inconsistencies the move must resolve"). A scenario
@@ -237,45 +243,6 @@ const sqliteProvider = (path, calls, faults, connections) => ({
   },
 });
 
-/** The owners of the TypeScript side: one `LegacyTransactionOwnerCore` per name, with a store and a timer. */
-const legacyOwners = (dependencies, faults, background) => {
-  const slots = new Map();
-  const live = (name) => {
-    let slot = slots.get(name);
-    if (!slot) {
-      const data = new Map();
-      const facilities = {
-        store: {
-          async get(key) { return structuredClone(data.get(key)); },
-          async put(key, value) {
-            if (faults.put?.({ phase: value?.status })?.fail) throw new Error("store put failed");
-            data.set(key, structuredClone(value));
-          },
-        },
-        timer: { async schedule() {} },
-        background,
-      };
-      slot = { data, core: new LegacyTransactionOwnerCore(facilities, dependencies) };
-      slots.set(name, slot);
-    }
-    return slot;
-  };
-  const wire = (value) => JSON.parse(JSON.stringify(value));
-  return {
-    port: {
-      route(name) {
-        return {
-          atomic: async (input, requestId) => wire(await live(name).core.atomic(wire(input), requestId)),
-          // The TypeScript owner's own callback input: the parsed command.
-          callbackQuery: async (input, requestId) => wire(await live(name).core.callbackQuery(wire(input), requestId)),
-        };
-      },
-    },
-    record: (name) => slots.get(name)?.data.get("transaction"),
-    names: () => [...slots.keys()],
-  };
-};
-
 const signedBy = (secret, timestamp, body, signature) =>
   signature === `v1=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
 const ALLOW = () => Response.json({ version: "1", allowed: true });
@@ -300,9 +267,12 @@ const environment = (t, { limits = {}, trace = false, engineConfig = config } = 
     runtime, clock, faults, logs, sides: {},
     hooks: { ts: [], step: [] }, tokens: { ts: [], step: [] }, callbacks: { ts: [], step: [] }, traces: { ts: [], step: [] },
     validator: ALLOW, validatorErrors: [],
+    reference: reference.of(t),
     setSide(side) { current = side; },
+    /** The side whose operation runs now (fault scripts act on that side). */
+    currentSide: () => current,
   };
-  for (const side of ["ts", "step"]) {
+  for (const side of ["step"]) {
     const path = join(directory, `${side}.sqlite`);
     const db = new DatabaseSync(path);
     db.exec(SCHEMA);
@@ -327,11 +297,7 @@ const environment = (t, { limits = {}, trace = false, engineConfig = config } = 
       const query = async (text) => {
         const requestId = `cb-${++callbackCount}`;
         const owner = env.sides[side].owner(`tx_${hook.validationId.slice("cval_".length)}`);
-        // The TypeScript owner reads the parsed command; production the port's input since pull
-        // request 7 (the validation id and the verified text).
-        const reply = side === "ts"
-          ? await owner.callbackQuery({ capability: hook.query.token, command: JSON.parse(text) }, requestId)
-          : await owner.callbackQuery({ validationId: hook.validationId, capability: hook.query.token, command: text }, requestId);
+        const reply = await owner.callbackQuery({ validationId: hook.validationId, capability: hook.query.token, command: text }, requestId);
         const normalized = reply.ok ? { ok: true, value: reply.value } : { ok: false, code: reply.error.code };
         env.callbacks[side].push(normalized);
         return normalized;
@@ -344,18 +310,11 @@ const environment = (t, { limits = {}, trace = false, engineConfig = config } = 
       }
     };
     const ownerDependencies = { getRuntime, database, config: engineConfig, fetchImpl };
-    if (side === "ts") {
-      const owners = legacyOwners(ownerDependencies, faults, background);
-      const execute = createLegacyExecute({ getRuntime, database, config: engineConfig, transactionOwners: owners.port, executionTrace });
-      env.sides.ts = { path, calls, tasks, background, execute: (input, context) => execute(input, context, background),
-        owner: (name) => owners.port.route(name), records: async () => owners.names().map((name) => owners.record(name)) };
-    } else {
-      const owners = createMemoryTransactionOwners(() => ownerDependencies, { background });
-      owners.interceptPut(({ value }) => faults.put?.({ phase: typeof value === "string" ? JSON.parse(value).phase : value?.status }));
-      const engine = createEngine({ getRuntime, database, config: engineConfig, transactionOwners: owners.port, ...(executionTrace ? { executionTrace } : {}) });
-      env.sides.step = { path, calls, tasks, background, execute: (input, context) => engine.execute(input, context, background),
-        owner: (name) => owners.port.route(name), records: async () => Promise.all(owners.names().map((name) => owners.record(name))) };
-    }
+    const owners = createMemoryTransactionOwners(() => ownerDependencies, { background });
+    owners.interceptPut(({ value }) => faults.put?.({ phase: typeof value === "string" ? JSON.parse(value).phase : value?.status }));
+    const engine = createEngine({ getRuntime, database, config: engineConfig, transactionOwners: owners.port, ...(executionTrace ? { executionTrace } : {}) });
+    env.sides.step = { path, calls, tasks, background, execute: (input, context) => engine.execute(input, context, background),
+      owner: (name) => owners.port.route(name), records: async () => Promise.all(owners.names().map((name) => owners.record(name))) };
   }
   t.after(() => {
     assert.deepEqual(env.validatorErrors, [], "the validator scripts' assertions hold");
@@ -406,41 +365,45 @@ const normalizedResult = (result) => result.ok
   ? { ok: true, value: randomOwner(result.value), requestId: result.requestId }
   : { ok: false, code: result.error.code, message: result.error.message, path: result.error.path, requestId: result.requestId };
 
-/** One `execute` on both sides; returns what each saw. */
-const both = async (env, op) => {
-  if (op.advance) {
-    env.clock.now += op.advance;
-    return null;
-  }
-  const requestId = env.nextRequest();
-  const seen = {};
-  const start = env.clock.now;
-  const ends = {};
-  for (const side of ["ts", "step"]) {
-    env.clock.now = start;
-    const marks = {
-      calls: env.sides[side].calls.length, logs: env.logs[side].length, hooks: env.hooks[side].length,
-      callbacks: env.callbacks[side].length, traces: env.traces[side].length,
-    };
-    env.setSide(side);
-    const context = { database: op.binding ?? bindingOf(env.runtime), session: session(op.access), requestId };
-    const input = { bodyText: typeof op.body === "string" ? op.body : JSON.stringify(op.body),
-      ...(op.key === undefined ? {} : { idempotencyKey: op.key }) };
-    const result = await env.sides[side].execute(input, context);
-    // Background work (cost observation) completes before the comparison.
-    while (env.sides[side].tasks.length > 0) await env.sides[side].tasks.shift();
-    seen[side] = {
+/** One `execute` on one side from `start`; returns what it saw and its clock at the end. */
+const runSide = async (env, side, op, requestId, start) => {
+  env.clock.now = start;
+  const marks = {
+    calls: env.sides[side].calls.length, logs: env.logs[side].length, hooks: env.hooks[side].length,
+    callbacks: env.callbacks[side].length, traces: env.traces[side].length,
+  };
+  env.setSide(side);
+  const context = { database: op.binding ?? bindingOf(env.runtime), session: session(op.access), requestId };
+  const input = { bodyText: typeof op.body === "string" ? op.body : JSON.stringify(op.body),
+    ...(op.key === undefined ? {} : { idempotencyKey: op.key }) };
+  const result = await env.sides[side].execute(input, context);
+  // Background work (cost observation) completes before the comparison.
+  while (env.sides[side].tasks.length > 0) await env.sides[side].tasks.shift();
+  return {
+    seen: {
       result: normalizedResult(result),
       calls: normalizedCalls(side, env.sides[side].calls.slice(marks.calls), op.owner === true),
       logs: env.logs[side].slice(marks.logs).filter((log) => op.owner !== true || !log.event.startsWith("cost_")),
       hooks: env.hooks[side].slice(marks.hooks),
       callbacks: env.callbacks[side].slice(marks.callbacks),
       traces: env.traces[side].slice(marks.traces),
-    };
-    ends[side] = env.clock.now;
+    },
+    end: env.clock.now,
+  };
+};
+
+/** One `execute` on the step side; returns what it and the reference side saw. */
+const both = async (env, op) => {
+  if (op.advance) {
+    env.clock.now += op.advance;
+    return null;
   }
-  env.clock.now = Math.max(ends.ts, ends.step);
-  return seen;
+  const requestId = env.nextRequest();
+  const start = env.clock.now;
+  const ts = env.reference.take("execute");
+  const step = asRecorded(await runSide(env, "step", op, requestId, start));
+  env.clock.now = Math.max(ts.end, step.end);
+  return { ts: ts.seen, step: step.seen };
 };
 
 const assertSame = (seen, label) => {
@@ -454,12 +417,12 @@ const assertSame = (seen, label) => {
   for (const hook of seen.step.hooks) assert.equal(hook.signed, true, `${label}: the hook body is signed`);
 };
 
-const assertSameEnd = (env, label, ownerPath = false) => {
+const assertSameEnd = async (env, label, ownerPath = false) => {
   const rows = (side) => {
     const value = env.rows(side);
     return { ...value, idempotency: value.idempotency.map((row) => ({ ...row, record: ownerPath ? row.record : normalizeStored(side, row.record) })) };
   };
-  assert.deepEqual(rows("step"), rows("ts"), `${label}: rows`);
+  assert.deepEqual(asRecorded(rows("step")), env.reference.take("rows"), `${label}: rows`);
 };
 
 const agree = async (t, ops, prepare = () => {}, options = {}) => {
@@ -472,7 +435,7 @@ const agree = async (t, ops, prepare = () => {}, options = {}) => {
     assertSame(seen, `op#${index}`);
     if (seen) env.answers.push(code(seen, "step"));
   }
-  assertSameEnd(env, "end", ops.some((op) => op.owner));
+  await assertSameEnd(env, "end", ops.some((op) => op.owner));
   return env;
 };
 
@@ -590,7 +553,7 @@ test("duplicate rows and a malformed stored record are internal, alike", async (
   const malformed = await both(env, { body: insertProject("p1"), key: KEY });
   assertSame(malformed, "malformed record");
   assert.equal(code(malformed, "step"), "POLICYSQL_INTERNAL");
-  assertSameEnd(env, "end");
+  await assertSameEnd(env, "end");
 });
 
 test("the execution trace reaches the sink and a debug caller, alike", async (t) => {
@@ -677,7 +640,7 @@ test(`allowlist idempotency-conflict-code: ${ALLOWLIST["idempotency-conflict-cod
   assert.equal(code(seen, "step"), "POLICYSQL_IDEMPOTENCY_CONFLICT");
   assert.equal(code(seen, "ts"), "POLICYSQL_TRANSACTION_CONFLICT");
   for (const side of ["ts", "step"]) assert.equal(seen[side].calls.filter((call) => call.op === "commit").length, 0);
-  assertSameEnd(env, "end", true);
+  await assertSameEnd(env, "end", true);
 });
 
 test(`allowlist duplicate-idempotency-rows: ${ALLOWLIST["duplicate-idempotency-rows"]}`, async (t) => {
@@ -694,7 +657,7 @@ test(`allowlist duplicate-idempotency-rows: ${ALLOWLIST["duplicate-idempotency-r
 test(`allowlist stored-record-shape: ${ALLOWLIST["stored-record-shape"]}`, async (t) => {
   const env = environment(t);
   await both(env, { body: insertProject("p1"), key: KEY });
-  const [ts] = env.rows("ts").idempotency;
+  const [ts] = env.reference.take("rows").idempotency;
   const [step] = env.rows("step").idempotency;
   assert.equal(Object.hasOwn(ts.record, "status") || Object.hasOwn(ts.record, "commitChecks"), false);
   assert.equal(step.record.status, "committed");
@@ -711,7 +674,7 @@ test(`allowlist owner-prior-record-of-another-binding: ${ALLOWLIST["owner-prior-
   assert.equal(code(seen, "step"), "POLICYSQL_IDEMPOTENCY_CONFLICT");
   assert.deepEqual(seen.step.calls.map((call) => call.op), ["begin", "execute", "rollback"], "core looked the row up");
   for (const side of ["ts", "step"]) assert.equal(seen[side].hooks.length, 0);
-  assertSameEnd(env, "end", true);
+  await assertSameEnd(env, "end", true);
 });
 
 test(`allowlist owner-commit-failure-code: ${ALLOWLIST["owner-commit-failure-code"]}`, async (t) => {
@@ -736,10 +699,10 @@ test(`allowlist direct-binding-revoked-before-commit: ${ALLOWLIST["direct-bindin
   const env = environment(t);
   // Each side asks the provider three times: before the body, at connect, and before COMMIT
   // (core's own first check is the engine's). The third answer of each side revokes.
-  let checks = 0;
-  env.faults.check = () => ++checks % 3 !== 0;
+  const checks = { ts: 0, step: 0 };
+  env.faults.check = () => ++checks[env.currentSide()] % 3 !== 0;
   const seen = await both(env, { body: insertProject("p1"), key: KEY });
-  assert.equal(checks, 6, "three provider calls per side");
+  assert.equal(checks.step, 3, "three provider calls");
   assert.equal(seen.ts.result.code, "POLICYSQL_DATABASE_BINDING_REJECTED");
   assert.equal(seen.step.result.code, "POLICYSQL_INTERNAL");
   for (const side of ["ts", "step"]) {
@@ -751,12 +714,15 @@ test(`allowlist direct-binding-revoked-before-commit: ${ALLOWLIST["direct-bindin
   }
   const { REJECTIONS } = await import("../../../packages/client/protocol.js");
   assert.equal([...REJECTIONS.values()].flat().some((value) => ["INTERNAL", "DATABASE_BINDING_REJECTED"].includes(value)), false);
-  for (const side of ["ts", "step"]) assert.equal(env.rows(side).projects.some((row) => row.id === "p1"), false, side);
+  const rows = { ts: env.reference.take("rows"), step: env.rows("step") };
+  for (const side of ["ts", "step"]) assert.equal(rows[side].projects.some((row) => row.id === "p1"), false, side);
 });
 
 // ---- cost_estimate_json against cost.ts (cost.test.mjs) ----------------------------------------
 
+// The cases of the former cost.test.mjs; `cost.ts` `estimateSealedEnvelope`'s answers are recorded.
 test("cost_estimate_json evaluates as cost.ts evaluates", async (t) => {
+  const recorded = reference.of(t);
   const runtime = makeRuntime();
   t.after(() => runtime.free());
   const validated = validateConfig({ environment: "test", costCatalog: { maxEstimatedRowsRead: 100, maxEstimatedRowsWritten: 100, resources: { 1: { upperRows: 20 } } } }).costCatalog;
@@ -775,13 +741,7 @@ test("cost_estimate_json evaluates as cost.ts evaluates", async (t) => {
   ];
   for (const [index, item] of cases.entries()) {
     const catalog = item.catalog === null ? undefined : item.catalog ? validateConfig({ environment: "test", costCatalog: item.catalog }).costCatalog : validated;
-    const fake = () => ({ async begin() { return { open: true, usage: [], async execute() { return item.rows.map((rows) => ({ columns: item.columns, rows, usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 0 } })); }, async commit() { this.open = false; }, async rollback() { this.open = false; } }; } });
-    let expected;
-    try {
-      expected = { estimates: (await estimateSealedEnvelope({ statements: item.statements }, catalog, "req", fake, 1_024, 1_000)).estimates };
-    } catch (error) {
-      expected = { error: { code: error.code, message: error.message } };
-    }
+    const expected = recorded.take("cost.ts");
     const planned = item.statements.filter((value) => value.operation !== "insert").length;
     const actual = JSON.parse(runtime.cost_estimate_json(JSON.stringify({
       catalog: catalog ?? null,

@@ -32,8 +32,8 @@ export const failureClass = (error: unknown): FailureClass => {
 };
 
 /**
- * The class of a database or provider failure on the engine's direct placement, as `turso.ts`
- * `remoteFailure` classified it before ADR 0024 pull request 8: a query timeout or the
+ * The class of a database or provider failure on the engine's direct placement, as the
+ * TypeScript direct path classified it before ADR 0024 pull request 8: a query timeout or the
  * engine's own timeout is `timeout`, a rejected binding `rejected`, anything else
  * `unavailable`. Core turns each class into its code.
  */
@@ -76,7 +76,7 @@ export const decodeArgs = (args: Record<string, unknown>, maxBytes: number) => {
   const entries = Object.entries(args ?? {});
   const exact = entries.filter(([, value]) => typeof value === "bigint");
   const rest = Object.fromEntries(entries.filter(([, value]) => typeof value !== "bigint"));
-  return { ...driverArgs({ clientParameters: rest, serverParameters: {} }, maxBytes), ...Object.fromEntries(exact) };
+  return { ...driverArgs(rest, maxBytes), ...Object.fromEntries(exact) };
 };
 
 /**

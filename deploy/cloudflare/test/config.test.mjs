@@ -6,7 +6,6 @@ import { createApp } from "../src/app.ts";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { createWorkerEntrypoints } from "../src/worker.ts";
 import { durableObjectTransactionOwnerClass } from "../src/adapters/durable-objects.ts";
-import { observeCostEnvelope } from "../src/cost.ts";
 import { configFromEnv as referenceConfig } from "../wrapper/config.ts";
 import { configFromEnv as exampleConfig } from "../../../examples/database-routing/config.ts";
 import { testBinding, testProvider } from "./helpers/database.mjs";
@@ -189,16 +188,6 @@ test("the Worker builds its deployment at most once per env object, and the Dura
   assert.equal(counts.deployment, 3);
   assert.equal(owner.config.environment, "built");
   assert.deepEqual(owner.config.commitCheck("consistency"), seen[0].commitChecks.consistency);
-});
-
-test("without a cost catalog, cost observation is logged as unknown and opens no database work", async (t) => {
-  const logs = [];
-  t.mock.method(console, "log", (line) => logs.push(JSON.parse(line)));
-  let connected = 0;
-  const compiled = { statements: [{ operation: "select", costExplainSql: "EXPLAIN QUERY PLAN SELECT 1", clientParameters: {}, serverParameters: {}, explain: { resource: 1 } }] };
-  await observeCostEnvelope(compiled, validateConfig({ environment: "test" }).costCatalog, "req", () => { connected++; }, 1_024, 1_000);
-  assert.equal(connected, 0);
-  assert.deepEqual(logs, [{ event: "cost_observation_failed", requestId: "req", code: "POLICYSQL_COST_UNKNOWN" }]);
 });
 
 const readJsonc = (relative) => JSON.parse(readFileSync(new URL(relative, import.meta.url), "utf8")

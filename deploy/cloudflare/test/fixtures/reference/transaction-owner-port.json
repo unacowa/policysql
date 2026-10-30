@@ -1,0 +1,10 @@
+{
+"durable-objects: a Worker of this version never turns an earlier object's answer into a rejection": [
+  ["earlier Worker committed",{"statuses":[201,200,200],"commit":{"transactionId":"tx_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","status":"committed","meta":{"requestId":"old/commit","commitChecks":"not_triggered"}},"rows":[{"id":"skewed","name":"skewed"}]}],
+  ["earlier object /commit",{"status":400,"headers":{"cache-control":"no-store","content-type":"application/json; charset=utf-8"},"body":"{\"error\":{\"code\":\"POLICYSQL_INVALID_REQUEST\",\"message\":\"The request is invalid.\",\"path\":null,\"requestId\":\"b0c96395-7637-4f86-9341-9aa9f6b0233c\"}}"}],
+  ["earlier object /begin",{"status":400,"headers":{"cache-control":"no-store","content-type":"application/json; charset=utf-8"},"body":"{\"error\":{\"code\":\"POLICYSQL_INVALID_REQUEST\",\"message\":\"The request is invalid.\",\"path\":null,\"requestId\":\"1edae847-89cc-4b06-a1a9-f735791737d8\"}}"}],
+  ["earlier object /statement",{"status":400,"headers":{"cache-control":"no-store","content-type":"application/json; charset=utf-8"},"body":"{\"error\":{\"code\":\"POLICYSQL_INVALID_REQUEST\",\"message\":\"The request is invalid.\",\"path\":null,\"requestId\":\"5fa37fec-62ae-4f39-ac34-f671d9d44916\"}}"}],
+  ["earlier object /rollback",{"status":400,"headers":{"cache-control":"no-store","content-type":"application/json; charset=utf-8"},"body":"{\"error\":{\"code\":\"POLICYSQL_INVALID_REQUEST\",\"message\":\"The request is invalid.\",\"path\":null,\"requestId\":\"1a335f1f-5529-42fd-96be-62fe819c75c9\"}}"}],
+  ["earlier object /validation-query",{"status":409,"headers":{"cache-control":"no-store","content-type":"application/json; charset=utf-8"},"body":"{\"error\":{\"code\":\"POLICYSQL_TRANSACTION_UNAVAILABLE\",\"message\":\"The transaction is no longer active.\",\"path\":null,\"requestId\":\"158de32b-baba-42f0-b8d2-7e0d16756136\"}}"}]
+]
+}

@@ -1,9 +1,7 @@
 #![forbid(unsafe_code)]
 
 use policysql_core::{ConstraintScalar, LogicalType, LogicalValue, ValueDescriptor};
-use policysql_execution::{
-    DatabaseExecutor, TransactionFactory, TransactionSession, VerifiedExecutionPlan,
-};
+use policysql_execution::{DatabaseExecutor, VerifiedExecutionPlan};
 use policysql_sqlite::SqliteProfile;
 use std::fmt;
 
@@ -207,103 +205,6 @@ fn strip_visibility_columns(
     result.rows = public_rows;
     result.redactions = redactions;
     Ok(())
-}
-
-/// Backend-owned transaction handle. It never accepts arbitrary SQL.
-pub trait TursoTransaction: Send {
-    /// Executes a sealed statement in this transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns a normalized adapter failure.
-    fn execute(
-        &mut self,
-        plan: &VerifiedExecutionPlan<SqliteProfile>,
-    ) -> Result<ExecuteResult, AdapterError>;
-
-    /// Commits this transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns a normalized commit failure.
-    fn commit(&mut self) -> Result<(), AdapterError>;
-
-    /// Rolls this transaction back.
-    ///
-    /// # Errors
-    ///
-    /// Returns a normalized rollback failure.
-    fn rollback(&mut self) -> Result<(), AdapterError>;
-}
-
-/// Opens an explicitly owned Turso transaction.
-pub trait TursoTransactionTransport: Send + Sync {
-    type Transaction: TursoTransaction;
-
-    /// Begins a transaction owned by `PolicySQL`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a normalized begin failure.
-    fn begin(&self) -> Result<Self::Transaction, AdapterError>;
-}
-
-#[derive(Debug)]
-pub struct TursoTransactionFactory<Transport> {
-    transport: Transport,
-}
-
-impl<Transport> TursoTransactionFactory<Transport> {
-    #[must_use]
-    pub const fn new(transport: Transport) -> Self {
-        Self { transport }
-    }
-}
-
-#[derive(Debug)]
-pub struct TursoTransactionSession<Transaction> {
-    transaction: Transaction,
-}
-
-impl<Transport: TursoTransactionTransport> TransactionFactory<SqliteProfile>
-    for TursoTransactionFactory<Transport>
-{
-    type Session = TursoTransactionSession<Transport::Transaction>;
-    type Error = AdapterError;
-
-    fn begin(&self) -> Result<Self::Session, Self::Error> {
-        self.transport
-            .begin()
-            .map(|transaction| TursoTransactionSession { transaction })
-    }
-}
-
-impl<Transaction: TursoTransaction> TransactionSession<SqliteProfile>
-    for TursoTransactionSession<Transaction>
-{
-    type Output = ExecuteResult;
-    type Error = AdapterError;
-
-    fn execute(
-        &mut self,
-        plan: &VerifiedExecutionPlan<SqliteProfile>,
-    ) -> Result<Self::Output, Self::Error> {
-        let mut result = self.transaction.execute(plan)?;
-        if plan.operation() == policysql_core::OperationKind::Select {
-            validate_result(plan, &mut result)?;
-        } else {
-            validate_mutation_result(plan, &mut result)?;
-        }
-        Ok(result)
-    }
-
-    fn commit(&mut self) -> Result<(), Self::Error> {
-        self.transaction.commit()
-    }
-
-    fn rollback(&mut self) -> Result<(), Self::Error> {
-        self.transaction.rollback()
-    }
 }
 
 fn validate_mutation_result(
@@ -661,8 +562,8 @@ fn _profile_type_safety_documentation() {}
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterError, ExecuteResult, TursoExecutor, TursoTransaction, TursoTransactionFactory,
-        TursoTransactionTransport, TursoTransport, validate_value,
+        AdapterError, ExecuteResult, TursoExecutor, TursoTransport, validate_sealed_result,
+        validate_value,
     };
     use policysql_catalog::{Catalog, ResourceDescriptor};
     use policysql_core::{
@@ -670,17 +571,13 @@ mod tests {
         ResourceName, ResultName, SnapshotId, ValueConstraints, ValueDescriptor,
         ValueRepresentation,
     };
-    use policysql_execution::{
-        CheckDecision, CommitCheck, DatabaseExecutor, ExecutionLimits, ReadOnlyCallback,
-        TransactionError, VerifiedExecutionPlan, execute_checked_transaction,
-    };
+    use policysql_execution::{DatabaseExecutor, ExecutionLimits, VerifiedExecutionPlan};
     use policysql_ir::{
         BoundAssignment, BoundColumn, BoundExpr, BoundInsert, BoundProjection, BoundSelect,
         BoundStatement, ColumnUsage, ProtectedPlan,
     };
     use policysql_sqlite::{SqliteProfile, compile_verified_insert, compile_verified_select};
     use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
 
     fn plan() -> VerifiedExecutionPlan<SqliteProfile> {
         let resource_id =
@@ -1000,86 +897,6 @@ mod tests {
         );
     }
 
-    #[derive(Clone, Debug, Default)]
-    struct TransactionState {
-        committed: bool,
-        rolled_back: bool,
-    }
-
-    #[derive(Clone, Debug)]
-    struct FakeTransactionTransport {
-        state: Arc<Mutex<TransactionState>>,
-        result: ExecuteResult,
-        fail_commit: bool,
-    }
-
-    #[derive(Debug)]
-    struct FakeTransaction {
-        state: Arc<Mutex<TransactionState>>,
-        result: ExecuteResult,
-        fail_commit: bool,
-    }
-
-    impl TursoTransactionTransport for FakeTransactionTransport {
-        type Transaction = FakeTransaction;
-
-        fn begin(&self) -> Result<Self::Transaction, AdapterError> {
-            Ok(FakeTransaction {
-                state: self.state.clone(),
-                result: self.result.clone(),
-                fail_commit: self.fail_commit,
-            })
-        }
-    }
-
-    impl TursoTransaction for FakeTransaction {
-        fn execute(
-            &mut self,
-            _plan: &VerifiedExecutionPlan<SqliteProfile>,
-        ) -> Result<ExecuteResult, AdapterError> {
-            Ok(self.result.clone())
-        }
-
-        fn commit(&mut self) -> Result<(), AdapterError> {
-            if self.fail_commit {
-                return Err(AdapterError::Remote);
-            }
-            self.state
-                .lock()
-                .map_err(|_| AdapterError::Remote)?
-                .committed = true;
-            Ok(())
-        }
-
-        fn rollback(&mut self) -> Result<(), AdapterError> {
-            self.state
-                .lock()
-                .map_err(|_| AdapterError::Remote)?
-                .rolled_back = true;
-            Ok(())
-        }
-    }
-
-    #[derive(Clone, Copy, Debug)]
-    struct Accept;
-
-    impl<Transaction: TursoTransaction>
-        CommitCheck<SqliteProfile, super::TursoTransactionSession<Transaction>> for Accept
-    {
-        type Error = AdapterError;
-
-        fn validate(
-            &self,
-            _callback: &mut ReadOnlyCallback<
-                '_,
-                SqliteProfile,
-                super::TursoTransactionSession<Transaction>,
-            >,
-        ) -> Result<CheckDecision, Self::Error> {
-            Ok(CheckDecision::Accept)
-        }
-    }
-
     fn mutation_result(check: LogicalValue) -> ExecuteResult {
         ExecuteResult {
             columns: vec!["id".to_owned(), "__policysql_check".to_owned()],
@@ -1089,63 +906,36 @@ mod tests {
         }
     }
 
+    // A mutation's sealed result (`validate_sealed_result`, which core's `validate_result_json`
+    // runs for every statement the step machine executes): the compiler's post-state check
+    // column is stripped from an accepted row, a false check is a rejection, and an affected-row
+    // count other than the declared expectation fails. What then happens to the transaction (a
+    // rollback, never a COMMIT) is the step machine's, tested in `policysql-transaction`
+    // (ADR 0024 pull request 9 moved these cases off `execute_checked_transaction`).
     #[test]
-    fn mutation_check_is_stripped_before_commit_and_false_rolls_back() {
-        let state = Arc::new(Mutex::new(TransactionState::default()));
-        let factory = TursoTransactionFactory::new(FakeTransactionTransport {
-            state: state.clone(),
-            result: mutation_result(LogicalValue::Boolean(true)),
-            fail_commit: false,
-        });
-        let outputs = execute_checked_transaction(&factory, &[mutation_plan()], &[Accept])
-            .unwrap_or_else(|error| unreachable!("valid transaction: {error}"));
-        assert_eq!(outputs[0].columns, vec!["id"]);
-        assert_eq!(outputs[0].rows[0].len(), 1);
-        assert!(state.lock().is_ok_and(|state| state.committed));
+    fn mutation_check_is_stripped_and_a_false_check_is_rejected() {
+        let mut accepted = mutation_result(LogicalValue::Boolean(true));
+        validate_sealed_result(&mutation_plan(), &mut accepted)
+            .unwrap_or_else(|error| unreachable!("valid mutation result: {error}"));
+        assert_eq!(accepted.columns, vec!["id"]);
+        assert_eq!(accepted.rows[0].len(), 1);
+        assert_eq!(accepted.affected_rows, 1);
 
-        let state = Arc::new(Mutex::new(TransactionState::default()));
-        let factory = TursoTransactionFactory::new(FakeTransactionTransport {
-            state: state.clone(),
-            result: mutation_result(LogicalValue::Boolean(false)),
-            fail_commit: false,
-        });
-        let result = execute_checked_transaction(&factory, &[mutation_plan()], &[Accept]);
+        let mut rejected = mutation_result(LogicalValue::Boolean(false));
         assert!(matches!(
-            result,
-            Err(TransactionError::Execute(AdapterError::Rejected(_)))
+            validate_sealed_result(&mutation_plan(), &mut rejected),
+            Err(AdapterError::Rejected(_))
         ));
-        assert!(state.lock().is_ok_and(|state| state.rolled_back));
     }
 
     #[test]
-    fn affected_row_and_commit_failures_roll_back() {
-        let state = Arc::new(Mutex::new(TransactionState::default()));
+    fn an_unexpected_affected_row_count_fails_the_expectation() {
         let mut invalid = mutation_result(LogicalValue::Boolean(true));
         invalid.affected_rows = 2;
-        let factory = TursoTransactionFactory::new(FakeTransactionTransport {
-            state: state.clone(),
-            result: invalid,
-            fail_commit: false,
-        });
-        let result = execute_checked_transaction(&factory, &[mutation_plan()], &[Accept]);
-        assert!(matches!(
-            result,
-            Err(TransactionError::Execute(AdapterError::ExpectationFailed))
-        ));
-        assert!(state.lock().is_ok_and(|state| state.rolled_back));
-
-        let state = Arc::new(Mutex::new(TransactionState::default()));
-        let factory = TursoTransactionFactory::new(FakeTransactionTransport {
-            state: state.clone(),
-            result: mutation_result(LogicalValue::Boolean(true)),
-            fail_commit: true,
-        });
-        let result = execute_checked_transaction(&factory, &[mutation_plan()], &[Accept]);
-        assert!(matches!(
-            result,
-            Err(TransactionError::Commit(AdapterError::Remote))
-        ));
-        assert!(state.lock().is_ok_and(|state| state.rolled_back));
+        assert_eq!(
+            validate_sealed_result(&mutation_plan(), &mut invalid),
+            Err(AdapterError::ExpectationFailed)
+        );
     }
 
     #[test]

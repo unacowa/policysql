@@ -24,7 +24,6 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = Object.freeze({
   POLICYSQL_PRESET_COLUMN: 403,
   POLICYSQL_TRANSACTION_MODE_VIOLATION: 403,
   POLICYSQL_DATABASE_BINDING_REJECTED: 403,
-  POLICYSQL_COST_UNKNOWN: 403,
   POLICYSQL_NOT_FOUND: 404,
   // State conflicts.
   POLICYSQL_STALE_OPERATION: 409,
@@ -38,15 +37,24 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = Object.freeze({
   POLICYSQL_EXPECTATION_FAILED: 422,
   POLICYSQL_SCHEMA_MISMATCH: 422,
   POLICYSQL_TRANSACTION_LIMIT_EXCEEDED: 429,
-  POLICYSQL_USAGE_BUDGET_EXCEEDED: 429,
   POLICYSQL_INTERNAL: 500,
   POLICYSQL_DATABASE_REQUIRED: 500,
   POLICYSQL_DATABASE_UNAVAILABLE: 503,
-  POLICYSQL_COST_ADMISSION_UNAVAILABLE: 503,
   POLICYSQL_COMMIT_OUTCOME_UNKNOWN: 503,
   POLICYSQL_TIMEOUT: 504,
   POLICYSQL_DATABASE_TIMEOUT: 504,
 });
+
+/**
+ * Codes that appear only in structured logs (the cost observation's `cost_observation_failed`)
+ * and never in a reply (ADR 0024 pull request 9; the log-only table of website/api/errors.md).
+ * They have no status, and `createErrorResponse` refuses them.
+ */
+export const LOG_ONLY_CODES: ReadonlySet<string> = Object.freeze(new Set([
+  "POLICYSQL_COST_UNKNOWN",
+  "POLICYSQL_USAGE_BUDGET_EXCEEDED",
+  "POLICYSQL_COST_ADMISSION_UNAVAILABLE",
+]));
 
 /** The status for a code. A code outside the table is a library fault and is served as 500. */
 export const statusFor = (code: string): number =>

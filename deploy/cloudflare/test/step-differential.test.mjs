@@ -1,16 +1,19 @@
-// The differential harness of ADR 0024 pull requests 4, 5, and 7: the TypeScript owner of
-// before the switch-over (`LegacyTransactionOwnerCore`, the reference until pull request 9)
-// and the production owner (`TransactionOwnerCore`, which since pull request 7 executes the
-// step machine over the real WASM `step_json`) run the same owner scenarios side by side, with the same fake clock, the same
-// kind of database (one SQLite file each), the same store and timer faults, and the same
-// scripted validator. The harness asserts equal replies, database calls (SQL and arguments),
-// terminal records, transaction log events, validator calls (the signed hook body, with the
-// capability token masked, and a valid signature), callback replies, and final rows, except
-// the differences in `ALLOWLIST`, each named with its reason.
+// The differential harness of ADR 0024 pull requests 4, 5, and 7, against its recorded
+// reference since pull request 9. It ran the TypeScript owner of before the switch-over
+// (`LegacyTransactionOwnerCore`) and the production owner (`TransactionOwnerCore`, which
+// executes the step machine over the real WASM `step_json`) on the same owner scenarios, with
+// the same fake clock, the same kind of database (one SQLite file each), the same store and
+// timer faults, and the same scripted validator. Pull request 9 deleted the TypeScript owner;
+// what it did in every scenario is recorded in test/fixtures/reference/step-differential.json
+// (the "ts" side, test/helpers/reference-transcript.mjs). The harness runs the production owner
+// and asserts equal replies, database calls (SQL and arguments), terminal records, transaction
+// log events, validator calls (the signed hook body, with the capability token masked, and a
+// valid signature), callback replies, and final rows, except the differences in `ALLOWLIST`,
+// each named with its reason and asserted for both sides.
 //
-// It covers the owner-level scenarios of transaction-owner.test.mjs and
+// It covers the owner-level scenarios of the former transaction-owner.test.mjs and of
 // transaction-owner-port.test.mjs, commit checks and callbacks included, plus generated command
-// sequences. Pull request 9 deletes it; the transcripts replace it.
+// sequences.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHmac } from "node:crypto";
@@ -20,10 +23,14 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
-import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
+import { asRecorded, referenceTranscript } from "./helpers/reference-transcript.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
+
+// What LegacyTransactionOwnerCore did in every scenario below (the "ts" side), recorded before
+// pull request 9 deleted it.
+const reference = referenceTranscript(new URL("./fixtures/reference/step-differential.json", import.meta.url));
 
 /**
  * The intentional differences (ADR 0024 "Inconsistencies the move must resolve", the failure
@@ -291,16 +298,15 @@ const ownerSlot = (makeCore, faults, phaseOf) => {
   return slot;
 };
 
-const tsPhase = (record) => !record ? undefined
-  : record.status === "committing" || (record.status === "failed" && record.commitSent) ? "commit_unknown" : record.status;
 const stepPhase = (text) => {
   if (typeof text !== "string") return undefined;
   const phase = JSON.parse(text).phase;
   return phase === "committing" ? "commit_unknown" : phase;
 };
+// The reference side's records were normalized the same way (its `committing` and its failed
+// record after COMMIT as `commit_unknown`).
 const normalizedRecord = (side, value) => {
   if (value === undefined) return undefined;
-  if (side === "ts") return { phase: tsPhase(value), nextSequence: value.nextSequence, last: value.last?.response ?? null };
   const record = JSON.parse(value);
   return { phase: stepPhase(value), nextSequence: record.nextSequence, last: record.last?.response ?? null };
 };
@@ -313,14 +319,12 @@ const ALLOW = () => Response.json({ version: "1", allowed: true });
 const signedBy = (secret, timestamp, body, signature) =>
   signature === `v1=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
 
-/** A callback query on one side: the TypeScript owner takes the parsed command, the step
- * machine the verified text (#70). Request ids count per side, so both sides see the same. */
+/** A callback query with the verified text (#70). Request ids count per operation, as they did
+ * on the reference side. */
 const callbackOn = async (env, side, token, text) => {
   const { slot } = env.sides[side];
   const requestId = `cb-${++env.callbackCount[side]}`;
-  const reply = side === "ts"
-    ? await slot.core.callbackQuery({ capability: token, command: JSON.parse(text) }, requestId)
-    : await slot.core.callbackQuery({ validationId: VALIDATION, capability: token, command: text }, requestId);
+  const reply = await slot.core.callbackQuery({ validationId: VALIDATION, capability: token, command: text }, requestId);
   const normalized = normalizedReply(reply);
   env.callbacks[side].push(normalized);
   return normalized;
@@ -376,8 +380,9 @@ const environment = (t, { ownerConfig = config, limits = {} } = {}) => {
     callbackCount: { ts: 0, step: 0 },
     validator: ALLOW,
     validatorErrors: [],
+    reference: reference.of(t),
   };
-  for (const side of ["ts", "step"]) {
+  for (const side of ["step"]) {
     const path = join(directory, `${side}.sqlite`);
     const db = new DatabaseSync(path);
     db.exec(SCHEMA);
@@ -386,14 +391,12 @@ const environment = (t, { ownerConfig = config, limits = {} } = {}) => {
     const database = sqliteProvider(path, calls, faults, connections);
     const getRuntime = () => runtimes.current;
     const fetchImpl = hookFetch(env, side);
-    const makeCore = side === "ts"
-      ? (facilities) => new LegacyTransactionOwnerCore(facilities, { getRuntime, database, config: ownerConfig, fetchImpl })
-      : (facilities) => {
-        const core = new TransactionOwnerCore({ ...facilities, name: TX }, { getRuntime, database, config: ownerConfig, fetchImpl });
-        core.transcript = [];
-        return core;
-      };
-    sides[side] = { path, calls, slot: ownerSlot(makeCore, faults, side === "ts" ? tsPhase : stepPhase) };
+    const makeCore = (facilities) => {
+      const core = new TransactionOwnerCore({ ...facilities, name: TX }, { getRuntime, database, config: ownerConfig, fetchImpl });
+      core.transcript = [];
+      return core;
+    };
+    sides[side] = { path, calls, slot: ownerSlot(makeCore, faults, stepPhase) };
   }
   t.after(() => {
     assert.deepEqual(env.validatorErrors, [], "the validator scripts' assertions hold");
@@ -405,6 +408,13 @@ const environment = (t, { ownerConfig = config, limits = {} } = {}) => {
   Object.assign(env, {
     caller: { subject: "user_1" },
     setSide(side) { current = side; },
+    /** The side whose operation runs now (fault scripts act on that side's owner). */
+    currentSide: () => current,
+    /** The reference side's final rows (recorded from its database). */
+    referenceRows: (label = "rows") => env.reference.take(label),
+    /** The reference side's normalized record. */
+    referenceRecord: (label = "record") =>
+      env.reference.take(label),
     rows(side) {
       const db = new DatabaseSync(sides[side].path, { readOnly: true });
       db.exec("PRAGMA busy_timeout = 0");
@@ -437,24 +447,18 @@ const perform = async (env, side, op, requestId) => {
   const auth = authOf(runtime, op.subject ?? env.caller.subject);
   const databaseBinding = bindingOf(runtime);
   const snapshot = runtime.snapshot;
-  const authFingerprint = identity(runtime, { op: "auth", auth, binding: databaseBinding }).fingerprint;
   switch (op.op) {
     case "begin": {
       const startFingerprint = op.startFingerprint ??
         identity(runtime, { op: "start", transactionId: TX, body: JSON.stringify({ mode: op.mode }) }).digest;
-      // The production owner computes the auth fingerprint itself (ADR 0024).
-      return await settle(await core.begin(side === "ts"
-        ? { transactionId: TX, authFingerprint, startFingerprint, mode: op.mode, auth, databaseBinding, snapshot }
-        : { transactionId: TX, startFingerprint, mode: op.mode, auth, databaseBinding, snapshot }, requestId));
+      // The owner computes the auth fingerprint itself (ADR 0024).
+      return await settle(await core.begin({ transactionId: TX, startFingerprint, mode: op.mode, auth, databaseBinding, snapshot }, requestId));
     }
     case "statement": case "commit": case "rollback": {
       const text = op.text ?? (op.op === "statement"
         ? JSON.stringify({ sequence: op.seq, sql: op.sql, params: op.params ?? {} })
         : JSON.stringify({ sequence: op.seq }));
-      const command = JSON.parse(text);
-      return await settle(await core.command(op.op, side === "ts"
-        ? { transactionId: TX, authFingerprint, command, databaseBinding, snapshot }
-        : { transactionId: TX, auth, command: text, databaseBinding, snapshot }, requestId));
+      return await settle(await core.command(op.op, { transactionId: TX, auth, command: text, databaseBinding, snapshot }, requestId));
     }
     case "timer":
       await slot.fireTimer(env.clock.now);
@@ -470,38 +474,44 @@ const perform = async (env, side, op, requestId) => {
   }
 };
 
-/** Runs `op` on both sides and returns what each saw. */
+/** Runs `op` on one side from `start` and returns what it saw and its clock at the end. */
+const runSide = async (env, side, op, requestId, start) => {
+  env.clock.now = start;
+  env.callbackCount[side] = 0;
+  const calls = env.sides[side].calls.length;
+  const logs = env.logs[side].length;
+  const hooks = env.hooks[side].length;
+  const callbacks = env.callbacks[side].length;
+  env.setSide(side);
+  const reply = await perform(env, side, op, requestId);
+  return {
+    seen: {
+      reply: reply && (op.op === "callback" ? reply : normalizedReply(reply)),
+      calls: env.sides[side].calls.slice(calls),
+      logs: env.logs[side].slice(logs),
+      hooks: env.hooks[side].slice(hooks),
+      callbacks: env.callbacks[side].slice(callbacks),
+    },
+    end: env.clock.now,
+  };
+};
+
+/** Runs `op` on the step side and returns what it and the reference side saw. */
 const both = async (env, op) => {
   if (op.op === "advance") {
     env.clock.now += op.ms;
     return null;
   }
   const requestId = env.nextRequest();
-  const seen = {};
   // Both sides start the operation at the same time; a fault that moves the clock moves it
   // for that side only.
   const start = env.clock.now;
-  const ends = {};
-  for (const side of ["ts", "step"]) {
-    env.clock.now = start;
-    env.callbackCount[side] = 0;
-    const calls = env.sides[side].calls.length;
-    const logs = env.logs[side].length;
-    const hooks = env.hooks[side].length;
-    const callbacks = env.callbacks[side].length;
-    env.setSide(side);
-    const reply = await perform(env, side, op, requestId);
-    seen[side] = {
-      reply: reply && (op.op === "callback" ? reply : normalizedReply(reply)),
-      calls: env.sides[side].calls.slice(calls),
-      logs: env.logs[side].slice(logs),
-      hooks: env.hooks[side].slice(hooks),
-      callbacks: env.callbacks[side].slice(callbacks),
-    };
-    ends[side] = env.clock.now;
-  }
-  env.clock.now = Math.max(ends.ts, ends.step);
-  return seen;
+  const ts = env.reference.take(op.op);
+  env.hooks.ts.push(...ts.seen.hooks);
+  env.callbacks.ts.push(...ts.seen.callbacks);
+  const step = asRecorded(await runSide(env, "step", op, requestId, start));
+  env.clock.now = Math.max(ts.end, step.end);
+  return { ts: ts.seen, step: step.seen };
 };
 
 const assertSame = (seen, label) => {
@@ -517,9 +527,11 @@ const assertSame = (seen, label) => {
   }
 };
 
-const assertSameEnd = (env, label) => {
-  assert.deepEqual(normalizedRecord("step", env.sides.step.slot.record()), normalizedRecord("ts", env.sides.ts.slot.record()), `${label}: record`);
-  assert.deepEqual(env.rows("step"), env.rows("ts"), `${label}: rows`);
+const assertSameEnd = async (env, label) => {
+  const end = env.reference.take("end");
+  env.referenceEnd = end;
+  assert.deepEqual(asRecorded(normalizedRecord("step", env.sides.step.slot.record())), end.record, `${label}: record`);
+  assert.deepEqual(asRecorded(env.rows("step")), end.rows, `${label}: rows`);
   assert.deepEqual(env.sides.step.slot.core.unrouted ?? [], [], `${label}: every reply routed`);
 };
 
@@ -528,7 +540,7 @@ const agree = async (t, ops, prepare = () => {}, options = {}) => {
   const env = environment(t, options);
   prepare(env);
   for (const [index, op] of ops.entries()) assertSame(await both(env, op), `${op.op}#${index}`);
-  assertSameEnd(env, "end");
+  await assertSameEnd(env, "end");
   return env;
 };
 
@@ -580,15 +592,13 @@ test("begin retries and another caller agree", async (t) => {
 
 test("owner loss after COMMIT, before its record (window A), is unknown alike", async (t) => {
   await agree(t, [write, insert(1, "p1"), commit(2), commit(2), rollback(2), { op: "advance", ms: 5_000 }, { op: "timer" }, commit(2)], (env) => {
-    let lost = false;
+    const lost = new Set();
     env.faults.afterCommit = async () => {
-      if (lost) return;
-      lost = true;
-      // Whichever side is committing loses its owner right after COMMIT applied.
-      const side = env.sides.ts.calls.at(-1)?.op === "commit" && !env.sidesCommitted?.ts ? "ts" : "step";
-      env.sidesCommitted = { ...env.sidesCommitted, [side]: true };
+      // The committing side loses its owner right after its first COMMIT applied.
+      const side = env.currentSide();
+      if (lost.has(side)) return;
+      lost.add(side);
       env.sides[side].slot.lose();
-      lost = side === "ts" ? false : true;
     };
   });
 });
@@ -597,8 +607,8 @@ test("owner loss between the committed record and its reply (window B) replays a
   await agree(t, [write, insert(1, "p1"), commit(2), commit(2)], (env) => {
     const done = new Set();
     env.faults.put = ({ phase }) => {
-      if (phase !== "committed" || done.size === 2) return undefined;
-      const side = done.has("ts") ? "step" : "ts";
+      const side = env.currentSide();
+      if (phase !== "committed" || done.has(side)) return undefined;
       done.add(side);
       return { lose: true };
     };
@@ -619,9 +629,7 @@ test("the timer firing while COMMIT is in flight does not end it, alike (inconsi
   env = await agree(t, [write, insert(1, "p1"), commit(2), commit(2)], (setup) => {
     setup.faults.commit = async () => {
       setup.clock.now += 10_000;
-      const side = setup.sides.ts.calls.at(-1)?.op === "commit" && !setup.fired?.ts ? "ts" : "step";
-      setup.fired = { ...setup.fired, [side]: true };
-      await setup.sides[side].slot.fireTimer(setup.clock.now);
+      await setup.sides[setup.currentSide()].slot.fireTimer(setup.clock.now);
     };
   });
   assert.equal(normalizedRecord("step", env.sides.step.slot.record()).phase, "committed");
@@ -649,7 +657,7 @@ test("a deployment between a commit and its retry keeps the commit answer, alike
   const previous = env.runtimes.current;
   env.runtimes.current = makeRuntime("policy_2");
   t.after(() => previous.free());
-  for (const side of ["ts", "step"]) env.sides[side].slot.lose();
+  env.sides.step.slot.lose();
   assertSame(await both(env, commit(2)), "commit retry after the deployment");
   assertSame(await both(env, insert(3, "p3")), "a statement after the deployment");
 });
@@ -786,15 +794,19 @@ test("owner loss while a commit waits on its last validator never commits, alike
   });
 });
 
-test("each side issues its own random capability and the hook bodies agree otherwise", async (t) => {
+test("each owner issues its own random capability and the hook bodies agree otherwise", async (t) => {
   // The bodies are compared with the token masked; the tokens themselves are random.
-  const env = await agree(t, [write, audit(1, "x1"), commit(2)], (setup) => {
-    setup.validator = async ({ query: run }) => {
-      await run(query(1));
-      return ALLOW();
-    };
-  });
-  assert.notEqual(env.tokens.step[0], env.tokens.ts[0], "each side issued its own random capability");
+  const tokens = [];
+  for (let run = 0; run < 2; run++) {
+    const env = await agree(t, [write, audit(1, "x1"), commit(2)], (setup) => {
+      setup.validator = async ({ query: run }) => {
+        await run(query(1));
+        return ALLOW();
+      };
+    });
+    tokens.push(env.tokens.step[0]);
+  }
+  assert.notEqual(tokens[0], tokens[1], "each owner issued its own random capability");
 });
 
 // ---- the allowlisted differences, each asserted for both sides ---------------------------------
@@ -803,38 +815,47 @@ test(`allowlist expiry-during-validator: ${ALLOWLIST["expiry-during-validator"]}
   const env = environment(t);
   for (const op of [write, audit(1, "x1")]) assertSame(await both(env, op), op.op);
   const release = {};
-  const gates = { ts: new Promise((resolve) => { release.ts = resolve; }), step: new Promise((resolve) => { release.step = resolve; }) };
+  const gates = { step: new Promise((resolve) => { release.step = resolve; }) };
   const called = {};
-  const calledGates = { ts: new Promise((resolve) => { called.ts = resolve; }), step: new Promise((resolve) => { called.step = resolve; }) };
+  const calledGates = { step: new Promise((resolve) => { called.step = resolve; }) };
   env.validator = async ({ side }) => {
     called[side]();
     await gates[side];
     return ALLOW();
   };
-  const replies = {};
-  for (const side of ["ts", "step"]) {
+  // The reference side ran this commit with the first request id, the step side with the next.
+  const requestIds = { ts: env.nextRequest(), step: env.nextRequest() };
+  const run = async (side) => {
     env.setSide(side);
-    const commitReply = perform(env, side, { ...commit(2), settle: false }, env.nextRequest()).then((reply) => { replies[side] = reply; });
+    const result = {};
+    const commitReply = perform(env, side, { ...commit(2), settle: false }, requestIds[side]).then((reply) => { result.reply = reply; });
     await calledGates[side];
     env.clock.now = T0 + 4_000;
     await env.sides[side].slot.fireTimer(env.clock.now);
     // Let the machine's reply arrive, if it is sent at expiry.
     await new Promise((resolve) => setImmediate(resolve));
-    if (side === "step") assert.equal(replies.step?.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED", "core answers at expiry");
-    else assert.equal(replies.ts, undefined, "TS waits for the validator");
+    result.atExpiry = result.reply ?? null;
     release[side]();
     await commitReply;
     await env.sides[side].slot.core.settled?.();
     env.clock.now = T0;
-  }
-  assert.equal(replies.ts.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
-  assert.equal(replies.step.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
-  assert.equal(normalizedRecord("ts", env.sides.ts.slot.record()).phase, "failed");
-  assert.equal(normalizedRecord("step", env.sides.step.slot.record()).phase, "expired");
-  for (const side of ["ts", "step"]) {
-    assert.equal(env.sides[side].calls.filter((call) => call.op === "commit").length, 0, `${side}: no COMMIT`);
-  }
-  assert.deepEqual(env.rows("step"), env.rows("ts"));
+    return {
+      ...result,
+      phase: normalizedRecord(side, env.sides[side].slot.record()).phase,
+      commits: env.sides[side].calls.filter((call) => call.op === "commit").length,
+      rows: env.rows(side),
+    };
+  };
+  const ts = env.reference.take("commit at expiry");
+  const step = asRecorded(await run("step"));
+  assert.equal(ts.atExpiry, null, "TS waits for the validator");
+  assert.equal(step.atExpiry?.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED", "core answers at expiry");
+  assert.equal(ts.reply.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
+  assert.equal(step.reply.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
+  assert.equal(ts.phase, "failed");
+  assert.equal(step.phase, "expired");
+  for (const [side, value] of Object.entries({ ts, step })) assert.equal(value.commits, 0, `${side}: no COMMIT`);
+  assert.deepEqual(step.rows, ts.rows);
   assert.deepEqual(env.sides.step.slot.core.unrouted, [], "the late verdict answered nobody");
 });
 
@@ -864,27 +885,38 @@ test("an expiry during a callback query's SELECT revokes it alike (#73)", async 
     seen[side].calls = env.sides[side].calls.slice(calls);
     return ALLOW();
   };
-  const replies = {};
-  for (const side of ["ts", "step"]) {
+  // The reference side ran this commit with the first request id, the step side with the next.
+  const requestIds = { ts: env.nextRequest(), step: env.nextRequest() };
+  const run = async (side) => {
     env.setSide(side);
-    replies[side] = await perform(env, side, commit(2), env.nextRequest());
+    const reply = await perform(env, side, commit(2), requestIds[side]);
     env.clock.now = T0;
-  }
+    return {
+      ...seen[side], reply,
+      commits: env.sides[side].calls.filter((call) => call.op === "commit").length,
+      endPhase: normalizedRecord(side, env.sides[side].slot.record()).phase,
+      rows: env.rows(side),
+    };
+  };
+  const observed = {
+    ts: env.reference.take("commit with an expiring callback"),
+    step: asRecorded(await run("step")),
+  };
   for (const side of ["ts", "step"]) {
-    assert.equal(seen[side].revoked.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", `${side}: the revoked query`);
-    assert.equal(seen[side].revoked.rows, undefined, `${side}: no rows`);
-    assert.equal(seen[side].again.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", `${side}: not restored`);
-    assert.equal(replies[side].error.code, "POLICYSQL_COMMIT_CHECK_REJECTED", `${side}: commit`);
-    assert.equal(env.sides[side].calls.filter((call) => call.op === "commit").length, 0, `${side}: no COMMIT`);
+    assert.equal(observed[side].revoked.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", `${side}: the revoked query`);
+    assert.equal(observed[side].revoked.rows, undefined, `${side}: no rows`);
+    assert.equal(observed[side].again.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", `${side}: not restored`);
+    assert.equal(observed[side].reply.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED", `${side}: commit`);
+    assert.equal(observed[side].commits, 0, `${side}: no COMMIT`);
   }
   // LegacyTransactionOwnerCore persists `expired` at the timer, before the callback is answered; the
   // machine persists it after the callback's Execute returns, and keeps it to the end.
-  assert.equal(seen.ts.phase, "expired", "ts: the record as the expiry wrote it");
-  assert.equal(normalizedRecord("step", env.sides.step.slot.record()).phase, "expired", "step: the record as the expiry wrote it");
-  assert.deepEqual(seen.step.revoked, seen.ts.revoked, "callback reply");
-  assert.deepEqual(seen.step.again, seen.ts.again, "callback reply after revocation");
-  assert.deepEqual(seen.step.calls, seen.ts.calls, "database calls from the callback on");
-  assert.deepEqual(env.rows("step"), env.rows("ts"));
+  assert.equal(observed.ts.phase, "expired", "ts: the record as the expiry wrote it");
+  assert.equal(observed.step.endPhase, "expired", "step: the record as the expiry wrote it");
+  assert.deepEqual(observed.step.revoked, observed.ts.revoked, "callback reply");
+  assert.deepEqual(observed.step.again, observed.ts.again, "callback reply after revocation");
+  assert.deepEqual(observed.step.calls, observed.ts.calls, "database calls from the callback on");
+  assert.deepEqual(observed.step.rows, observed.ts.rows);
 });
 
 test(`allowlist loss-between-checks: ${ALLOWLIST["loss-between-checks"]}`, async (t) => {
@@ -899,14 +931,13 @@ test(`allowlist loss-between-checks: ${ALLOWLIST["loss-between-checks"]}`, async
   assert.equal(lost.step.reply.code, "POLICYSQL_INTERNAL");
   assert.deepEqual(lost.ts.hooks.map((hook) => JSON.parse(hook.body).check), ["consistency"]);
   assert.deepEqual(lost.step.hooks.map((hook) => JSON.parse(hook.body).check), ["consistency", "retention"]);
-  for (const side of ["ts", "step"]) {
-    assert.equal(env.sides[side].calls.filter((call) => call.op === "commit").length, 0, `${side}: no COMMIT`);
-  }
+  assert.equal(lost.ts.calls.filter((call) => call.op === "commit").length, 0, "ts: no COMMIT");
+  assert.equal(env.sides.step.calls.filter((call) => call.op === "commit").length, 0, "step: no COMMIT");
   // The successor answers alike, and the timer expires the record alike.
   assertSame(await both(env, commit(2)), "commit retry on the successor");
   await both(env, { op: "advance", ms: 4_000 });
   assertSame(await both(env, { op: "timer" }), "timer");
-  assertSameEnd(env, "end");
+  await assertSameEnd(env, "end");
 });
 
 // Formerly the `callback-without-validation` allowlist entry (#73): a callback that reaches an
@@ -936,7 +967,7 @@ test(`allowlist issue-70: ${ALLOWLIST["issue-70"]}`, async (t) => {
   const overflowCommit = await both(env, commit(2));
   assert.equal(overflowCommit.ts.reply.value.status, "committed");
   assert.equal(overflowCommit.step.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", "the compile error closed it");
-  assert.deepEqual(env.rows("ts").counters.map((row) => [row.id, row.ratio]), [["inf", null]], "TS wrote NULL");
+  assert.deepEqual(env.referenceRows().counters.map((row) => [row.id, row.ratio]), [["inf", null]], "TS wrote NULL");
   assert.deepEqual(env.rows("step").counters, [], "core wrote nothing");
 
   const big = '{"sequence":1,"sql":"INSERT INTO counters (id, big) VALUES (:id, :value)","params":{"id":"big","value":9007199254740993}}';
@@ -948,7 +979,7 @@ test(`allowlist issue-70: ${ALLOWLIST["issue-70"]}`, async (t) => {
   assert.equal(inserted.ts.calls.find((call) => call.op === "execute").args.value, 9007199254740992, "TS rounds");
   assertSame(await both(exact, commit(2)), "commit");
   assert.equal(exact.rows("step").counters[0].big, "9007199254740993");
-  assert.equal(exact.rows("ts").counters[0].big, "9007199254740992", "TS wrote the rounded value");
+  assert.equal(exact.referenceRows().counters[0].big, "9007199254740992", "TS wrote the rounded value");
 
   // The rounded spelling is another command for core, and an exact retry for TS.
   const retried = environment(t);
@@ -979,9 +1010,9 @@ test(`allowlist expired-command: ${ALLOWLIST["expired-command"]}`, async (t) => 
   const late = await both(env, commit(2));
   assert.equal(late.ts.reply.code, "POLICYSQL_DATABASE_TIMEOUT");
   assert.equal(late.step.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
-  assert.equal(normalizedRecord("ts", env.sides.ts.slot.record()).phase, "failed");
+  assert.equal(env.referenceRecord().phase, "failed");
   assert.equal(normalizedRecord("step", env.sides.step.slot.record()).phase, "expired");
-  assert.deepEqual(env.rows("step"), env.rows("ts"));
+  assert.deepEqual(asRecorded(env.rows("step")), env.referenceRows());
 });
 
 test(`allowlist unrecorded-commit-retry: ${ALLOWLIST["unrecorded-commit-retry"]}`, async (t) => {
@@ -999,7 +1030,7 @@ test(`allowlist unrecorded-commit-retry: ${ALLOWLIST["unrecorded-commit-retry"]}
   const recovered = await both(env, commit(2));
   assert.equal(recovered.ts.reply.value.status, "committed", "TS re-records its in-memory terminal record");
   assert.equal(recovered.step.reply.code, "POLICYSQL_COMMIT_OUTCOME_UNKNOWN", "core answers as a successor would");
-  assert.deepEqual(env.rows("step"), env.rows("ts"), "committed once on both");
+  assert.deepEqual(asRecorded(env.rows("step")), env.referenceRows(), "committed once on both");
 });
 
 test(`allowlist persist-failure-before-committing: ${ALLOWLIST["persist-failure-before-committing"]}`, async (t) => {
@@ -1015,7 +1046,7 @@ test(`allowlist persist-failure-before-committing: ${ALLOWLIST["persist-failure-
   const recorded = normalizedRecord("step", env.sides.step.slot.record());
   assert.deepEqual(recorded, { phase: "failed", nextSequence: 1, last: null },
     "core recorded failed from the record before the statement: it is not done");
-  assert.equal(normalizedRecord("ts", env.sides.ts.slot.record()).phase, "active", "TS left it open");
+  assert.equal(env.referenceRecord().phase, "active", "TS left it open");
   const after = await both(env, insert(1, "p1"));
   assert.equal(after.step.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", "core: the retry is not replayed as done");
   // A successor answers the retry the same way.
@@ -1033,7 +1064,7 @@ test(`allowlist timer-during-statement: ${ALLOWLIST["timer-during-statement"]}`,
   assertSame(await both(env, write), "begin");
   const fired = new Set();
   env.faults.execute = async () => {
-    const side = fired.has("ts") ? "step" : "ts";
+    const side = env.currentSide();
     if (fired.has(side)) return;
     fired.add(side);
     env.clock.now = T0 + 4_000;
@@ -1043,8 +1074,8 @@ test(`allowlist timer-during-statement: ${ALLOWLIST["timer-during-statement"]}`,
   assert.equal(statement.step.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", "core answers the expiry");
   assert.notEqual(statement.ts.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", "TS answers the statement's own failure");
   assert.equal(normalizedRecord("step", env.sides.step.slot.record()).phase, "expired");
-  assert.equal(normalizedRecord("ts", env.sides.ts.slot.record()).phase, "failed");
-  assert.deepEqual(env.rows("step").projects, env.rows("ts").projects, "nothing committed on either side");
+  assert.equal(env.referenceRecord().phase, "failed");
+  assert.deepEqual(asRecorded(env.rows("step")).projects, env.referenceRows().projects, "nothing committed on either side");
 });
 
 test(`allowlist rollback-failure-keeps-phase: ${ALLOWLIST["rollback-failure-keeps-phase"]}`, async (t) => {
@@ -1059,8 +1090,8 @@ test(`allowlist rollback-failure-keeps-phase: ${ALLOWLIST["rollback-failure-keep
 test(`allowlist old-format-record: ${ALLOWLIST["old-format-record"]}`, async (t) => {
   const env = environment(t);
   for (const op of [write, insert(1, "p1")]) assertSame(await both(env, op), op.op);
-  // The step side reads the record LegacyTransactionOwnerCore wrote.
-  env.sides.step.slot.setRecord(structuredClone(env.sides.ts.slot.record()));
+  // The step side reads the record LegacyTransactionOwnerCore wrote (recorded as it wrote it).
+  env.sides.step.slot.setRecord(env.reference.take("old-format record"));
   env.sides.step.slot.lose();
   env.setSide("step");
   const requestId = env.nextRequest();
@@ -1097,16 +1128,12 @@ const generatedValidator = async ({ hook, query: run }) => {
   return Response.json({ version: "1", allowed: !hook.requestId.endsWith("3") });
 };
 
-/** The allowlisted condition `op` reaches, judged from the TypeScript side's state. */
-const reaches = (env, op, history) => {
-  const record = env.sides.ts.slot.record();
-  if (!record || !["statement", "commit", "rollback"].includes(op.op)) return null;
-  const retry = op.seq === record.nextSequence - 1 && history.completed.get(op.seq) === op.text;
-  const expired = record.expiresAtMs !== undefined && env.clock.now >= record.expiresAtMs;
-  if (record.status === "active" && retry && (history.lost || expired)) return "replay-before-liveness";
-  if (record.status === "active" && expired && !retry) return "expired-command";
-  return null;
-};
+/**
+ * The allowlisted condition `op` reaches, as judged from the reference side's record when it was
+ * recorded: an exact retry of its last completed command after owner loss or the deadline
+ * (`replay-before-liveness`), or any other command after the deadline (`expired-command`).
+ */
+const reaches = (env) => env.reference.take("reaches");
 
 const generate = (random) => {
   const ops = [random() < 0.7 ? write : read];
@@ -1150,11 +1177,10 @@ test("generated command sequences agree except the allowlisted differences", asy
     await t.test(`sequence ${sequence}`, async (st) => {
       const env = environment(st);
       env.validator = generatedValidator;
-      const history = { completed: new Map(), lost: false };
       let stopped = null;
       for (const [index, op] of ops.entries()) {
         stats.ops++;
-        const reason = reaches(env, op, history);
+        const reason = reaches(env);
         if (reason) {
           stopped = reason;
           break;
@@ -1162,14 +1188,11 @@ test("generated command sequences agree except the allowlisted differences", asy
         const seen = await both(env, op);
         assertSame(seen, `sequence ${sequence} op ${index} ${JSON.stringify(op)}`);
         stats.compared++;
-        if (op.op === "lose") history.lost = true;
-        if (op.op === "begin") history.lost = false;
-        if (seen?.ts.reply?.ok && op.text) history.completed.set(op.seq, op.text);
       }
       stats.validatorCalls += env.hooks.ts.length;
       stats.callbacks += env.callbacks.ts.length;
       if (stopped) stats.stopped[stopped] = (stats.stopped[stopped] ?? 0) + 1;
-      else assertSameEnd(env, `sequence ${sequence}`);
+      else await assertSameEnd(env, `sequence ${sequence}`);
     });
     stats.sequences++;
   }
@@ -1239,7 +1262,7 @@ test("generated commit-check sequences agree", async (t) => {
       const env = await agree(st, ops, (setup) => { setup.validator = validator; });
       stats.validatorCalls += env.hooks.ts.length;
       stats.callbacks += env.callbacks.ts.length;
-      const phase = normalizedRecord("ts", env.sides.ts.slot.record()).phase;
+      const phase = env.referenceEnd.record.phase;
       if (phase === "committed") stats.committed++;
       if (env.hooks.ts.length > 0 && phase !== "committed") stats.rejected++;
     });

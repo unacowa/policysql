@@ -90,7 +90,10 @@ returned (`FORBIDDEN_ROLE`, `CHECK_FAILED`, `COMMIT_CHECK_UNAVAILABLE`, `COMMIT_
 `TRANSACTION_FAILED`, `REQUEST_IN_PROGRESS`) and omitted ones the library does return
 (`TRANSACTION_CONFLICT`, `TRANSACTION_UNAVAILABLE`, `TRANSACTION_MODE_VIOLATION`, `NOT_FOUND`,
 `UNSUPPORTED_MEDIA_TYPE`, `COST_UNKNOWN`, `COST_ADMISSION_UNAVAILABLE`,
-`DATABASE_BINDING_REJECTED`); the table now lists exactly what is returned. The client listed
+`DATABASE_BINDING_REJECTED`); the table now lists exactly what is returned. (ADR 0024 pull
+request 9 moved `COST_UNKNOWN`, `COST_ADMISSION_UNAVAILABLE`, and `USAGE_BUDGET_EXCEEDED` to a
+log-only table once `cost.ts`, which threw them, was deleted: cost is an observation, and the
+codes appear only in `cost_observation_failed` records.) The client listed
 `PRESET_COLUMN` under 400 while the server has always sent 403; the client now agrees.
 
 ### Guards and conformance
@@ -107,6 +110,8 @@ response, error, or status). The test also proves the scan finds each form in th
 To satisfy it, the commit-check validator call (HMAC signing, hook headers, the callback URL)
 moved from `commit-checks.ts` into the outbound adapter `src/adapters/commit-check-hook.ts`;
 the engine still chooses the endpoint, issues the capability, and judges the decision.
+(Since ADR 0024, core issues the capability and judges the decision; the owner chooses the
+endpoint by check id. Pull request 9 deleted `commit-checks.ts`.)
 
 `src/http/conformance.ts` (exported as `@unacowa/policysql/cloudflare/http-conformance`) is the
 HTTP mapping conformance suite. It drives a mapping over a recording engine and checks routes,

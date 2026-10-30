@@ -7,9 +7,9 @@
 // maps each awaited effect's outcome or exception to exactly one outcome event:
 //
 // - `checkBinding`, `open`, `execute`, `commit`, `rollback` through the wrapper's database
-//   provider; a failure is classified as `turso.ts` `remoteFailure` classified it on this path
-//   (`directFailureClass`: a timeout is `timeout`, a rejected binding `rejected`, anything else
-//   `unavailable`);
+//   provider; a failure is classified as the TypeScript direct path classified it before ADR
+//   0024 pull request 8 (`directFailureClass`: a timeout is `timeout`, a rejected binding
+//   `rejected`, anything else `unavailable`);
 // - `execute.trace`, when present, is published to the deployment's trace sink before the
 //   statements run;
 // - `forward` through the TransactionOwner port's `atomic`, with the engine's request id, which

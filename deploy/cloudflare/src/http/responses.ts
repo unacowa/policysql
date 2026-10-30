@@ -1,7 +1,7 @@
 // HTTP response framing (inbound adapter, ADR 0019): the fixed headers, the public error
 // shape, the status of every code (src/http/status.ts), and ETag / 304.
 import type { OperationError } from "../errors.ts";
-import { ERROR_STATUS, statusFor } from "./status.ts";
+import { ERROR_STATUS, LOG_ONLY_CODES, statusFor } from "./status.ts";
 
 const FIXED_HEADERS = Object.freeze({
   "cache-control": "no-store",
@@ -63,6 +63,9 @@ export const createErrorResponse = (
   }
   if (typeof code !== "string" || !ERROR_CODE.test(code)) {
     throw new TypeError("Error response code must match POLICYSQL_[A-Z0-9_]+");
+  }
+  if (LOG_ONLY_CODES.has(code)) {
+    throw new TypeError(`${code} appears only in logs and is never returned in a response`);
   }
   if (Object.hasOwn(ERROR_STATUS, code) && ERROR_STATUS[code] !== status) {
     throw new TypeError(`${code} is served with status ${ERROR_STATUS[code]}`);

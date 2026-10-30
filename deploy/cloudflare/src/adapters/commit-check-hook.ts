@@ -1,6 +1,7 @@
 // Outbound adapter for the commit-check validator call (ADR 0007, ADR 0019): one signed HTTP
-// request per triggered check. It makes no decision. The engine (src/commit-checks.ts)
-// chooses the endpoint, issues the capability, and judges the reply.
+// request per triggered check. It makes no decision. Core's step machine issues the capability,
+// builds the payload, and judges the reply; the owner (src/transaction-owner.ts) chooses the
+// endpoint by check id.
 import { fetchNoFollow } from "../redirects.ts";
 import type { OutboundFetch } from "../redirects.ts";
 import { callbackQueryUrl } from "../http/routes.ts";

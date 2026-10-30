@@ -22,9 +22,8 @@
 //
 // Atomic executions on an owner (an execute whose envelope could trigger a commit check) run
 // the same machine since ADR 0024 pull request 8: the engine's `request` step forwards the
-// owner input, and the owner's step answers it. The TypeScript decision path
-// (`LegacyTransactionOwnerCore`) is no longer reachable from here; it stays only as the
-// differential harnesses' reference until pull request 9 deletes it. A record it wrote is an
+// owner input, and the owner's step answers it. ADR 0024 pull request 9 deleted the TypeScript
+// decision path this class replaced (`LegacyTransactionOwnerCore`). A record it wrote is an
 // old-format record: the machine discards it (an atomic input ignores it and resolves a keyed
 // retry through `policysql_idempotency`).
 import { EngineError, operationError } from "./errors.ts";
@@ -92,7 +91,7 @@ const recordOwner = (stored: unknown): string | null => {
   return typeof name === "string" && OWNER_NAME.test(name) ? name : null;
 };
 
-/** The re-check at the outbound exit (`commit-checks.ts` `secureUrl`). */
+/** The re-check of a validator endpoint at the outbound exit: `https:`, no credentials. */
 const secureUrl = (raw: string) => {
   const url = new URL(raw);
   if (url.protocol !== "https:" || url.username || url.password) throw new TypeError("insecure validator URL");

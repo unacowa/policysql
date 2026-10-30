@@ -11,7 +11,7 @@ import { limitsJson } from "./helpers/limits.mjs";
 // Every codec call takes the runtime's limit; these bind the real WASM value.
 const decodeBlob = value => decodeWithLimit(value, MAX_BYTES_PER_VALUE);
 const encodeBlob = value => encodeWithLimit(value, MAX_BYTES_PER_VALUE);
-const driverArgs = statement => driverArgsWithLimit(statement, MAX_BYTES_PER_VALUE);
+const driverArgs = args => driverArgsWithLimit(args, MAX_BYTES_PER_VALUE);
 const rawDriverValue = value => rawWithLimit(value, MAX_BYTES_PER_VALUE);
 
 const read = name => readFileSync(new URL(`../../../tests/fixtures/${name}`, import.meta.url), "utf8");
@@ -44,7 +44,7 @@ test("private binary adapters share strict vectors and preserve physical value i
   for (const { base64, bytes } of cases.valid) {
     assert.deepEqual([...decodeBlob(base64)], bytes);
     assert.equal(encodeBlob(Uint8Array.from(bytes)), base64);
-    const args = driverArgs({ clientParameters: { data: { type: "blob", base64 }, text: base64 }, serverParameters: { preset: { type: "blob", base64 } } });
+    const args = driverArgs({ data: { type: "blob", base64 }, text: base64, preset: { type: "blob", base64 } });
     assert.deepEqual([...args.data], bytes);
     assert.deepEqual([...args.preset], bytes);
     assert.equal(args.text, base64);
@@ -54,7 +54,8 @@ test("private binary adapters share strict vectors and preserve physical value i
   for (const value of [{ type: "blob", base64: "AA==" }, [0], {}, new ArrayBuffer(1), NaN, Infinity, undefined]) {
     assert.throws(() => rawDriverValue(value), { code: "POLICYSQL_SCHEMA_MISMATCH" });
   }
-  assert.throws(() => driverArgs({ clientParameters: { x: "AA==" }, serverParameters: { x: "AA==" } }), { code: "POLICYSQL_INTERNAL" });
+  // A collision of the client and server parameter namespaces is core's to reject, before any
+  // `execute` effect (crates/policysql-transaction/tests/machine.rs).
   assert.throws(() => decodeBlob(Buffer.alloc(MAX_BYTES_PER_VALUE + 1).toString("base64")), BinaryLimitError);
   assert.throws(() => encodeBlob(new Uint8Array(MAX_BYTES_PER_VALUE + 1)), BinaryLimitError);
   assert.throws(() => rawDriverValue(new Uint8Array(MAX_BYTES_PER_VALUE + 1)), { code: "POLICYSQL_LIMIT_EXCEEDED" });
@@ -73,7 +74,7 @@ test("binary codec honors the injected runtime limit instead of a host constant"
   const base64 = above.toString("base64");
   assert.deepEqual(Buffer.from(decodeWithLimit(base64, raised)), above);
   assert.equal(encodeWithLimit(above, raised), base64);
-  assert.deepEqual(Buffer.from(driverArgsWithLimit({ clientParameters: { v: { type: "blob", base64 } }, serverParameters: {} }, raised).v), above);
+  assert.deepEqual(Buffer.from(driverArgsWithLimit({ v: { type: "blob", base64 } }, raised).v), above);
   assert.deepEqual(rawWithLimit(new Uint8Array(above), raised), { type: "blob", base64 });
   for (const lowered of [1, 3, 16]) {
     const fits = Buffer.alloc(lowered, 1);
@@ -82,7 +83,7 @@ test("binary codec honors the injected runtime limit instead of a host constant"
     assert.throws(() => decodeWithLimit(over.toString("base64"), lowered), BinaryLimitError);
     assert.throws(() => encodeWithLimit(over, lowered), BinaryLimitError);
     assert.throws(() => rawWithLimit(new Uint8Array(over), lowered), { code: "POLICYSQL_LIMIT_EXCEEDED" });
-    assert.throws(() => driverArgsWithLimit({ clientParameters: { v: { type: "blob", base64: over.toString("base64") } }, serverParameters: {} }, lowered), { code: "POLICYSQL_INTERNAL" });
+    assert.throws(() => driverArgsWithLimit({ v: { type: "blob", base64: over.toString("base64") } }, lowered), { code: "POLICYSQL_INTERNAL" });
     // Malformed input stays malformed (TypeError → 400/503/422) at any limit.
     assert.throws(() => decodeWithLimit("A===", lowered), TypeError);
   }
@@ -94,7 +95,7 @@ test("a missing or malformed injected limit fails closed instead of disabling th
   for (const limit of [undefined, null, 0, -1, 1.5, NaN, "262144", 2 ** 53, Infinity, -Infinity]) {
     assert.throws(() => decodeWithLimit("AA==", limit), TypeError, String(limit));
     assert.throws(() => encodeWithLimit(new Uint8Array(1), limit), TypeError, String(limit));
-    assert.throws(() => driverArgsWithLimit({ clientParameters: {}, serverParameters: {} }, limit), TypeError, String(limit));
+    assert.throws(() => driverArgsWithLimit({}, limit), TypeError, String(limit));
     assert.throws(() => rawWithLimit("text", limit), TypeError, String(limit));
     assert.throws(() => runtimeBytesLimit({ max_bytes_per_value: limit }), TypeError, String(limit));
     assert.throws(() => bytesLimit(limit), TypeError, String(limit));
@@ -108,7 +109,7 @@ test("a missing or malformed injected limit fails closed instead of disabling th
   assert.throws(() => encodeWithLimit(huge, Infinity), TypeError);
   assert.throws(() => decodeWithLimit(hugeBase64, Infinity), TypeError);
   assert.throws(() => rawWithLimit(huge, Infinity), TypeError);
-  assert.throws(() => driverArgsWithLimit({ clientParameters: { v: { type: "blob", base64: hugeBase64 } }, serverParameters: {} }, Infinity), TypeError);
+  assert.throws(() => driverArgsWithLimit({ v: { type: "blob", base64: hugeBase64 } }, Infinity), TypeError);
   assert.equal(runtimeBytesLimit({ max_bytes_per_value: 512 * 1024 }), 512 * 1024);
 });
 

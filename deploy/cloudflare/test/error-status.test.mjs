@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ERROR_STATUS, statusFor } from "../src/http/status.ts";
+import { ERROR_STATUS, LOG_ONLY_CODES, statusFor } from "../src/http/status.ts";
 import { createErrorResponse } from "../src/http/responses.ts";
 import { JwtAuthenticationError } from "../src/adapters/jwt.ts";
 
@@ -31,6 +31,26 @@ const specTable = (marker) => {
   return table;
 };
 
+// The codes that appear only in structured logs (no status, never in a reply): the table under
+// `<!-- policysql:log-code-table -->`, whose first column is the code.
+const logCodes = () => {
+  const text = read("website/api/errors.md");
+  const start = text.indexOf("<!-- policysql:log-code-table -->");
+  assert.notEqual(start, -1, "errors.md has the log code table");
+  const rows = text.slice(start).split("\n").slice(1);
+  assert.match(rows[0], /^\| Code \| Log event \|/u);
+  const codes = new Set();
+  for (const row of rows.slice(2)) {
+    if (!row.startsWith("|")) break;
+    const match = row.match(/^\| `(POLICYSQL_[A-Z0-9_]+)` \| `[a-z_]+` \|/u);
+    assert.ok(match, `malformed row: ${row}`);
+    assert.equal(codes.has(match[1]), false, `${match[1]} is listed once`);
+    codes.add(match[1]);
+  }
+  assert.ok(codes.size > 0);
+  return codes;
+};
+
 const files = (directory, extension) => readdirSync(join(repository, directory), { recursive: true })
   .filter((name) => name.endsWith(extension))
   .map((name) => join(directory, name));
@@ -51,7 +71,11 @@ test("the HTTP adapter's status table is exactly the specification's library tab
 test("every code in TypeScript library source and Rust crates has a status in the specification", () => {
   const library = specTable("library");
   const wrapper = specTable("wrapper");
+  const logged = logCodes();
   for (const code of Object.keys(wrapper)) assert.equal(Object.hasOwn(library, code), false, `${code} is in one table`);
+  for (const code of logged) {
+    assert.equal(Object.hasOwn(library, code) || Object.hasOwn(wrapper, code), false, `${code} is in one table`);
+  }
   // The conformance suite is test support; it names an unknown code on purpose.
   const typescript = codesIn(files("deploy/cloudflare/src", ".ts")
     .filter((path) => path !== join("deploy/cloudflare/src", "http", "conformance.ts")));
@@ -60,7 +84,8 @@ test("every code in TypeScript library source and Rust crates has a status in th
   assert.ok(typescript.has("POLICYSQL_TRANSACTION_CONFLICT") && typescript.has("POLICYSQL_UNSUPPORTED_MEDIA_TYPE"));
   assert.ok(rust.has("POLICYSQL_FORBIDDEN_COLUMN") && rust.has("POLICYSQL_AMBIGUOUS_PARAMETER_TYPE"));
   for (const [code, path] of [...typescript, ...rust]) {
-    assert.ok(Object.hasOwn(library, code) || Object.hasOwn(wrapper, code), `${code} (${relative(".", path)}) has no status in website/api/errors.md`);
+    assert.ok(Object.hasOwn(library, code) || Object.hasOwn(wrapper, code) || logged.has(code),
+      `${code} (${relative(".", path)}) has no status (or log-only entry) in website/api/errors.md`);
   }
   // The only wrapper code in library source is the JWT identity adapter's.
   for (const [code, path] of typescript) {
@@ -101,6 +126,26 @@ const rustSource = () => files("crates", ".rs")
   .filter((path) => !/(^|[\\/])tests[\\/]|_tests\.rs$/u.test(path))
   .map((path) => [path, read(path).split(/#\[cfg\(test\)\]\s*mod\s+\w+\s*\{/u)[0]]);
 
+// ADR 0024 pull request 9: the cost codes appear only in `cost_observation_failed` records.
+// Each log-only code is still produced somewhere, and only by the cost observation: core's
+// `cost_estimate_json` (crates/policysql-transaction/src/cost.rs) and the executor's
+// observation (src/step-effects.ts).
+test("every log-only code is produced by the cost observation and by nothing else", () => {
+  const where = new Set([join("crates", "policysql-transaction", "src", "cost.rs"), join("deploy/cloudflare/src", "step-effects.ts")]);
+  const sources = [
+    // The status module lists them only to refuse them (`LOG_ONLY_CODES`).
+    ...files("deploy/cloudflare/src", ".ts")
+      .filter((path) => ![join("deploy/cloudflare/src", "http", "conformance.ts"), join("deploy/cloudflare/src", "http", "status.ts")].includes(path))
+      .map((path) => [path, read(path)]),
+    ...rustSource(),
+  ];
+  for (const code of logCodes()) {
+    const producers = sources.filter(([, text]) => text.includes(`"${code}"`)).map(([path]) => path);
+    assert.ok(producers.length > 0, `${code} is produced somewhere`);
+    for (const path of producers) assert.ok(where.has(path), `${code} is produced only by the cost observation, not ${path}`);
+  }
+});
+
 test("every code in the library table is returned somewhere, so dead codes cannot creep back", () => {
   const library = specTable("library");
   // Where a code may appear without being returned: the table itself and the conformance suite.
@@ -119,4 +164,19 @@ test("every code in the library table is returned somewhere, so dead codes canno
   // Non-vacuity: a removed code is not found, and a code only Rust test code names is not either.
   assert.equal(emitted.has("POLICYSQL_ACCESS_DENIED"), false);
   assert.ok(read("crates/policysql-wasm/src/lib.rs").includes('assert_eq!(unknown["error"]["code"], "POLICYSQL_INTERNAL")'));
+});
+
+// `ERROR_STATUS` and `statusFor` are public exports of `@unacowa/policysql/cloudflare`. Since ADR
+// 0024 pull request 9 the log-only codes have no status (statusFor answers 500, as for any code
+// outside the table), and `createErrorResponse` refuses them at every status, so a wrapper
+// cannot put them into a reply.
+test("the log-only codes have no status and createErrorResponse refuses them", () => {
+  assert.deepEqual([...LOG_ONLY_CODES].sort(), [...logCodes()].sort(), "the adapter's set is the specification's table");
+  for (const code of LOG_ONLY_CODES) {
+    assert.equal(Object.hasOwn(ERROR_STATUS, code), false, code);
+    assert.equal(statusFor(code), 500, code);
+    for (const status of [400, 403, 429, 500, 503]) {
+      assert.throws(() => createErrorResponse(status, code, "m"), TypeError, `${code} at ${status}`);
+    }
+  }
 });
