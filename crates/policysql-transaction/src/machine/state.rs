@@ -6,7 +6,7 @@
 //! the pending effect, the live execution handles, and the operation in progress. Both cross the
 //! ABI as JSON text that the engine keeps verbatim, so a recorded response keeps its exact bytes.
 
-use super::compiler::Operation;
+use super::compiler::{Operation, StatementLimits};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -104,12 +104,40 @@ impl Phase {
     }
 }
 
-/// The machine kind. Pull request 4 implements `interactive`; `atomic` (pull request 6) is
-/// not yet a readable kind, so a record that names it is discarded.
+/// The machine kind of an owner's record: an interactive transaction (pull request 4) or an
+/// atomic execution on its owner (pull request 6), whose record only serializes work and is
+/// never used to answer a request (ADR 0024 "Atomic on the owner").
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     Interactive,
+    Atomic,
+}
+
+/// The ids of an atomic execution on its owner (ADR 0024 `AtomicIds`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AtomicIds {
+    /// `atomic_` and 24 (keyed) or 32 (unkeyed) hex digits.
+    pub transaction_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_hash: Option<String>,
+}
+
+impl AtomicIds {
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let id = self
+            .transaction_id
+            .strip_prefix("atomic_")
+            .is_some_and(|hex| {
+                matches!(hex.len(), 24 | 32)
+                    && hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+        id && self.key_hash.as_deref().is_none_or(hex64)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -250,6 +278,8 @@ pub struct Record {
     pub counters: Counters,
     pub mutations: Vec<Mutation>,
     pub versions: Option<Versions>,
+    /// Present iff `kind` is `atomic`.
+    pub atomic: Option<AtomicIds>,
 }
 
 /// The wire form: every field but `v`, `owner`, and `phase` is absent in a tombstone.
@@ -279,6 +309,8 @@ struct DurableWire {
     mutations: Option<Vec<Mutation>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     versions: Option<Versions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    atomic: Option<AtomicIds>,
 }
 
 /// Why a durable record is unreadable (`tx_state_discarded.reason`; never a value).
@@ -378,7 +410,8 @@ impl Durable {
                 && wire.last.is_none()
                 && wire.counters.is_none()
                 && wire.mutations.is_none()
-                && wire.versions.is_none();
+                && wire.versions.is_none()
+                && wire.atomic.is_none();
             return empty.then_some(Self::Tombstone { owner: wire.owner });
         }
         let record = Record {
@@ -394,6 +427,7 @@ impl Durable {
             counters: wire.counters?,
             mutations: wire.mutations?,
             versions: wire.versions,
+            atomic: wire.atomic,
         };
         record.is_consistent().then(|| Self::Live(Box::new(record)))
     }
@@ -416,6 +450,7 @@ impl Durable {
                 counters: None,
                 mutations: None,
                 versions: None,
+                atomic: None,
             },
             Self::Live(record) => DurableWire {
                 v: TX_STATE_VERSION,
@@ -431,6 +466,7 @@ impl Durable {
                 counters: Some(record.counters),
                 mutations: Some(record.mutations.clone()),
                 versions: record.versions.clone(),
+                atomic: record.atomic.clone(),
             },
         };
         // Every field is a string, an integer, a finite float, or exact JSON text, so
@@ -458,8 +494,24 @@ impl Record {
             .last
             .as_ref()
             .is_none_or(|last| hex64(&last.digest) && last.response.get().starts_with('{'));
-        let terminal_reply =
-            !matches!(self.phase, Phase::Committed | Phase::RolledBack) || self.last.is_some();
+        let terminal_reply = self.kind == Kind::Atomic
+            || !matches!(self.phase, Phase::Committed | Phase::RolledBack)
+            || self.last.is_some();
+        // An atomic record only serializes work: `active`, then a terminal phase; it never
+        // holds a reply, a sequence, a mutation, or `committing` (ADR 0024).
+        let kind = match self.kind {
+            Kind::Interactive => self.atomic.is_none(),
+            Kind::Atomic => {
+                matches!(
+                    self.phase,
+                    Phase::Active | Phase::Committed | Phase::Failed | Phase::Expired
+                ) && self.atomic.as_ref().is_some_and(AtomicIds::is_valid)
+                    && self.next_sequence == 1
+                    && self.counters == Counters::default()
+                    && self.mutations.is_empty()
+                    && self.identity.mode == Mode::Write
+            }
+        };
         let mutations = self.mutations.len() <= MAX_MUTATIONS
             && self
                 .mutations
@@ -476,6 +528,7 @@ impl Record {
                 short_text(&versions.schema) && short_text(&versions.policy)
             });
         hashes
+            && kind
             && deadline
             && sequence
             && last
@@ -513,6 +566,7 @@ pub enum Awaited {
     SetTimer,
     Persist,
     CallValidator,
+    Forward,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -564,6 +618,8 @@ pub enum Task {
         operation: Operation,
         resource: Option<String>,
         versions: Versions,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explain_resource: Option<u64>,
     },
     /// `Execute` of a statement.
     #[serde(rename_all = "camelCase")]
@@ -575,6 +631,8 @@ pub enum Task {
         resource: Option<String>,
         versions: Versions,
         started_at_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explain_resource: Option<u64>,
     },
     /// `CheckBinding` before a commit. `auth` (the commit's canonical session) is present when
     /// the recorded mutations trigger commit checks, which run after this check; `passed` when
@@ -641,11 +699,124 @@ pub enum Task {
     },
     /// `Persist` of a fail-closed record; then `Reset` whatever the outcome.
     ResetAfterPersist,
+
+    // ---- atomic execution (pull request 6) ----
+    /// `CheckBinding` before an engine-side `execute` compiles (the `request` kind).
+    RequestBinding { operation: Box<RawValue> },
+    /// `Forward` of an `execute` whose commit checks could trigger; the owner's reply is
+    /// relayed.
+    AtomicForward,
+    /// `CheckBinding` of an atomic input on its owner, before it compiles.
+    AtomicBinding { input: Box<RawValue> },
+    /// `Open` of the atomic database transaction.
+    AtomicOpen,
+    /// `Persist` of the owner's `active` record.
+    AtomicPersist,
+    /// `SetTimer` at the owner's deadline.
+    AtomicTimer,
+    /// `Execute` of the idempotency lookup.
+    AtomicLookup,
+    /// `Execute` of the envelope's statements.
+    AtomicExecute,
+    /// `CheckBinding` after the commit checks, before the idempotency row and COMMIT.
+    AtomicCommitBinding,
+    /// `Execute` of the idempotency row, in the same database transaction.
+    AtomicInsert,
+    /// `Commit`; from here only its outcome decides.
+    AtomicCommit,
+    /// `Rollback` after the lookup found this request's row; then the stored reply.
+    AtomicReplay { reply: Box<RawValue> },
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// Where an atomic execution runs (ADR 0024 "One machine, three kinds").
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    /// In the engine that received the request: no owner, no `Persist`, no `SetTimer`.
+    Direct,
+    /// On the owner of `tx_<validation hex>`: commit checks and their callbacks.
+    Owner,
+}
+
+/// The idempotency identity of a keyed write (`identity_json` `request`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Idempotency {
+    pub key_hash: String,
+    pub fingerprint: String,
+}
+
+/// One statement of an atomic envelope, as the machine keeps it while the envelope runs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AtomicStatement {
+    pub operation: Operation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    pub limits: StatementLimits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain_resource: Option<u64>,
+}
+
+/// The atomic `usage` of a reply (`turso.ts` `policyUsage`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AtomicUsage {
+    pub rows_returned: u64,
+    pub rows_affected: u64,
+    pub rows_read: u64,
+    pub rows_written: u64,
+    pub query_duration_ms: f64,
+}
+
+/// An atomic execution in progress (ADR 0024 `AtomicProgress`): compiled, executed, checked,
+/// and committed within one request, so nothing of it is durable.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AtomicRun {
+    pub placement: Placement,
+    /// The public `transactionId` (`atomic_...`).
+    pub transaction_id: String,
+    /// The request id the reply's `meta.requestId` names.
+    pub request_id: String,
+    /// The caller's canonical session (commit checks derive the callback session from it).
+    pub auth: String,
+    pub role: String,
+    /// The pinned binding (the direct placement has no record).
+    pub binding: Binding,
+    /// The envelope's plan, live until the execution ends.
+    pub handle: u64,
+    pub statements: Vec<AtomicStatement>,
+    pub versions: Versions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency: Option<Idempotency>,
+    /// When the work began (`now_ms`), for the cumulative timeout.
+    pub started_at_ms: u64,
+    /// The owner's deadline (`now_ms + transaction_ms`); absent for the direct placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+    /// Whether the reply carries `debug.executionTrace` (tracing enabled and debug access).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub debug: bool,
+    /// The execution trace `Execute` carries, kept for the reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<Box<RawValue>>,
+    /// The validated public results, once the envelope executed within its limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<Box<RawValue>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AtomicUsage>,
+    /// The statements that changed rows (by envelope index): what triggers commit checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutations: Vec<Mutation>,
+    /// Every triggered commit check allowed the commit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub checks_passed: bool,
 }
 
 /// The commit checks of the commit in progress (ADR 0024 `CommitProgress`): recomputed from
@@ -738,7 +909,9 @@ pub struct CallbackWork {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Volatile {
     pub v: u32,
-    pub owner: String,
+    /// The owner name; absent in the engine (the `request` kind and direct atomic execution).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     pub next_effect_id: u64,
     pub connection: Connection,
     pub handles: Vec<u64>,
@@ -758,17 +931,21 @@ pub struct Volatile {
     /// is logged and ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_validator: Option<u64>,
+    /// The atomic execution in progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atomic: Option<Box<AtomicRun>>,
 }
 
 impl Volatile {
-    /// Reads volatile JSON for `owner`; `None` when it is not a valid value of this version.
+    /// Reads volatile JSON for `owner` (`None`: the engine); `None` when it is not a valid
+    /// value of this version or exceeds `bound` bytes.
     #[must_use]
-    pub fn parse(text: &str, owner: &str) -> Option<Self> {
-        if text.len() > MAX_VOLATILE_BYTES {
+    pub fn parse(text: &str, owner: Option<&str>, bound: usize) -> Option<Self> {
+        if text.len() > bound {
             return None;
         }
         let value: Self = serde_json::from_str(text).ok()?;
-        (value.v == TX_STATE_VERSION && value.owner == owner && value.is_consistent())
+        (value.v == TX_STATE_VERSION && value.owner.as_deref() == owner && value.is_consistent())
             .then_some(value)
     }
 
@@ -834,7 +1011,14 @@ impl Volatile {
                 .pending
                 .is_none_or(|pending| pending.id < self.next_effect_id)
             && self.handles.len() <= 2
-            && owner_name(&self.owner)
+            && self.owner.as_deref().is_none_or(owner_name)
+            && self.atomic.as_ref().is_none_or(|atomic| {
+                // The direct placement runs in the engine, the owner placement on its owner.
+                (atomic.placement == Placement::Owner) == self.owner.is_some()
+                    && atomic.binding.is_valid()
+                    && super::io::valid_request_id(&atomic.request_id)
+                    && self.handles.contains(&atomic.handle)
+            })
             && self
                 .work
                 .as_ref()
@@ -861,6 +1045,7 @@ impl Volatile {
             && self.callback.is_none()
             && self.capability.is_none()
             && self.deferred.is_none()
+            && self.atomic.is_none()
     }
 }
 
@@ -871,18 +1056,28 @@ pub const fn awaited_by(task: &Task) -> Awaited {
         Task::BeginBinding { .. }
         | Task::StatementBinding { .. }
         | Task::CommitBinding { .. }
-        | Task::RollbackBinding { .. } => Awaited::CheckBinding,
-        Task::BeginOpen { .. } => Awaited::Open,
+        | Task::RollbackBinding { .. }
+        | Task::RequestBinding { .. }
+        | Task::AtomicBinding { .. }
+        | Task::AtomicCommitBinding => Awaited::CheckBinding,
+        Task::BeginOpen { .. } | Task::AtomicOpen => Awaited::Open,
         Task::BeginPersist
         | Task::CommitPersist { .. }
         | Task::ValidatingPersist(_)
         | Task::Reply { .. }
-        | Task::ResetAfterPersist => Awaited::Persist,
-        Task::BeginTimer => Awaited::SetTimer,
+        | Task::ResetAfterPersist
+        | Task::AtomicPersist => Awaited::Persist,
+        Task::BeginTimer | Task::AtomicTimer => Awaited::SetTimer,
+        Task::AtomicForward => Awaited::Forward,
         // A deferred verdict is never pending (`is_consistent` keeps it out of `work`).
         Task::Validator(_) | Task::Verdict { .. } => Awaited::CallValidator,
-        Task::StatementExecute { .. } => Awaited::Execute,
-        Task::CommitSend { .. } => Awaited::Commit,
-        Task::RollbackSend { .. } | Task::CloseRollback { .. } => Awaited::Rollback,
+        Task::StatementExecute { .. }
+        | Task::AtomicLookup
+        | Task::AtomicExecute
+        | Task::AtomicInsert => Awaited::Execute,
+        Task::CommitSend { .. } | Task::AtomicCommit => Awaited::Commit,
+        Task::RollbackSend { .. } | Task::CloseRollback { .. } | Task::AtomicReplay { .. } => {
+            Awaited::Rollback
+        }
     }
 }

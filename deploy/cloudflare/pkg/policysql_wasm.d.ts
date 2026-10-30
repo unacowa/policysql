@@ -25,6 +25,13 @@ export class PolicySqlRuntime {
      */
     compile_json(verified_auth_json: string, request_json: string, permission: string): string;
     /**
+     * Evaluates the cost of one envelope from the `EXPLAIN QUERY PLAN` results an `Observe`
+     * effect's statements returned and the wrapper's cost catalog (ADR 0024 "Cost"). The
+     * engine only logs the result: cost admits or rejects nothing. The contract is
+     * [`policysql_transaction::cost`].
+     */
+    cost_estimate_json(input_json: string): string;
+    /**
      * Computes a request identity, fingerprint, or command digest with core's canonical
      * JSON and SHA-256 (ADR 0024 pull request 2, ADR 0025). The input and output contract is
      * [`policysql_transaction::identity_json`]; bodies are passed as their exact text.
@@ -78,8 +85,10 @@ export class PolicySqlRuntime {
      * [`policysql_transaction::machine`].
      *
      * Adding this method bumped `ABI_VERSION` to 6; commit checks and callbacks (pull request
-     * 5) changed what it returns for some inputs and bumped it to 7. No production path calls
-     * it before the switch-over (ADR 0024 pull request 7).
+     * 5) changed what it returns for some inputs and bumped it to 7; atomic execution (pull
+     * request 6: an `atomic` input is executed instead of answered `POLICYSQL_INTERNAL`, the
+     * `request` event, `Execute.trace`, and the `Observe` context) bumped it to 8. No
+     * production path calls it before the switch-over (ADR 0024 pull requests 7 and 8).
      */
     step_json(durable_json: string | null | undefined, volatile_json: string | null | undefined, event_json: string, host_json: string): string;
     /**
@@ -103,6 +112,7 @@ export interface InitOutput {
     readonly policysqlruntime_catalog_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_commit_checks_enabled: (a: number) => number;
     readonly policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+    readonly policysqlruntime_cost_estimate_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_identity_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_limits_json: (a: number) => [number, number];
     readonly policysqlruntime_max_bytes_per_value: (a: number) => number;

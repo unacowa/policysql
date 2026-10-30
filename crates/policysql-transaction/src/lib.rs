@@ -5,15 +5,18 @@
 //! `policysql-wasm` exposes it. Pull request 2 of the ADR 0024 migration moved canonical JSON,
 //! SHA-256, the idempotency key syntax, the request identities (`keyHash`, fingerprints), and
 //! the command digests here; ADR 0025 makes core's canonical form the only definition. Pull
-//! request 4 adds the `step` machine ([`machine`]) for interactive transactions and pull request
-//! 5 its commit checks and callbacks; no production path uses it before the switch-over (pull
-//! request 7).
+//! request 4 adds the `step` machine ([`machine`]) for interactive transactions, pull request 5
+//! its commit checks and callbacks, and pull request 6 atomic execution and the cost evaluation
+//! ([`cost`]); no production path uses the machine before the switch-over (pull requests 7 and
+//! 8).
 
 pub mod canonical;
+pub mod cost;
 pub mod identity;
 pub mod machine;
 
 pub use canonical::{Json, ParseError, canonical_json};
+pub use cost::cost_estimate_json;
 pub use identity::{IdentityError, identity_json, sha256_hex, valid_idempotency_key};
 
 #[cfg(test)]
@@ -38,6 +41,7 @@ mod purity_tests {
         for source in [
             include_str!("lib.rs"),
             include_str!("canonical.rs"),
+            include_str!("cost.rs"),
             include_str!("identity.rs"),
             include_str!("machine/mod.rs"),
             include_str!("machine/compiler.rs"),
@@ -45,6 +49,7 @@ mod purity_tests {
             include_str!("machine/state.rs"),
             include_str!("machine/step.rs"),
             include_str!("machine/step/checks.rs"),
+            include_str!("machine/step/atomic.rs"),
             include_str!("machine/time.rs"),
         ] {
             for forbidden in [

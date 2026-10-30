@@ -9,8 +9,8 @@
 mod common;
 
 use common::{
-    Engine, FakeCompiler, LIMITS, OWNER, TranscriptLine, begin, command, sequence_text,
-    statement_text,
+    Engine, FakeCompiler, LIMITS, OWNER, TranscriptLine, atomic_input, begin, command, envelope,
+    execute_request, sequence_text, statement_text,
 };
 use policysql_transaction::machine::step_json;
 use serde_json::json;
@@ -315,7 +315,7 @@ fn check_capability_tampering() -> Engine {
 
 type Scenario = fn() -> Engine;
 
-const SCENARIOS: [(&str, Scenario); 20] = [
+const SCENARIOS: [(&str, Scenario); 29] = [
     (
         "commit-check-allowed-with-callbacks",
         check_allowed_with_callbacks,
@@ -366,7 +366,94 @@ const SCENARIOS: [(&str, Scenario); 20] = [
         "statement-completion-put-failed",
         statement_completion_put_failed,
     ),
+    ("atomic-direct-keyed-replay", atomic_direct_keyed_replay),
+    ("atomic-expectation-rollback", atomic_expectation_rollback),
+    ("atomic-commit-failure", atomic_commit_failure),
+    ("atomic-owner-commit-check", atomic_owner_commit_check),
+    (
+        "atomic-prior-record-of-another-binding",
+        common::probes::prior_record_of_another_binding,
+    ),
+    (
+        "atomic-timer-while-callback-holds-connection",
+        common::probes::timer_while_callback_holds_the_connection,
+    ),
+    (
+        "atomic-successor-timer-races-keyed-retry",
+        common::probes::successor_timer_races_a_keyed_retry,
+    ),
+    (
+        "atomic-timer-during-idempotency-insert",
+        common::probes::timer_during_the_idempotency_insert,
+    ),
+    (
+        "atomic-direct-abandon-during-commit",
+        direct_abandon_applied,
+    ),
 ];
+
+/// P5 with a COMMIT that applied: the retry replays.
+fn direct_abandon_applied() -> Engine {
+    common::probes::direct_abandon_during_commit(true)
+}
+
+// ---- atomic execution (pull request 6) ------------------------------------------------------
+
+const ATOMIC_KEY: &str = "request-key-0001";
+const OWNER_KEY_HASH: &str = "0123456789abcdef0123456789abcdef00000000000000000000000000000000";
+const OWNER_FINGERPRINT: &str = "f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00d";
+
+fn project_insert(id: &str) -> serde_json::Value {
+    envelope(&[(
+        "INSERT INTO projects (id, name) VALUES (:id, :name)",
+        json!({"id": id, "name": id}),
+    )])
+}
+
+/// Direct placement: a keyed write, its replay, and a conflicting body on the same key.
+fn atomic_direct_keyed_replay() -> Engine {
+    let mut engine = Engine::atomic(false);
+    engine.run(&execute_request(&project_insert("p1"), Some(ATOMIC_KEY)));
+    engine.run(&execute_request(&project_insert("p1"), Some(ATOMIC_KEY)));
+    engine.run(&execute_request(&project_insert("p2"), Some(ATOMIC_KEY)));
+    engine
+}
+
+/// Direct placement: an expectation fails, the envelope rolls back, nothing is stored.
+fn atomic_expectation_rollback() -> Engine {
+    let mut engine = Engine::atomic(false);
+    let body = json!({"statements": [{"sql": "INSERT INTO projects (id, name) VALUES (:id, :name)",
+        "params": {"id": "p1", "name": "p1"}, "expect": {"affectedRows": 2}}]});
+    engine.run(&execute_request(&body, Some(ATOMIC_KEY)));
+    engine
+}
+
+/// Direct placement: COMMIT fails in transport; the reply is not a rejection.
+fn atomic_commit_failure() -> Engine {
+    let mut engine = Engine::atomic(false);
+    engine.feed(&execute_request(&project_insert("p1"), Some(ATOMIC_KEY)));
+    for _ in 0..5 {
+        engine.resolve(true, "unknown");
+    }
+    engine.resolve(false, "unavailable");
+    engine.settle();
+    engine
+}
+
+/// Owner placement: a keyed write whose commit check allows it, then its retry, which
+/// resolves through the idempotency row.
+fn atomic_owner_commit_check() -> Engine {
+    let mut engine = Engine::atomic(true);
+    engine.configured = vec!["consistency".to_owned()];
+    let body = envelope(&[(
+        "INSERT INTO audited (id, note) VALUES (:id, :note)",
+        json!({"id": "a1", "note": "a1"}),
+    )]);
+    let input = atomic_input(&body, Some([OWNER_KEY_HASH, OWNER_FINGERPRINT]));
+    engine.run(&input);
+    engine.run(&input);
+    engine
+}
 
 fn jsonl(lines: &[TranscriptLine]) -> String {
     lines
@@ -554,6 +641,22 @@ fn transcripts_record_the_decided_answers() {
     for engine in [&lost, &exhausted, &tampered] {
         assert_eq!(engine.observed.commits_emitted, 0);
     }
+    assert_eq!(
+        answers(&atomic_direct_keyed_replay()),
+        ["committed", "committed", "POLICYSQL_IDEMPOTENCY_CONFLICT"]
+    );
+    let expectation = atomic_expectation_rollback();
+    assert_eq!(answers(&expectation), ["POLICYSQL_EXPECTATION_FAILED"]);
+    assert_eq!(expectation.observed.commits_emitted, 0);
+    assert_eq!(expectation.observed.rollbacks_emitted, 1);
+    assert_eq!(
+        answers(&atomic_commit_failure()),
+        ["POLICYSQL_DATABASE_UNAVAILABLE"]
+    );
+    let owner = atomic_owner_commit_check();
+    assert_eq!(answers(&owner), ["committed", "committed"]);
+    assert_eq!(owner.observed.commits_emitted, 1);
+    assert_eq!(owner.observed.validator_calls.len(), 1);
     assert_eq!(
         answers(&statement_completion_put_failed()),
         [

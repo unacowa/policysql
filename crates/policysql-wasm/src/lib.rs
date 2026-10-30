@@ -27,7 +27,7 @@ use wasm_bindgen::prelude::*;
 /// 7: commit checks and callbacks in `step_json` (ADR 0024 pull request 5): a commit whose
 /// mutations trigger checks now emits `callValidator` instead of being rejected, callback
 /// queries are served, and the `validatorReplied`/`validatorFailed` events are read.
-const ABI_VERSION: u32 = 7;
+const ABI_VERSION: u32 = 8;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -653,8 +653,10 @@ impl PolicySqlRuntime {
     /// [`policysql_transaction::machine`].
     ///
     /// Adding this method bumped `ABI_VERSION` to 6; commit checks and callbacks (pull request
-    /// 5) changed what it returns for some inputs and bumped it to 7. No production path calls
-    /// it before the switch-over (ADR 0024 pull request 7).
+    /// 5) changed what it returns for some inputs and bumped it to 7; atomic execution (pull
+    /// request 6: an `atomic` input is executed instead of answered `POLICYSQL_INTERNAL`, the
+    /// `request` event, `Execute.trace`, and the `Observe` context) bumped it to 8. No
+    /// production path calls it before the switch-over (ADR 0024 pull requests 7 and 8).
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn step_json(
@@ -672,6 +674,16 @@ impl PolicySqlRuntime {
             event_json,
             host_json,
         )
+    }
+
+    /// Evaluates the cost of one envelope from the `EXPLAIN QUERY PLAN` results an `Observe`
+    /// effect's statements returned and the wrapper's cost catalog (ADR 0024 "Cost"). The
+    /// engine only logs the result: cost admits or rejects nothing. The contract is
+    /// [`policysql_transaction::cost`].
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn cost_estimate_json(&self, input_json: &str) -> String {
+        policysql_transaction::cost_estimate_json(input_json)
     }
 
     /// Returns the activated, role-visible logical Catalog.

@@ -258,8 +258,10 @@ struct Volatile {
   lost commit response can still be confirmed after a deployment changed the snapshot. Every
   command that does work still requires the full fingerprint and the current snapshot.
 - **Bounds.** Durable JSON is at most 96 KiB, so it fits a Durable Object value (128 KiB) with
-  room for the key and framing; volatile JSON is at most 256 KiB; an event is at most
-  `max_statements` × 1 MiB of raw results plus 64 KiB. `last.response` is bounded by the
+  room for the key and framing; an event is at most `max_statements` × 1 MiB of raw results
+  plus 64 KiB; volatile JSON is at most 256 KiB plus four times that event bound (pull request
+  6: an atomic execution keeps its validated results until COMMIT; 256 KiB before it), and the
+  handles of a volatile text that fails validation within that bound are still released. `last.response` is bounded by the
   transaction result-byte limit; runtime construction rejects a limit that could make durable
   state exceed its bound. Core never emits a state over its bound: the transition fails
   closed instead.
@@ -594,6 +596,10 @@ today.
   `callbackQuery` input is served instead of answered unavailable), which is the rule ADR 0025
   applied to `identity_json`. Nothing in production calls `step_json` yet, so the deployment
   is one more snapshot change.
+  Pull request 6 bumps to 8 by the same rule: an `atomic` owner input is executed instead of
+  answered `POLICYSQL_INTERNAL`, a `request` event is accepted with no owner in the host facts,
+  `execute.trace` carries the execution trace, and the `observe` context changes shape. The new
+  `cost_estimate_json` method alone would not have needed a bump (the rule of pull request 2).
 - **In-flight transactions** do not survive any deployment: owners restart, so their
   connections are gone, and they fail closed as today.
 - **Keyed atomic retries across a snapshot change** get `POLICYSQL_IDEMPOTENCY_CONFLICT`,
@@ -957,6 +963,138 @@ Recorded by pull request 5 (ABI 7), which adds commit checks and callbacks to th
   expiry while validating, a late verdict after expiry, a callback after revocation, callback
   limit exhaustion, and capability tampering, and `step_tests.rs` in `policysql-wasm` with the
   real compiler.
+
+Recorded by pull request 6 (ABI 8), which adds atomic execution to the machine
+(`crates/policysql-transaction/src/machine/step/atomic.rs`) and `cost_estimate_json`
+(`crates/policysql-transaction/src/cost.rs`); no production path calls either yet (pull request 8
+switches atomic execution).
+
+- **The `request` kind of `execute`.** The engine-side entry point is
+  `{"type":"request","operation":{"kind":"execute", auth, databaseBinding, snapshot, bodyText,
+  idempotencyKey?, trace}}` with `owner: null` in the host facts (the engine holds no durable
+  state; a durable text with no owner is `{"error":…}`). `auth` is the canonical session the engine
+  authorized, `bodyText` the verified body text (#70: compile and the idempotency fingerprint
+  use it, never a re-serialization), `trace` whether the deployment records execution traces.
+  The step checks the binding (`CheckBinding`), compiles, computes the idempotency identity of a
+  write envelope (a read ignores the key, as today; a malformed key is
+  `POLICYSQL_IDEMPOTENCY_KEY_REQUIRED`), and, when a mutated resource could trigger a commit check
+  (`Compiler::triggered_checks`), releases the plan and emits `Forward { owner: tx_<hex>, lane:
+  "client", input }`, where `hex` is the key hash's first 32 digits or entropy bytes 16..32 (the
+  bytes that seed effect ids are 0..6). `OwnerReplied` is relayed after a shape check (an
+  unexpected shape is `POLICYSQL_INTERNAL` and logs `owner_reply_rejected`); `ForwardFailed` is
+  `POLICYSQL_INTERNAL`. Every other envelope runs in the engine with placement `direct`. The
+  `request` kind of interactive commands remains pull request 7.
+- **The owner's input** is `{kind: "atomic", validationId, auth, request, databaseBinding,
+  snapshot, idempotency?}` (`request` is the verified text, as `OwnerAtomicInput` today). The
+  validation id must name the owner and a key hash must start with the owner's hex; the snapshot
+  must be the runtime's (`POLICYSQL_TRANSACTION_CONFLICT`, as `checkContext`); the owner placement
+  runs write envelopes only (`POLICYSQL_INVALID_REQUEST`). Whatever the owner's record says, the
+  input starts a fresh execution: an unreadable record is logged (`tx_state_discarded`) and
+  replaced when the execution persists its own, a busy owner or one holding an interactive record
+  answers `POLICYSQL_INTERNAL` (names never collide).
+- **Order.** Direct: `CheckBinding`, `Open` (timeout and deadline from the strictest statement
+  `timeoutMs`), the lookup (keyed writes), `Execute` of the envelope, the row (`INSERT`), `Commit`.
+  Owner: `CheckBinding`, compile, `Open` (deadline `now + transaction_ms`, BEGIN timeout the
+  strictest statement timeout), `Persist(active)`, `SetTimer`, the lookup, `Execute`, the commit
+  checks of the statements that changed rows (reusing pull request 5's capability, validator,
+  and callback rules; the hook payload lists them by envelope index, as `triggeredCommitChecks`
+  does), `CheckBinding` again (with the snapshot, as `checkCurrent`), the row, `Commit`,
+  `Persist(committed)`. The lookup's three outcomes are those of the failure table: one row with
+  this fingerprint replays (rolled back; nothing executes; the owner records `committed`), one
+  with another fingerprint is `POLICYSQL_IDEMPOTENCY_CONFLICT` on both placements, more than one
+  row is `POLICYSQL_INTERNAL` on both (inconsistencies 1 and 2).
+- **Atomic durable state** is `kind: atomic` with `atomic: {transactionId, keyHash?}` and only
+  `active`, `committed`, `failed`, or `expired`: no reply, sequence, mutation, `validating`, or
+  `committing`. The capability of a commit check is live while the record is `active` and the
+  validator is awaited (an interactive commit requires `validating`). `TransactionOwnerCore`
+  persists `validating` and `active` around each check; nothing reads either.
+- **The stored record** (`response_json`) has one shape on both placements: the owner path's,
+  `{version: 1, transactionId, status: "committed", results, usage, originalRequestId, replayed:
+  false, commitChecks}`. It is read strictly (version 1, an array of results, an `atomic_`
+  transaction id, a string request id, a usage object, `status` `committed`, `commitChecks`
+  `passed` or `not_triggered`), except that `status` and `commitChecks` may be absent, which the
+  rows of today's direct path are (they omit both); they read as `committed` and
+  `not_triggered`, so a keyed retry across pull request 8 still replays. Transaction ids are
+  today's: `atomic_<keyHash[0..24]>` keyed, `atomic_<requestId>` direct and
+  `atomic_<validation hex>` on an owner unkeyed.
+- **The reply** is the public `execute` response (`engine.ts` 352-370 and 392-409 move to core):
+  `{transactionId, status: "committed", results, meta: {requestId, policyVersion, schemaVersion,
+  role, commitChecks}, debug?}`; the owner replies it and the engine relays it. A replay names the
+  stored request id and `commitChecks`. `debug.executionTrace` is present when tracing is enabled
+  and the session has `debug` access, on the direct placement only (the owner path records no
+  trace today, and still does not); the trace (`turso.ts` `executionTrace`, parameters sorted by an
+  ASCII approximation of `localeCompare`) rides on the envelope's `Execute`, and the engine
+  publishes it to the sink before running the statements.
+- **Limits.** The envelope's results are validated statement by statement (a failed expectation
+  or a schema mismatch rolls back), then the strictest statement `maxRows` and `maxResultBytes`
+  apply to the whole envelope (`POLICYSQL_LIMIT_EXCEEDED`), counting `JSON.stringify` of the rows
+  as objects with core's canonical numbers (an exponent spelling such as `1e21` can count one byte
+  less than `1e+21`), and the strictest `timeoutMs` to `now_ms` minus the step that emitted `Open`
+  (`POLICYSQL_TIMEOUT`; the transport's deadline usually ends a slow envelope first). Volatile
+  state may hold the validated results until COMMIT, so its bound is 256 KiB plus four times the
+  largest event.
+- **COMMIT.** At most one `Commit` per execution, emitted only by the step that has every
+  triggered check allowed and the binding checked after the last one, and on an owner only before
+  its deadline (after it, or after a `TimerFired` that arrived during a database effect, the
+  execution rolls back with `POLICYSQL_TRANSACTION_UNAVAILABLE`, as `checkCurrent` answers, and
+  records `expired`; a `TimerFired` during a validator call answers `POLICYSQL_COMMIT_CHECK_REJECTED`
+  at once, as for an interactive commit; a `TimerFired` while `Commit` is in flight is ignored).
+  `Committed` replies the committed response, also when the owner's terminal record cannot be
+  stored. `CommitFailed` rolls the connection back (as both TypeScript paths do) and answers by
+  class: `timeout` `POLICYSQL_DATABASE_TIMEOUT`, `unavailable` `POLICYSQL_DATABASE_UNAVAILABLE`,
+  anything else `POLICYSQL_INTERNAL`: none is a rejection in the client, so an unkeyed request is
+  reported with the error of the failure as today and a keyed one resolves through its row.
+- **Cost** stays observation ("Cost" above): nothing is admitted or rejected by it. `Observe`
+  carries the cost statements of the non-insert statements and `context: {requestId, binding,
+  statements: [{operation, resource?, explainResource}]}`, one entry per envelope statement (an
+  interactive statement has one); the binding is the pinned one the cost connection uses (ADR
+  0014). It is emitted after COMMIT, and for a direct replay, as `engine.ts` observes today.
+  `TransactionOwnerCore` observes the owner path after the envelope, before its checks, so the
+  harness does not compare owner-path observations. `cost_estimate_json({catalog, statements,
+  results})` is `cost.ts` `evaluate`: bounds from the catalog only, plan rows counted (each must
+  have a string `detail`), `POLICYSQL_COST_UNKNOWN`, `POLICYSQL_USAGE_BUDGET_EXCEEDED`, or
+  `POLICYSQL_COST_ADMISSION_UNAVAILABLE` (more results than planned statements, or another
+  shape); fewer results leave the remaining statements at their defaults, as `evaluate` does.
+  `cost.ts` keeps its `evaluate` until pull request 9; the harness compares the two over the
+  cases of `cost.test.mjs`.
+- **Differential harness.** `deploy/cloudflare/test/step-atomic-differential.test.mjs` runs
+  `execute` through `createEngine` (direct path and `TransactionOwnerCore` behind the in-memory
+  port) and through `StepEngine` (`test/helpers/step-engine.mjs`) with `StepOwnerCore` owners,
+  and compares results, database calls (the stored `response_json` as JSON), validator calls,
+  callback replies, trace-sink calls, cost observations, and final rows. Allowlist:
+  `idempotency-conflict-code` (inconsistency 1), `duplicate-idempotency-rows` (inconsistency 2),
+  and `stored-record-shape` (core's direct-path record also carries `status` and `commitChecks`;
+  normalized after asserting their values). Not exercised by the harness, but pinned by core's
+  tests and transcripts (below): `TransactionOwnerCore` answers a previous record of another
+  binding or snapshot with `POLICYSQL_TRANSACTION_CONFLICT`, which core ignores (the request
+  resolves through its row: a replay when the row's fingerprint is the request's, else
+  `POLICYSQL_IDEMPOTENCY_CONFLICT`, inconsistency 1), and owner timers during an atomic
+  execution. Owner-path cost observations are not compared: `TransactionOwnerCore` observes
+  after the envelope also when a check later rejects, core only after COMMIT, and
+  `StepOwnerCore` does not run them.
+- **Tests.** `tests/atomic.rs` (scenarios on both placements), `tests/atomic_properties.rs`
+  (proptest over effect outcomes, verdicts, timers, `Abandon`, and duplicated and stale outcomes:
+  at most one COMMIT per execution; a keyed retry never executes twice; no definite rejection after
+  COMMIT; a failed expectation never commits and stores nothing; every handle released;
+  determinism), transcripts `atomic-direct-keyed-replay`, `atomic-expectation-rollback`,
+  `atomic-commit-failure`, and `atomic-owner-commit-check`, the review's probes of #75 as
+  scenarios and transcripts (`atomic-prior-record-of-another-binding`,
+  `atomic-timer-while-callback-holds-connection`, `atomic-successor-timer-races-keyed-retry`,
+  `atomic-timer-during-idempotency-insert`, `atomic-direct-abandon-during-commit`), a volatile
+  text between 256 KiB and the runtime's bound that fails validation and still releases its
+  handles, and `step_tests.rs` in
+  `policysql-wasm` with the real compiler (#70 digits, the trace). The one transcript of pull
+  request 4 with an `observe` effect (`owner-loss-and-expiry`) was regenerated for its new
+  context.
+- **Obligations for the production executor (pull request 8).** Classify driver failures as
+  `turso.ts` `remoteFailure` does on the direct placement (a query timeout is `timeout`, anything
+  else `unavailable`); publish `execute.trace` to the sink before the statements; run `observe`
+  in the background on a read connection named `${requestId}-cost` with the runtime's
+  `costTimeoutMs` and log `cost_estimate_json`'s answer as `cost_observation` or
+  `cost_observation_failed`; relay `forward` through the owner port's `atomic`, passing the
+  engine's request id as the owner's request id, which becomes the owner's
+  `HostFacts.request_id`, so the owner's reply keeps `meta.requestId` (and the stored
+  `originalRequestId`) equal to the engine's request id, as today.
 
 ## Decided during review
 

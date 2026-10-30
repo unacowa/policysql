@@ -16,7 +16,8 @@ pub struct HostFacts {
     pub entropy: String,
     /// The caller's request id or a fresh one (ADR 0023 rules).
     pub request_id: String,
-    /// The owner running this step; `None` in the engine (the `request` kind, pull request 7).
+    /// The owner running this step; `None` in the engine (the `request` kind and atomic
+    /// execution with placement `direct`).
     pub owner: Option<String>,
     /// Check ids with an endpoint in `PolicySqlConfig`, empty when it has no `publicBaseUrl`
     /// (ADR 0021): a triggered check outside this list rejects the commit before any
@@ -32,14 +33,14 @@ pub fn valid_request_id(value: &str) -> bool {
 }
 
 impl HostFacts {
-    /// Host facts the machine can run with: an owner step (pull request 4 implements no
-    /// engine-side `request` kind), a time JavaScript holds exactly, 32 bytes of entropy.
+    /// Host facts the machine can run with: an owner name or none (the engine), a time
+    /// JavaScript holds exactly, 32 bytes of entropy.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         self.now_ms <= super::MAX_TIME_MS
             && super::state::hex64(&self.entropy)
             && valid_request_id(&self.request_id)
-            && self.owner.as_deref().is_some_and(super::state::owner_name)
+            && self.owner.as_deref().is_none_or(super::state::owner_name)
             && self.configured_checks.len() <= 64
             && self
                 .configured_checks
@@ -54,6 +55,13 @@ impl HostFacts {
             .get(offset * 2..offset * 2 + 12)
             .and_then(|hex| u64::from_str_radix(hex, 16).ok())
             .unwrap_or(0)
+    }
+
+    /// The 16 entropy bytes 16..32 as 32 lowercase hex digits: the id of an unkeyed atomic
+    /// owner (disjoint from the bytes that seed effect ids).
+    #[must_use]
+    pub fn entropy_id(&self) -> Option<&str> {
+        self.entropy.get(32..64)
     }
 
     /// All 32 entropy bytes (the capability token).
@@ -105,6 +113,12 @@ pub struct DriverResult {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Event {
+    /// A client operation the engine received (the `request` kind; pull request 6 implements
+    /// `execute`). Its session and binding were validated by the engine; core validates the
+    /// shape again.
+    Request {
+        operation: serde_json::Value,
+    },
     /// What a `Forward` delivered to this owner: untrusted, validated field by field.
     Forwarded {
         input: serde_json::Value,
@@ -172,6 +186,16 @@ pub enum Event {
         id: u64,
         class: Class,
     },
+    /// The owner's reply to a `Forward` (untrusted: core checks its shape).
+    OwnerReplied {
+        id: u64,
+        reply: serde_json::Value,
+    },
+    /// The owner could not be reached or did not reply.
+    ForwardFailed {
+        id: u64,
+        class: Class,
+    },
     /// The engine is discarding volatile state (owner shutdown, unexpected engine error).
     Abandon,
 }
@@ -196,8 +220,12 @@ impl Event {
             | Self::TimerSet { id }
             | Self::TimerFailed { id }
             | Self::ValidatorReplied { id, .. }
-            | Self::ValidatorFailed { id, .. } => Some(*id),
-            Self::Forwarded { .. } | Self::TimerFired | Self::Abandon => None,
+            | Self::ValidatorFailed { id, .. }
+            | Self::OwnerReplied { id, .. }
+            | Self::ForwardFailed { id, .. } => Some(*id),
+            Self::Request { .. } | Self::Forwarded { .. } | Self::TimerFired | Self::Abandon => {
+                None
+            }
         }
     }
 
@@ -218,7 +246,10 @@ impl Event {
             Self::ValidatorReplied { .. } | Self::ValidatorFailed { .. } => {
                 Some(Awaited::CallValidator)
             }
-            Self::Forwarded { .. } | Self::TimerFired | Self::Abandon => None,
+            Self::OwnerReplied { .. } | Self::ForwardFailed { .. } => Some(Awaited::Forward),
+            Self::Request { .. } | Self::Forwarded { .. } | Self::TimerFired | Self::Abandon => {
+                None
+            }
         }
     }
 }
@@ -230,12 +261,25 @@ pub struct DriverCall {
     pub args: BTreeMap<String, serde_json::Value>,
 }
 
-/// The context `Observe` carries to the background cost observation.
+/// The context `Observe` carries to the background cost observation: every statement of the
+/// envelope, in order (the `statements` input of `cost_estimate_json`); `Observe.statements`
+/// holds the cost statements of the non-insert ones, in the same order.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObserveContext {
+    pub request_id: String,
+    /// The pinned binding the cost connection uses (ADR 0014).
+    pub binding: Binding,
+    pub statements: Vec<ObservedStatement>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedStatement {
     pub operation: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    pub explain_resource: Option<u64>,
 }
 
 /// One effect. Awaited effects carry an id that their outcome event repeats; a batch holds any
@@ -243,6 +287,14 @@ pub struct ObserveContext {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Effect {
+    /// Delivers `input` to the owner `owner` on `lane` (ADR 0022); its reply comes back as
+    /// `OwnerReplied`.
+    Forward {
+        id: u64,
+        owner: String,
+        lane: &'static str,
+        input: Box<RawValue>,
+    },
     #[serde(rename_all = "camelCase")]
     Open {
         id: u64,
@@ -259,10 +311,12 @@ pub enum Effect {
         #[serde(skip_serializing_if = "Option::is_none")]
         deadline_ms: Option<u64>,
     },
+    /// `trace`, when present, is the execution trace (`turso.ts` `executionTrace`) the engine
+    /// publishes to its sink before it runs the statements.
     Execute {
         id: u64,
         statements: Vec<DriverCall>,
-        trace: Option<()>,
+        trace: Option<Box<RawValue>>,
     },
     Commit {
         id: u64,
@@ -313,7 +367,8 @@ impl Effect {
     #[must_use]
     pub const fn id(&self) -> Option<u64> {
         match self {
-            Self::Open { id, .. }
+            Self::Forward { id, .. }
+            | Self::Open { id, .. }
             | Self::CheckBinding { id, .. }
             | Self::Execute { id, .. }
             | Self::Commit { id }
@@ -329,7 +384,8 @@ impl Effect {
     pub const fn is_awaited(&self) -> bool {
         matches!(
             self,
-            Self::Open { .. }
+            Self::Forward { .. }
+                | Self::Open { .. }
                 | Self::CheckBinding { .. }
                 | Self::Execute { .. }
                 | Self::Commit { .. }
@@ -368,6 +424,9 @@ pub enum Code {
     DatabaseUnavailable,
     SchemaMismatch,
     LimitExceeded,
+    IdempotencyConflict,
+    KeyRequired,
+    Timeout,
 }
 
 impl Code {
@@ -424,6 +483,15 @@ impl Code {
                 "POLICYSQL_LIMIT_EXCEEDED",
                 "The request or result exceeded a configured limit.",
             ),
+            Self::IdempotencyConflict => (
+                "POLICYSQL_IDEMPOTENCY_CONFLICT",
+                "The idempotency key is already bound to a different request.",
+            ),
+            Self::KeyRequired => (
+                "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED",
+                "Idempotency-Key must contain 16-128 letters, digits, dots, underscores, colons, or hyphens when provided.",
+            ),
+            Self::Timeout => ("POLICYSQL_TIMEOUT", "The database operation timed out."),
         }
     }
 

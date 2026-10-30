@@ -3,12 +3,14 @@
 #![allow(dead_code, clippy::missing_panics_doc, clippy::too_many_lines)]
 
 use policysql_transaction::machine::{
-    Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, StatementSummary,
-    TriggeredCheck, Validated, step_json,
+    Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, StatementLimits,
+    StatementSummary, TriggeredCheck, Validated, step_json,
 };
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+
+pub mod probes;
 
 pub const OWNER: &str = "tx_0123456789abcdef0123456789abcdef";
 pub const SNAPSHOT: &str = "sqlite-turso-v1:schema_1:policy_1:abi-6";
@@ -25,13 +27,27 @@ pub const LIMITS: Limits = Limits {
 };
 
 #[derive(Clone, Debug)]
-struct Plan {
+struct PlanStatement {
     operation: Operation,
     resource: Option<String>,
     sql: String,
     params: BTreeMap<String, Value>,
+    /// `expect.affectedRows` of the statement.
+    expect_affected: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct Plan {
+    statements: Vec<PlanStatement>,
     tenant: String,
 }
+
+/// The compiled limits of every fake statement (the runtime defaults).
+pub const STATEMENT_LIMITS: StatementLimits = StatementLimits {
+    max_rows: 100,
+    max_result_bytes: 64_000,
+    timeout_ms: 1_000,
+};
 
 /// Compiles `SELECT`/`INSERT`/`UPDATE`/`DELETE` on one resource. `BAD` SQL is
 /// `POLICYSQL_INVALID_SQL`; an envelope `serde_json` rejects (`1e400`) is
@@ -46,6 +62,11 @@ pub struct FakeCompiler {
     /// The checks a trigger runs (by default `consistency`, as role `auditor`, 1,000 ms).
     pub checks: Vec<TriggeredCheck>,
     pub compiles: Cell<usize>,
+    /// The statement limits every compiled statement gets.
+    pub limits: Option<StatementLimits>,
+    /// The cost catalog id every compiled statement names (`None` keeps the transcripts of
+    /// pull requests 4 and 5).
+    pub explain_resource: Option<u64>,
 }
 
 impl FakeCompiler {
@@ -63,6 +84,8 @@ impl FakeCompiler {
                 timeout_ms: 1_000,
             }],
             compiles: Cell::new(0),
+            limits: None,
+            explain_resource: None,
         }
     }
 
@@ -105,18 +128,31 @@ impl Compiler for FakeCompiler {
             || CoreError::new("POLICYSQL_INVALID_REQUEST", "Request envelope is invalid.");
         let envelope: Value = serde_json::from_str(envelope_json).map_err(|_| invalid())?;
         let auth: Value = serde_json::from_str(auth_json).map_err(|_| invalid())?;
-        let statement = envelope["statements"].get(0).ok_or_else(invalid)?;
-        let sql = statement["sql"].as_str().ok_or_else(invalid)?;
-        let params = statement["params"].as_object().ok_or_else(invalid)?;
-        let Some((operation, resource)) = resource_of(sql) else {
-            return Err(CoreError {
-                code: "POLICYSQL_INVALID_SQL".to_owned(),
-                message: "The SQL statement cannot be parsed.".to_owned(),
-                path: Some("/statements/0".to_owned()),
-            });
-        };
-        if params.values().any(|value| matches!(value, Value::Number(number) if number.as_i64().is_none() && number.as_f64().is_none_or(|f| !f.is_finite()))) {
+        let statements = envelope["statements"].as_array().ok_or_else(invalid)?;
+        if statements.is_empty() || statements.len() > 8 {
             return Err(invalid());
+        }
+        let mut planned = Vec::new();
+        for (index, statement) in statements.iter().enumerate() {
+            let sql = statement["sql"].as_str().ok_or_else(invalid)?;
+            let params = statement["params"].as_object().ok_or_else(invalid)?;
+            let Some((operation, resource)) = resource_of(sql) else {
+                return Err(CoreError {
+                    code: "POLICYSQL_INVALID_SQL".to_owned(),
+                    message: "The SQL statement cannot be parsed.".to_owned(),
+                    path: Some(format!("/statements/{index}")),
+                });
+            };
+            if params.values().any(|value| matches!(value, Value::Number(number) if number.as_i64().is_none() && number.as_f64().is_none_or(|f| !f.is_finite()))) {
+                return Err(invalid());
+            }
+            planned.push(PlanStatement {
+                operation,
+                resource: Some(resource),
+                sql: sql.to_owned(),
+                params: params.clone().into_iter().collect(),
+                expect_affected: statement["expect"]["affectedRows"].as_u64(),
+            });
         }
         let mut plans = self.plans.borrow_mut();
         if plans.len() >= 64 {
@@ -127,13 +163,19 @@ impl Compiler for FakeCompiler {
         }
         let handle = self.next.get();
         self.next.set(handle + 1);
+        let summaries = planned
+            .iter()
+            .map(|statement| StatementSummary {
+                operation: statement.operation,
+                resource: statement.resource.clone(),
+                limits: self.limits.unwrap_or(STATEMENT_LIMITS),
+                explain_resource: self.explain_resource,
+            })
+            .collect();
         plans.insert(
             handle,
             Plan {
-                operation,
-                resource: Some(resource.clone()),
-                sql: sql.to_owned(),
-                params: params.clone().into_iter().collect(),
+                statements: planned,
                 tenant: auth["session"]["tenant_id"]
                     .as_str()
                     .unwrap_or("")
@@ -142,10 +184,7 @@ impl Compiler for FakeCompiler {
         );
         Ok(Compiled {
             handle,
-            statements: vec![StatementSummary {
-                operation,
-                resource: Some(resource),
-            }],
+            statements: summaries,
             schema_version: "schema_1".to_owned(),
             policy_version: "policy_1".to_owned(),
         })
@@ -156,15 +195,19 @@ impl Compiler for FakeCompiler {
         let plan = plans.get(&handle).ok_or_else(|| {
             CoreError::new("POLICYSQL_INTERNAL", "The request could not be completed.")
         })?;
-        Ok(vec![DriverStatement {
-            sql: format!("{} /* protected */", plan.sql),
-            client_parameters: plan.params.clone(),
-            server_parameters: BTreeMap::from([(
-                "session_tenant_id".to_owned(),
-                Value::String(plan.tenant.clone()),
-            )]),
-            cost_sql: format!("EXPLAIN QUERY PLAN {}", plan.sql),
-        }])
+        Ok(plan
+            .statements
+            .iter()
+            .map(|statement| DriverStatement {
+                sql: format!("{} /* protected */", statement.sql),
+                client_parameters: statement.params.clone(),
+                server_parameters: BTreeMap::from([(
+                    "session_tenant_id".to_owned(),
+                    Value::String(plan.tenant.clone()),
+                )]),
+                cost_sql: format!("EXPLAIN QUERY PLAN {}", statement.sql),
+            })
+            .collect())
     }
 
     fn validate(&self, handle: u64, index: usize, raw: RawResult) -> Result<Validated, CoreError> {
@@ -173,8 +216,22 @@ impl Compiler for FakeCompiler {
             message: "The database result does not match the compiled logical contract.".to_owned(),
             path: Some(format!("/statements/{index}")),
         };
-        if !self.plans.borrow().contains_key(&handle) || index != 0 {
-            return Err(mismatch());
+        let expect = {
+            let plans = self.plans.borrow();
+            let Some(statement) = plans
+                .get(&handle)
+                .and_then(|plan| plan.statements.get(index))
+            else {
+                return Err(mismatch());
+            };
+            statement.expect_affected
+        };
+        if expect.is_some_and(|expected| expected != raw.affected_rows) {
+            return Err(CoreError {
+                code: "POLICYSQL_EXPECTATION_FAILED".to_owned(),
+                message: "The statement did not meet its expectation.".to_owned(),
+                path: Some(format!("/statements/{index}/expect")),
+            });
         }
         if raw
             .rows
@@ -287,6 +344,13 @@ pub struct Observed {
     pub validator_calls: Vec<Value>,
     /// Callback `execute` effects run on the connection.
     pub callback_executes: usize,
+    /// Envelope `execute` effects of atomic executions (not the idempotency statements).
+    pub envelope_executes: usize,
+    /// Atomic executions whose envelope ran and whose COMMIT applied.
+    pub envelope_commits: usize,
+    pub rollbacks_emitted: usize,
+    /// Every awaited effect type, in order.
+    pub awaited: Vec<String>,
 }
 
 /// A model of the engine: in-memory state, a store, and the outstanding awaited effect.
@@ -313,6 +377,21 @@ pub struct Engine {
     pub waiting: Vec<String>,
     pub last_effects: Vec<Value>,
     pub isolate: u32,
+    /// The host's owner name: `None` is the engine (direct atomic execution).
+    pub owner: Option<String>,
+    /// The committed `policysql_idempotency` rows: `[key_hash, fingerprint, response_json]`.
+    pub idempotency_rows: Vec<[String; 3]>,
+    /// Rows inserted by the open database transaction, committed by `Commit`.
+    pub pending_rows: Vec<[String; 3]>,
+    /// The open database transaction executed an envelope.
+    pub envelope_open: bool,
+    /// What a `forward` effect's owner replies.
+    pub forward_reply: Value,
+    /// `affectedRows` a mutation statement reports.
+    pub affected: u64,
+    /// Every `execute` that is not an idempotency statement or a callback query runs an
+    /// atomic envelope (one result per statement).
+    pub atomic_mode: bool,
 }
 
 impl Default for Engine {
@@ -347,6 +426,24 @@ impl Engine {
             waiting: Vec::new(),
             last_effects: Vec::new(),
             isolate: 0,
+            owner: Some(OWNER.to_owned()),
+            idempotency_rows: Vec::new(),
+            pending_rows: Vec::new(),
+            envelope_open: false,
+            forward_reply: json!({"ok": true, "value": {"transactionId": "atomic_x", "status": "committed"}}),
+            affected: 1,
+            atomic_mode: false,
+        }
+    }
+
+    /// An engine model for atomic execution: in the engine (`owner: None`, the direct
+    /// placement) or on [`OWNER`].
+    #[must_use]
+    pub fn atomic(owner: bool) -> Self {
+        Self {
+            owner: owner.then(|| OWNER.to_owned()),
+            atomic_mode: true,
+            ..Self::new()
         }
     }
 
@@ -357,7 +454,7 @@ impl Engine {
             "nowMs": self.now,
             "entropy": format!("{:064x}", self.entropy.wrapping_mul(0x9e37_79b9_7f4a_7c15)),
             "requestId": format!("req_{}", self.requests),
-            "owner": OWNER,
+            "owner": self.owner,
             "configuredChecks": self.configured,
         })
         .to_string()
@@ -374,6 +471,9 @@ impl Engine {
         // A callback query, or the outcome of the callback lane's pending effect.
         let callback_lane = event["input"]["kind"] == "callbackQuery"
             || (event["id"].is_u64() && self.callback_pending() == event["id"].as_u64());
+        if let Some(kind) = event["operation"]["kind"].as_str() {
+            self.waiting.push(kind.to_owned());
+        }
         if let Some(kind) = event["input"]["kind"].as_str()
             && kind != "callbackQuery"
         {
@@ -420,7 +520,10 @@ impl Engine {
             assert!(text.len() <= 96 * 1024, "durable bound");
         }
         if let Some(text) = parsed["volatile"].as_str() {
-            assert!(text.len() <= 256 * 1024, "volatile bound");
+            assert!(
+                text.len() <= self.limits.max_volatile_bytes(),
+                "volatile bound"
+            );
         }
         let reset = effects.iter().any(|effect| effect["type"] == "reset");
         self.durable = parsed["durable"].as_str().map(str::to_owned);
@@ -449,6 +552,7 @@ impl Engine {
                     self.observed.replies.push((kind, effect["reply"].clone()));
                 }
                 Some("commit") => self.observed.commits_emitted += 1,
+                Some("rollback") => self.observed.rollbacks_emitted += 1,
                 Some("persist") => {
                     if phase_of(self.durable.as_deref()).as_deref() == Some("committing") {
                         self.observed.persist_committing_emitted = true;
@@ -458,6 +562,9 @@ impl Engine {
                 _ => {}
             }
             if is_awaited(effect) {
+                self.observed
+                    .awaited
+                    .push(effect["type"].as_str().unwrap_or("").to_owned());
                 if callback_pending.is_some() && callback_pending == effect["id"].as_u64() {
                     self.callback_outstanding = Some(effect.clone());
                 } else {
@@ -466,6 +573,9 @@ impl Engine {
             }
         }
         if reset {
+            // The engine closes the connection: whatever it held rolls back.
+            self.pending_rows.clear();
+            self.envelope_open = false;
             self.durable.clone_from(&self.store);
             self.volatile = None;
             self.outstanding = None;
@@ -546,6 +656,61 @@ impl Engine {
             (Some("checkBinding"), false) => {
                 json!({"type": "bindingCheckFailed", "id": id, "class": class})
             }
+            (Some("execute"), true)
+                if effect["statements"][0]["sql"]
+                    .as_str()
+                    .is_some_and(|sql| sql.contains("policysql_idempotency")) =>
+            {
+                let sql = effect["statements"][0]["sql"].as_str().unwrap_or("");
+                let args = &effect["statements"][0]["args"];
+                let text = |name: &str| args[name].as_str().unwrap_or("").to_owned();
+                if sql.starts_with("SELECT") {
+                    let rows: Vec<Value> = self
+                        .idempotency_rows
+                        .iter()
+                        .filter(|row| row[0] == text("key_hash"))
+                        .map(|row| json!([row[1], row[2]]))
+                        .collect();
+                    json!({"type": "executed", "id": id, "results": [{
+                        "columns": ["fingerprint", "response_json"], "rows": rows, "rowsAffected": 0,
+                        "usage": {"rowsRead": 1, "rowsWritten": 0, "queryDurationMs": 0.25},
+                    }]})
+                } else {
+                    self.pending_rows.push([
+                        text("key_hash"),
+                        text("fingerprint"),
+                        text("response_json"),
+                    ]);
+                    json!({"type": "executed", "id": id, "results": [{
+                        "columns": [], "rows": [], "rowsAffected": 1,
+                        "usage": {"rowsRead": 0, "rowsWritten": 1, "queryDurationMs": 0.25},
+                    }]})
+                }
+            }
+            (Some("execute"), true)
+                if self.atomic_mode && self.callback_pending() != effect["id"].as_u64() =>
+            {
+                self.envelope_open = true;
+                self.observed.envelope_executes += 1;
+                let results: Vec<Value> = effect["statements"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|statement| {
+                        let sql = statement["sql"].as_str().unwrap_or("");
+                        let select = sql.trim_start().to_ascii_uppercase().starts_with("SELECT");
+                        let affected = if select { 0 } else { self.affected };
+                        json!({
+                            "columns": if select { json!(["id", "name"]) } else { json!([]) },
+                            "rows": if select { json!([["p1", "safe"]]) } else { json!([]) },
+                            "rowsAffected": affected,
+                            "usage": {"rowsRead": 1, "rowsWritten": affected, "queryDurationMs": 0.5},
+                        })
+                    })
+                    .collect();
+                json!({"type": "executed", "id": id, "results": results})
+            }
             (Some("execute"), true) => {
                 let sql = effect["statements"][0]["sql"].as_str().unwrap_or("");
                 let select = sql.trim_start().to_ascii_uppercase().starts_with("SELECT");
@@ -559,6 +724,10 @@ impl Engine {
             (Some("execute"), false) => json!({"type": "executeFailed", "id": id, "class": class}),
             (Some("commit"), true) => {
                 self.observed.committed_fed = true;
+                self.idempotency_rows.append(&mut self.pending_rows);
+                if std::mem::take(&mut self.envelope_open) {
+                    self.observed.envelope_commits += 1;
+                }
                 json!({"type": "committed", "id": id})
             }
             (Some("commit"), false) => {
@@ -567,7 +736,15 @@ impl Engine {
                 }
                 json!({"type": "commitFailed", "id": id, "class": class})
             }
-            (Some("rollback"), true) => json!({"type": "rolledBack", "id": id}),
+            (Some("rollback"), true) => {
+                self.pending_rows.clear();
+                self.envelope_open = false;
+                json!({"type": "rolledBack", "id": id})
+            }
+            (Some("forward"), true) => {
+                json!({"type": "ownerReplied", "id": id, "reply": self.forward_reply})
+            }
+            (Some("forward"), false) => json!({"type": "forwardFailed", "id": id, "class": class}),
             (Some("rollback"), false) => {
                 json!({"type": "rollbackFailed", "id": id, "class": class})
             }
@@ -654,8 +831,39 @@ pub fn is_awaited(effect: &Value) -> bool {
                 | "setTimer"
                 | "persist"
                 | "callValidator"
+                | "forward"
         )
     )
+}
+
+/// An `execute` request event in the engine (host owner `None`).
+pub fn execute_request(body: &Value, key: Option<&str>) -> Value {
+    let mut operation = json!({
+        "kind": "execute", "auth": auth("user_1"), "databaseBinding": binding(SNAPSHOT),
+        "snapshot": SNAPSHOT, "bodyText": body.to_string(),
+    });
+    if let Some(key) = key {
+        operation["idempotencyKey"] = json!(key);
+    }
+    json!({"type": "request", "operation": operation})
+}
+
+/// An envelope of statements `(sql, params)`.
+pub fn envelope(statements: &[(&str, Value)]) -> Value {
+    json!({"statements": statements.iter().map(|(sql, params)| json!({"sql": sql, "params": params})).collect::<Vec<_>>()})
+}
+
+/// The owner's `atomic` input for `body` (keyed with `idempotency` = `[keyHash, fingerprint]`).
+pub fn atomic_input(body: &Value, idempotency: Option<[&str; 2]>) -> Value {
+    let hex = &OWNER[3..];
+    let mut input = json!({
+        "kind": "atomic", "validationId": format!("cval_{hex}"), "auth": auth("user_1"),
+        "request": body.to_string(), "databaseBinding": binding(SNAPSHOT), "snapshot": SNAPSHOT,
+    });
+    if let Some([key_hash, fingerprint]) = idempotency {
+        input["idempotency"] = json!({"keyHash": key_hash, "fingerprint": fingerprint});
+    }
+    json!({"type": "forwarded", "input": input})
 }
 
 pub fn code(reply: &Value) -> Option<&str> {

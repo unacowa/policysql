@@ -7,8 +7,10 @@
 //! `validating`, calls each validator in turn (`CallValidator`) with a fresh callback
 //! capability, serves the validator's callback queries on the callback lane, revokes the
 //! capability at the verdict, and checks the binding again before `committing`.
-//! Atomic execution (pull request 6) and the engine-side `request` kind (pull request 7) are not
-//! implemented: their events are answered without effects.
+//! Pull request 6 adds atomic execution with placements `direct` (in the engine, from a
+//! `request` event for `execute`) and `owner` (a forwarded `atomic` input, with commit checks),
+//! the idempotency lookup, replay, and row, and the cumulative limits. The `request` kind of
+//! interactive commands (pull request 7) is not implemented.
 //!
 //! The JSON entry point is [`step_json`]; `policysql-wasm` exports it as `step_json`. The
 //! machine is not used by production paths before the switch-over (pull request 7).
@@ -20,8 +22,8 @@ mod step;
 pub mod time;
 
 pub use compiler::{
-    Compiled, Compiler, CoreError, DriverStatement, Operation, RawResult, StatementSummary,
-    TriggeredCheck, Validated,
+    Compiled, Compiler, CoreError, DriverStatement, Operation, RawResult, StatementLimits,
+    StatementSummary, TriggeredCheck, Validated,
 };
 pub use io::{Class, Effect, Event, HostFacts};
 pub use state::{
@@ -53,6 +55,14 @@ pub struct Limits {
 }
 
 impl Limits {
+    /// The largest volatile JSON: [`MAX_VOLATILE_BYTES`] plus room for an atomic execution's
+    /// validated results (derived from one `Executed` event, whose raw rows they restate as
+    /// objects) and the body text it compiled.
+    #[must_use]
+    pub fn max_volatile_bytes(&self) -> usize {
+        MAX_VOLATILE_BYTES.saturating_add(self.max_event_bytes().saturating_mul(4))
+    }
+
     /// The largest event JSON: `max_statements` × 1 MiB of raw results plus 64 KiB.
     #[must_use]
     pub fn max_event_bytes(&self) -> usize {

@@ -50,12 +50,26 @@ impl CoreError {
     }
 }
 
+/// The compiled limits of one statement (`compile_json` `statements[].limits`): the runtime's
+/// `RuntimeLimits` tightened by the policy. An atomic envelope enforces the strictest of them
+/// cumulatively (`turso.ts` `enforceCumulativeLimits`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StatementLimits {
+    pub max_rows: u64,
+    pub max_result_bytes: u64,
+    pub timeout_ms: u64,
+}
+
 /// One compiled statement, as the machine sees it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatementSummary {
     pub operation: Operation,
     /// The logical resource name the statement acts on.
     pub resource: Option<String>,
+    pub limits: StatementLimits,
+    /// The catalog's numeric id of the resource the cost catalog bounds (`explain.resource`).
+    pub explain_resource: Option<u64>,
 }
 
 /// A compiled envelope whose plan is held by the compiler under `handle`.

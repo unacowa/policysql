@@ -1,4 +1,4 @@
-// A test-only effect executor for the transaction step machine (ADR 0024 pull requests 4 and 5).
+// A test-only effect executor for the transaction step machine (ADR 0024 pull requests 4-6).
 // TEST ONLY: no production path uses the machine before the switch-over (pull request 7).
 //
 // `StepOwnerCore` has the owner-side shape of `TransactionOwnerCore` (the same facilities and
@@ -145,8 +145,10 @@ export class StepOwnerCore {
             console.log(JSON.stringify(effect.record));
             break;
           case "observe":
-            // Cost observation runs in the background (pull request 6 moves its evaluation
-            // into core); this executor does not run it.
+            // Cost observation runs in the background; the engine-side executor
+            // (step-engine.mjs) runs it through `cost_estimate_json`. This owner-side executor
+            // does not (TransactionOwnerCore observes before its commit checks, so the owner
+            // path's observations are not compared).
             break;
           case "reset":
             this.reset();
@@ -322,6 +324,15 @@ export class StepOwnerCore {
         databaseBinding: input.databaseBinding, snapshot: input.snapshot,
       },
     }, requestId);
+  }
+
+  /**
+   * `input` is the machine's own forwarded atomic input (`{ kind: "atomic", validationId, auth,
+   * request, databaseBinding, snapshot, idempotency? }`, from a `forward` effect of the engine
+   * side, test/helpers/step-engine.mjs), whose `request` is the verified body text (#70).
+   */
+  atomic(input, requestId) {
+    return this.lane("client", { type: "forwarded", input }, requestId);
   }
 
   /** `input` is `{ validationId, capability, bodyText }`: the verified callback text (#70). */
