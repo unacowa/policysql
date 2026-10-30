@@ -26,6 +26,7 @@ const MAX_REQUEST_BYTES: usize = 1_048_576;
 const MAX_SQL_BYTES: usize = 65_536;
 const MAX_ACTIVE_EXECUTIONS: usize = 64;
 
+mod limits;
 mod session;
 
 #[cfg(test)]
@@ -88,15 +89,6 @@ struct PhysicalTable {
 struct PhysicalColumn {
     declared_type: String,
     nullable: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RuntimeLimits {
-    max_rows: u64,
-    max_result_bytes: u64,
-    timeout_ms: u64,
-    max_statements: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -364,6 +356,7 @@ pub struct PolicySqlRuntime {
     schema_version: String,
     policy_version: String,
     snapshot: SnapshotId,
+    limits: limits::RuntimeLimits,
     plans: RefCell<BTreeMap<u64, policysql_gateway::CompiledEnvelope>>,
     next_handle: Cell<u64>,
 }
@@ -386,15 +379,19 @@ fn build_runtime(
         .map_err(|_| js_error("Catalog activation failed"))?;
     let policies = PolicyBundle::activate(policy_yaml, &catalog, snapshot.clone())
         .map_err(|_| js_error("policy activation failed"))?;
-    let limits: RuntimeLimits =
-        serde_json::from_str(limits_json).map_err(|_| js_error("runtime limits are invalid"))?;
-    if limits.max_rows == 0
-        || limits.max_result_bytes == 0
-        || limits.timeout_ms == 0
-        || limits.max_statements == 0
-    {
-        return Err(js_error("runtime limits are invalid"));
-    }
+    let limits = limits::parse(
+        limits_json,
+        &limits::FixedLimits {
+            max_request_bytes: MAX_REQUEST_BYTES,
+            max_sql_bytes: MAX_SQL_BYTES,
+            max_joins: policysql_parser::BindingLimits::default().max_joins,
+            max_commit_checks: policysql_policy::MAX_COMMIT_CHECKS,
+            max_hook_duration_ms: policysql_policy::MAX_COMMIT_CHECK_TIMEOUT_MS,
+        },
+    )
+    .map_err(|message| js_error(&message))?;
+    let max_statements = usize::try_from(limits.max_statements)
+        .map_err(|_| js_error("runtime limits are invalid: `max_statements` is too large"))?;
     Ok(PolicySqlRuntime {
         gateway: Gateway::new(
             catalog.clone(),
@@ -405,13 +402,14 @@ fn build_runtime(
                 max_result_bytes: limits.max_result_bytes,
                 timeout_ms: limits.timeout_ms,
             },
-            limits.max_statements,
+            max_statements,
         ),
         catalog,
         policies,
         schema_version: schema_version.to_owned(),
         policy_version: policy_version.to_owned(),
         snapshot,
+        limits,
         plans: RefCell::new(BTreeMap::new()),
         next_handle: Cell::new(1),
     })
@@ -480,6 +478,19 @@ impl PolicySqlRuntime {
     #[must_use]
     pub fn max_bytes_per_value(&self) -> usize {
         policysql_core::bytes::MAX_BYTES_PER_VALUE
+    }
+
+    /// The effective limits of this runtime as a JSON object with camelCase keys: the
+    /// configured ones (defaults filled) and the fixed protocol constants core enforces. The
+    /// engine enforces and advertises exactly these values; it holds no copy of its own
+    /// (ADR 0024, "One place for limits").
+    ///
+    /// Adding this method and the optional constructor fields does not change
+    /// `ABI_VERSION`: every existing `limits_json` is accepted and enforced as before, no
+    /// existing method or value changes, and the engine and this module ship in one bundle.
+    #[must_use]
+    pub fn limits_json(&self) -> String {
+        serialize_or_internal(&self.limits)
     }
 
     #[wasm_bindgen(getter)]
@@ -2387,6 +2398,51 @@ resources:
             r#"{"max_rows":100,"max_result_bytes":10000,"timeout_ms":1000,"max_statements":4}"#,
         )
         .unwrap_or_else(|_| unreachable!("valid runtime"))
+    }
+
+    #[test]
+    fn runtime_reports_its_configured_limits_and_the_constants_core_enforces() {
+        let limits: serde_json::Value = serde_json::from_str(&runtime().limits_json())
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        assert_eq!(limits["maxRows"], 100);
+        assert_eq!(limits["maxResultBytes"], 10_000);
+        assert_eq!(limits["maxStatements"], 4);
+        assert_eq!(
+            limits["transactionMs"], 4_000,
+            "default of an omitted field"
+        );
+        assert_eq!(limits["maxSqlBytes"], super::MAX_SQL_BYTES);
+        assert_eq!(limits["maxRequestBytes"], super::MAX_REQUEST_BYTES);
+        assert_eq!(
+            limits["maxJoins"],
+            policysql_parser::BindingLimits::default().max_joins
+        );
+        assert_eq!(
+            limits["maxCommitChecks"],
+            policysql_policy::MAX_COMMIT_CHECKS
+        );
+        assert_eq!(
+            limits["maxHookDurationMs"],
+            policysql_policy::MAX_COMMIT_CHECK_TIMEOUT_MS
+        );
+        let configured = PolicySqlRuntime::new(
+            CATALOG,
+            POLICY,
+            "schema_test",
+            "policy_test",
+            r#"{"max_rows":5,"max_result_bytes":6,"timeout_ms":7,"max_statements":2,"transaction_ms":900,"max_callback_rows":3}"#,
+        )
+        .unwrap_or_else(|_| unreachable!("valid runtime"));
+        let limits: serde_json::Value = serde_json::from_str(&configured.limits_json())
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        assert_eq!(limits["transactionMs"], 900);
+        assert_eq!(limits["maxCallbackRows"], 3);
+        assert_eq!(limits["maxStatements"], 2);
+        assert_eq!(
+            configured.snapshot(),
+            runtime().snapshot(),
+            "limits are not part of the snapshot"
+        );
     }
 
     #[test]

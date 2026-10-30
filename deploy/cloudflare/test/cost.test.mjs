@@ -45,7 +45,7 @@ test("bounds a statement from the catalog without interpreting planner prose", a
         usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 1 },
       }];
   });
-  const result = await estimateSealedEnvelope(compiled, catalog, "req", () => fake, 1_024);
+  const result = await estimateSealedEnvelope(compiled, catalog, "req", () => fake, 1_024, 1_000);
   assert.equal(result.estimates[0].upperRowsRead, 20);
   assert.equal(result.estimates[0].access, "unknown");
   assert.equal(result.estimates[0].planSteps, 1);
@@ -59,7 +59,7 @@ test("records complex planner output without treating unstable detail text as au
         usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 1 },
       }];
   });
-  const result = await estimateSealedEnvelope(compiled, catalog, "req", () => fake, 1_024);
+  const result = await estimateSealedEnvelope(compiled, catalog, "req", () => fake, 1_024, 1_000);
   assert.equal(result.estimates[0].upperRowsRead, 20);
   assert.equal(result.estimates[0].access, "unknown");
   assert.equal(result.estimates[0].planSteps, 3);
@@ -75,7 +75,7 @@ test("logs complex cost observations without blocking execution", async () => {
       rows: [["SCAN outer"], ["CORRELATED SCALAR SUBQUERY"], ["SCAN inner"]],
       usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 1 },
     }]);
-    await observeCostEnvelope(compiled, catalog, "req", () => fake, 1_024);
+    await observeCostEnvelope(compiled, catalog, "req", () => fake, 1_024, 1_000);
   } finally {
     console.log = previous;
   }
@@ -94,7 +94,7 @@ test("logs cost observations and their own Turso usage", async () => {
       rows: [["SCAN projects"]],
       usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 2 },
     }]);
-    await observeCostEnvelope(compiled, catalog, "req", () => fake, 1_024);
+    await observeCostEnvelope(compiled, catalog, "req", () => fake, 1_024, 1_000);
   } finally {
     console.log = previous;
   }
@@ -125,6 +125,7 @@ test("bounds inserts directly and updates conservatively without parsing SEARCH 
     "req",
     () => fake,
     1_024,
+    1_000,
   );
   assert.equal(statements.length, 1);
   assert.equal(result.estimates[0].upperRowsWritten, 1);
@@ -137,7 +138,7 @@ test("a malformed per-value limit fails before the cost transaction begins", asy
   for (const limit of [undefined, 0, "1024", Infinity]) {
     let connected = 0;
     const factory = () => { connected++; return { async begin() { assert.fail("must not BEGIN"); } }; };
-    await assert.rejects(estimateSealedEnvelope(compiled, catalog, "req", factory, limit), TypeError, String(limit));
+    await assert.rejects(estimateSealedEnvelope(compiled, catalog, "req", factory, limit, 1_000), TypeError, String(limit));
     assert.equal(connected, 0);
   }
 });

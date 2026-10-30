@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { testBinding, testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { createApp as createHandlerCore } from "../src/app.ts";
-import { LIMITS, POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
+import { POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
+import { CONSTRUCTOR_LIMITS } from "./helpers/limits.mjs";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 
 let runtime;
@@ -14,12 +15,7 @@ const runtimeFrom = (catalogYaml, policyYaml) => new PolicySqlRuntime(
   policyYaml,
   SCHEMA_VERSION,
   POLICY_VERSION,
-  JSON.stringify({
-    max_rows: LIMITS.maxRows,
-    max_result_bytes: LIMITS.maxResultBytes,
-    timeout_ms: LIMITS.timeoutMs,
-    max_statements: LIMITS.maxStatements,
-  }),
+  CONSTRUCTOR_LIMITS,
 );
 
 const ensureWasm = () => {

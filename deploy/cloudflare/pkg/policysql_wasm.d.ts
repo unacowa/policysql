@@ -36,6 +36,17 @@ export class PolicySqlRuntime {
      */
     identity_json(input_json: string): string;
     /**
+     * The effective limits of this runtime as a JSON object with camelCase keys: the
+     * configured ones (defaults filled) and the fixed protocol constants core enforces. The
+     * engine enforces and advertises exactly these values; it holds no copy of its own
+     * (ADR 0024, "One place for limits").
+     *
+     * Adding this method and the optional constructor fields does not change
+     * `ABI_VERSION`: every existing `limits_json` is accepted and enforced as before, no
+     * existing method or value changes, and the engine and this module ship in one bundle.
+     */
+    limits_json(): string;
+    /**
      * Activates one immutable deployment snapshot.
      *
      * # Errors
@@ -79,6 +90,7 @@ export interface InitOutput {
     readonly policysqlruntime_commit_checks_enabled: (a: number) => number;
     readonly policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly policysqlruntime_identity_json: (a: number, b: number, c: number) => [number, number];
+    readonly policysqlruntime_limits_json: (a: number) => [number, number];
     readonly policysqlruntime_max_bytes_per_value: (a: number) => number;
     readonly policysqlruntime_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
     readonly policysqlruntime_newWithPhysicalSchema: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number];

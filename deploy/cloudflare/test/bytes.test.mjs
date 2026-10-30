@@ -6,6 +6,7 @@ import { MAX_BYTES_PER_VALUE, harness } from "./helpers/routing.mjs";
 import { BinaryLimitError, bytesLimit, decodeBlob as decodeWithLimit, encodeBlob as encodeWithLimit, runtimeBytesLimit } from "../src/binary.ts";
 import { capabilities } from "../src/presenters.ts";
 import { driverArgs as driverArgsWithLimit, rawDriverValue as rawWithLimit, rowValues } from "../src/driver-values.ts";
+import { limitsJson } from "./helpers/limits.mjs";
 
 // Every codec call takes the runtime's limit; these bind the real WASM value.
 const decodeBlob = value => decodeWithLimit(value, MAX_BYTES_PER_VALUE);
@@ -113,7 +114,10 @@ test("a missing or malformed injected limit fails closed instead of disabling th
 
 test("Capabilities and the adapter take maxBytesPerValue from the same runtime value", () => {
   for (const advertised of [16, MAX_BYTES_PER_VALUE, MAX_BYTES_PER_VALUE * 2]) {
-    const runtime = { snapshot: "s", profile: "p", abi_version: 2, commit_checks_enabled: false, max_bytes_per_value: advertised };
+    const runtime = {
+      snapshot: "s", profile: "p", abi_version: 2, commit_checks_enabled: false, max_bytes_per_value: advertised,
+      limits_json: limitsJson(),
+    };
     assert.equal(capabilities(runtime, { limits: { maxBytesPerValue: 1 } }).limits.maxBytesPerValue, advertised);
     assert.equal(runtimeBytesLimit(runtime), advertised);
   }

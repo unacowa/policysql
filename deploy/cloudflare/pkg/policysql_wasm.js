@@ -135,6 +135,29 @@ export class PolicySqlRuntime {
         }
     }
     /**
+     * The effective limits of this runtime as a JSON object with camelCase keys: the
+     * configured ones (defaults filled) and the fixed protocol constants core enforces. The
+     * engine enforces and advertises exactly these values; it holds no copy of its own
+     * (ADR 0024, "One place for limits").
+     *
+     * Adding this method and the optional constructor fields does not change
+     * `ABI_VERSION`: every existing `limits_json` is accepted and enforced as before, no
+     * existing method or value changes, and the engine and this module ship in one bundle.
+     * @returns {string}
+     */
+    limits_json() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.policysqlruntime_limits_json(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * @returns {number}
      */
     get max_bytes_per_value() {
