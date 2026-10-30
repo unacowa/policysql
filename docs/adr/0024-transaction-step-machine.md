@@ -2,6 +2,8 @@
 
 - Status: accepted (design; implemented by the pull requests under [Migration](#migration))
 - Issue: #35 (stage 4 of [ADR 0019](0019-library-layers-and-the-wrapper-boundary.md))
+- Amended by: [ADR 0025](0025-core-defined-canonical-json.md) (canonical JSON is defined by
+  core; byte equality with TypeScript and the dual-hash gate are dropped)
 - Related: [ADR 0007](0007-transaction-retry-and-commit-check-protocol.md),
   [ADR 0011](0011-use-versioned-backend-profiles-for-multi-database-support.md),
   [ADR 0014](0014-wrapper-provided-database-bindings.md),
