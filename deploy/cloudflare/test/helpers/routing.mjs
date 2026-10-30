@@ -107,6 +107,9 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   // Called after the remote database ran each statement; may lose the owner, or throw to
   // fail the transport after the statement took effect.
   let afterStatement = null;
+  // Called with the remote reply after the database ran a whole pipeline; a returned Response
+  // is sent instead (for example an oversized or malformed reply to a COMMIT that applied).
+  let replaceResponse = null;
   const connections = new Map();
   const acceptedTokens = new Map(["a", "b"].map((tenant) => [tenant, new Set([`token_${tenant}`])]));
   const remote = async (url, options) => {
@@ -155,7 +158,11 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
       }
       if (afterStatement) await afterStatement({ tenant, sql });
     }
-    return Response.json({ baton, results });
+    const replaced = replaceResponse && await replaceResponse({
+      tenant, sqls: input.requests.map((request) => request.stmt?.sql ?? request.type),
+      requestBaton: input.baton ?? null, baton, results,
+    });
+    return replaced ?? Response.json({ baton, results });
   };
   const { privateKey, publicKey } = await generateKeyPair("ES256");
   const jwk = await exportJWK(publicKey);
@@ -318,6 +325,8 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     interceptOwnerGet: (hook) => owners.interceptGet(hook),
     /** `hook({ tenant, sql })` runs after the remote database executed each statement. */
     afterDatabaseStatement(hook) { afterStatement = hook; },
+    /** `hook({ tenant, sqls, requestBaton, baton, results })` may return a Response sent instead of the remote reply. */
+    replaceDatabaseResponse(hook) { replaceResponse = hook; },
     // A platform alarm fires at its time, not before: the owner's clock reads at least that
     // time while it runs (the step machine checks the deadline against it, ADR 0024).
     async fireTimer(name) {

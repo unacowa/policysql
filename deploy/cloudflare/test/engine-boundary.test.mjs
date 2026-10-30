@@ -22,6 +22,7 @@ const NOT_ENGINE = new Map([
   ["adapters/jwt.ts", "identity adapter: bearer credentials"],
   ["turso-http.ts", "outbound adapter: the Turso HTTP database"],
   ["redirects.ts", "outbound HTTP exit: no-follow fetch"],
+  ["bounded-body.ts", "outbound HTTP: streamed, byte-bounded response body (#53)"],
   ["worker.ts", "Workers assembly: engine plus HTTP adapter"],
   ["package.ts", "Workers assembly: the published entry point"],
   ["modules.d.ts", "bundler module declarations"],
