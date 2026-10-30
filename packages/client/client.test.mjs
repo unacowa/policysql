@@ -358,14 +358,28 @@ test("rejection pairs follow the public status table: 403 PRESET_COLUMN is defin
   }
 });
 
-test("TRANSACTION_LIMIT_EXCEEDED is a permanent 413 rejection, sent once; the former 429 pairing is unknown (#62)", async () => {
+test("TRANSACTION_LIMIT_EXCEEDED is a permanent 413 rejection of a statement, sent once; the former 429 pairing is unknown (#62)", async () => {
   const body = errorBody("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
-  let calls = 0;
-  const h = setup({}, () => async () => { calls++; return { status: 413, body }; });
-  await assert.rejects(h.client.execute(select), error =>
-    !(error instanceof PolicySqlOutcomeUnknownError) && error.code === "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED" && error.status === 413);
-  assert.equal(calls, 1);
-  // 429 asks for a later retry; the server no longer sends it for this code, so it proves nothing.
-  const retryable = setup({}, () => async () => ({ status: 429, body }));
-  await assert.rejects(retryable.client.execute(select), error => error instanceof PolicySqlOutcomeUnknownError);
+  for (const [status, definite] of [[413, true], [429, false]]) {
+    let statements = 0;
+    const h = setup({}, send => async request => {
+      if (request.kind !== "statement") return send(request);
+      statements++;
+      return { status, body };
+    });
+    const tx = await h.client.beginTransaction();
+    await assert.rejects(tx.execute(select), error => definite
+      ? !(error instanceof PolicySqlOutcomeUnknownError) && error.code === "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED" && error.status === 413
+      : error instanceof PolicySqlOutcomeUnknownError, String(status));
+    assert.equal(statements, 1, "never retried");
+  }
+});
+
+test("TRANSACTION_LIMIT_EXCEEDED establishes a rejection only for an interactive statement (#62)", async () => {
+  const body = errorBody("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
+  const atomic = setup({}, () => async () => ({ status: 413, body }));
+  await assert.rejects(atomic.client.execute(select), error => error instanceof PolicySqlOutcomeUnknownError);
+  const h = setup({}, send => async request => request.kind === "commit" ? { status: 413, body } : send(request));
+  const tx = await h.client.beginTransaction();
+  await assert.rejects(tx.commit(), error => error instanceof PolicySqlOutcomeUnknownError && error.phase === "commit");
 });

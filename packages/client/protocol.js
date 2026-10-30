@@ -122,6 +122,9 @@ const rejectsCommand = ({ error, status }, kind) => {
   if (code === "COMMIT_CHECK_REJECTED") return kind === "execute" || kind === "commit";
   if (code === "TRANSACTION_MODE_VIOLATION") return kind === "statement";
   // Atomic commit checks also run through a transaction owner.
+  // The server sends this only for an interactive statement (a callback's limit reaches the validator,
+  // and the commit answers 409 COMMIT_CHECK_REJECTED), so it proves nothing for any other command.
+  if (code === "TRANSACTION_LIMIT_EXCEEDED") return kind === "statement";
   if (code.startsWith("TRANSACTION_")) return ["execute", "statement", "commit", "rollback"].includes(kind);
   return true;
 };
