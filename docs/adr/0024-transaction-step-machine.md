@@ -575,8 +575,8 @@ today.
 - **ABI 5.** `ABI_VERSION` goes from 4 to 5 in the first pull request that changes the ABI
   surface; each later pull request that changes the ABI bumps it again. Under
   [ADR 0025](0025-core-defined-canonical-json.md), that first pull request is ADR 0025's
-  follow-up (it changes values `identity_json` returns), and pull request 4, which adds
-  `step_json`, bumps to 6. The snapshot is
+  follow-up (it changes values `identity_json` returns, and bumped to 5), and pull request 4,
+  which adds `step_json`, bumps to 6. The snapshot is
   `{profile}:{schema}:{policy}:abi-{ABI_VERSION}` (`crates/policysql-wasm/src/lib.rs` 382), so it
   changes on the deployments of those pull requests, not necessarily on the switch-over
   deployments (pull requests 7 and 8). Pull request 2 adds the `identity_json` method without a
@@ -647,7 +647,8 @@ see no regression at the switch-over. For a commit that #48 could still replay f
    exported as `identity_json`. The engine uses core's result; `idempotency.ts` stays as the
    second computation of the gate below until ADR 0025's follow-up removes the gate and that
    computation (ADR 0025 supersedes the corpus, randomized test, and gate items below). No
-   behavior change.
+   behavior change. (ADR 0025's follow-up has removed `identity.ts` and `idempotency.ts`;
+   `core-identity.ts` calls `identity_json`, and `stable_json` is now `canonical_json`.)
    - **Corpus** (each case also as an object key, a nested value, and an array element):
      integers above 2^53 (`9007199254740993`, which JavaScript rounds), `-0` (printed `0`),
      overflow (`1e400` parses to Infinity, which `JSON.stringify` prints as `null`), number
@@ -701,8 +702,9 @@ see no regression at the switch-over. For a commit that #48 could still replay f
    `enforceCumulativeLimits`, result shaping), `cost.ts` `evaluate` and
    `estimateSealedOnTransaction`, `driverArgs`' namespace check; the differential harness (the transcripts replace it).
    The identity gate and the identity computation in `idempotency.ts` are not deleted here:
-   ADR 0025's follow-up removes them earlier, and `idempotency.ts`'s `stableJson` and `sha256`
-   helpers are deleted only when no TypeScript caller remains (ADR 0025). In Rust:
+   ADR 0025's follow-up removed them earlier. Its `stableJson` and `sha256` helpers moved next
+   to their only callers (`database.ts`, `commit-checks.ts`) and are deleted only when no
+   TypeScript caller remains (ADR 0025). In Rust:
    `execute_checked_transaction`, `TransactionFactory`, `TransactionSession`, `CommitCheck`,
    `CheckDecision`, `ReadOnlyCallback`, `CallbackError`, `TransactionError`, and
    `Gateway::execute_transactional`; the `policysql-turso` tests that use them move to the

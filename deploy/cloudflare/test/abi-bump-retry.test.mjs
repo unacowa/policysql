@@ -50,8 +50,14 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     t.mock.method(console, "log", () => {});
     const h = await harness(t, { ownerAdapter, hooks: false });
     const real = h.runtime.snapshot;
-    const base = real.replace(/:abi-\d+$/u, "");
-    const at = (abi) => Object.defineProperty(h.runtime, "snapshot", { value: `${base}:abi-${abi}`, configurable: true });
+    // This code is ABI 5; the previous release's snapshot differed only in its ABI suffix.
+    assert.match(real, /:abi-5$/u);
+    assert.equal(h.runtime.abi_version, 5);
+    const at = (abi) => {
+      if (abi === 5) delete h.runtime.snapshot;
+      else Object.defineProperty(h.runtime, "snapshot", { value: real.replace(/:abi-5$/u, `:abi-${abi}`), configurable: true });
+      assert.match(h.runtime.snapshot, new RegExp(`:abi-${abi}$`, "u"));
+    };
     const credential = h.session("a", { principal: `https://issuer.test:${SUBJECT}`, subject: SUBJECT, session: { tenant_id: "tenant_a" } });
     const send = (path, body, key = null) => h.request("a", path, body, key, credential);
     return { h, at, send, credential };

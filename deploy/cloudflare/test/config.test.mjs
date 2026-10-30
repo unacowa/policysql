@@ -25,7 +25,7 @@ const valid = () => ({
 });
 
 const runtime = {
-  abi_version: 4, profile: "sqlite-turso-v1", snapshot: "test-snapshot", commit_checks_enabled: true, max_bytes_per_value: 1_024,
+  abi_version: 5, profile: "sqlite-turso-v1", snapshot: "test-snapshot", commit_checks_enabled: true, max_bytes_per_value: 1_024,
   limits_json: limitsJson(),
 };
 

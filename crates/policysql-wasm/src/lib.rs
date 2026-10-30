@@ -19,7 +19,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::prelude::*;
 
-const ABI_VERSION: u32 = 4;
+/// 5: core-defined canonical JSON (ADR 0025) changes `identity_json` values for some inputs
+/// (non-integer numbers, integers beyond 2^53 - 1, non-ASCII object keys) and reads decimals
+/// correctly rounded.
+const ABI_VERSION: u32 = 5;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -603,13 +606,13 @@ impl PolicySqlRuntime {
     }
 
     /// Computes a request identity, fingerprint, or command digest with core's canonical
-    /// JSON and SHA-256 (ADR 0024 pull request 2). The input and output contract is
-    /// [`policysql_transaction::identity_json`]; bodies are passed as their exact text, so an
-    /// escaped lone surrogate in a body reaches core intact.
+    /// JSON and SHA-256 (ADR 0024 pull request 2, ADR 0025). The input and output contract is
+    /// [`policysql_transaction::identity_json`]; bodies are passed as their exact text.
     ///
-    /// Adding this method does not change `ABI_VERSION`: no existing method or value changes,
-    /// the engine and this module ship in one bundle, and keeping the version keeps the
-    /// snapshot, which every fingerprint includes (ADR 0024, "ABI impact and rollout").
+    /// ADR 0025 made core's canonical form the only definition, which changes this method's
+    /// values for some inputs, so it bumped `ABI_VERSION` to 5. `keyHash`, the auth and start
+    /// fingerprints, and the `{sequence}` digests are unchanged
+    /// (`tests/fixtures/identity-goldens.json`).
     #[must_use]
     #[allow(clippy::unused_self)]
     pub fn identity_json(&self, input_json: &str) -> String {
