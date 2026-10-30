@@ -414,3 +414,10 @@ test("TRANSACTION_LIMIT_EXCEEDED establishes a rejection only for an interactive
   const tx = await h.client.beginTransaction();
   await assert.rejects(tx.commit(), error => error instanceof PolicySqlOutcomeUnknownError && error.phase === "commit");
 });
+
+test("#85: an owner's version-skew answer (500 POLICYSQL_INTERNAL) is an unknown outcome for execute, never a rejection", async () => {
+  const skew = { status: 500, body: errorBody("POLICYSQL_INTERNAL") };
+  const h = setup({}, () => async () => skew);
+  await assert.rejects(h.client.execute("UPDATE posts SET title = 'x'", {}, { idempotencyKey: "request-key-0001" }),
+    error => error instanceof PolicySqlOutcomeUnknownError);
+});

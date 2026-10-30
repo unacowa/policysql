@@ -314,7 +314,11 @@ export class PolicySqlRuntime {
      * rejected as unreadable is now read, and keeping the snapshot is what keeps keyed atomic
      * retries replaying across that deployment. #65 changed what an atomic `request` with a
      * malformed key is answered (`POLICYSQL_IDEMPOTENCY_KEY_INVALID`, a new message) and which keys
-     * it accepts (`+ / =`), and bumped `ABI_VERSION` to 10.
+     * it accepts (`+ / =`), and bumped `ABI_VERSION` to 10. #85 changed what an owner answers
+     * when the Worker's snapshot is not its own for an `atomic` input
+     * (`POLICYSQL_INTERNAL`, the version-skew answer, instead of
+     * `POLICYSQL_TRANSACTION_CONFLICT`, which a client takes as a rejection), and bumped
+     * `ABI_VERSION` to 11; no identity value changed.
      * @param {string | null | undefined} durable_json
      * @param {string | null | undefined} volatile_json
      * @param {string} event_json

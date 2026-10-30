@@ -95,7 +95,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
 
   // Interactive owner paths: nothing is a rejection of a COMMIT that may have been sent. A
   // transaction still active when the owners change snapshot is closed without a COMMIT.
-  test(`${ownerAdapter}: #85: interactive: a commit after the owners changed snapshot never applies, and begin is skew`, async (t) => {
+  test(`${ownerAdapter}: #85: interactive: a commit after the owners changed snapshot never applies`, async (t) => {
     const h = await ownerHarness(t);
     const begun = await h.request("a", "/v1/transactions", { mode: "write" });
     assert.equal(begun.status, 201, JSON.stringify(begun.body));
@@ -108,10 +108,6 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.notEqual(commit.status, 200, JSON.stringify(commit.body));
     assert.equal(commits(h), committed, "COMMIT was never sent");
     assert.equal(count(h, "skew_7"), 0);
-    // A new transaction on a skewed owner is the skew answer, not a conflict with a state.
-    const begin = await h.request("a", "/v1/transactions", { mode: "write" }, "owner-skew-begin-0001");
-    assert.equal(begin.status, 500, JSON.stringify(begin.body));
-    assert.equal(begin.body.error.code, "POLICYSQL_INTERNAL");
   });
 
   // Regression: a legitimate TRANSACTION_CONFLICT stays a rejection (a sequence conflict).

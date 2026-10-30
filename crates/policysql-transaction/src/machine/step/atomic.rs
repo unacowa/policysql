@@ -594,7 +594,7 @@ impl<C: Compiler> Step<'_, C> {
             }
         };
         if parsed.snapshot != self.compiler.snapshot() {
-            self.respond(error_reply(Code::Conflict));
+            self.snapshot_skew("atomic");
             return Ok(());
         }
         if parsed.binding.snapshot != parsed.snapshot {

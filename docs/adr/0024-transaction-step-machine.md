@@ -640,6 +640,25 @@ today.
   The internal owner wire (ADR 0022, ADR 0023) keeps its paths; the forwarded inputs become the
   `Forwarded` event's JSON.
 
+- **Owner snapshot mismatch (#85, ABI 11).** The Worker forwards an `atomic` input with the
+  snapshot it compiled for. An owner whose own snapshot differs (a Worker and an owner of
+  different deployments, whether during a rollout or a stale object after a partial deploy)
+  runs nothing and answers `POLICYSQL_INTERNAL` (500, the version-skew answer, with the fixed
+  message of that code), the answer a wire-version skew gets. It is never
+  `POLICYSQL_TRANSACTION_CONFLICT`: the client takes that as a definite rejection of an
+  execute, but the Worker may be retrying a keyed write that already committed, and ADR 0007
+  forbids a definite rejection of a request whose COMMIT may have been sent. The retry replays
+  from its `policysql_idempotency` row once the snapshots agree. A legitimate
+  `POLICYSQL_TRANSACTION_CONFLICT` (a busy owner, a command sequence conflict) is unchanged,
+  and so is the Worker's `POLICYSQL_STALE_OPERATION` for a request pinned to an earlier
+  snapshot. Interactive commands were checked: a `commit` is answered
+  `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` whenever COMMIT may have been sent (the `Committing` and
+  `CommitUnknown` phases, before any snapshot check); while the transaction is `Active`, no
+  COMMIT was sent, so the `POLICYSQL_TRANSACTION_UNAVAILABLE` of a snapshot change is a true
+  rejection. This changes what `step_json` returns for existing inputs, so `ABI_VERSION` is
+  11; `keyHash`, the fingerprints and every identity golden are unchanged.
+
+
 ## Migration
 
 Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare && npm run verify`
