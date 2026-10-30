@@ -17,7 +17,7 @@ Interactive transaction start uses the same optional-key rule; an unkeyed start 
 
 Commit checks trigger only when an operation actually changes at least one row in a configured resource. Triggered checks execute sequentially by ascending check identifier. Each gets a distinct short-lived callback capability. Callback SELECTs are processed serially and use the same response and retry rule as transaction statements. Callback role is immutable policy data; trusted session remains the initiating session.
 
-The callback capability authorizes only policy-compiled SELECT against the owned open transaction. It cannot mutate, choose a role, commit, roll back, or obtain credentials. Owner loss, timeout, deny, malformed protocol, or query failure rolls back (for the step machine, scoped to a running validation: see "Callback rules of the step machine").
+The callback capability authorizes only policy-compiled SELECT against the owned open transaction. It cannot mutate, choose a role, commit, roll back, or obtain credentials. Owner loss, timeout, deny, malformed protocol, or query failure rolls back, scoped to a running validation: see "Callback rules of the step machine", which `TransactionOwnerCore` also follows since [#73](https://github.com/unacowa/policysql/issues/73).
 
 ### DO ownership
 
@@ -177,8 +177,10 @@ scoped to the validation a callback belongs to. In the step machine of
 
 A caller that knows the validation id can therefore end the transaction only while one of its
 validations is running, which is today's behavior during validation. `TransactionOwnerCore`
-also fails an active transaction on a stray callback; the differential harness lists that as
-`callback-without-validation` until the TypeScript owner is aligned.
+follows the same rule since [#73](https://github.com/unacowa/policysql/issues/73) (it failed an
+active transaction on a stray callback before), and the differential harness asserts that both
+owners agree. In both, any close also revokes the capability, and a callback query still running
+when its capability is revoked returns no rows and does not restore it.
 
 ## Consequences
 

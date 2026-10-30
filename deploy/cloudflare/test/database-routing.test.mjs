@@ -365,6 +365,110 @@ test("callback capability from another database cannot read the active transacti
   assert.equal(h.rows("b").some((row) => row.id === "b_only"), false);
 });
 
+// #73: a callback reaches an owner by its validation id alone (the transaction id with `tx_`
+// replaced by `cval_`). Without a live capability it is unavailable and changes nothing; only
+// a failure while a capability is live ends the transaction (ADR 0007, docs/commit-checks.md).
+const callbackPath = (transactionId) => `/v1/commit-checks/cval_${transactionId.slice("tx_".length)}/query`;
+const strayToken = "A".repeat(43);
+
+test("a callback with no validation running leaves the open transaction usable (#73)", async (t) => {
+  const h = await harness(t);
+  const start = await h.request("a", "/v1/transactions", { mode: "write" });
+  assert.equal(start.status, 201, JSON.stringify(start));
+  const id = start.body.transactionId;
+  assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("kept") })).status, 200);
+  const events = h.events.length;
+  for (const token of [strayToken, "malformed", ""]) {
+    const stray = await h.request("a", callbackPath(id), { sequence: 1, ...read }, undefined, token);
+    assert.equal(stray.status, 409, JSON.stringify(stray));
+    assert.equal(stray.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  }
+  assert.equal(h.events.length, events, "no SQL and no rollback reached the database");
+  assert.equal((await h.ownerRecord(id)).status, "active");
+  assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 2, ...insert("later") })).status, 200);
+  const committed = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 3 });
+  assert.equal(committed.status, 200, JSON.stringify(committed));
+  assert.equal(committed.body.status, "committed");
+  assert.equal(committed.body.meta.commitChecks, "passed");
+  assert.deepEqual(h.rows("a").filter((row) => ["kept", "later"].includes(row.id)).map((row) => row.id), ["kept", "later"]);
+});
+
+test("a revoked capability changes nothing: the committed record and its replay stay (#73)", async (t) => {
+  const h = await harness(t);
+  let token;
+  const validator = async (hook) => {
+    token = hook.query.token;
+    const query = await h.request("a", new URL(hook.query.url).pathname, { sequence: 1, ...read }, undefined, token);
+    return query.status === 200;
+  };
+  h.setValidator(validator);
+  const start = await h.request("a", "/v1/transactions", { mode: "write" });
+  const id = start.body.transactionId;
+  assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("revoked_cap") })).status, 200);
+  const committed = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 });
+  assert.equal(committed.body.status, "committed", JSON.stringify(committed));
+  // The verdict revoked the capability; its token, replayed or advanced, is unavailable.
+  for (const sequence of [1, 2]) {
+    const late = await h.request("a", callbackPath(id), { sequence, ...read }, undefined, token);
+    assert.equal(late.status, 409, JSON.stringify(late));
+    assert.equal(late.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  }
+  assert.equal((await h.ownerRecord(id)).status, "committed");
+  assert.deepEqual((await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 })).body, committed.body);
+  assert.equal(h.rows("a").some((row) => row.id === "revoked_cap"), true);
+});
+
+test("a capability revoked by expiry changes nothing: the expired record stays (#73)", async (t) => {
+  const h = await harness(t);
+  // Expiry with no validation running.
+  const idle = (await h.request("b", "/v1/transactions", { mode: "write" })).body.transactionId;
+  assert.equal(await h.fireTimer(idle), true);
+  const stray = await h.request("b", callbackPath(idle), { sequence: 1, ...read }, undefined, strayToken);
+  assert.equal(stray.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  assert.equal((await h.ownerRecord(idle)).status, "expired");
+
+  // Expiry while the validator is awaited: the capability it holds is revoked.
+  const id = (await h.request("a", "/v1/transactions", { mode: "write" })).body.transactionId;
+  assert.notEqual(id, idle);
+  assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("expired_cap") })).status, 200);
+  let seen;
+  h.setValidator(async (hook) => {
+    assert.equal(await h.fireTimer(id), true);
+    const late = await h.request("a", new URL(hook.query.url).pathname, { sequence: 1, ...read }, undefined, hook.query.token);
+    seen = { late, status: (await h.ownerRecord(id)).status };
+    return true;
+  });
+  const commit = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 });
+  assert.equal(seen.late.status, 409, JSON.stringify(seen.late));
+  assert.equal(seen.late.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  assert.equal(seen.status, "expired", "the late callback did not overwrite the expiry");
+  assert.ok(commit.status >= 400, JSON.stringify(commit));
+  assert.equal(h.rows("a").some((row) => row.id === "expired_cap"), false);
+});
+
+test("a wrong or malformed token while a capability is live still fails the validation and rolls back (#73)", async (t) => {
+  for (const token of [strayToken, "malformed"]) {
+    const h = await harness(t);
+    const id = (await h.request("a", "/v1/transactions", { mode: "write" })).body.transactionId;
+    assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("wrong_token") })).status, 200);
+    let wrong;
+    h.setValidator(async (hook) => {
+      wrong = await h.request("a", new URL(hook.query.url).pathname, { sequence: 1, ...read }, undefined, token);
+      // The real token no longer works: the failure revoked the capability.
+      const real = await h.request("a", new URL(hook.query.url).pathname, { sequence: 1, ...read }, undefined, hook.query.token);
+      assert.equal(real.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+      return true;
+    });
+    const commit = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 });
+    assert.equal(wrong.status, 409, JSON.stringify(wrong));
+    assert.equal(wrong.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+    assert.equal(commit.status, 409, JSON.stringify(commit));
+    assert.equal(commit.body.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
+    assert.equal((await h.ownerRecord(id)).status, "failed");
+    assert.equal(h.rows("a").some((row) => row.id === "wrong_token"), false);
+  }
+});
+
 test("a changed runtime snapshot fails before another statement and rolls back", async (t) => {
   const h = await harness(t);
   const start = await h.request("a", "/v1/transactions", { mode: "write" });
