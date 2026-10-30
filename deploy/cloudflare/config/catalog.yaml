@@ -75,3 +75,23 @@ resources:
       name: { type: string }
       status: { type: string }
       created_by: { type: string }
+  # Development-only release-smoke resources (#42). Not part of the documented sample model.
+  smoke_checks:
+    source:
+      table: smoke_checks
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      verdict:
+        type: string
+        constraints:
+          enum: [allow, deny, timeout]
+  smoke_values:
+    source:
+      table: smoke_values
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      label: { type: string }
+      note: { type: string, nullable: true }
+      payload: { type: bytes, nullable: true }

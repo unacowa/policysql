@@ -17,11 +17,14 @@ const HEALTH = "/healthz";
  *   initializes the WASM runtime. `/healthz` is public and is not authenticated.
  * - Commit-check callbacks use a separate bucket, before `fetchCallback` parses the body
  *   or reaches a Durable Object; their capability is only checked inside the owner.
+ * - `routes` are wrapper-owned paths (the reference wrapper's `/healthz/owner`). They are
+ *   rate limited and authenticated like any other client request and never reach the library.
  */
 export const createWrapperFetch = (
   app: PolicySqlWorkerApp<RateLimitedBindings>,
   binding: (env: RateLimitedBindings) => DatabaseBinding,
   authenticate: Authenticate = authenticateJwt,
+  routes: Readonly<Record<string, FetchHandler>> = {},
 ): FetchHandler => {
   const client = withRateLimit(async (request, env, context) => {
     const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
@@ -30,6 +33,8 @@ export const createWrapperFetch = (
       const outcome = await authenticateRequest(authenticate, request, env, requestId);
       if ("response" in outcome) return outcome.response;
       session = outcome.session;
+      const pathname = new URL(request.url).pathname;
+      if (Object.hasOwn(routes, pathname)) return routes[pathname](request, env, context);
     }
     // The library reads no platform header; this wrapper passes Cloudflare's ray id.
     return app.fetch(request, env, context, { database: binding(env), session, requestId });

@@ -5,3 +5,12 @@ includes:
   - resources/comments.yaml
   - resources/posts.yaml
   - resources/projects.yaml
+  - resources/smoke_checks.yaml
+  - resources/smoke_values.yaml
+# Development-only (#42): the release smoke drives this check through the dev validator
+# Worker (dev-validator/). Only a write to smoke_checks triggers it.
+commit_checks:
+  smoke_check:
+    triggered_by: [smoke_checks]
+    hook:
+      timeout_ms: 1500

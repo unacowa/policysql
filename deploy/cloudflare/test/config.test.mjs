@@ -195,11 +195,18 @@ const readJsonc = (relative) => JSON.parse(readFileSync(new URL(relative, import
   .replace(/,(\s*[}\]])/g, "$1"));
 
 test("the wrappers' env conventions build a valid configuration from their wrangler vars", () => {
-  const reference = readJsonc("../wrangler.jsonc").vars;
+  const referenceWrangler = readJsonc("../wrangler.jsonc");
+  // The dev policy's `smoke_check` (#42): its URL is a var, its HMAC secret a required secret.
+  assert.ok(referenceWrangler.secrets.required.includes("SMOKE_VALIDATOR_HMAC_SECRET"));
+  const reference = { ...referenceWrangler.vars, SMOKE_VALIDATOR_HMAC_SECRET: SECRET };
   const fromReference = validateConfig(referenceConfig(reference));
   assert.equal(fromReference.environment, reference.POLICYSQL_ENVIRONMENT);
   assert.equal(fromReference.publicBaseUrl, reference.POLICYSQL_PUBLIC_BASE_URL);
   assert.deepEqual(fromReference.costCatalog, JSON.parse(reference.POLICYSQL_COST_CATALOG_JSON));
+  assert.deepEqual(fromReference.commitCheck("smoke_check"), { url: reference.SMOKE_VALIDATOR_URL, hmacSecret: SECRET });
+  // Without the secret the whole reference configuration is rejected, never a check without one.
+  const { SMOKE_VALIDATOR_HMAC_SECRET: _omitted, ...unsigned } = reference;
+  assert.throws(() => validateConfig(referenceConfig(unsigned)), (error) => error instanceof ConfigError && !leaks(error.message));
   // A check id the wrapper maps reads that check's own env names.
   const mapped = validateConfig(referenceConfig({ ...reference, A_URL: SECRET_URL, A_SECRET: SECRET }, { alpha: { url: "A_URL", hmacSecret: "A_SECRET" } }));
   assert.deepEqual(mapped.commitCheck("alpha"), { url: SECRET_URL, hmacSecret: SECRET });

@@ -1,0 +1,25 @@
+# Development-only (#42). Bytes (ADR 0016) and NULL assignment (ADR 0017) in the real
+# environment: `note` and `payload` are nullable, `label` is not.
+resource: smoke_values
+roles:
+  member:
+    select:
+      columns: [id, label, note, payload]
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      limit: 100
+      allow_aggregations: false
+      allow_windows: false
+    insert:
+      columns: [id, label, note, payload]
+      presets:
+        tenant_id: { session: tenant_id }
+      check: { tenant_id: { eq: { session: tenant_id } } }
+      returning: { columns: [id, label, note, payload] }
+    update:
+      columns: [label, note, payload]
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      check: { tenant_id: { eq: { session: tenant_id } } }
+      returning: { columns: [id, label, note, payload] }
+    delete:
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      returning: { columns: [id] }

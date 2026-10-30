@@ -26,6 +26,9 @@
       "simple": { "limit": 1000, "period": 60 }
     }
   ],
+  // The deployed version id, which the wrapper reports in the `policysql-deployment-version`
+  // header and on `/healthz/owner` so the release smoke can wait for the new version (#42).
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "durable_objects": {
     "bindings": [
       { "name": "TRANSACTION_OWNER", "class_name": "TransactionOwner" }
@@ -46,7 +49,10 @@
     "APPLICATION_DATABASE_ID": "development_db",
     "APPLICATION_DATABASE_GENERATION": "1",
     "POLICYSQL_PUBLIC_BASE_URL": "https://gateway.example.com",
-    "POLICYSQL_COST_CATALOG_JSON": "{\"maxEstimatedRowsRead\":10000,\"maxEstimatedRowsWritten\":100,\"resources\":{\"1\":{\"upperRows\":1000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_archived_posts_1\"]},\"2\":{\"upperRows\":1000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_authors_1\"]},\"3\":{\"upperRows\":10000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_comments_1\"]},\"4\":{\"upperRows\":10000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_posts_1\"]},\"5\":{\"upperRows\":10000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_projects_1\"]}}}"
+    // Development-only (#42): the dev validator Worker (dev-validator/) for the dev policy's
+    // `smoke_check` commit check. provision-dev.mjs replaces both URLs with the deployed ones.
+    "SMOKE_VALIDATOR_URL": "https://validator.example.com/check",
+    "POLICYSQL_COST_CATALOG_JSON": "{\"maxEstimatedRowsRead\":10000,\"maxEstimatedRowsWritten\":100,\"resources\":{\"1\":{\"upperRows\":1000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_archived_posts_1\"]},\"2\":{\"upperRows\":1000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_authors_1\"]},\"3\":{\"upperRows\":10000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_comments_1\"]},\"4\":{\"upperRows\":10000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_posts_1\"]},\"5\":{\"upperRows\":10000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_projects_1\"]},\"6\":{\"upperRows\":1000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_smoke_checks_1\"]},\"7\":{\"upperRows\":1000,\"uniqueSearchPatterns\":[\"sqlite_autoindex_smoke_values_1\"]}}}"
   },
   "secrets": {
     "required": [
@@ -54,7 +60,8 @@
       "POLICYSQL_JWT_ISSUER",
       "POLICYSQL_JWT_AUDIENCE",
       "TURSO_DATABASE_URL",
-      "TURSO_AUTH_TOKEN"
+      "TURSO_AUTH_TOKEN",
+      "SMOKE_VALIDATOR_HMAC_SECRET"
     ]
   }
 }
