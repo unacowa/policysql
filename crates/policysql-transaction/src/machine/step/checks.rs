@@ -217,7 +217,12 @@ impl<C: Compiler> Step<'_, C> {
         if resources.is_empty() {
             return Vec::new();
         }
-        self.compiler.triggered_checks(&resources)
+        // Ascending id order, each id once, is the machine's guarantee (ADR 0007), not only
+        // the compiler's.
+        let mut checks = self.compiler.triggered_checks(&resources);
+        checks.sort_by(|left, right| left.id.cmp(&right.id));
+        checks.dedup_by(|left, right| left.id == right.id);
+        checks
     }
 
     /// After the commit's binding check: every triggered check must be configured, then the
@@ -533,7 +538,13 @@ impl<C: Compiler> Step<'_, C> {
             self.respond_callback(error_reply(Code::Unavailable));
             return Ok(());
         };
-        // From here every failure ends the open transaction (ADR 0007).
+        // A validation is running. From here every failure ends the open transaction and
+        // rejects the waiting commit (ADR 0007, "Callback rules of the step machine"),
+        // including a malformed, wrong, or expired token: a caller that cannot present the live
+        // capability is an authentication failure of that validation. Without a live
+        // capability (above) nothing changes. Holding the validation id while a validation runs
+        // therefore lets a caller end it; the id derives from the transaction id, which only the
+        // client and its validator see.
         let now = self.host.now_ms;
         let presented = token_syntax(token)
             && same_hash(

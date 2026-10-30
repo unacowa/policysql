@@ -36,7 +36,8 @@ enum Action {
         ok: bool,
         class: u8,
     },
-    /// Answer the validator: 0 deny, 1 malformed, 2 non-2xx, 3 allow.
+    /// Answer the validator: 0 deny, 1 malformed, 2 non-2xx, 3 allow, 4 an allow addressed to
+    /// the previous validator's id (or an id never issued): stale, it must not advance.
     Decide(u8),
     Timer,
     Advance(u16),
@@ -62,7 +63,7 @@ fn action() -> impl Strategy<Value = Action> {
         10 => (prop_oneof![8 => Just(0u8), 1 => Just(1u8), 1 => Just(2u8)], prop_oneof![8 => Just(0i8), 1 => Just(-1i8), 1 => Just(1i8)], prop_oneof![8 => Just(0u8), 1 => Just(1u8), 1 => Just(2u8)], prop::bool::weighted(0.75)).prop_map(|(token, offset, sql, whole)| Action::Callback { token, offset, sql, whole }),
         6 => (prop::bool::weighted(0.92), 0u8..5).prop_map(|(ok, class)| Action::ResolveCallback { ok, class }),
         6 => (prop::bool::weighted(0.9), 0u8..5).prop_map(|(ok, class)| Action::Resolve { ok, class }),
-        3 => (0u8..4).prop_map(Action::Decide),
+        4 => (0u8..5).prop_map(Action::Decide),
         2 => Just(Action::Timer),
         2 => prop_oneof![0u16..50, 900u16..1_100, 3_900u16..4_100].prop_map(Action::Advance),
         1 => Just(Action::Lose),
@@ -89,7 +90,8 @@ const CLASSES: [&str; 5] = [
 #[derive(Default)]
 struct Watch {
     commit_emitted: bool,
-    /// Validator calls emitted, and allowing verdicts fed for them.
+    /// Checks the commit triggers, validator calls emitted, and allowing verdicts fed for them.
+    checks: usize,
     validator_calls: usize,
     allowed_verdicts: BTreeSet<u64>,
     /// Transcript index of the last allowing verdict and of the last allowed binding check.
@@ -136,10 +138,13 @@ fn feed_checked(
     if let Some(id) = event["id"].as_u64() {
         watch.connection.remove(&id);
         if event["type"] == "validatorReplied" || event["type"] == "validatorFailed" {
+            // Only the first verdict for the latest validator counts; a stale or repeated one
+            // is ignored by the model, as the machine must ignore it.
+            let fresh = watch.validator_ids.last() == Some(&id) && !watch.decided.contains(&id);
             watch.decided.insert(id);
             let allows = event["ok"] == true
                 && event["decision"] == json!({"version": "1", "allowed": true});
-            if allows && watch.validator_ids.contains(&id) {
+            if allows && fresh {
                 watch.allowed_verdicts.insert(id);
                 watch.last_allow = Some(engine.transcript.len());
             }
@@ -206,6 +211,17 @@ fn check(engine: &Engine, watch: &mut Watch) -> Result<(), TestCaseError> {
         }
         match effect["type"].as_str() {
             Some("callValidator") => {
+                // Checks run in ascending id order, each once, and the next one only after the
+                // previous one allowed.
+                let expected = CHECK_IDS.get(watch.validator_calls).copied();
+                prop_assert_eq!(effect["check"].as_str(), expected, "check order");
+                prop_assert!(
+                    watch
+                        .validator_ids
+                        .iter()
+                        .all(|id| watch.allowed_verdicts.contains(id)),
+                    "the next validator before the previous one allowed"
+                );
                 watch.validator_calls += 1;
                 if let Some(id) = effect["id"].as_u64() {
                     watch.validator_ids.push(id);
@@ -236,7 +252,11 @@ fn check(engine: &Engine, watch: &mut Watch) -> Result<(), TestCaseError> {
                 prop_assert_eq!(stored.as_deref(), Some("committing"));
                 // The commit's mutation triggers the check: every validator called allowed,
                 // and the binding was checked after the last allow.
-                prop_assert!(watch.validator_calls >= 1, "COMMIT without a validator");
+                prop_assert_eq!(
+                    watch.validator_calls,
+                    watch.checks,
+                    "COMMIT without every check called"
+                );
                 prop_assert!(
                     watch
                         .validator_ids
@@ -297,11 +317,29 @@ fn check(engine: &Engine, watch: &mut Watch) -> Result<(), TestCaseError> {
     Ok(())
 }
 
-/// A write transaction with one insert into `projects`, at its validator call.
-fn validating() -> Engine {
+/// The ids of the triggered checks, in the order they must run.
+const CHECK_IDS: [&str; 2] = ["consistency", "zeta"];
+
+/// A write transaction with one insert into `projects` that triggers `checks` checks (1 or 2;
+/// the second without a role), at its first validator call.
+fn validating(checks: usize) -> Engine {
     let mut engine = Engine::new();
     engine.compiler.triggers.insert("projects".to_owned());
-    engine.configured = vec!["consistency".to_owned()];
+    if checks > 1 {
+        // Listed out of order: the machine must run them by ascending id.
+        let mut second = engine.compiler.checks[0].clone();
+        CHECK_IDS[1].clone_into(&mut second.id);
+        second.role = None;
+        engine.compiler.checks.insert(0, second);
+    }
+    engine
+        .compiler
+        .checks
+        .sort_by(|left, right| right.id.cmp(&left.id));
+    engine.configured = CHECK_IDS[..checks]
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect();
     engine.limits.max_callback_rows = MAX_CALLBACK_ROWS;
     engine.run(&begin("write"));
     let insert =
@@ -320,9 +358,10 @@ fn next_callback_sequence(engine: &Engine) -> u64 {
         .unwrap_or(1)
 }
 
-fn run(actions: &[Action]) -> Result<Reached, TestCaseError> {
-    let mut engine = validating();
+fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
+    let mut engine = validating(checks);
     let mut watch = Watch {
+        checks,
         lines_seen: engine.transcript.len(),
         replies_seen: engine.observed.replies.len(),
         ..Watch::default()
@@ -393,6 +432,33 @@ fn run(actions: &[Action]) -> Result<Reached, TestCaseError> {
                     }
                     last_outcome = Some(event.clone());
                     feed_checked(&mut engine, &mut watch, &event)?;
+                }
+            }
+            Action::Decide(4) => {
+                // A verdict for an id that is not the awaited validator's: the previous
+                // validator's (already decided) or one never issued.
+                let id = match watch.validator_ids.as_slice() {
+                    [.., previous, _] => *previous,
+                    _ => {
+                        engine
+                            .outstanding
+                            .as_ref()
+                            .and_then(|effect| effect["id"].as_u64())
+                            .unwrap_or(1)
+                            + 100
+                    }
+                };
+                reached.stale = true;
+                let event = json!({"type": "validatorReplied", "id": id, "ok": true,
+                    "decision": {"version": "1", "allowed": true}});
+                let (outstanding, callback) = (
+                    engine.outstanding.clone(),
+                    engine.callback_outstanding.clone(),
+                );
+                feed_checked(&mut engine, &mut watch, &event)?;
+                if engine.volatile.is_some() {
+                    engine.outstanding = engine.outstanding.take().or(outstanding);
+                    engine.callback_outstanding = engine.callback_outstanding.take().or(callback);
                 }
             }
             Action::Decide(kind) => {
@@ -535,6 +601,8 @@ fn run(actions: &[Action]) -> Result<Reached, TestCaseError> {
         }
     }
     reached.validated = watch.validator_calls > 0;
+    reached.second = watch.validator_calls > 1;
+    reached.second_committed = watch.validator_calls > 1 && watch.commit_emitted;
     reached.callback = engine
         .observed
         .callback_replies
@@ -623,27 +691,31 @@ struct Reached {
     rejected: bool,
     limit: bool,
     late: bool,
+    stale: bool,
+    second: bool,
+    second_committed: bool,
 }
 
-fn path() -> impl Strategy<Value = Vec<Action>> {
-    // Reach the validator call first (binding check, then `validating` stored).
+/// One or two triggered checks, then actions after reaching the first validator call
+/// (binding check, then `validating` stored).
+fn path() -> impl Strategy<Value = (usize, Vec<Action>)> {
     let prefix = vec![
         Action::Resolve { ok: true, class: 0 },
         Action::Resolve { ok: true, class: 0 },
     ];
-    prop::collection::vec(action(), 0..40).prop_map(move |tail| {
+    (1usize..=2, prop::collection::vec(action(), 0..50)).prop_map(move |(checks, tail)| {
         let mut actions = prefix.clone();
         actions.extend(tail);
-        actions
+        (checks, actions)
     })
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 2_000, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 3_000, ..ProptestConfig::default() })]
 
     #[test]
-    fn commit_checks_and_callbacks_are_safe(actions in path()) {
-        run(&actions)?;
+    fn commit_checks_and_callbacks_are_safe((checks, actions) in path()) {
+        run(checks, &actions)?;
     }
 }
 
@@ -653,12 +725,13 @@ fn the_generator_reaches_every_outcome() {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::TestRunner;
     let mut runner = TestRunner::deterministic();
-    let mut counts = [0usize; 6];
+    let mut counts = [0usize; 9];
     for _ in 0..1_000 {
         let Ok(tree) = path().new_tree(&mut runner) else {
             continue;
         };
-        let Ok(reached) = run(&tree.current()) else {
+        let (checks, actions) = tree.current();
+        let Ok(reached) = run(checks, &actions) else {
             continue;
         };
         for (count, hit) in counts.iter_mut().zip([
@@ -668,12 +741,15 @@ fn the_generator_reaches_every_outcome() {
             reached.rejected,
             reached.limit,
             reached.late,
+            reached.stale,
+            reached.second,
+            reached.second_committed,
         ]) {
             *count += usize::from(hit);
         }
     }
     eprintln!(
-        "reached [validated, callback, committed, rejected, limit, late] in 1000 runs: {counts:?}"
+        "reached [validated, callback, committed, rejected, limit, late, stale, second check, committed after two checks] in 1000 runs: {counts:?}"
     );
     assert!(counts.iter().all(|count| *count >= 10), "{counts:?}");
 }
