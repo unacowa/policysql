@@ -573,8 +573,10 @@ today.
 ### ABI impact and rollout
 
 - **ABI 5.** `ABI_VERSION` goes from 4 to 5 in the first pull request that changes the ABI
-  surface: pull request 4 adds `step_json`; each later pull request that changes the ABI bumps
-  it again. The snapshot is
+  surface; each later pull request that changes the ABI bumps it again. Under
+  [ADR 0025](0025-core-defined-canonical-json.md), that first pull request is ADR 0025's
+  follow-up (it changes values `identity_json` returns), and pull request 4, which adds
+  `step_json`, bumps to 6. The snapshot is
   `{profile}:{schema}:{policy}:abi-{ABI_VERSION}` (`crates/policysql-wasm/src/lib.rs` 382), so it
   changes on the deployments of those pull requests, not necessarily on the switch-over
   deployments (pull requests 7 and 8). Pull request 2 adds the `identity_json` method without a
@@ -592,7 +594,10 @@ today.
 - **Keyed atomic retries across a snapshot change** get `POLICYSQL_IDEMPOTENCY_CONFLICT`,
   because the fingerprint includes the binding's snapshot (ADR 0014). This is today's behavior
   for every snapshot change and is unchanged by this ADR.
-- **Where byte-equal hashing is load-bearing.** `keyHash` must equal what `idempotency.ts`
+- **Where byte-equal hashing is load-bearing.** (Superseded by
+  [ADR 0025](0025-core-defined-canonical-json.md), which drops byte equality with TypeScript
+  and states the stability requirements for `keyHash`, the auth and start fingerprints, and
+  the `{sequence}` digests; kept as the record of pull request 2.) `keyHash` must equal what `idempotency.ts`
   computes on every deployment that changes who computes it (pull requests 2, 7, and 8). It does
   not include the snapshot, so a different `keyHash` finds no row and executes a committed keyed
   request again. The fingerprints and the command digest must be equal on those deployments
@@ -640,7 +645,9 @@ see no regression at the switch-over. For a commit that #48 could still replay f
 2. **Canonical JSON, hashing, and identities in core.** `policysql-transaction` with
    `stable_json`, SHA-256 (the `sha2` crate), key syntax, `keyHash`, fingerprints, digest;
    exported as `identity_json`. The engine uses core's result; `idempotency.ts` stays as the
-   second computation of the gate below until pull request 9 deletes it. No behavior change.
+   second computation of the gate below until ADR 0025's follow-up removes the gate and that
+   computation (ADR 0025 supersedes the corpus, randomized test, and gate items below). No
+   behavior change.
    - **Corpus** (each case also as an object key, a nested value, and an array element):
      integers above 2^53 (`9007199254740993`, which JavaScript rounds), `-0` (printed `0`),
      overflow (`1e400` parses to Infinity, which `JSON.stringify` prints as `null`), number
@@ -654,7 +661,7 @@ see no regression at the switch-over. For a commit that #48 could still replay f
      `identity_json`, in `npm run verify`.
    - **Risk and gate.** If the hashes differ while the snapshot is unchanged, a committed keyed
      retry gets a false `POLICYSQL_IDEMPOTENCY_CONFLICT` (a definite rejection) or, with a
-     different `keyHash`, executes again. Until pull request 9 the engine computes both and
+     different `keyHash`, executes again. Until pull request 9 (under ADR 0025, until its follow-up) the engine computes both and
      compares them before any database work; a mismatch logs `identity_mismatch` (no values) and
      fails the request with `POLICYSQL_INTERNAL` (500, which the client treats as uncertain). A
      mismatch is therefore an availability fault, never a wrong retry decision.
@@ -668,7 +675,7 @@ see no regression at the switch-over. For a commit that #48 could still replay f
    `docs/configuration.md`.
 4. **The machine for interactive transactions, unused.** `TxState`, `TxEvent`, `Effect`,
    `HostFacts`, `step` for begin, statement, commit, rollback, expiry, and owner loss, without
-   commit checks; `step_json` (ABI 5); property tests. A test-only `StepOwnerCore` (an effect
+   commit checks; `step_json` (ABI 6, after ADR 0025's bump to 5); property tests. A test-only `StepOwnerCore` (an effect
    executor) and a **differential harness** run every `transaction-owner` and conformance
    scenario through both `TransactionOwnerCore` and `StepOwnerCore` with the same fake clock,
    database, and store, and assert equal replies, database calls (SQL and arguments), terminal
@@ -689,11 +696,13 @@ see no regression at the switch-over. For a commit that #48 could still replay f
 8. **Switch atomic execution.** `engine.ts` execute and the owner's atomic input run the
    machine. Smoke.
 9. **Delete.** The TypeScript decision code: the decision parts of `transaction-owner.ts`,
-   `commit-checks.ts` (except what the hook adapter needs), `idempotency.ts`, the decision parts
+   `commit-checks.ts` (except what the hook adapter needs), the decision parts
    of `turso.ts` (`executeSealedEnvelope`, `executeSealedOnTransaction`,
    `enforceCumulativeLimits`, result shaping), `cost.ts` `evaluate` and
-   `estimateSealedOnTransaction`, `driverArgs`' namespace check; the TypeScript side of the
-   identity gate; the differential harness (the transcripts replace it). In Rust:
+   `estimateSealedOnTransaction`, `driverArgs`' namespace check; the differential harness (the transcripts replace it).
+   The identity gate and the identity computation in `idempotency.ts` are not deleted here:
+   ADR 0025's follow-up removes them earlier, and `idempotency.ts`'s `stableJson` and `sha256`
+   helpers are deleted only when no TypeScript caller remains (ADR 0025). In Rust:
    `execute_checked_transaction`, `TransactionFactory`, `TransactionSession`, `CommitCheck`,
    `CheckDecision`, `ReadOnlyCallback`, `CallbackError`, `TransactionError`, and
    `Gateway::execute_transactional`; the `policysql-turso` tests that use them move to the
