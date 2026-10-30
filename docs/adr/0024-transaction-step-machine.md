@@ -1341,12 +1341,26 @@ pull request 9 deletes it.
   record), cost observation after COMMIT only, malformed delegated idempotency on the
   production owner, and both directions of `/atomic` skew. `step-atomic-differential.test.mjs`
   runs the previous release's `execute` against production (its `StepEngine` and
-  `StepOwnerCore` helpers are deleted). `crates/policysql-transaction/tests/atomic.rs` adds the
+  `StepOwnerCore` helpers are deleted); its allowlist pins client-visible changes 5, 6, and the
+  direct-path half of 6 as `owner-prior-record-of-another-binding`, `owner-commit-failure-code`,
+  and `direct-binding-revoked-before-commit`, asserting what each side answers (#77 review).
+  `test/request-step.test.mjs` pins that the engine's binding check answers at most the first
+  `checkBinding` of a request: the cache is consumed by that check whatever it names, so a
+  later deadline-less check of the same binding always calls the provider, whatever order of
+  effects core uses. `crates/policysql-transaction/tests/atomic.rs` adds the
   `limit` class, and the property tests draw it. Tests that changed with the switch: the owner
   wire tests (per-path marker), the atomic owner's record (now the machine's), the ABI 4 row of
   `abi-bump-retry.test.mjs` (planted with the frozen ABI 4 values, since the machine reads the
   runtime's own snapshot), and the atomic unit tests over a fake compiler, which now test
   `LegacyTransactionOwnerCore` as the interactive ones do.
+- **For pull request 9: the cost codes.** `POLICYSQL_COST_UNKNOWN` and
+  `POLICYSQL_COST_ADMISSION_UNAVAILABLE` are now thrown only by `cost.ts`, which no production
+  path reaches; core's `cost_estimate_json` and the `observe` executor put them only into
+  `cost_observation_failed` log records, never into a reply. Pull request 9, which deletes
+  `cost.ts`, must remove them from, or re-home them in, the public status table
+  (`src/http/status.ts`, `website/api/errors.md`) consistently with the ADR 0023 round-trip test
+  that requires every code in the table to be returned somewhere and to appear in exactly one
+  table.
 
 ## Decided during review
 

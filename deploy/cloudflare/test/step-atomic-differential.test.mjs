@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { createEngine } from "../src/engine.ts";
+import { EngineError } from "../src/errors.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
 import { estimateSealedEnvelope } from "../src/cost.ts";
 import { validateConfig } from "../src/engine-config.ts";
@@ -50,6 +51,20 @@ export const ALLOWLIST = Object.freeze({
     "placements, the owner path's, with `status: \"committed\"` and `commitChecks`; the TypeScript direct path " +
     "omits both keys. The comparison removes them from core's direct-path record after asserting their values; " +
     "core still replays the rows the TypeScript direct path wrote (`crates/policysql-transaction/tests/atomic.rs`).",
+  "owner-prior-record-of-another-binding":
+    "ADR 0024 pull request 6 (\"The owner's input\"; client-visible change 5 of pull request 8): an owner whose " +
+    "previous record has another binding or snapshot does not answer from that record; core resolves the request " +
+    "through its row (here IDEMPOTENCY_CONFLICT, since the fingerprint includes the binding). " +
+    "LegacyTransactionOwnerCore answered TRANSACTION_CONFLICT from the record, before any database work.",
+  "owner-commit-failure-code":
+    "ADR 0024 pull request 7 executor and pull request 8 (client-visible change 6): the owner classifies every " +
+    "COMMIT failure as `unknown`, which core answers INTERNAL (500) for execute. LegacyTransactionOwnerCore passed " +
+    "the transport's code through (DATABASE_UNAVAILABLE, 503). Neither is a rejection in the client.",
+  "direct-binding-revoked-before-commit":
+    "ADR 0024 pull request 8 (client-visible change 6'): a binding the provider revokes between the envelope and " +
+    "COMMIT (the transport's check before COMMIT) is a COMMIT failure of class `rejected`, which core answers " +
+    "INTERNAL (500) for execute, because COMMIT may have been sent. The TypeScript direct path answered " +
+    "DATABASE_BINDING_REJECTED (403). Neither is a rejection in the client; no COMMIT reaches the database.",
 });
 
 const CATALOG = `version: 1
@@ -408,7 +423,7 @@ const both = async (env, op) => {
       callbacks: env.callbacks[side].length, traces: env.traces[side].length,
     };
     env.setSide(side);
-    const context = { database: bindingOf(env.runtime), session: session(op.access), requestId };
+    const context = { database: op.binding ?? bindingOf(env.runtime), session: session(op.access), requestId };
     const input = { bodyText: typeof op.body === "string" ? op.body : JSON.stringify(op.body),
       ...(op.key === undefined ? {} : { idempotencyKey: op.key }) };
     const result = await env.sides[side].execute(input, context);
@@ -684,6 +699,59 @@ test(`allowlist stored-record-shape: ${ALLOWLIST["stored-record-shape"]}`, async
   assert.equal(Object.hasOwn(ts.record, "status") || Object.hasOwn(ts.record, "commitChecks"), false);
   assert.equal(step.record.status, "committed");
   assert.equal(step.record.commitChecks, "not_triggered");
+});
+
+test(`allowlist owner-prior-record-of-another-binding: ${ALLOWLIST["owner-prior-record-of-another-binding"]}`, async (t) => {
+  const env = environment(t);
+  assertSame(await both(env, { body: auditRow("x1"), key: KEY, owner: true }), "first");
+  // The same key (its hash has no generation) under another generation of the same database.
+  const seen = await both(env, { body: auditRow("x1"), key: KEY, owner: true, binding: { ...bindingOf(env.runtime), generation: "2" } });
+  assert.equal(code(seen, "ts"), "POLICYSQL_TRANSACTION_CONFLICT");
+  assert.deepEqual(seen.ts.calls, [], "the TypeScript owner answered from its record");
+  assert.equal(code(seen, "step"), "POLICYSQL_IDEMPOTENCY_CONFLICT");
+  assert.deepEqual(seen.step.calls.map((call) => call.op), ["begin", "execute", "rollback"], "core looked the row up");
+  for (const side of ["ts", "step"]) assert.equal(seen[side].hooks.length, 0);
+  assertSameEnd(env, "end", true);
+});
+
+test(`allowlist owner-commit-failure-code: ${ALLOWLIST["owner-commit-failure-code"]}`, async (t) => {
+  const unavailable = async () => { throw new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable."); };
+  // The direct placement still agrees: DATABASE_UNAVAILABLE on both.
+  const direct = await agree(t, [{ body: insertProject("p1"), key: KEY }], (setup) => { setup.faults.commit = unavailable; });
+  assert.deepEqual(direct.answers, ["POLICYSQL_DATABASE_UNAVAILABLE"]);
+  const env = environment(t);
+  env.faults.commit = unavailable;
+  const seen = await both(env, { body: auditRow("x1"), key: KEY, owner: true });
+  assert.equal(code(seen, "ts"), "POLICYSQL_DATABASE_UNAVAILABLE");
+  assert.equal(code(seen, "step"), "POLICYSQL_INTERNAL");
+  for (const side of ["ts", "step"]) {
+    assert.equal(seen[side].calls.filter((call) => call.op === "commit").length, 1, `${side}: COMMIT was sent once`);
+    assert.equal(seen[side].hooks.length, 2, `${side}: both checks allowed first`);
+  }
+  const { REJECTIONS } = await import("../../../packages/client/protocol.js");
+  assert.equal([...REJECTIONS.values()].flat().some((value) => ["INTERNAL", "DATABASE_UNAVAILABLE"].includes(value)), false);
+});
+
+test(`allowlist direct-binding-revoked-before-commit: ${ALLOWLIST["direct-binding-revoked-before-commit"]}`, async (t) => {
+  const env = environment(t);
+  // Each side asks the provider three times: before the body, at connect, and before COMMIT
+  // (core's own first check is the engine's). The third answer of each side revokes.
+  let checks = 0;
+  env.faults.check = () => ++checks % 3 !== 0;
+  const seen = await both(env, { body: insertProject("p1"), key: KEY });
+  assert.equal(checks, 6, "three provider calls per side");
+  assert.equal(seen.ts.result.code, "POLICYSQL_DATABASE_BINDING_REJECTED");
+  assert.equal(seen.step.result.code, "POLICYSQL_INTERNAL");
+  for (const side of ["ts", "step"]) {
+    // Lookup, envelope, and row ran; no COMMIT reached the database, and the connection was
+    // rolled back (the TypeScript path's catch rolled back a second time, a no-op).
+    const ops = seen[side].calls.map((call) => call.op);
+    assert.deepEqual(ops.slice(0, 5), ["begin", "execute", "execute", "execute", "rollback"], side);
+    assert.equal(ops.includes("commit"), false, side);
+  }
+  const { REJECTIONS } = await import("../../../packages/client/protocol.js");
+  assert.equal([...REJECTIONS.values()].flat().some((value) => ["INTERNAL", "DATABASE_BINDING_REJECTED"].includes(value)), false);
+  for (const side of ["ts", "step"]) assert.equal(env.rows(side).projects.some((row) => row.id === "p1"), false, side);
 });
 
 // ---- cost_estimate_json against cost.ts (cost.test.mjs) ----------------------------------------
