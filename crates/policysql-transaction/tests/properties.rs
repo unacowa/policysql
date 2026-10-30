@@ -701,3 +701,42 @@ fn host() -> String {
     json!({"nowMs": common::T0, "entropy": "1".repeat(64), "requestId": "req", "owner": OWNER})
         .to_string()
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 500, ..ProptestConfig::default() })]
+
+    /// A statement whose completion cannot be stored is not recorded as done: the record
+    /// moves to `failed` from the state before it, and a retry of that statement gets the
+    /// same answer from this owner and from a successor (never the statement's reply).
+    #[test]
+    fn a_statement_whose_completion_is_not_stored_is_never_replayed(
+        before in 0u64..4,
+        sql in 0usize..3,
+        lose in any::<bool>(),
+    ) {
+        let mut engine = Engine::new();
+        engine.run(&begin("write"));
+        for sequence in 1..=before {
+            let text = json!({"sequence": sequence, "sql": SQL[0], "params": {}}).to_string();
+            prop_assert_eq!(&engine.run(&command("statement", &text))["ok"], &json!(true));
+        }
+        let sequence = before + 1;
+        let text = json!({"sequence": sequence, "sql": SQL[sql], "params": {"id": "a"}}).to_string();
+        engine.feed(&command("statement", &text));
+        engine.resolve(true, "unknown"); // binding checked
+        engine.resolve(true, "unknown"); // executed -> Persist(completion)
+        engine.resolve(false, "unknown"); // PersistFailed -> rollback, Persist(failed)
+        engine.settle();
+        let reply = engine.last_reply().cloned().unwrap_or_default();
+        prop_assert_eq!(code(&reply), Some("POLICYSQL_INTERNAL"));
+        let stored: Value = serde_json::from_str(engine.store.as_deref().unwrap_or("null")).unwrap_or_default();
+        prop_assert_eq!(stored["phase"].as_str(), Some("failed"));
+        prop_assert_eq!(stored["nextSequence"].as_u64(), Some(sequence), "the statement is not recorded");
+        if lose {
+            engine.lose();
+        }
+        let retry = engine.run(&command("statement", &text));
+        prop_assert_eq!(code(&retry), Some("POLICYSQL_TRANSACTION_UNAVAILABLE"), "{}", retry);
+        prop_assert_eq!(engine.compiler.live_handles(), 0);
+    }
+}

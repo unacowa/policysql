@@ -1,6 +1,7 @@
 # ADR 0007: Transaction retry and commit-check protocol
 
-- Status: accepted
+- Status: accepted (retry rules amended by [ADR 0024](0024-transaction-step-machine.md) from
+  its pull request 7)
 
 ## Context
 
@@ -102,6 +103,46 @@ before the deployment replaces it: that code answers as it always did, possibly 
 no change in this release can reach it. This needs a retry that overlaps the deployment
 itself, so it occurs only during the rollout: an interactive transaction lives at most a few
 seconds, and a deployment restarts every owner.
+
+### Retry rules of the step machine (amended by ADR 0024, effective from its pull request 7)
+
+The transaction step machine of [ADR 0024](0024-transaction-step-machine.md) replaces
+`TransactionOwnerCore` at the switch-over (ADR 0024 pull request 7; pull request 4 adds it
+unused). It keeps the guarantee above (no commit retry is answered with a definite rejection
+when COMMIT may have been sent) with these rules, which replace the numbered order and the
+in-memory re-recording above once it is in use:
+
+- **Exact retries are answered before the snapshot and liveness checks, for every command.**
+  A statement, commit, or rollback whose sequence is the last completed one and whose
+  canonical payload digest equals the recorded `last.digest` gets `last.response`, also when
+  the caller's snapshot differs from the record's, the owner was lost, or the deadline passed.
+  The caller must match the record's *replay identity*: a hash of the principal, subject,
+  role, session, and the database binding without its `snapshot` (version, scope, database id,
+  and generation). This is safe because the replay identity carries everything the auth
+  fingerprint carries except the deployment snapshot: another principal, subject, role,
+  session, database, or generation is still rejected with `POLICYSQL_TRANSACTION_UNAVAILABLE`,
+  a replay executes nothing and returns only the reply the same caller already received, and
+  every command that does work still requires the full fingerprint, the record's snapshot, the
+  runtime's snapshot, and a live connection. Item 4 above therefore no longer requires the
+  record's snapshot for an exact retry of a non-commit command.
+- **`committing` and `commit_unknown`.** A commit at the sequence of a commit whose
+  `committing` record was persisted is answered with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` unless
+  the terminal `committed` record (with that commit as `last`) was stored; the successor rule
+  persists `commit_unknown` first. Other commands get `POLICYSQL_TRANSACTION_UNAVAILABLE`.
+- **No in-memory re-recording.** When the terminal record cannot be stored after COMMIT
+  succeeded, the reply is still `committed`, and the owner then resets: it drops its memory and
+  answers the next event from the store, exactly as a successor would. A commit retry
+  therefore gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (the store holds `committing`), also after
+  the store recovers. This replaces "the live owner keeps that terminal record in memory and
+  stores it again on the next retry": a same-owner retry and a successor give the same answer,
+  and neither is a rejection.
+- **A failed ROLLBACK** keeps the decided phase (`rolled_back` for a rollback command,
+  `expired` or `failed` otherwise). The phase means that the transaction will never be
+  committed (no COMMIT is ever sent for it), not that the server confirmed the rollback; the
+  server transaction, and any locks it holds, may persist until the database deadline ends it.
+- **Records written before the switch-over**, `commitRecording` ones included, are discarded:
+  a commit gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, every other command
+  `POLICYSQL_TRANSACTION_UNAVAILABLE` (ADR 0024, "Old-format records are discarded, not read").
 
 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` is never a rejection. The client library does not list it
 among definite rejections, so it raises `PolicySqlOutcomeUnknownError` and keeps the commit

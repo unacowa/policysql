@@ -603,6 +603,10 @@ pub enum Task {
         /// A statement whose completion is being recorded: an expiry that arrived meanwhile
         /// rolls back after the reply.
         expire_after: bool,
+        /// The durable text before the statement completed. When its completion cannot be
+        /// stored, the record moves to `failed` from this state, so the statement is not
+        /// recorded as done (a retry gets what a successor would answer).
+        restore: Option<String>,
     },
     /// `Persist` of a fail-closed record; then `Reset` whatever the outcome.
     ResetAfterPersist,

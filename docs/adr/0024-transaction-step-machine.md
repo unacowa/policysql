@@ -835,7 +835,25 @@ it yet.
   strings must fit 96 KiB; `docs/configuration.md`). A transition that would still exceed a
   bound closes the transaction with `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`.
 - **`RollbackFailed`** of a rollback command keeps `rolled_back` (the decided phase), as the
-  failure table says; `TransactionOwnerCore` reports `failed`.
+  failure table says; `TransactionOwnerCore` reports `failed`. `rolled_back` (and `expired` or
+  `failed` after a failed rollback) means that the transaction will never be committed, not
+  that the server confirmed the rollback: the server transaction and its locks may persist
+  until the database deadline ends it.
+- **A statement whose completion cannot be stored** moves to `failed` from the record before
+  the statement (the task keeps that record), so a retry of the statement gets
+  `POLICYSQL_TRANSACTION_UNAVAILABLE` from this owner and a successor alike, never the
+  statement's reply for a transaction that failed.
+- **ADR 0007's retry rules** are amended for the machine (ADR 0007, "Retry rules of the step
+  machine"): exact retries of every command are answered before the snapshot and liveness
+  checks, matched by the replay identity (principal, subject, role, session, and the binding
+  without its snapshot, so another caller or database is still rejected), and there is no
+  in-memory re-recording of a terminal record whose put failed (`Reset`, then outcome-unknown,
+  as a successor answers).
+- **Obligation for the production executor (pull request 7).** `Reset` and the fail-closed
+  path emit no `Rollback` effect: the engine must close the database connection it holds when
+  it runs `Reset` (and on `Abandon`), and drop every reference to it. The test executor
+  (`test/helpers/step-owner.mjs`) does this; `TransactionOwnerCore`'s successor inherits it at
+  the switch-over.
 - **Tests.** Property tests (`tests/properties.rs`, proptest), transcripts of inconsistencies
   3, 4, and 6, the deadline after `committing`, #70, and old-format records
   (`tests/fixtures/transactions/`, replayed byte for byte by `tests/transcripts.rs`), and the

@@ -517,6 +517,7 @@ impl<C: Compiler> Step<'_, C> {
                         logs: Vec::new(),
                         failure_logs: Vec::new(),
                         expire_after: false,
+                        restore: None,
                     },
                     |id| Effect::Persist { id },
                 )
@@ -591,6 +592,7 @@ impl<C: Compiler> Step<'_, C> {
                 logs: Vec::new(),
                 failure_logs: Vec::new(),
                 expire_after: false,
+                restore: None,
             },
             |id| Effect::Persist { id },
         )
@@ -882,6 +884,7 @@ impl<C: Compiler> Step<'_, C> {
                         logs: vec![io::to_raw(&terminal)],
                         failure_logs: vec![io::to_raw(&unrecorded), io::to_raw(&terminal)],
                         expire_after: false,
+                        restore: None,
                     },
                     |id| Effect::Persist { id },
                 )
@@ -902,6 +905,7 @@ impl<C: Compiler> Step<'_, C> {
                             logs: Vec::new(),
                             failure_logs: Vec::new(),
                             expire_after: false,
+                            restore: None,
                         },
                         |id| Effect::Persist { id },
                     );
@@ -922,6 +926,7 @@ impl<C: Compiler> Step<'_, C> {
                         logs: Vec::new(),
                         failure_logs: Vec::new(),
                         expire_after: false,
+                        restore: None,
                     },
                     |id| Effect::Persist { id },
                 )
@@ -968,6 +973,7 @@ impl<C: Compiler> Step<'_, C> {
                         logs: vec![io::to_raw(&terminal)],
                         failure_logs: Vec::new(),
                         expire_after: false,
+                        restore: None,
                     },
                     |id| Effect::Persist { id },
                 )
@@ -1010,6 +1016,7 @@ impl<C: Compiler> Step<'_, C> {
                     failure,
                     failure_logs,
                     expire_after,
+                    restore,
                     ..
                 },
                 Event::PersistFailed { .. },
@@ -1019,7 +1026,12 @@ impl<C: Compiler> Step<'_, C> {
                 }
                 if expire_after {
                     // A statement's completion could not be stored: roll back and record
-                    // `failed` before answering (ADR 0024 failure table).
+                    // `failed` from the record before the statement (ADR 0024 failure table),
+                    // so a retry of it is not replayed as done.
+                    let previous = restore.ok_or(Fault("statement_restore"))?;
+                    let previous = Durable::parse(&previous, self.owner)
+                        .map_err(|_| Fault("statement_restore"))?;
+                    self.durable = Some(previous);
                     return self.close(lane, Phase::Failed, failure);
                 }
                 if let Some(failure) = failure {
@@ -1223,6 +1235,7 @@ impl<C: Compiler> Step<'_, C> {
                 Some(error_reply(Code::TransactionLimit)),
             );
         }
+        let previous = self.durable.as_ref().map(Durable::to_json);
         self.durable = Some(next);
         let usage_log = json!({
             "event": "transaction_usage",
@@ -1240,6 +1253,7 @@ impl<C: Compiler> Step<'_, C> {
                 logs: Vec::new(),
                 failure_logs: Vec::new(),
                 expire_after: true,
+                restore: previous,
             },
             |id| Effect::Persist { id },
         )
@@ -1512,6 +1526,7 @@ impl<C: Compiler> Step<'_, C> {
                 logs: Vec::new(),
                 failure_logs: Vec::new(),
                 expire_after: false,
+                restore: None,
             },
             |id| Effect::Persist { id },
         )

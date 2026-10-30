@@ -39,8 +39,9 @@ export const ALLOWLIST = Object.freeze({
     "#70: core compiles and hashes the verified body text. TransactionOwnerCore recompiles JSON.stringify(command): " +
     "1e400 becomes NULL and 9007199254740993 is rounded (known bug until pull request 7).",
   "persist-failure-before-committing":
-    "ADR 0024 failure table, PersistFailed before committing: core rolls back and records failed before answering " +
-    "INTERNAL. TransactionOwnerCore answers INTERNAL and leaves the transaction open.",
+    "ADR 0024 failure table, PersistFailed before committing: core rolls back and records failed (from the record " +
+    "before the statement, so a retry is unavailable, not replayed) before answering INTERNAL. " +
+    "TransactionOwnerCore answers INTERNAL and leaves the transaction open.",
   "unrecorded-commit-retry":
     "ADR 0024 failure table, PersistFailed of the terminal record after Committed: a retry gets " +
     "COMMIT_OUTCOME_UNKNOWN from this owner and a successor alike. TransactionOwnerCore (#48) keeps the terminal " +
@@ -598,12 +599,20 @@ test(`allowlist persist-failure-before-committing: ${ALLOWLIST["persist-failure-
   fail = false;
   assert.equal(failed.ts.reply.code, "POLICYSQL_INTERNAL");
   assert.equal(failed.step.reply.code, "POLICYSQL_INTERNAL");
-  assert.equal(normalizedRecord("step", env.sides.step.slot.record()).phase, "failed", "core recorded failed");
+  const recorded = normalizedRecord("step", env.sides.step.slot.record());
+  assert.deepEqual(recorded, { phase: "failed", nextSequence: 1, last: null },
+    "core recorded failed from the record before the statement: it is not done");
   assert.equal(normalizedRecord("ts", env.sides.ts.slot.record()).phase, "active", "TS left it open");
   const after = await both(env, insert(1, "p1"));
-  assert.equal(after.step.reply.code ?? after.step.reply.value?.status, "active", "core: the recorded `last` replays");
+  assert.equal(after.step.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", "core: the retry is not replayed as done");
+  // A successor answers the retry the same way.
+  env.sides.step.slot.lose();
+  env.setSide("step");
+  const successor = await perform(env, "step", insert(1, "p1"), env.nextRequest());
+  assert.equal(successor.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
   const commitAfter = await both(env, commit(2));
   assert.equal(commitAfter.step.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  assert.deepEqual(env.rows("step").projects.map((row) => row.id), ["hidden", "seed"], "nothing committed");
 });
 
 test(`allowlist timer-during-statement: ${ALLOWLIST["timer-during-statement"]}`, async (t) => {

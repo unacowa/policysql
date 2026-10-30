@@ -185,9 +185,25 @@ fn owner_loss_and_expiry() -> Engine {
     engine
 }
 
+/// A statement's completion cannot be stored: `failed` is recorded from the record before it,
+/// so its retry is unavailable, never replayed as done (#71 review).
+fn statement_completion_put_failed() -> Engine {
+    let mut engine = begun();
+    let text = statement_text(1, "INSERT INTO projects (id) VALUES (:id)");
+    engine.feed(&command("statement", &text));
+    engine.resolve(true, "unknown");
+    engine.resolve(true, "unknown");
+    engine.resolve(false, "unknown");
+    engine.settle();
+    engine.run(&command("statement", &text));
+    engine.lose();
+    engine.run(&command("statement", &text));
+    engine
+}
+
 type Scenario = fn() -> Engine;
 
-const SCENARIOS: [(&str, Scenario); 10] = [
+const SCENARIOS: [(&str, Scenario); 11] = [
     (
         "inconsistency-3-owner-lost-after-commit",
         owner_lost_after_commit,
@@ -204,6 +220,10 @@ const SCENARIOS: [(&str, Scenario); 10] = [
     ("old-format-record-discarded", old_format_record),
     ("exact-retry-and-commit", exact_retry_and_commit),
     ("owner-loss-and-expiry", owner_loss_and_expiry),
+    (
+        "statement-completion-put-failed",
+        statement_completion_put_failed,
+    ),
 ];
 
 fn jsonl(lines: &[TranscriptLine]) -> String {
@@ -309,6 +329,15 @@ fn transcripts_record_the_decided_answers() {
         answers(&old_format_record()),
         [
             "POLICYSQL_COMMIT_OUTCOME_UNKNOWN",
+            "POLICYSQL_TRANSACTION_UNAVAILABLE"
+        ]
+    );
+    assert_eq!(
+        answers(&statement_completion_put_failed()),
+        [
+            "active",
+            "POLICYSQL_INTERNAL",
+            "POLICYSQL_TRANSACTION_UNAVAILABLE",
             "POLICYSQL_TRANSACTION_UNAVAILABLE"
         ]
     );
