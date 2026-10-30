@@ -250,6 +250,10 @@ Recorded by the follow-up pull request (ABI 5):
   feature explicitly, so compile reads decimals as the same correctly rounded double; before,
   such a parameter could be one unit off. Nesting is bounded by `serde_json`'s recursion limit
   (127 levels).
+  The client-facing note, including that a REAL value written by an older release may no
+  longer match an equality predicate with the same literal, is in
+  [`docs/http-api.md`](../http-api.md#numeric-parameters) and the website page on types and
+  formats (`website/data-validity/types-and-formats.md`).
 - Core's rule for numbers outside (b) is `serde_json`'s printing of the number it read: an
   integer lexeme in the 64-bit range keeps its exact digits (`9007199254740993`, which compile
   also keeps), and every other number is the shortest text that reads back as the same double

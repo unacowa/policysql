@@ -96,6 +96,19 @@ Interactive start without a key creates a fresh transaction ID/owner for each re
 Keyed starts retain their existing DO replay behavior. Once started, interactive commands
 retain sequence-based retries with or without a start key and do not use this DB table.
 
+### Numeric parameters
+
+Since ABI 5 ([ADR 0025](adr/0025-core-defined-canonical-json.md)), a JSON number parameter
+written with a fraction or an exponent (`0.30000000000000004`, `9007199254740991.0`,
+`1.5e-7`) binds the IEEE 754 double nearest to its decimal text (correctly rounded). Earlier
+releases could bind a double up to 1 ULP off for such spellings with 16-17 or more
+significant digits (`9007199254740991.0` bound as `9007199254740990`). Integer spellings
+without a fraction or exponent (`42`, `9007199254740993`) bind exact integers, unchanged.
+Consequence: a REAL value written by an older release from such a literal may no longer
+match an equality predicate (`WHERE price = :price`) with the same literal on ABI 5; use a
+range comparison, or keep such values as integers or strings. `abiVersion` and `id` in
+Capabilities show the change.
+
 ### Durable Object ownership without a key
 
 | Request | Owner assignment |

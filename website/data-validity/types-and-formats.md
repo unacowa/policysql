@@ -153,6 +153,12 @@ SQL式が複数のlogical typeを返し得る場合は、重複を除いて安�
 
 `date`、`datetime`、`instant`を同じ型として扱いません。例えば`YYYY-MM-DD`は時刻ではなく、timezoneのない暦日です。RFC 3339のoffset付き日時は`instant`として扱えます。
 
+### 小数パラメータの丸め（ABI 5）
+
+小数点や指数を含むJSON数値パラメータ（例: `0.30000000000000004`、`9007199254740991.0`、`1.5e-7`）は、その10進表記に最も近いIEEE 754 doubleとしてbindされます（correctly rounded）。ABI 4以前のreleaseでは、有効桁16〜17桁以上の小数・指数表記が最大1 ULPずれたdoubleとしてbindされることがありました（例: `9007199254740991.0`が`9007199254740990`）。小数点も指数も持たない整数表記（`42`、`9007199254740993`）は従来どおり正確な整数としてbindされ、変わりません。
+
+このため、旧releaseで書き込んだREAL値が、同じliteralを使った新releaseの等価比較（`WHERE price = :price`）に一致しなくなる場合があります。該当し得る値を照合する場合は、範囲比較を使うか、値を整数・文字列で保持してください。ABIの変更は`/v1/capabilities`の`abiVersion`と`id`で確認できます（[ADR 0025](https://github.com/unacowa/policysql/blob/main/docs/adr/0025-core-defined-canonical-json.md)）。
+
 ## Format
 
 formatは安定したidentifierで指定します。任意のformat文字列をclientごとに解釈させません。
