@@ -67,11 +67,6 @@ export const ALLOWLIST = Object.freeze({
     "nothing between checks, so an owner lost during one check calls the next validator before its next write " +
     "(Persist(committing)) fails; no COMMIT is sent and the reply is INTERNAL on both sides. TransactionOwnerCore " +
     "writes active between checks, which fails on the lost owner before the next validator is called.",
-  "callback-without-validation":
-    "ADR 0007 \"The callback capability authorizes only policy-compiled SELECT against the owned open transaction\": " +
-    "core answers a callback query that reaches an owner with no live capability (no validation running) " +
-    "TRANSACTION_UNAVAILABLE and changes nothing. TransactionOwnerCore also fails that owner's open transaction, so a " +
-    "request naming the validation id of an active transaction could end it.",
 });
 
 const CATALOG = `version: 1
@@ -857,17 +852,17 @@ test(`allowlist loss-between-checks: ${ALLOWLIST["loss-between-checks"]}`, async
   assertSameEnd(env, "end");
 });
 
-test(`allowlist callback-without-validation: ${ALLOWLIST["callback-without-validation"]}`, async (t) => {
-  const env = environment(t);
-  for (const op of [write, audit(1, "x1")]) assertSame(await both(env, op), op.op);
-  const stray = await both(env, { op: "callback", token: "A".repeat(43), text: query(1) });
-  assert.equal(stray.ts.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
-  assert.equal(stray.step.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
-  assert.deepEqual(stray.ts.calls, [{ op: "rollback" }], "TS ended the active transaction");
-  assert.deepEqual(stray.step.calls, [], "core changed nothing");
-  const next = await both(env, commit(2));
-  assert.equal(next.ts.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
-  assert.equal(next.step.reply.value.status, "committed");
+// Formerly the `callback-without-validation` allowlist entry (#73): a callback that reaches an
+// owner with no live capability (before any check, or with any token) changes nothing on either
+// side, and the transaction goes on to its next statement and commit.
+test("a callback with no validation running changes nothing, alike (#73)", async (t) => {
+  const stray = (token) => ({ op: "callback", token, text: query(1) });
+  const env = await agree(t, [
+    write, audit(1, "x1"), stray("A".repeat(43)), stray("malformed"), stray(""), select(2), commit(3),
+  ]);
+  const strays = env.callbacks.step.slice(0, 3);
+  assert.deepEqual(strays.map((reply) => reply.code), Array(3).fill("POLICYSQL_TRANSACTION_UNAVAILABLE"));
+  assert.equal(normalizedRecord("step", env.sides.step.slot.record()).phase, "committed");
 });
 
 test(`allowlist issue-70: ${ALLOWLIST["issue-70"]}`, async (t) => {
