@@ -249,3 +249,29 @@ test("requests manual redirects and rejects 3xx and opaqueredirect responses unr
     assert.equal(state.cancelled, true, `${label}: the redirect body is released`);
   }
 });
+
+// ADR 0024 pull request 7 (#70): an integer beyond 2^53 - 1 that the step machine bound
+// reaches the transport as a BigInt and keeps its digits on the wire; anything outside the
+// signed 64-bit range fails closed before any request.
+test("encodes BigInt arguments as exact Hrana integers within the signed 64-bit range", async () => {
+  const sent = [];
+  const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "bigint", async (_url, init) => {
+    const { requests } = JSON.parse(init.body);
+    sent.push(...requests);
+    return Response.json({ baton: "baton", results: requests.map(() => result([], [])) });
+  });
+  const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
+  const args = { big: 9007199254740993n, min: -(2n ** 63n), max: 2n ** 63n - 1n, small: 7 };
+  await transaction.execute([{ sql: "INSERT INTO counters (big) VALUES (:big)", args }]);
+  assert.deepEqual(sent.at(-1).stmt.named_args, [
+    { name: "big", value: { type: "integer", value: "9007199254740993" } },
+    { name: "min", value: { type: "integer", value: "-9223372036854775808" } },
+    { name: "max", value: { type: "integer", value: "9223372036854775807" } },
+    { name: "small", value: { type: "integer", value: "7" } },
+  ]);
+  const before = sent.length;
+  for (const value of [2n ** 63n, -(2n ** 63n) - 1n]) {
+    await assert.rejects(transaction.execute([{ sql: "SELECT :v", args: { v: value } }]), { code: "POLICYSQL_INTERNAL" });
+  }
+  assert.equal(sent.length, before, "nothing is sent for an out-of-range integer");
+});
