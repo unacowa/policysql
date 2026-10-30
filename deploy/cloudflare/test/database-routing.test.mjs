@@ -369,7 +369,8 @@ test("a changed runtime snapshot fails before another statement and rolls back",
   const start = await h.request("a", "/v1/transactions", { mode: "write" });
   const id = start.body.transactionId;
   assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("stale") })).status, 200);
-  h.ownerCore(id).getRuntime = () => ({ snapshot: "new_snapshot" });
+  // A later runtime: another snapshot, the same core identity computation.
+  h.ownerCore(id).getRuntime = () => ({ snapshot: "new_snapshot", identity_json: (input) => h.runtime.identity_json(input) });
   assert.equal((await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 })).status, 409);
   assert.equal(h.rows("a").some((row) => row.id === "stale"), false);
 });

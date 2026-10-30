@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { testBinding, testProvider } from "./helpers/database.mjs";
+import { identity_json } from "./helpers/identity.mjs";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { statusFor } from "../src/http/status.ts";
 
@@ -57,6 +58,7 @@ const ownerProvider = (database) => {
 const runtime = () => ({
   snapshot: "test-snapshot",
   max_bytes_per_value: 1_024,
+  identity_json,
   released: 0,
   compile_json() {
     return JSON.stringify({
@@ -145,7 +147,9 @@ test("runs a sequenced statement, exact-retries it, and commits", async () => {
   const replay = await call(owner, "statement", body);
   assert.equal(first.status, 200);
   assert.deepEqual(await replay.json(), await first.clone().json());
-  assert.equal(compiler.released, 1);
+  // The statement's plan, and the retry's: a possible exact retry is compiled (and released at
+  // once) before it is hashed, so a body that cannot compile is never hashed (#55 review).
+  assert.equal(compiler.released, 2);
   const committed = await call(owner, "commit", { transactionId: txId, authFingerprint: fingerprint, command: { sequence: 2 } });
   assert.equal((await committed.json()).status, "committed");
   assert.equal(database.committed, true);
@@ -178,6 +182,7 @@ test("fails closed after owner replacement and on alarm expiry", async () => {
 const commitRuntime = () => ({
   snapshot: "test-snapshot",
   max_bytes_per_value: 1_024,
+  identity_json,
   released: 0,
   compile_json(_auth, envelope) {
     const sql = JSON.parse(envelope).statements[0].sql;

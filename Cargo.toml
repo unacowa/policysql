@@ -11,6 +11,7 @@ members = [
   "crates/policysql-turso",
   "crates/policysql-gateway",
   "crates/policysql-testkit",
+  "crates/policysql-transaction",
   "crates/policysql-wasm",
 ]
 

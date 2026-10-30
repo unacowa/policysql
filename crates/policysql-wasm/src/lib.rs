@@ -591,6 +591,20 @@ impl PolicySqlRuntime {
         }
     }
 
+    /// Computes a request identity, fingerprint, or command digest with core's canonical
+    /// JSON and SHA-256 (ADR 0024 pull request 2). The input and output contract is
+    /// [`policysql_transaction::identity_json`]; bodies are passed as their exact text, so an
+    /// escaped lone surrogate in a body reaches core intact.
+    ///
+    /// Adding this method does not change `ABI_VERSION`: no existing method or value changes,
+    /// the engine and this module ship in one bundle, and keeping the version keeps the
+    /// snapshot, which every fingerprint includes (ADR 0024, "ABI impact and rollout").
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn identity_json(&self, input_json: &str) -> String {
+        policysql_transaction::identity_json(input_json)
+    }
+
     /// Returns the activated, role-visible logical Catalog.
     #[must_use]
     pub fn catalog_json(&self, verified_auth_json: &str) -> String {
