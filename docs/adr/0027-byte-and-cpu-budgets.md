@@ -205,6 +205,12 @@ Every bound is exactly one of:
    rejects data that every configured limit accepts; when it rejects, the data was already
    over a configured limit, and the error is that limit's error.
 
+   **One exception.** The column-metadata guard (1,048,576 bytes per envelope, below) is a
+   memory guard measured on the compiled statements, and it can reject a request that is within
+   every input-side limit (for example eight statements whose aliases fill `maxSqlBytes`). It
+   then answers `POLICYSQL_SQL_TOO_COMPLEX` with cause `column_metadata`, like the other
+   measured complexity limits, and is documented as such.
+
 No other byte constant may exist on the request path. The engine-boundary test gains a rule:
 no numeric byte limit literal in `deploy/cloudflare/src` outside the fixed list below.
 
@@ -223,7 +229,7 @@ defaults and ranges.
 | `maxBytesPerValue` (new; was fixed) | 262,144 | 1 – 1,048,576 | decoded bytes of one bytes value (parameter, preset, result cell) | core codecs, the Turso adapters (from the runtime) | 413 `POLICYSQL_LIMIT_EXCEEDED` (malformed: 400 `POLICYSQL_INVALID_PARAMETER`) |
 | `maxParameters` (new) | 1,024 | 1 – 16,384 | distinct client parameter names per statement | binder | 413 `POLICYSQL_LIMIT_EXCEEDED`, statement path |
 | `maxExpressionDepth` (new) | 32 | 1 – 64 | binder expression depth of the client's SQL (an n-term `OR` chain has depth n); protects the binder's recursion, stack, and CPU | binder | 413 `POLICYSQL_LIMIT_EXCEEDED`, statement path |
-| `maxJoins` (new; was fixed) | 8 | 1 – 64 | joins per FROM in the client's SQL | binder | 413 `POLICYSQL_LIMIT_EXCEEDED`, statement path |
+| `maxJoins` (new; was fixed) | 8 | 1 – 63 | joins per FROM in the client's SQL | binder | 413 `POLICYSQL_LIMIT_EXCEEDED`, statement path |
 | `maxProjections` (new) | 128 | 1 – 2,000 | result columns per SELECT/RETURNING in the client's SQL | binder | 413 `POLICYSQL_LIMIT_EXCEEDED`, statement path |
 | `maxStatements` | required | 1 – 64 (was 2^32 − 1) | statements per atomic envelope | core | 413 `POLICYSQL_LIMIT_EXCEEDED` |
 | `maxRows` | required | 1 – 100,000 (was 2^53 − 1) | rows per statement | core | 413 `POLICYSQL_LIMIT_EXCEEDED` |
@@ -263,10 +269,15 @@ Ranges and why:
   measurements (Context) show that every shape found, including the worst at 8 joins, still
   fits the parser at these values, so common statements are unaffected; a deployment raising
   them accepts that more statements may end in `POLICYSQL_SQL_TOO_COMPLEX`. `maxParameters`
-  rises to 1,024 (#63). The maxima are input-side bounds: depth 64 and joins 64 keep the binder
+  rises to 1,024 (#63). The maxima are input-side bounds: depth 64 and joins 63 keep the binder
   cheap (client SQL deeper than about 98 is refused by `turso_parser` before binding anyway),
   projections 2,000 equals SQLite's column limit for the client's own columns, and parameters
-  16,384 is half of SQLite's 32,766 host parameters.
+  16,384 is half of SQLite's 32,766 host parameters. Joins stop at 63 because SQLite allows at
+  most 64 tables in a join. The upper part of the join range is reachable only without row
+  filters: each filtered inner join adds 2 to the emitted height (left-deep `AND`), so beyond
+  about 45 filtered inner joins a statement returns `POLICYSQL_SQL_TOO_COMPLEX` however simple
+  its predicate is; `docs/configuration.md` says so. Composing the filters as a balanced tree
+  would lift this, but changes the emitter's golden output and is left for another ADR.
 - `maxStatements` ≤ 64 bounds the per-statement framing of a raw response.
 - `maxResponseBytes` ≥ `maxResultBytes` + 3,072 is checked at construction: the response adds
   the envelope (at least about 2 KiB for one statement with one column) and the 1,024-byte
@@ -292,7 +303,7 @@ now rejected. Every other default equals today's value.
 | Validator (commit-check) response | 65,536 | an allow/deny answer; over it denies the commit as a failed validator |
 | Upstream expression height and parse recursion | 100 each (`turso_parser` 0.7.2) | dependency; client SQL beyond them is 400 `POLICYSQL_INVALID_SQL` before PolicySQL sees a tree; emitted SQL beyond them is `POLICYSQL_SQL_TOO_COMPLEX` (below) |
 | Emitted statement limits of the database | SQLite defaults: 2,000 result columns, 32,766 host parameters, 50,000-byte LIKE/GLOB pattern, expression depth 1,000 | the database's; reaching one is `POLICYSQL_SQL_TOO_COMPLEX` (below) |
-| Emitted column metadata per envelope | 1,048,576 bytes (Σ over emitted columns of `2·alias + 2·declared type + 32`) | memory guard on the raw response's column descriptors, measured on the compiled statements; over it is `POLICYSQL_SQL_TOO_COMPLEX` |
+| Emitted column metadata per envelope | 1,048,576 bytes (exact Σ over emitted columns of `2·len(alias) + 2·len(declared type) + 32`) | memory guard on the raw response's column descriptors, measured on the compiled statements; over it is `POLICYSQL_SQL_TOO_COMPLEX` |
 
 ### Derived internal bounds
 
@@ -312,12 +323,18 @@ key ≤ 128):
 The raw result bound:
 
 - `eᵢ` is statement i's emitted column count (projections plus visibility companions plus the
-  check column), `nᵢ` its longest emitted column alias and `tᵢ` its longest declared type in
-  bytes (both doubled for JSON escaping), 512 the per-statement Hrana framing, and 32 the
-  per-column `cols` framing. The column term `M = Σᵢ eᵢ × (2·nᵢ + 2·tᵢ + 32)` is measured on the
-  compiled statements and is at most 1,048,576 bytes per envelope (the fixed metadata guard;
-  over it the envelope is `POLICYSQL_SQL_TOO_COMPLEX`); the count of column descriptors is under
-  `maxJsonValues`. No separate limit on emitted columns or name length is added. `C` is the number of cells, at most `min(Σᵢ rowsᵢ × eᵢ, maxJsonValues − Σᵢ eᵢ)`
+  check column), 512 the per-statement Hrana framing, and the column term is the exact sum over
+  every emitted column c of the envelope,
+  `M = Σ_c (2·|alias_c| + 2·|declared type_c| + 32)` (names doubled for JSON escaping, 32 the
+  per-column `cols` framing). It is computed on the compiled statements and is at most
+  1,048,576 bytes per envelope (the column-metadata guard; over it the envelope is
+  `POLICYSQL_SQL_TOO_COMPLEX`, cause `column_metadata`); the count of column descriptors is
+  under `maxJsonValues`. Client aliases appear in the SQL text, so their total is at most
+  `maxSqlBytes` per statement, and names without an alias and declared types come from the
+  Catalog and physical schema (bounded at construction). The guard is therefore at most
+  `Σᵢ (2·maxSqlBytes + eᵢ·(2·T + 2·N + 32))` with `N`, `T` the longest Catalog name and declared
+  type; at the defaults it is reached only when all eight statements fill their SQL with
+  aliases, and at the hard maxima it is reachable, which the measured-limit policy accepts. No separate limit on emitted columns or name length is added. `C` is the number of cells, at most `min(Σᵢ rowsᵢ × eᵢ, maxJsonValues − Σᵢ eᵢ)`
   with `rowsᵢ` the statement's effective row limit, and 64 bytes is the largest per-cell Hrana
   framing (`{"type":"integer","value":"-9223372036854775808"},` is 49). The factor 2 on
   `maxResultBytes` covers escaping of a canonical JSON-typed value inside a text cell (every
@@ -438,14 +455,19 @@ How each cause is recognized:
 
 | Cause | Where | How |
 | --- | --- | --- |
-| Expression height over 100; parse recursion depth over 100 | core, at emit time, before re-parse | `turso_parser` 0.7.2 reports both as an untyped `ParseError(String)`, so core does not match its message. The emitter counts both quantities exactly on the AST it is about to print, with the parser's rules: height (a parenthesis +1, a binary node 1 + the taller operand, restarting inside a subquery) and recursion depth (accumulating across `EXISTS` and other subqueries). This measures the actual statement; it does not predict from limits. |
+| Expression height over 100; parse recursion depth over 100 | core, at emit time, before re-parse | `turso_parser` 0.7.2 reports both as an untyped `ParseError(String)`, so core does not match its message. The emitter counts both quantities exactly on the AST it is about to print, with the parser's rules: height (a parenthesis +1, a binary node 1 + the taller operand, restarting inside a subquery) and recursion depth (accumulating across `EXISTS` and other subqueries). This measures the actual statement; it does not predict from limits. Because the counts copy a dependency's internal rules, pull request 4 tests them in **both directions** on generated shapes (count over 100 ⇔ the re-parse fails), and every pull request that changes the `turso_parser` version must run that test. (Classifying the re-parse failure by the pinned version's fixed message instead was considered; it was not chosen because the message is an untyped string that can change in any release, and it does not say which counter failed.) |
 | Result columns over 2,000; host parameters over 32,766 | core, at emit time | exact count of the emitted result columns (companions and the check column included) and of the bound parameters (client and server) |
 | LIKE/GLOB pattern over 50,000 bytes | core, when parameters are bound | exact byte length of a pattern that is a bound value (a parameter or a server value); a pattern computed by an expression is left to the database (next row) |
-| Emitted column metadata over 1,048,576 bytes per envelope | core, at compile time | exact sum over the compiled statements (raw bound above) |
-| The database refuses the statement for complexity (for example `too many columns in result set`, `LIKE or GLOB pattern too complex`, `Expression tree is too large`, `too many SQL variables`) | the database adapter, on the statement's error | the Hrana (or driver) error message of a **statement** request is compared against a fixed allowlist of exact message prefixes for the pinned SQLite/libSQL version, read only on the server; a match is classified as complexity, anything else keeps today's classification (503). The allowlist is tested against real Turso in the smoke run. These errors arise when the statement is prepared or stepped, before COMMIT: in an atomic envelope it rolls back; in an interactive transaction the statement fails and the transaction follows the existing failed-statement rule. A COMMIT error is never classified this way. |
+| Emitted column metadata over 1,048,576 bytes per envelope | core, at compile time | the exact per-column sum `M` over the compiled statements (raw bound above) |
+| The database refuses the statement for complexity (for example `too many columns in result set`, `LIKE or GLOB pattern too complex`, `Expression tree is too large`, `too many SQL variables`) | the database adapter, on the statement's error; core decides | The adapter starts reading the Hrana error object of a statement request (today `decodeResult` in `turso-http.ts` discards it): `{"type":"error","error":{"message","code"}}`. A complexity match requires **`code` == `SQLITE_ERROR`** (which structurally excludes `SQLITE_BUSY`, `SQLITE_CONSTRAINT_*`, `SQLITE_FULL`, and the rest) **and** a message starting with one entry of a fixed allowlist derived mechanically from SQLite's `SQLITE_LIMIT_*` family for the pinned version: too many columns (`in result set`, `in ORDER BY clause`, `in GROUP BY clause`, `in set list`, `in index`, and the other "too many columns in …" forms), too many SQL variables, too many arguments on function, too many terms in compound SELECT, at most 64 tables in a join, LIKE or GLOB pattern too complex, Expression tree is too large. The message is read only to classify; it is never logged or returned. A match becomes a new outcome class (`complex`) on `ExecuteFailed`, which also carries the failed statement's index so core can answer `/statements/<i>`; core maps the class to `POLICYSQL_SQL_TOO_COMPLEX`. The class is never produced for COMMIT, and the COMMIT outcome mapping gains no entry for it, so a COMMIT is never classified this way. Anything else keeps today's classification (503) and is logged as `database_error_unclassified` with the Hrana `code` only. The smoke run sends one statement per allowlist entry to real Turso and **fails** if any is not matched, so a change on the server side cannot silently regress to 503. These errors arise when the statement is prepared or stepped, before COMMIT; the transaction effect is in the error table below (atomic: rollback; interactive: the transaction closes as `failed`). |
 
 Any other re-parse failure of emitted SQL is an emitter bug: an internal invariant failure,
-500 `POLICYSQL_INTERNAL`, logged as `emitted_sql_reparse_failed`, not this code. Client SQL
+500 `POLICYSQL_INTERNAL`, logged as `emitted_sql_reparse_failed`, not this code. That log,
+`sql_too_complex`, and `database_error_unclassified` carry only the statement index, the schema
+and policy versions, the runtime ABI version, and a fixed cause name (or the Hrana `code`); never
+the parser's or the database's text, the emitted SQL, parameters, or names, since the parser's
+message can embed tokens of the emitted SQL and SQLite's constraint messages name columns. The
+emitted SQL may be logged only under a development-only debug flag, never in a deployment. Client SQL
 that the parser refuses remains 400 `POLICYSQL_INVALID_SQL`.
 
 The input-side limits stay in place because they protect PolicySQL's own work, and they are
@@ -535,7 +557,8 @@ so the binder enforces the advertised values; a test asserts every advertised li
 a request at the value and one over it. Derived bounds and fixed internal constants are not
 advertised. The depth, join, projection, parameter, and SQL-length limits are described as
 input-side limits: a request within them can still be refused with `POLICYSQL_SQL_TOO_COMPLEX`
-when the policy makes its emitted statement too complex, and result-side `maxJsonValues` is
+when the policy makes its emitted statement too complex or when the column metadata of its
+emitted statements exceeds the 1 MiB guard, and result-side `maxJsonValues` is
 described as counting companion cells and column descriptors. `spec/openapi.yaml` lists the new
 `limits` properties (additive; the schema already allows additional properties).
 
@@ -547,7 +570,7 @@ described as counting companion cells and column descriptors. `spec/openapi.yaml
 | SQL text over `maxSqlBytes` | 413 `POLICYSQL_REQUEST_TOO_LARGE`, `/statements/<i>/sql` | none started |
 | Parameters, depth, projections, or joins of the client's SQL over their limit | 413 `POLICYSQL_LIMIT_EXCEEDED`, statement path | none started |
 | Client SQL beyond the parser's caps | 400 `POLICYSQL_INVALID_SQL` | none started |
-| The emitted statement exceeds a downstream complexity limit (parser height or recursion, result columns, host parameters, LIKE pattern, column metadata, or a recognized database complexity error) | 400 `POLICYSQL_SQL_TOO_COMPLEX`, statement path, fixed message | none started, or rolled back before COMMIT |
+| The emitted statement exceeds a downstream complexity limit (parser height or recursion, result columns, host parameters, LIKE pattern, column metadata, or a recognized database complexity error) | 400 `POLICYSQL_SQL_TOO_COMPLEX`, statement path, fixed message | atomic: none started, or rolled back before COMMIT. Interactive: whether detected at emit time or by the database, the transaction closes as `failed` and is rolled back, like any compile or execute failure (ADR 0024); later statements and COMMIT get 409 `POLICYSQL_TRANSACTION_UNAVAILABLE` |
 | Emitted SQL that fails to re-parse for any other reason | 500 `POLICYSQL_INTERNAL` | none started |
 | Bytes parameter malformed / over `maxBytesPerValue` | 400 `POLICYSQL_INVALID_PARAMETER` / 413 `POLICYSQL_LIMIT_EXCEEDED` | none started |
 | Rows, result bytes, result values, raw result bound, BLOB cell over the limit, response over `maxResponseBytes` | 413 `POLICYSQL_LIMIT_EXCEEDED` | rolled back before COMMIT; no idempotency record |
@@ -615,8 +638,11 @@ smoke (`deploy/cloudflare/scripts/provision-dev.mjs`) before merge.
 1. **Measure, and make the reference wrapper consistent (#56, #42).** Add
    `scripts/measure-cpu.mjs` (the request, JSON-cell, and cell-heavy shapes above, plus the
    companion-heavy shape — one-character aliases, every column `visible_if`, and RETURNING with
-   the check column — to fix the per-raw-value coefficient; harness time excluded; WASM memory
-   high-water). Add a smoke step that sends
+   the check column — to fix the per-raw-value coefficient; and SQL-dense shapes — depth 32,
+   many projections, 8 joins with row filters, and statements at `maxSqlBytes` repeated
+   `maxStatements` times — to decide whether `a_b` covers parse, bind, policy composition, emit,
+   the height counts, and re-parse, or whether the CPU formula needs a separate term for SQL
+   bytes; harness time excluded; WASM memory high-water). Add a smoke step that sends
    the worst shapes at the deployed limits and reads the invocations' CPU time from Workers
    observability, polling until the events are ingested (Workers Logs arrive with a delay) or
    capturing them with `wrangler tail` during the run; it records `F`. Set the reference
@@ -650,8 +676,11 @@ smoke (`deploy/cloudflare/scripts/provision-dev.mjs`) before merge.
    counter, many inner joins, wide conditional projections over 2,000 emitted columns, more than
    32,766 parameters, a 50,001-byte LIKE pattern), each run on SQLite and on Turso in the smoke,
    in atomic and interactive transactions (rollback before COMMIT), asserting that the response
-   and the logs contain no SQL, parameter, policy, or column text. A differential test shows that
-   every statement the emitter's counts accept re-parses.
+   and the logs contain no SQL, parameter, policy, or column text. The two-way differential test
+   on generated shapes (count over 100 ⇔ re-parse fails), required again on every
+   `turso_parser` version change. The adapter's reading of the Hrana error object, the
+   `complex` class with the statement index on `ExecuteFailed`, and the smoke check that every
+   allowlist entry matches on real Turso.
 5. **Per-value bytes (#52).** `maxBytesPerValue` becomes configurable, threaded through
    `policysql-core` codecs, `policysql-sqlite`, `policysql-turso`, and the adapters (no ABI
    change: the field exists in `limits_json` since pull request 3); the per-path documentation
@@ -735,7 +764,7 @@ Each has a proposed answer from the review of this ADR, pending maintainer confi
    3 MiB. *This revision:* the memory measurements (69.5 MiB of WASM for 1 MiB of dense JSON)
    lower them to request 2 MiB, result 512 KiB, with `maxJsonValues` ≤ 131,072 (the review
    agreed); per value 1 MiB, with the smallest path limit governing; parameters 16,384; depth
-   64, joins 64, projections 2,000 as input-side bounds, defaults 32 / 8 / 128 unchanged. To be
+   64, joins 63, projections 2,000 as input-side bounds, defaults 32 / 8 / 128 unchanged. To be
    confirmed, or raised after pull request 7.
 6. **Buffering drivers.** *Proposed:* accepted as a declared port capability
    (`streamedReadCap: false`) with a one-time log when `maxResultBytes` exceeds 64,000.
@@ -750,6 +779,8 @@ Each has a proposed answer from the review of this ADR, pending maintainer confi
 9. **Status for `POLICYSQL_SQL_TOO_COMPLEX`.** *Proposed:* 400, like the other definite SQL
    rejections, rather than 413 or 422: the request is well formed but cannot be run under the
    active policy, and retrying it unchanged will not help.
-10. **Complexity messages from the database.** *Proposed:* recognize them by an allowlist of
-    exact message prefixes for the pinned SQLite/libSQL version, confirmed by the smoke run; if
-    Turso changes a message, the statement falls back to today's 503 until the list is updated.
+10. **Complexity messages from the database.** *Proposed:* recognize them only when the Hrana
+    `code` is `SQLITE_ERROR` and the message starts with an entry of the allowlist derived from
+    `SQLITE_LIMIT_*`; the smoke run fails when an entry stops matching on real Turso (for
+    example after Turso's move to its Rust server), so the list is updated before release
+    instead of silently falling back to 503.
