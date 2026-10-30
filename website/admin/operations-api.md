@@ -39,7 +39,7 @@ clientの操作は、文脈、session、DB binding、本文の順に確認しま
 
 ## 本文
 
-`bodyText`は本文の文字列か、文字列を返す関数です。関数を渡すと、engineはsessionとDBを確認した後、本文が必要になった時点で呼びます。engineはどの入口でも同じ検査をします。不正なUnicode（対になっていないsurrogate）、UTF-8で1 MiBを超える本文（先頭のBOMも3 byteとして数える）、重複したJSON key、不正なJSONを拒否します。先頭のBOM（U+FEFF）は1つだけ取り除きます。bytesからの復号は入口の役割です。HTTP adapterは不正なUTF-8を置換せずに拒否します。
+`bodyText`は本文の文字列か、文字列を返す関数です。関数を渡すと、engineはsessionとDBを確認した後、本文が必要になった時点で呼びます。engineはどの入口でも同じ検査をします。不正なUnicode（対になっていないsurrogate。生の文字でも、JSON文字列内の`\ud800`のようなエスケープでも同じエラー）、UTF-8で1 MiBを超える本文（先頭のBOMも3 byteとして数える）、重複したJSON key、不正なJSONを拒否します。先頭のBOM（U+FEFF）は1つだけ取り除きます。bytesからの復号は入口の役割です。HTTP adapterは不正なUTF-8を置換せずに拒否します。
 
 ## 組み立て
 

@@ -28,6 +28,25 @@ test("a lone surrogate has no UTF-8 form and is rejected; a surrogate pair is ac
   assert.equal((await parseBodyText('{"a":"😀"}')).value.a, "\u{1f600}");
 });
 
+test("an escaped lone surrogate is rejected as the raw one is; an escaped pair is accepted (ADR 0025)", async () => {
+  const utf8 = (error) => error.code === "POLICYSQL_INVALID_REQUEST" && error.message === "Request body is not valid UTF-8.";
+  // Six ASCII characters each: valid UTF-8 text, but the string they denote has no UTF-8 form.
+  for (const text of [
+    '{"a":"\\ud800"}', '{"a":"\\udc00"}', '{"a":"\\uDBFF"}', '{"a":"x\\ud800y"}', '{"a":"\\udc00\\ud800"}',
+    '{"a":"\\ud800\\u0041"}', '{"\\ud800":1}', '{"a":[{"b":"\\udfff"}]}', '"\\ud800"',
+  ]) {
+    assert.equal(text.includes("\ud800") || text.includes("\udc00"), false, "no raw surrogate in the text");
+    await assert.rejects(parseBodyText(text), utf8, text);
+  }
+  // The raw form, for comparison: the same error.
+  await assert.rejects(parseBodyText('{"a":"\ud800"}'), utf8);
+  await assert.rejects(parseBodyText('{"a":"\udc00"}'), utf8);
+  // An escaped pair is one character; an escaped backslash before `u` is not an escape.
+  assert.equal((await parseBodyText('{"a":"\\ud83d\\ude00"}')).value.a, "\u{1f600}");
+  assert.equal((await parseBodyText('{"a":"\\\\ud800"}')).value.a, "\\ud800");
+  assert.equal((await parseBodyText('{"a":"\\u00e9\\u2028"}')).value.a, "\u00e9\u2028");
+});
+
 test("the body limit counts UTF-8 bytes, not UTF-16 units", async () => {
   const fits = `{"a":"${"x".repeat(MAX_BODY_BYTES - 8)}"}`;
   assert.equal((await parseBodyText(fits)).text.length, MAX_BODY_BYTES);

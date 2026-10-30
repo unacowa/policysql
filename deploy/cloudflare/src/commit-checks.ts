@@ -1,8 +1,15 @@
 import { EngineError } from "./errors.ts";
-import { sha256 } from "./idempotency.ts";
 import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import type { ValidatedConfig } from "./engine-config.ts";
+
+// The capability token's hash. Computed and compared here only, over a random token, not over
+// canonical JSON; it moves to core with capability verification (ADR 0024 pull request 5).
+const sha256 = async (value: string): Promise<string> => {
+  const bytes = new TextEncoder().encode(value);
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+};
 
 const rejected = () => new EngineError("POLICYSQL_COMMIT_CHECK_REJECTED",
   "A commit check rejected the transaction.",

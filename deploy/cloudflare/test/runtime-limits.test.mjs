@@ -73,7 +73,7 @@ test("Capabilities advertises exactly the runtime's limits, each from its own so
   // Distinct values, so an advertised number taken from the wrong source cannot match.
   const distinct = Object.fromEntries(ENFORCED_LIMIT_KEYS.map((key, index) => [key, 1_000 + index]));
   const runtime = {
-    snapshot: "s", profile: "p", abi_version: 4, commit_checks_enabled: true, max_bytes_per_value: 999,
+    snapshot: "s", profile: "p", abi_version: 5, commit_checks_enabled: true, max_bytes_per_value: 999,
     limits_json: limitsJson(distinct),
   };
   assertAdvertisesExactly(capabilities(runtime, { limits: { maxRows: 1 } }), runtime);

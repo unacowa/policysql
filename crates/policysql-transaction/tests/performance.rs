@@ -2,7 +2,7 @@
 //! computes a command digest before compiling, so canonicalization must stay near linear in
 //! the 1 MiB body limit. These tests live outside the crate, whose sources name no clock.
 
-use policysql_transaction::{ParseError, canonical::parse, stable_json};
+use policysql_transaction::{ParseError, canonical::parse, canonical_json};
 use std::time::{Duration, Instant};
 
 // Generous for an unoptimized test build; the earlier quadratic duplicate scan took 11 s even
@@ -24,7 +24,7 @@ fn wide_objects_are_linearithmic_and_still_reject_duplicates() {
     let text = wide_object(count);
     assert!(text.len() > 950_000 && text.len() < 1_048_576);
     let started = Instant::now();
-    let canonical = stable_json(&text);
+    let canonical = canonical_json(&text);
     let elapsed = started.elapsed();
     // The keys are already in canonical order, so the canonical text is the input.
     assert_eq!(canonical.as_deref(), Ok(text.as_str()));
@@ -52,31 +52,61 @@ fn reversed_and_nested_wide_objects_stay_fast() {
         .collect();
     let text = format!("{{\"params\":[{{{}}}]}}", members.join(","));
     let started = Instant::now();
-    assert!(stable_json(&text).is_ok());
+    assert!(canonical_json(&text).is_ok());
     assert!(started.elapsed() < BOUND);
 }
 
 #[test]
 fn many_long_numbers_stay_fast() {
-    // Every number has 17 odd digits and so takes the tie check, which is constant time.
+    // 17 significant digits each: the correctly rounded (`float_roundtrip`) slow path.
     let numbers: Vec<String> = (0..50_000_u64)
         .map(|index| format!("{}.{:03}", 90_071_992_547_409 + index * 7, index % 1000))
         .collect();
     let text = format!("[{}]", numbers.join(","));
     let started = Instant::now();
-    assert!(stable_json(&text).is_ok());
+    assert!(canonical_json(&text).is_ok());
     assert!(started.elapsed() < BOUND);
+}
+
+#[test]
+fn many_exponents_and_integral_decimals_stay_fast() {
+    for make in [
+        |index: u64| {
+            let exponent = index % 600;
+            let sign = if exponent < 300 { "-" } else { "" };
+            format!(
+                "{}.{}e{sign}{}",
+                index % 9 + 1,
+                index % 97,
+                exponent.abs_diff(300)
+            )
+        },
+        |index: u64| format!("{}.0", index * 7919),
+    ] {
+        let numbers: Vec<String> = (0..80_000_u64).map(make).collect();
+        let text = format!("[{}]", numbers.join(","));
+        assert!(text.len() > 400_000 && text.len() < 1_048_576);
+        let started = Instant::now();
+        assert!(canonical_json(&text).is_ok());
+        assert!(started.elapsed() < BOUND);
+    }
 }
 
 #[test]
 fn long_strings_and_escapes_stay_fast() {
     let text = format!(
-        "[\"{}\",\"{}\",\"{}\"]",
+        "[\"{}\",\"{}\",\"{}\",\"{}\"]",
         "x".repeat(300_000),
-        "\\ud800".repeat(40_000),
+        "\\u0001\\n\\\"".repeat(20_000),
+        "\\ud83d\\ude00".repeat(20_000),
         "\u{1f600}".repeat(40_000)
     );
     let started = Instant::now();
-    assert!(stable_json(&text).is_ok());
+    assert!(canonical_json(&text).is_ok());
+    assert!(started.elapsed() < BOUND);
+    // Escaped lone surrogates are rejected, quickly, wherever they are.
+    let lone = format!("[\"{}\\ud800\"]", "x".repeat(900_000));
+    let started = Instant::now();
+    assert_eq!(parse(&lone), Err(ParseError));
     assert!(started.elapsed() < BOUND);
 }

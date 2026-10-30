@@ -240,6 +240,32 @@ One pull request, before ADR 0024 pull request 4:
    determinism, and duplicate-key rejection.
 7. Update ADR 0024's references to this ADR.
 
+## Implementation notes
+
+Recorded by the follow-up pull request (ABI 5):
+
+- `canonical.rs` parses with `serde_json` (a visitor that sorts each object's members once and
+  rejects neighbouring equal keys) with `float_roundtrip`: `serde_json`'s default reads
+  `9007199254740991.0` as 2^53 − 2, which (b) does not allow. `policysql-wasm` enables the
+  feature explicitly, so compile reads decimals as the same correctly rounded double; before,
+  such a parameter could be one unit off. Nesting is bounded by `serde_json`'s recursion limit
+  (127 levels).
+  The client-facing note, including that a REAL value written by an older release may no
+  longer match an equality predicate with the same literal, is in
+  [`docs/http-api.md`](../http-api.md#numeric-parameters) and the website page on types and
+  formats (`website/data-validity/types-and-formats.md`).
+- Core's rule for numbers outside (b) is `serde_json`'s printing of the number it read: an
+  integer lexeme in the 64-bit range keeps its exact digits (`9007199254740993`, which compile
+  also keeps), and every other number is the shortest text that reads back as the same double
+  (`1.5`, `1e+21`, `1e-7`).
+- `deploy/cloudflare/src/identity.ts` and `idempotency.ts` are removed; `core-identity.ts`
+  calls `identity_json`. `stableJson` now lives in `database.ts` and `sha256` in
+  `commit-checks.ts`.
+- Goldens: `tests/fixtures/identity-goldens.json`, asserted by core
+  (`crates/policysql-transaction/tests/goldens.rs`) and by the deployed WASM
+  (`identity-goldens.test.mjs`); `abi-bump-retry.test.mjs` retries owner records and
+  idempotency rows written with the ABI 4 implementation.
+
 ## Rejected alternatives
 
 - **Keep byte equality, using `ryu-js` and `serde_json` instead of a hand-written formatter.**

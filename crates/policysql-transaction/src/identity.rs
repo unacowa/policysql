@@ -1,24 +1,24 @@
-//! Request identities, fingerprints, and digests (ADR 0024 pull request 2).
+//! Request identities, fingerprints, and digests (ADR 0024 pull request 2, ADR 0025).
 //!
-//! Each computation is byte-for-byte the one `deploy/cloudflare/src/idempotency.ts` and its
-//! callers make today:
+//! The engine and the transaction owner use these values only; no other implementation
+//! computes them. With `canonical` the canonical text of [`crate::canonical`]:
 //!
-//! | Operation | Today | Result |
+//! | Operation | Used as | Result |
 //! | --- | --- | --- |
-//! | `request` | `requestIdempotency` | `keyHash = sha256(identity + ":" + key)`, `fingerprint = sha256(identity + ":" + stable(body) + ":" + stable(binding))` |
-//! | `auth` | `authFingerprint` | `sha256(stable({principal, subject, role, session, databaseBinding}))` |
-//! | `start` | unkeyed `startFingerprint` in `engine.ts` begin | `sha256(stable({transactionId, request: body}))` |
-//! | `command` | command digest in `transaction-owner.ts` | `sha256(stable({kind, command}))` |
-//! | `callback` | callback query digest in `transaction-owner.ts` | `sha256(stable(command))` |
+//! | `request` | `policysql_idempotency` key and fingerprint; keyed transaction ids | `keyHash = sha256(identity + ":" + key)`, `fingerprint = sha256(identity + ":" + canonical(body) + ":" + canonical(binding))` |
+//! | `auth` | the owner record's caller fingerprint | `sha256(canonical({principal, subject, role, session, databaseBinding}))` |
+//! | `start` | the start fingerprint of an unkeyed begin | `sha256(canonical({transactionId, request: body}))` |
+//! | `command` | statement, commit, and rollback digests (`last`, `commitSent`) | `sha256(canonical({kind, command}))` |
+//! | `callback` | callback query digests | `sha256(canonical(command))` |
 //!
-//! where `identity = stable({principal, subject, role, session, endpoint, database: {scope,
-//! databaseId}})`. Every identity field that reaches a hash is checked to be a string (the
-//! session a map of strings, the binding of the ADR 0014 shape): `stableJson` would print an
-//! absent field as `undefined`, and core rejects such an input before hashing instead.
+//! where `identity = canonical({principal, subject, role, session, endpoint, database:
+//! {scope, databaseId}})`. This construction is fixed by ADR 0025 (a): together with the
+//! canonical form's rules (b)-(d), it keeps `keyHash`, the auth and start fingerprints, and
+//! the `{sequence}` digests byte-identical to the values stored before ADR 0025
+//! (`tests/fixtures/identity-goldens.json`). Every identity field that reaches a hash is
+//! checked to be a string (the session a map of strings, the binding of the ADR 0014 shape).
 //!
-//! Hashes are lowercase hexadecimal SHA-256 of the UTF-8 bytes of the text, as
-//! `crypto.subtle.digest` over `TextEncoder` output. Canonical text escapes every lone
-//! surrogate, so it is always well-formed and that encoding is exact.
+//! Hashes are lowercase hexadecimal SHA-256 of the UTF-8 bytes of the text.
 
 use crate::canonical::{self, Json};
 use sha2::{Digest, Sha256};
@@ -95,7 +95,7 @@ pub fn compute(input: &str) -> Result<String, IdentityError> {
     }
     let input = canonical::parse(input).map_err(|_| IdentityError::Internal)?;
     let op = text(input.get("op"))?;
-    match op.as_str() {
+    match op {
         "request" => request(&input),
         "auth" => {
             exact_keys(&input, &["op", "auth", "binding"], &[])?;
@@ -110,25 +110,25 @@ pub fn compute(input: &str) -> Result<String, IdentityError> {
             ]);
             Ok(format!(
                 r#"{{"fingerprint":"{}"}}"#,
-                sha256_hex(canonical::to_stable(&value).as_bytes())
+                sha256_hex(canonical::to_canonical(&value).as_bytes())
             ))
         }
         "start" => {
             exact_keys(&input, &["op", "transactionId", "body"], &[])?;
             let transaction_id = text(input.get("transactionId"))?;
-            if !valid_transaction_id(&transaction_id) {
+            if !valid_transaction_id(transaction_id) {
                 return Err(IdentityError::Internal);
             }
             let body = body(input.get("body"))?;
             Ok(digest(&Json::Object(vec![
-                member("transactionId", Json::string(&transaction_id)),
+                member("transactionId", Json::string(transaction_id)),
                 member("request", body),
             ])))
         }
         "command" => {
             exact_keys(&input, &["op", "kind", "command"], &[])?;
             let kind = text(input.get("kind"))?;
-            if !matches!(kind.as_str(), "statement" | "commit" | "rollback") {
+            if !matches!(kind, "statement" | "commit" | "rollback") {
                 return Err(IdentityError::Internal);
             }
             let command = input
@@ -136,7 +136,7 @@ pub fn compute(input: &str) -> Result<String, IdentityError> {
                 .cloned()
                 .ok_or(IdentityError::Internal)?;
             Ok(digest(&Json::Object(vec![
-                member("kind", Json::string(&kind)),
+                member("kind", Json::string(kind)),
                 member("command", command),
             ])))
         }
@@ -156,7 +156,7 @@ fn request(input: &Json) -> Result<String, IdentityError> {
         &["key"],
     )?;
     let endpoint = text(input.get("endpoint"))?;
-    if !matches!(endpoint.as_str(), "execute" | "interactive-start") {
+    if !matches!(endpoint, "execute" | "interactive-start") {
         return Err(IdentityError::Internal);
     }
     let auth = Auth::read(input.get("auth"))?;
@@ -166,16 +166,16 @@ fn request(input: &Json) -> Result<String, IdentityError> {
         return Ok(r#"{"idempotency":null}"#.to_owned());
     };
     let key = key.as_text().ok_or(IdentityError::KeyRequired)?;
-    if !valid_idempotency_key(&key) {
+    if !valid_idempotency_key(key) {
         return Err(IdentityError::KeyRequired);
     }
     let part = |name: &str| binding.get(name).cloned().ok_or(IdentityError::Internal);
-    let identity = canonical::to_stable(&Json::Object(vec![
+    let identity = canonical::to_canonical(&Json::Object(vec![
         member("principal", auth.principal),
         member("subject", auth.subject),
         member("role", auth.role),
         member("session", auth.session),
-        member("endpoint", Json::string(&endpoint)),
+        member("endpoint", Json::string(endpoint)),
         member(
             "database",
             Json::Object(vec![
@@ -188,8 +188,8 @@ fn request(input: &Json) -> Result<String, IdentityError> {
     let fingerprint = sha256_hex(
         format!(
             "{identity}:{}:{}",
-            canonical::to_stable(&body),
-            canonical::to_stable(binding)
+            canonical::to_canonical(&body),
+            canonical::to_canonical(binding)
         )
         .as_bytes(),
     );
@@ -201,15 +201,15 @@ fn request(input: &Json) -> Result<String, IdentityError> {
 fn digest(value: &Json) -> String {
     format!(
         r#"{{"digest":"{}"}}"#,
-        sha256_hex(canonical::to_stable(value).as_bytes())
+        sha256_hex(canonical::to_canonical(value).as_bytes())
     )
 }
 
-fn member(key: &str, value: Json) -> (Vec<u16>, Json) {
-    (key.encode_utf16().collect(), value)
+fn member(key: &str, value: Json) -> (String, Json) {
+    (key.to_owned(), value)
 }
 
-fn text(value: Option<&Json>) -> Result<String, IdentityError> {
+fn text(value: Option<&Json>) -> Result<&str, IdentityError> {
     value.and_then(Json::as_text).ok_or(IdentityError::Internal)
 }
 
@@ -222,12 +222,7 @@ fn exact_keys(value: &Json, required: &[&str], optional: &[&str]) -> Result<(), 
     let Json::Object(members) = value else {
         return Err(IdentityError::Internal);
     };
-    let allowed = |name: &[u16]| {
-        required
-            .iter()
-            .chain(optional)
-            .any(|key| key.encode_utf16().eq(name.iter().copied()))
-    };
+    let allowed = |name: &str| required.iter().chain(optional).any(|key| *key == name);
     if members.iter().all(|(name, _)| allowed(name))
         && required.iter().all(|key| value.get(key).is_some())
     {
@@ -299,7 +294,7 @@ fn binding(value: Option<&Json>) -> Result<&Json, IdentityError> {
         &["version", "scope", "databaseId", "generation", "snapshot"],
         &[],
     )?;
-    if !matches!(value.get("version"), Some(Json::Number(version, _)) if version.to_bits() == 1.0_f64.to_bits())
+    if !matches!(value.get("version"), Some(Json::Number(version)) if version.as_f64() == Some(1.0))
     {
         return Err(IdentityError::Internal);
     }
@@ -313,10 +308,9 @@ fn binding(value: Option<&Json>) -> Result<&Json, IdentityError> {
     }
 }
 
-/// The request body, read from its text with the canonical tokenizer.
+/// The request body, parsed from its exact text.
 fn body(value: Option<&Json>) -> Result<Json, IdentityError> {
-    let text = text(value)?;
-    canonical::parse(&text).map_err(|_| IdentityError::Internal)
+    canonical::parse(text(value)?).map_err(|_| IdentityError::Internal)
 }
 
 #[cfg(test)]
@@ -375,8 +369,7 @@ mod tests {
 
     #[test]
     fn identity_fields_must_be_strings_before_hashing() {
-        // The negative case of the corpus: `stableJson` prints an absent field as `undefined`.
-        // Core rejects every such input instead of hashing it.
+        // An absent or non-string identity field is rejected, never hashed.
         let body = r#""{}""#;
         for auth in [
             r#"{"subject":"user_1","role":"member","session":{}}"#,

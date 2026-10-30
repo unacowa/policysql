@@ -2,16 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { harness } from "./helpers/routing.mjs";
-import { sha256, stableJson } from "../src/idempotency.ts";
 import { MAX_BODY_BYTES } from "../src/request-body.ts";
 
 // Regression fixture (#55 re-review, AGENTS.md): a statement that COMPILES and carries ~1 MB
 // of numbers in a JSON-typed parameter (`projects.metadata`, as in the deployed catalog). The
-// owner hashes it through the identity gate (core and the reference) after compile, so core's
-// number canonicalization must not be slow next to the reference. PolicySQL sets no size limit
-// on JSON parameters beyond the body limit, and this test adds none. The responses are main's:
-// the same statement, retry, and commit return the same values on origin/main (checked with
-// an export of main and the same scenario).
+// owner hashes it with core after compile, so core's number canonicalization must stay fast.
+// PolicySQL sets no size limit on JSON parameters beyond the body limit, and this test adds
+// none. The responses are those of main before ADR 0024 pull request 2.
 const read = (name) => readFileSync(new URL(`../../../tests/fixtures/${name}`, import.meta.url), "utf8");
 const fixture = {
   catalog: read("bytes/catalog.yaml"), policy: read("bytes/policy.yaml"),
@@ -24,9 +21,9 @@ const SHAPES = {
   "short decimals": (index) => Number(`${index % 100}.${index % 10}`),
   "small integers": (index) => index % 1000,
 };
-// Core's time is held to a multiple of the in-process reference (best of 5 after a warm-up),
-// which catches a regression to a slow number path without depending on the machine's load.
-const RATIO_BOUND = 10;
+// Core's time (best of 5 after a warm-up) is held to an absolute bound far below a slow
+// number path's.
+const ABSOLUTE_BOUND_MS = 250;
 const fastest = async (runs, work) => {
   await work();
   let best = Number.POSITIVE_INFINITY;
@@ -51,21 +48,20 @@ const statementBody = (sequence, make) => {
 };
 
 for (const [name, make] of Object.entries(SHAPES)) {
-  test(`regression: a compiling ~1 MB JSON parameter of ${name} is hashed like the reference and answered as on main`, async (t) => {
+  test(`regression: a compiling ~1 MB JSON parameter of ${name} is hashed fast and answered as before`, async (t) => {
     t.mock.method(console, "log", () => {});
     const h = await harness(t, { fixture, hooks: false });
     const command = statementBody(1, make);
     const text = JSON.stringify(command);
     assert.ok(text.length > 990_000 && text.length < MAX_BODY_BYTES, `${text.length}`);
 
-    // Hash equality and the ratio bound, on the runtime the owner uses.
+    // A deterministic digest and the time bound, on the runtime the owner uses.
     const input = JSON.stringify({ op: "command", kind: "statement", command });
-    const reference = await sha256(stableJson({ kind: "statement", command }));
-    assert.equal(JSON.parse(h.runtime.identity_json(input)).digest, reference);
+    const digest = JSON.parse(h.runtime.identity_json(input)).digest;
+    assert.match(digest, /^[a-f0-9]{64}$/u);
+    assert.equal(JSON.parse(h.runtime.identity_json(JSON.stringify({ op: "command", command, kind: "statement" }))).digest, digest);
     const coreMs = await fastest(5, () => h.runtime.identity_json(JSON.stringify({ op: "command", kind: "statement", command })));
-    const referenceMs = await fastest(5, () => sha256(stableJson({ kind: "statement", command })));
-    assert.ok(coreMs <= Math.max(referenceMs, 1) * RATIO_BOUND,
-      `${name}: core ${coreMs.toFixed(1)} ms against the reference's ${referenceMs.toFixed(1)} ms`);
+    assert.ok(coreMs < ABSOLUTE_BOUND_MS, `${name}: core took ${coreMs.toFixed(1)} ms`);
 
     // The owner path: the statement compiles and executes, its exact retry replays, and the
     // transaction commits, as on main.

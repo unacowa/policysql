@@ -110,13 +110,13 @@ export class PolicySqlRuntime {
     }
     /**
      * Computes a request identity, fingerprint, or command digest with core's canonical
-     * JSON and SHA-256 (ADR 0024 pull request 2). The input and output contract is
-     * [`policysql_transaction::identity_json`]; bodies are passed as their exact text, so an
-     * escaped lone surrogate in a body reaches core intact.
+     * JSON and SHA-256 (ADR 0024 pull request 2, ADR 0025). The input and output contract is
+     * [`policysql_transaction::identity_json`]; bodies are passed as their exact text.
      *
-     * Adding this method does not change `ABI_VERSION`: no existing method or value changes,
-     * the engine and this module ship in one bundle, and keeping the version keeps the
-     * snapshot, which every fingerprint includes (ADR 0024, "ABI impact and rollout").
+     * ADR 0025 made core's canonical form the only definition, which changes this method's
+     * values for some inputs, so it bumped `ABI_VERSION` to 5. `keyHash`, the auth and start
+     * fingerprints, and the `{sequence}` digests are unchanged
+     * (`tests/fixtures/identity-goldens.json`).
      * @param {string} input_json
      * @returns {string}
      */

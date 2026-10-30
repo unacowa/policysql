@@ -90,22 +90,25 @@ const advertisedLimits = (capabilities) => ({
   "transactions.maxCallbackRowsPerCheck": capabilities.transactions?.maxCallbackRowsPerCheck,
   "transactions.maxCallbackBytesPerCheck": capabilities.transactions?.maxCallbackBytesPerCheck,
 });
-// The effective limits: `RUNTIME_LIMITS` as the runtime fills and validates them, so a key
-// the wrapper omits is expected at its runtime default, not as `undefined`.
-let effective;
-const effectiveLimits = () => {
-  if (effective) return effective;
+// The release being deployed, from the runtime it bundles: the effective limits
+// (`RUNTIME_LIMITS` as the runtime fills and validates them, so a key the wrapper omits is
+// expected at its runtime default, not as `undefined`), its snapshot, and its ABI version.
+let release;
+const localRelease = () => {
+  if (release) return release;
   initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
   const config = (name) => readFileSync(new URL(`../config/${name}`, import.meta.url), "utf8");
   const runtime = PolicySqlRuntime.newWithPhysicalSchema(
     config("catalog.yaml"), config("policy.compiled.yaml"), SCHEMA_VERSION, POLICY_VERSION,
     runtimeLimitsJson(RUNTIME_LIMITS), config("schema-introspection.json"),
   );
-  try { effective = runtimeLimits(runtime); } finally { runtime.free(); }
-  return effective;
+  try {
+    release = { limits: runtimeLimits(runtime), snapshot: runtime.snapshot, abiVersion: runtime.abi_version };
+  } finally { runtime.free(); }
+  return release;
 };
 const configuredLimits = () => {
-  const limits = effectiveLimits();
+  const { limits } = localRelease();
   return {
     "limits.maxRows": limits.maxRows,
     "limits.maxResultBytes": limits.maxResultBytes,
@@ -352,8 +355,14 @@ const smoke = async (baseUrl, token) => {
     `release-delete-${Date.now()}`,
   );
   const visibleRows = execute.results?.[0]?.rows ?? [];
+  const expected = localRelease();
   if (
     !health.ready ||
+    // Every answer came from this release, not from the previous version still serving.
+    health.snapshot !== expected.snapshot ||
+    health.abiVersion !== expected.abiVersion ||
+    capabilities.id !== expected.snapshot ||
+    capabilities.abiVersion !== expected.abiVersion ||
     !capabilitiesResponse.ok ||
     !limitsMatch ||
     !catalogResponse.ok ||
@@ -423,7 +432,7 @@ const smoke = async (baseUrl, token) => {
     })}`);
   }
   return {
-    health: { ready: health.ready, snapshot: health.snapshot, profile: health.profile },
+    health: { ready: health.ready, snapshot: health.snapshot, abiVersion: health.abiVersion, profile: health.profile },
     capabilities: {
       status: capabilitiesResponse.status, id: capabilities.id, limitsMatch, limits: advertisedLimits(capabilities),
     },
@@ -473,9 +482,11 @@ const waitForActiveRelease = async (baseUrl, token) => {
         headers: { authorization: `Bearer ${token}` },
       });
       const body = await response.json();
-      // The snapshot does not change when only limits do, so this release is recognized by
-      // advertising the configured limits.
+      // This release's snapshot and ABI version (which change when the ABI does, as at ABI 5),
+      // and its limits (the snapshot does not change when only limits do).
+      const { snapshot, abiVersion } = localRelease();
       if (response.ok && body.transactions?.interactive === true &&
+        body.id === snapshot && body.abiVersion === abiVersion &&
         JSON.stringify(advertisedLimits(body)) === JSON.stringify(configuredLimits())) return;
     } catch { /* retry until the bounded release deadline */ }
     await new Promise((resolve) => setTimeout(resolve, 500));
