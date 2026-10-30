@@ -1,4 +1,4 @@
-//! Scenario tests of the step machine (ADR 0024 pull request 4) with a fake compiler and a
+//! Scenario tests of the step machine (ADR 0024 pull requests 4 and 5) with a fake compiler and a
 //! model of the engine. The scenarios that ADR 0024 names (inconsistencies 3, 4, 6, and #70)
 //! are also checked in as transcripts under `tests/fixtures/transactions/` (see
 //! `transcripts.rs`).
@@ -445,7 +445,7 @@ fn timer_during_a_statement_rolls_back_when_it_returns() {
 }
 
 #[test]
-fn triggered_commit_checks_reject_until_pull_request_5() {
+fn a_triggered_check_without_an_endpoint_rejects_the_commit() {
     let mut engine = begun("write");
     engine.compiler.triggers.insert("projects".to_owned());
     engine.run(&command(

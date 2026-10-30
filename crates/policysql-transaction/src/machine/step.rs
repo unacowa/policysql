@@ -16,9 +16,13 @@ use super::state::{
     Mutation, Pending, Phase, Record, Replay, TX_STATE_VERSION, Task, Unreadable, Usage, Versions,
     Volatile, Work, WorkLane, awaited_by, hex64,
 };
+
+mod checks;
+
 use super::{Limits, MAX_SAFE_INTEGER, Output};
 use crate::canonical::{self, Json};
 use crate::identity;
+use checks::allowed_decision;
 use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
@@ -172,12 +176,7 @@ impl<C: Compiler> Step<'_, C> {
                 effects: self.effects,
             };
         }
-        if let Some(volatile) = &self.volatile
-            && volatile.work.is_none()
-            && volatile.pending.is_none()
-            && volatile.connection == Connection::None
-            && volatile.handles.is_empty()
-        {
+        if self.volatile.as_ref().is_some_and(Volatile::is_idle) {
             self.volatile = None;
         }
         Output {
@@ -213,12 +212,22 @@ impl<C: Compiler> Step<'_, C> {
         if awaited > 1 || (awaited == 1 && !last_awaited) {
             return Err(Fault("batch_rule"));
         }
-        // The awaited effect of this batch is the one recorded as pending.
-        let pending = self.volatile.as_ref().and_then(|volatile| volatile.pending);
+        // The awaited effect of this batch is the one recorded as pending on its lane.
+        let pending = self
+            .volatile
+            .as_ref()
+            .and_then(|volatile| volatile.pending)
+            .map(|pending| pending.id);
+        let callback = self
+            .volatile
+            .as_ref()
+            .and_then(|volatile| volatile.callback.as_ref())
+            .map(|callback| callback.pending.id);
         // `Abandon`'s Persist is run by the engine as it discards the state; no outcome follows.
         if let Some(effect) = self.effects.iter().find(|effect| effect.is_awaited())
             && !(self.abandoned && self.volatile.is_none())
-            && pending.map(|pending| pending.id) != effect.id()
+            && pending != effect.id()
+            && callback != effect.id()
         {
             return Err(Fault("pending_mismatch"));
         }
@@ -255,6 +264,10 @@ impl<C: Compiler> Step<'_, C> {
             pending: None,
             work: None,
             rollback_requested: false,
+            callback: None,
+            capability: None,
+            deferred: None,
+            revoked_validator: None,
         })
     }
 
@@ -316,6 +329,14 @@ impl<C: Compiler> Step<'_, C> {
     fn respond(&mut self, reply: Box<RawValue>) {
         self.effects.push(Effect::Respond {
             lane: "client",
+            reply,
+        });
+    }
+
+    /// Answers the callback lane (a validator's callback query).
+    fn respond_callback(&mut self, reply: Box<RawValue>) {
+        self.effects.push(Effect::Respond {
+            lane: "callback",
             reply,
         });
     }
@@ -413,13 +434,28 @@ impl<C: Compiler> Step<'_, C> {
                 Code::Internal
             }));
         }
+        // A deferred verdict's commit and a callback query in progress wait too.
+        let (deferred, callback) = self.volatile.as_ref().map_or((false, false), |volatile| {
+            (volatile.deferred.is_some(), volatile.callback.is_some())
+        });
+        if deferred {
+            self.respond(error_reply(Code::Internal));
+        }
+        if callback {
+            self.respond_callback(error_reply(Code::Internal));
+        }
         if let Event::Forwarded { input } = event {
-            let commit = input.get("kind").and_then(Value::as_str) == Some("commit");
-            self.respond(error_reply(if unsure_commit && commit {
-                Code::OutcomeUnknown
-            } else {
-                Code::Internal
-            }));
+            match input.get("kind").and_then(Value::as_str) {
+                Some("callbackQuery") => self.respond_callback(error_reply(Code::Internal)),
+                kind => {
+                    let commit = kind == Some("commit");
+                    self.respond(error_reply(if unsure_commit && commit {
+                        Code::OutcomeUnknown
+                    } else {
+                        Code::Internal
+                    }));
+                }
+            }
         }
         self.release_all();
         self.volatile = None;
@@ -462,6 +498,8 @@ impl<C: Compiler> Step<'_, C> {
                 Task::CommitBinding { .. }
                     | Task::CommitPersist { .. }
                     | Task::CommitSend { .. }
+                    | Task::ValidatingPersist(_)
+                    | Task::Validator(_)
                     | Task::Reply { .. }
             );
             self.respond(error_reply(if commit {
@@ -470,16 +508,27 @@ impl<C: Compiler> Step<'_, C> {
                 Code::Internal
             }));
         }
+        let (deferred, callback) = self.volatile.as_ref().map_or((false, false), |volatile| {
+            (volatile.deferred.is_some(), volatile.callback.is_some())
+        });
+        if deferred {
+            self.respond(error_reply(Code::OutcomeUnknown));
+        }
+        if callback {
+            self.respond_callback(error_reply(Code::Unavailable));
+        }
         if let Event::Forwarded { input } = event {
-            let reply = match input.get("kind").and_then(Value::as_str) {
-                Some("commit") => Code::OutcomeUnknown,
-                Some("atomic") => Code::Internal,
-                _ => Code::Unavailable,
-            };
-            self.respond(error_reply(reply));
+            match input.get("kind").and_then(Value::as_str) {
+                Some("commit") => self.respond(error_reply(Code::OutcomeUnknown)),
+                Some("atomic") => self.respond(error_reply(Code::Internal)),
+                Some("callbackQuery") => self.respond_callback(error_reply(Code::Unavailable)),
+                _ => self.respond(error_reply(Code::Unavailable)),
+            }
         }
         let idle_open = self.volatile.as_ref().is_some_and(|volatile| {
-            volatile.connection == Connection::Open && volatile.pending.is_none()
+            volatile.connection == Connection::Open
+                && volatile.pending.is_none()
+                && volatile.callback.is_none()
         });
         self.release_all();
         self.durable = Some(Durable::Tombstone {
@@ -549,6 +598,16 @@ impl<C: Compiler> Step<'_, C> {
     /// persist the phase, then answer `reply` (client work). A failed persist answers
     /// `POLICYSQL_INTERNAL` and resets.
     fn close(&mut self, lane: WorkLane, phase: Phase, reply: Option<Box<RawValue>>) -> Result<()> {
+        // One effect on the connection at a time: a closing path never overtakes a callback
+        // query's `Execute` (those paths defer instead).
+        if self
+            .volatile
+            .as_ref()
+            .is_some_and(Volatile::callback_executing)
+        {
+            return Err(Fault("connection_busy"));
+        }
+        self.revoke();
         self.release_all();
         let request_id = match lane {
             WorkLane::Client => Some(self.request.clone().unwrap_or_else(|| self.request_id())),
@@ -612,6 +671,14 @@ impl<C: Compiler> Step<'_, C> {
         let expected = event.answers().ok_or(Fault("not_outcome"))?;
         let pending = self.volatile.as_ref().and_then(|volatile| volatile.pending);
         if !pending.is_some_and(|pending| pending.id == id && pending.effect == expected) {
+            let callback = self
+                .volatile
+                .as_ref()
+                .and_then(|volatile| volatile.callback.as_ref())
+                .map(|callback| callback.pending);
+            if callback.is_some_and(|pending| pending.id == id && pending.effect == expected) {
+                return self.callback_outcome(event);
+            }
             return self.stale(event);
         }
         let volatile = self.volatile.as_mut().ok_or(Fault("no_volatile"))?;
@@ -641,7 +708,16 @@ impl<C: Compiler> Step<'_, C> {
             .durable
             .as_ref()
             .map_or(idle, |durable| durable.phase().is_terminal());
-        if terminal {
+        // The validator whose wait an expiry or a failed callback ended: its verdict is late.
+        let revoked = matches!(
+            event,
+            Event::ValidatorReplied { .. } | Event::ValidatorFailed { .. }
+        ) && self
+            .volatile
+            .as_ref()
+            .and_then(|volatile| volatile.revoked_validator)
+            == event.outcome_id();
+        if terminal || revoked {
             self.log(&json!({
                 "event": "tx_outcome_ignored",
                 "transactionId": self.owner,
@@ -721,7 +797,7 @@ impl<C: Compiler> Step<'_, C> {
                     at_ms,
                 })
             }
-            (Task::BeginPersist, Event::PersistFailed { .. })
+            (Task::BeginPersist | Task::ValidatingPersist(_), Event::PersistFailed { .. })
             | (Task::BeginTimer, Event::TimerFailed { .. }) => {
                 self.close(lane, Phase::Failed, Some(error_reply(Code::Internal)))
             }
@@ -824,21 +900,51 @@ impl<C: Compiler> Step<'_, C> {
 
             // -- commit --
             (
-                Task::CommitBinding { sequence, digest },
+                Task::CommitBinding {
+                    sequence,
+                    digest,
+                    auth,
+                    passed,
+                },
                 Event::BindingChecked { allowed: true, .. },
             ) => {
                 if let Some(expired) = self.recheck(lane)? {
                     return expired;
                 }
+                if let Some(auth) = auth {
+                    // The commit checks run before `committing` (ADR 0007).
+                    return self.start_checks(lane, request_id, sequence, digest, auth);
+                }
                 self.set_phase(Phase::Committing);
                 self.wait(
                     lane,
                     request_id,
-                    Task::CommitPersist { sequence, digest },
+                    Task::CommitPersist {
+                        sequence,
+                        digest,
+                        passed,
+                    },
                     |id| Effect::Persist { id },
                 )
             }
-            (Task::CommitPersist { sequence, digest }, Event::Persisted { .. }) => {
+            (Task::ValidatingPersist(checks), Event::Persisted { .. }) => {
+                self.validating_persisted(lane, request_id, checks)
+            }
+            (Task::Validator(checks), Event::ValidatorReplied { ok, decision, .. }) => {
+                let allowed = *ok && allowed_decision(decision);
+                self.verdict_arrived(lane, request_id, checks, allowed)
+            }
+            (Task::Validator(checks), Event::ValidatorFailed { .. }) => {
+                self.verdict_arrived(lane, request_id, checks, false)
+            }
+            (
+                Task::CommitPersist {
+                    sequence,
+                    digest,
+                    passed,
+                },
+                Event::Persisted { .. },
+            ) => {
                 let expires = self
                     .record()
                     .and_then(|record| record.expires_at_ms)
@@ -852,7 +958,11 @@ impl<C: Compiler> Step<'_, C> {
                 self.wait(
                     lane,
                     request_id,
-                    Task::CommitSend { sequence, digest },
+                    Task::CommitSend {
+                        sequence,
+                        digest,
+                        passed,
+                    },
                     |id| Effect::Commit { id },
                 )
             }
@@ -860,10 +970,10 @@ impl<C: Compiler> Step<'_, C> {
                 // COMMIT was never sent; the store holds `committing` or the earlier phase.
                 self.close(lane, Phase::Failed, Some(error_reply(Code::Internal)))
             }
-            (Task::CommitSend { digest, .. }, Event::Committed { .. }) => {
+            (Task::CommitSend { digest, passed, .. }, Event::Committed { .. }) => {
                 self.set_connection(Connection::None);
                 let request = request_id.unwrap_or_else(|| self.request_id());
-                let response = terminal_response(self.owner, "committed", &request);
+                let response = terminal_response(self.owner, "committed", &request, passed);
                 let usage = self.record().ok_or(Fault("commit_record"))?.counters.usage;
                 self.complete(Phase::Committed, digest, &response)?;
                 let terminal = self.terminal_log("committed", &request, usage);
@@ -889,12 +999,12 @@ impl<C: Compiler> Step<'_, C> {
                     |id| Effect::Persist { id },
                 )
             }
-            (Task::CommitSend { digest, .. }, Event::CommitFailed { class, .. }) => {
+            (Task::CommitSend { digest, passed, .. }, Event::CommitFailed { class, .. }) => {
                 self.set_connection(Connection::None);
                 let request = request_id.unwrap_or_else(|| self.request_id());
                 if *class == Class::NotCommitted {
                     // The adapter proved COMMIT did not apply.
-                    let response = terminal_response(self.owner, "failed", &request);
+                    let response = terminal_response(self.owner, "failed", &request, passed);
                     self.complete(Phase::Failed, digest, &response)?;
                     return self.wait(
                         lane,
@@ -956,7 +1066,7 @@ impl<C: Compiler> Step<'_, C> {
                 // server transaction, and no COMMIT is ever sent.
                 self.set_connection(Connection::None);
                 let request = request_id.unwrap_or_else(|| self.request_id());
-                let response = terminal_response(self.owner, "rolled_back", &request);
+                let response = terminal_response(self.owner, "rolled_back", &request, false);
                 let usage = self
                     .record()
                     .ok_or(Fault("rollback_record"))?
@@ -1274,6 +1384,16 @@ impl<C: Compiler> Step<'_, C> {
         if !due || !matches!(phase, Phase::Active | Phase::Validating) {
             return Ok(());
         }
+        // A commit waiting on its validator is answered now (ADR 0024 failure table).
+        let waits_on_validator =
+            matches!(self.work().map(|work| &work.task), Some(Task::Validator(_)))
+                || self
+                    .volatile
+                    .as_ref()
+                    .is_some_and(|volatile| volatile.deferred.is_some());
+        if phase == Phase::Validating && waits_on_validator {
+            return self.expire_validating();
+        }
         if let Some(work) = self.work() {
             let defer = work.lane == WorkLane::Client
                 && matches!(
@@ -1285,6 +1405,7 @@ impl<C: Compiler> Step<'_, C> {
                         | Task::StatementBinding { .. }
                         | Task::StatementExecute { .. }
                         | Task::CommitBinding { .. }
+                        | Task::ValidatingPersist(_)
                         | Task::RollbackBinding { .. }
                         | Task::Reply {
                             expire_after: true,
@@ -1313,11 +1434,7 @@ impl<C: Compiler> Step<'_, C> {
                 };
                 self.command(kind, input)
             }
-            // A callback query needs a validation session (pull request 5).
-            Some("callbackQuery") => {
-                self.respond(error_reply(Code::Unavailable));
-                Ok(())
-            }
+            Some("callbackQuery") => self.callback_query(input),
             // Atomic execution runs in the machine from pull request 6.
             Some("atomic") => {
                 self.respond(error_reply(Code::Internal));
@@ -1333,6 +1450,14 @@ impl<C: Compiler> Step<'_, C> {
     /// What a client event gets while other work is in progress: an engine fault on the
     /// client lane (the lane is serialized), or an expiry, discard, or fail-closed in progress.
     fn busy(&self) -> Option<Code> {
+        if self
+            .volatile
+            .as_ref()
+            .is_some_and(|volatile| volatile.deferred.is_some())
+        {
+            // A commit's verdict waits for the connection: the client lane is busy.
+            return Some(Code::Internal);
+        }
         self.work().map(|work| match work.lane {
             WorkLane::Client => Code::Internal,
             WorkLane::Background => Code::Unavailable,
@@ -1731,33 +1856,20 @@ impl<C: Compiler> Step<'_, C> {
         match kind {
             "statement" => self.statement(&command, &record, sequence, deadline, check),
             "commit" => {
-                let resources: Vec<&str> = record
-                    .mutations
-                    .iter()
-                    .map(|mutation| mutation.resource.as_str())
-                    .collect();
-                let checks = self.compiler.triggered_checks(&resources);
-                if !checks.is_empty() {
-                    // Commit checks run in the machine from pull request 5. Until then a
-                    // triggered check cannot pass, so the commit is rejected before COMMIT.
-                    let unavailable = json!({
-                        "event": "commit_check_unavailable",
-                        "transactionId": self.owner,
-                        "requestId": request,
-                        "checks": checks,
-                    });
-                    self.log(&unavailable);
-                    return self.close(
-                        WorkLane::Client,
-                        Phase::Failed,
-                        Some(error_reply(Code::CheckRejected)),
-                    );
-                }
                 let digest = digest_of(&command).ok_or(Fault("commit_digest"))?;
+                // Checks trigger only when a recorded mutation changed rows in a configured
+                // resource; they run after this binding check, under the commit's session.
+                let auth = (!self.triggered(&record).is_empty())
+                    .then(|| canonical::to_canonical(&command.auth));
                 self.wait(
                     WorkLane::Client,
                     Some(request),
-                    Task::CommitBinding { sequence, digest },
+                    Task::CommitBinding {
+                        sequence,
+                        digest,
+                        auth,
+                        passed: false,
+                    },
                     |id| Effect::CheckBinding {
                         id,
                         binding: check,
@@ -1853,29 +1965,41 @@ impl<C: Compiler> Step<'_, C> {
     /// Compiles a statement command's envelope, built from the raw members of its verified
     /// text, so every number keeps its exact spelling (#70).
     fn compile(&self, command: &Command<'_>) -> std::result::Result<super::Compiled, CoreError> {
+        self.compile_members(&canonical::to_canonical(&command.auth), &command.members)
+    }
+
+    /// Compiles the one-statement envelope of a command's raw members (`sql`, `params`, and
+    /// `expect`) for the canonical session `auth`.
+    fn compile_members(
+        &self,
+        auth: &str,
+        members: &BTreeMap<String, Box<RawValue>>,
+    ) -> std::result::Result<super::Compiled, CoreError> {
         let internal =
             || CoreError::new("POLICYSQL_INTERNAL", "The request could not be completed.");
-        let (Some(sql), Some(params)) = (command.members.get("sql"), command.members.get("params"))
-        else {
+        let (Some(sql), Some(params)) = (members.get("sql"), members.get("params")) else {
             return Err(internal());
         };
         let envelope = serde_json::to_string(&Envelope {
             statements: [EnvelopeStatement {
                 sql,
                 params,
-                expect: command.members.get("expect").map(AsRef::as_ref),
+                expect: members.get("expect").map(AsRef::as_ref),
             }],
         })
         .map_err(|_| internal())?;
-        self.compiler
-            .compile(&canonical::to_canonical(&command.auth), &envelope)
+        self.compiler.compile(auth, &envelope)
     }
 
     /// Whether a statement may repeat `last`, judged by compiling it (released at once): a
     /// compile that rejects it for a reason of its own proves it is not `last` without hashing
     /// it; a state-dependent failure is inconclusive.
     fn may_repeat(&self, command: &Command<'_>) -> bool {
-        match self.compile(command) {
+        self.may_repeat_members(&canonical::to_canonical(&command.auth), &command.members)
+    }
+
+    fn may_repeat_members(&self, auth: &str, members: &BTreeMap<String, Box<RawValue>>) -> bool {
+        match self.compile_members(auth, members) {
             Ok(compiled) => {
                 self.compiler.release(compiled.handle);
                 true
@@ -2056,13 +2180,23 @@ fn public_state(record: &Record, request_id: &str) -> Box<RawValue> {
     })
 }
 
-fn terminal_response(transaction_id: &str, status: &str, request_id: &str) -> Box<RawValue> {
+/// A terminal reply; `checks_passed` when the commit's checks ran and all allowed it.
+fn terminal_response(
+    transaction_id: &str,
+    status: &str,
+    request_id: &str,
+    checks_passed: bool,
+) -> Box<RawValue> {
     io::to_raw(&TerminalResponse {
         transaction_id,
         status,
         meta: TerminalMeta {
             request_id,
-            commit_checks: "not_triggered",
+            commit_checks: if checks_passed {
+                "passed"
+            } else {
+                "not_triggered"
+            },
         },
     })
 }
@@ -2146,6 +2280,27 @@ struct StatementResult<'a> {
     meta: ResultMeta<'a>,
 }
 
+/// The redactions of a validated result, by row and column.
+fn redactions_of(validated: &Validated) -> Result<Vec<Redaction<'_>>> {
+    let mut redactions = Vec::new();
+    for (row, flags) in validated.redactions.iter().enumerate() {
+        for (index, redacted) in flags.iter().enumerate() {
+            if *redacted {
+                let column = validated
+                    .columns
+                    .get(index)
+                    .ok_or(Fault("redaction_column"))?;
+                redactions.push(Redaction {
+                    row,
+                    column,
+                    code: "POLICY_REDACTED",
+                });
+            }
+        }
+    }
+    Ok(redactions)
+}
+
 /// The public result of one statement (`turso.ts` `validateDriverResults`), with its sequence.
 fn shape_result(
     sequence: u64,
@@ -2158,19 +2313,7 @@ fn shape_result(
         .iter()
         .map(|values| Row { columns, values })
         .collect();
-    let mut redactions = Vec::new();
-    for (row, flags) in validated.redactions.iter().enumerate() {
-        for (index, redacted) in flags.iter().enumerate() {
-            if *redacted {
-                let column = columns.get(index).ok_or(Fault("redaction_column"))?;
-                redactions.push(Redaction {
-                    row,
-                    column,
-                    code: "POLICY_REDACTED",
-                });
-            }
-        }
-    }
+    let redactions = redactions_of(validated)?;
     let mutation = (operation != Operation::Select).then_some(MutationMeta {
         affected_rows: validated.affected_rows,
         returning: !validated.result_columns.is_empty(),

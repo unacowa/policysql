@@ -140,7 +140,21 @@ pub trait Compiler {
     /// Releases a handle; releasing an unknown handle does nothing.
     fn release(&self, handle: u64);
 
-    /// The commit checks that changed rows in `resources` trigger, by ascending id. Commit
-    /// checks run in pull request 5; until then any triggered check rejects the commit.
-    fn triggered_checks(&self, resources: &[&str]) -> Vec<String>;
+    /// The commit checks that changed rows in `resources` trigger, by ascending id, with the
+    /// role their callback queries run as and their validator timeout (policy data).
+    fn triggered_checks(&self, resources: &[&str]) -> Vec<TriggeredCheck>;
+}
+
+/// A commit check that a commit triggers (ADR 0007): recomputed from the recorded mutations
+/// and the runtime's policy on every commit, never stored durably.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TriggeredCheck {
+    /// The policy check id; the validator endpoint is looked up by it in the configuration.
+    pub id: String,
+    /// The callback role; `None` runs callback queries as the commit's role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The validator call timeout (`hook.timeout_ms`).
+    pub timeout_ms: u64,
 }

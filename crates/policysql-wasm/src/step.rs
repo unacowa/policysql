@@ -9,7 +9,7 @@
 use super::{PolicySqlRuntime, RuntimeError, compiled_statement, error_body};
 use policysql_transaction::machine::{
     Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, StatementSummary,
-    Validated,
+    TriggeredCheck, Validated,
 };
 use serde::Serialize;
 
@@ -58,6 +58,7 @@ impl PolicySqlRuntime {
             max_transaction_statements: self.limits.max_transaction_statements,
             max_transaction_result_bytes: self.limits.max_transaction_result_bytes,
             begin_timeout_ms: self.limits.begin_timeout_ms,
+            max_callback_rows: self.limits.max_callback_rows,
             max_statements: self.limits.max_statements,
         }
     }
@@ -172,8 +173,8 @@ impl Compiler for RuntimeCompiler<'_> {
         self.0.plans.borrow_mut().remove(&handle);
     }
 
-    fn triggered_checks(&self, resources: &[&str]) -> Vec<String> {
-        let mut checks: Vec<String> = self
+    fn triggered_checks(&self, resources: &[&str]) -> Vec<TriggeredCheck> {
+        let mut checks: Vec<TriggeredCheck> = self
             .0
             .policies
             .commit_checks()
@@ -186,9 +187,13 @@ impl Compiler for RuntimeCompiler<'_> {
                         .is_some_and(|resource| resources.contains(&resource.name.as_str()))
                 })
             })
-            .map(|check| check.id.clone())
+            .map(|check| TriggeredCheck {
+                id: check.id.clone(),
+                role: check.role.as_ref().map(|role| role.as_str().to_owned()),
+                timeout_ms: check.timeout_ms,
+            })
             .collect();
-        checks.sort();
+        checks.sort_by(|left, right| left.id.cmp(&right.id));
         checks
     }
 }

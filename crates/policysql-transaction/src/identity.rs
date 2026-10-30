@@ -196,6 +196,12 @@ pub(crate) fn command_digest(kind: &str, command: Json) -> String {
     sha256_hex(canonical::to_canonical(&value).as_bytes())
 }
 
+/// The digest of a callback query parsed from its exact body text (the `callback`
+/// operation): `sha256(canonical(command))`.
+pub(crate) fn callback_digest(command: &Json) -> String {
+    sha256_hex(canonical::to_canonical(command).as_bytes())
+}
+
 /// `requestIdempotency`: no identity without a key, else `keyHash` and `fingerprint`.
 fn request(input: &Json) -> Result<String, IdentityError> {
     exact_keys(

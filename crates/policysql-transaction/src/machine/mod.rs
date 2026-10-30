@@ -2,10 +2,11 @@
 //! (durable, volatile, effects)`, pure, with no I/O, clock, or randomness.
 //!
 //! Pull request 4 implements the `interactive` kind on an owner: begin, statement, commit,
-//! rollback, expiry, and owner loss, without commit checks. Commit checks and callbacks (pull
-//! request 5) attach at [`Compiler::triggered_checks`] and the `validating` phase, which a
-//! record may already hold and which is handled by the successor rules; until then a commit
-//! whose changed rows trigger a check is rejected with `POLICYSQL_COMMIT_CHECK_REJECTED`.
+//! rollback, expiry, and owner loss. Pull request 5 adds commit checks and callbacks: a commit
+//! whose recorded mutations trigger checks ([`Compiler::triggered_checks`]) persists
+//! `validating`, calls each validator in turn (`CallValidator`) with a fresh callback
+//! capability, serves the validator's callback queries on the callback lane, revokes the
+//! capability at the verdict, and checks the binding again before `committing`.
 //! Atomic execution (pull request 6) and the engine-side `request` kind (pull request 7) are not
 //! implemented: their events are answered without effects.
 //!
@@ -20,7 +21,7 @@ pub mod time;
 
 pub use compiler::{
     Compiled, Compiler, CoreError, DriverStatement, Operation, RawResult, StatementSummary,
-    Validated,
+    TriggeredCheck, Validated,
 };
 pub use io::{Class, Effect, Event, HostFacts};
 pub use state::{
@@ -45,6 +46,8 @@ pub struct Limits {
     pub max_transaction_statements: u64,
     pub max_transaction_result_bytes: u64,
     pub begin_timeout_ms: u64,
+    /// Cumulative callback query rows per commit check.
+    pub max_callback_rows: u64,
     /// Statements per atomic envelope; bounds an `Executed` event.
     pub max_statements: u64,
 }

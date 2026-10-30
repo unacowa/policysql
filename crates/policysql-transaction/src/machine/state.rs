@@ -512,6 +512,7 @@ pub enum Awaited {
     Rollback,
     SetTimer,
     Persist,
+    CallValidator,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -575,12 +576,42 @@ pub enum Task {
         versions: Versions,
         started_at_ms: u64,
     },
-    /// `CheckBinding` before a commit.
-    CommitBinding { sequence: u64, digest: String },
+    /// `CheckBinding` before a commit. `auth` (the commit's canonical session) is present when
+    /// the recorded mutations trigger commit checks, which run after this check; `passed` when
+    /// they have all allowed the commit (this is the check after the last validator).
+    #[serde(rename_all = "camelCase")]
+    CommitBinding {
+        sequence: u64,
+        digest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        passed: bool,
+    },
     /// `Persist` of `committing`; the deadline is checked when it is consumed.
-    CommitPersist { sequence: u64, digest: String },
+    #[serde(rename_all = "camelCase")]
+    CommitPersist {
+        sequence: u64,
+        digest: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        passed: bool,
+    },
     /// `Commit`; from here only its outcome decides.
-    CommitSend { sequence: u64, digest: String },
+    #[serde(rename_all = "camelCase")]
+    CommitSend {
+        sequence: u64,
+        digest: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        passed: bool,
+    },
+    /// `Persist` of `validating`, before the first validator is called.
+    ValidatingPersist(CommitChecks),
+    /// `CallValidator` of `checks[index]`; its capability is live in volatile state.
+    Validator(CommitChecks),
+    /// A verdict that waits for the connection, which a callback query holds; awaits nothing
+    /// (kept as `Volatile::deferred`, resumed when the callback query's `Execute` returns).
+    #[serde(rename_all = "camelCase")]
+    Verdict { checks: CommitChecks, allowed: bool },
     /// `CheckBinding` before a rollback command.
     RollbackBinding { sequence: u64, digest: String },
     /// `Rollback` of a rollback command.
@@ -612,6 +643,25 @@ pub enum Task {
     ResetAfterPersist,
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// The commit checks of the commit in progress (ADR 0024 `CommitProgress`): recomputed from
+/// the policy when the commit starts, kept only in volatile state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommitChecks {
+    pub sequence: u64,
+    pub digest: String,
+    /// The commit's canonical session; each check's callback session derives from it.
+    pub auth: String,
+    pub checks: Vec<super::compiler::TriggeredCheck>,
+    /// The check being validated.
+    pub index: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Work {
@@ -619,6 +669,69 @@ pub struct Work {
     /// The client request this work answers.
     pub request_id: Option<String>,
     pub task: Task,
+}
+
+/// The live callback capability of the check being validated (ADR 0007): the token's hash,
+/// never the token, its expiry, the callback session, and the callback queries' sequence,
+/// last reply, and cumulative rows and bytes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Capability {
+    pub token_hash: String,
+    pub expires_at_ms: u64,
+    pub check: String,
+    /// The callback session (canonical JSON): the commit's session with the check's role,
+    /// that role added to `roles`, and `access: ["execute"]`.
+    pub session: String,
+    pub role: String,
+    pub next_sequence: u64,
+    pub last: Option<Replay>,
+    pub rows: u64,
+    pub result_bytes: u64,
+}
+
+/// A callback query in progress and the effect it waits for.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum CallbackTask {
+    /// `CheckBinding` before the query executes.
+    #[serde(rename_all = "camelCase")]
+    Binding {
+        sequence: u64,
+        digest: String,
+        handle: u64,
+        versions: Versions,
+    },
+    /// `Execute` of the query on the transaction's connection.
+    #[serde(rename_all = "camelCase")]
+    Execute {
+        sequence: u64,
+        digest: String,
+        handle: u64,
+        versions: Versions,
+    },
+}
+
+impl CallbackTask {
+    #[must_use]
+    pub const fn awaits(&self) -> Awaited {
+        match self {
+            Self::Binding { .. } => Awaited::CheckBinding,
+            Self::Execute { .. } => Awaited::Execute,
+        }
+    }
+}
+
+/// The callback lane (ADR 0022): at most one query in progress, beside the client lane.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CallbackWork {
+    pub pending: Pending,
+    pub request_id: String,
+    /// The capability the query was authorized by; it continues only while that capability
+    /// is the live one.
+    pub token_hash: String,
+    pub task: CallbackTask,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -632,6 +745,19 @@ pub struct Volatile {
     pub pending: Option<Pending>,
     pub work: Option<Work>,
     pub rollback_requested: bool,
+    /// The callback lane's query in progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback: Option<CallbackWork>,
+    /// The capability of the validator being called; revoked at its verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<Capability>,
+    /// A verdict waiting for the connection (`Task::Verdict`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<Work>,
+    /// The `CallValidator` whose wait was ended (expiry, a failed callback): its late outcome
+    /// is logged and ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_validator: Option<u64>,
 }
 
 impl Volatile {
@@ -651,8 +777,9 @@ impl Volatile {
         serde_json::to_string(self).unwrap_or_default()
     }
 
-    /// Pending effect and work belong together; ids stay below 2^53 so the engine reads them
-    /// exactly; at most one live handle (one statement at a time).
+    /// Pending effect and work belong together on each lane; ids stay below 2^53 so the engine
+    /// reads them exactly; at most one live handle per lane. A capability is live only while
+    /// its validator is awaited; a deferred verdict only while a callback query executes.
     #[must_use]
     pub fn is_consistent(&self) -> bool {
         let work_awaits = self.work.as_ref().map(|work| awaited_by(&work.task));
@@ -661,19 +788,79 @@ impl Volatile {
             (Some(pending), Some(effect)) => pending.effect == effect,
             _ => false,
         };
+        let callback = self.callback.as_ref().is_none_or(|callback| {
+            callback.pending.effect == callback.task.awaits()
+                && callback.pending.id < self.next_effect_id
+                && self
+                    .pending
+                    .is_none_or(|pending| pending.id != callback.pending.id)
+                && super::io::valid_request_id(&callback.request_id)
+        });
+        let validating = matches!(
+            self.work.as_ref().map(|work| &work.task),
+            Some(Task::Validator(_))
+        );
+        let capability = self.capability.as_ref().is_none_or(|capability| {
+            validating
+                && hex64(&capability.token_hash)
+                && capability.next_sequence >= 1
+                && capability.next_sequence <= super::MAX_SAFE_INTEGER
+                && capability.last.is_some() == (capability.next_sequence > 1)
+        });
+        let deferred = self.deferred.as_ref().is_none_or(|deferred| {
+            self.work.is_none()
+                && matches!(deferred.task, Task::Verdict { .. })
+                && matches!(
+                    self.callback.as_ref().map(|callback| &callback.task),
+                    Some(CallbackTask::Execute { .. })
+                )
+                && deferred
+                    .request_id
+                    .as_deref()
+                    .is_none_or(super::io::valid_request_id)
+        });
+        let verdict_in_work = matches!(
+            self.work.as_ref().map(|work| &work.task),
+            Some(Task::Verdict { .. })
+        );
         paired
+            && !verdict_in_work
+            && callback
+            && capability
+            && deferred
             && self.next_effect_id >= 1
             && self.next_effect_id <= super::MAX_SAFE_INTEGER
             && self
                 .pending
                 .is_none_or(|pending| pending.id < self.next_effect_id)
-            && self.handles.len() <= 1
+            && self.handles.len() <= 2
             && owner_name(&self.owner)
             && self
                 .work
                 .as_ref()
                 .and_then(|work| work.request_id.as_deref())
                 .is_none_or(super::io::valid_request_id)
+    }
+
+    /// Whether a callback query's `Execute` holds the connection.
+    #[must_use]
+    pub fn callback_executing(&self) -> bool {
+        matches!(
+            self.callback.as_ref().map(|callback| &callback.task),
+            Some(CallbackTask::Execute { .. })
+        )
+    }
+
+    /// Nothing is in progress or held: the owner can drop this volatile part.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.work.is_none()
+            && self.pending.is_none()
+            && self.connection == Connection::None
+            && self.handles.is_empty()
+            && self.callback.is_none()
+            && self.capability.is_none()
+            && self.deferred.is_none()
     }
 }
 
@@ -688,9 +875,12 @@ pub const fn awaited_by(task: &Task) -> Awaited {
         Task::BeginOpen { .. } => Awaited::Open,
         Task::BeginPersist
         | Task::CommitPersist { .. }
+        | Task::ValidatingPersist(_)
         | Task::Reply { .. }
         | Task::ResetAfterPersist => Awaited::Persist,
         Task::BeginTimer => Awaited::SetTimer,
+        // A deferred verdict is never pending (`is_consistent` keeps it out of `work`).
+        Task::Validator(_) | Task::Verdict { .. } => Awaited::CallValidator,
         Task::StatementExecute { .. } => Awaited::Execute,
         Task::CommitSend { .. } => Awaited::Commit,
         Task::RollbackSend { .. } | Task::CloseRollback { .. } => Awaited::Rollback,

@@ -18,7 +18,9 @@ pub struct HostFacts {
     pub request_id: String,
     /// The owner running this step; `None` in the engine (the `request` kind, pull request 7).
     pub owner: Option<String>,
-    /// Check ids with an endpoint in `PolicySqlConfig` (commit checks run in pull request 5).
+    /// Check ids with an endpoint in `PolicySqlConfig`, empty when it has no `publicBaseUrl`
+    /// (ADR 0021): a triggered check outside this list rejects the commit before any
+    /// capability or validator call.
     #[serde(default)]
     pub configured_checks: Vec<String>,
 }
@@ -52,6 +54,17 @@ impl HostFacts {
             .get(offset * 2..offset * 2 + 12)
             .and_then(|hex| u64::from_str_radix(hex, 16).ok())
             .unwrap_or(0)
+    }
+
+    /// All 32 entropy bytes (the capability token).
+    #[must_use]
+    pub fn entropy_bytes(&self) -> Option<[u8; 32]> {
+        let mut bytes = [0_u8; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            let hex = self.entropy.get(index * 2..index * 2 + 2)?;
+            *byte = u8::from_str_radix(hex, 16).ok()?;
+        }
+        Some(bytes)
     }
 }
 
@@ -146,6 +159,19 @@ pub enum Event {
     TimerFailed {
         id: u64,
     },
+    /// The validator answered: whether its HTTP status was 2xx, and its JSON body (`null`
+    /// when it was not JSON). Untrusted: core checks the decision's exact shape.
+    ValidatorReplied {
+        id: u64,
+        ok: bool,
+        decision: serde_json::Value,
+    },
+    /// No answer arrived (transport error, timeout, redirect, or a configuration the hook
+    /// adapter refused at the exit).
+    ValidatorFailed {
+        id: u64,
+        class: Class,
+    },
     /// The engine is discarding volatile state (owner shutdown, unexpected engine error).
     Abandon,
 }
@@ -168,7 +194,9 @@ impl Event {
             | Self::Persisted { id }
             | Self::PersistFailed { id }
             | Self::TimerSet { id }
-            | Self::TimerFailed { id } => Some(*id),
+            | Self::TimerFailed { id }
+            | Self::ValidatorReplied { id, .. }
+            | Self::ValidatorFailed { id, .. } => Some(*id),
             Self::Forwarded { .. } | Self::TimerFired | Self::Abandon => None,
         }
     }
@@ -187,6 +215,9 @@ impl Event {
             Self::RolledBack { .. } | Self::RollbackFailed { .. } => Some(Awaited::Rollback),
             Self::Persisted { .. } | Self::PersistFailed { .. } => Some(Awaited::Persist),
             Self::TimerSet { .. } | Self::TimerFailed { .. } => Some(Awaited::SetTimer),
+            Self::ValidatorReplied { .. } | Self::ValidatorFailed { .. } => {
+                Some(Awaited::CallValidator)
+            }
             Self::Forwarded { .. } | Self::TimerFired | Self::Abandon => None,
         }
     }
@@ -248,6 +279,20 @@ pub enum Effect {
     Persist {
         id: u64,
     },
+    /// Calls the validator of `check` (ADR 0007). The hook adapter looks up the endpoint and
+    /// secret by the check id in the validated configuration, adds the `query` block (the
+    /// capability token, the callback URL for `payload.validationId`, and the expiry) to
+    /// `payload`, signs, and sends; secrets never enter core.
+    #[serde(rename_all = "camelCase")]
+    CallValidator {
+        id: u64,
+        check: String,
+        /// The hook body without `query`, in its wire key order.
+        payload: Box<RawValue>,
+        capability: CapabilityGrant,
+        timeout_ms: u64,
+    },
+    /// `lane` is `client` or `callback`.
     Respond {
         lane: &'static str,
         reply: Box<RawValue>,
@@ -274,7 +319,8 @@ impl Effect {
             | Self::Commit { id }
             | Self::Rollback { id }
             | Self::SetTimer { id, .. }
-            | Self::Persist { id } => Some(*id),
+            | Self::Persist { id }
+            | Self::CallValidator { id, .. } => Some(*id),
             Self::Respond { .. } | Self::Observe { .. } | Self::Log { .. } | Self::Reset => None,
         }
     }
@@ -290,8 +336,18 @@ impl Effect {
                 | Self::Rollback { .. }
                 | Self::SetTimer { .. }
                 | Self::Persist { .. }
+                | Self::CallValidator { .. }
         )
     }
+}
+
+/// The callback capability handed to one validator: the opaque token (32 random bytes,
+/// base64url) and its expiry. Core keeps only the token's SHA-256, in volatile state.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityGrant {
+    pub token: String,
+    pub expires_at_ms: u64,
 }
 
 /// The client-facing errors the machine returns itself; compile and validation errors pass
