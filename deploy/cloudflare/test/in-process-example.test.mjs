@@ -83,6 +83,8 @@ test("in-process: failures are codes, never statuses, and body checks run withou
     "POLICYSQL_FORBIDDEN_COLUMN");
   await failure(p.engine.execute({ bodyText: '{"statements":[],"statements":[]}' }, context), "POLICYSQL_INVALID_REQUEST");
   await failure(p.engine.execute({ bodyText: '{"a":"\ud800"}' }, context), "POLICYSQL_INVALID_REQUEST");
+  await failure(p.engine.execute({ bodyText: '{"a":"\\ud800"}' }, context), "POLICYSQL_INVALID_REQUEST");
+  await failure(p.engine.execute({ bodyText: '{"a":"\\udc00"}' }, context), "POLICYSQL_INVALID_REQUEST");
   await failure(p.engine.execute({ bodyText: `"${"x".repeat(1_048_576)}"` }, context), "POLICYSQL_REQUEST_TOO_LARGE");
   await failure(p.engine.execute({ bodyText: statements({ sql: "SELECT id FROM projects", params: {} }), role: "admin" }, context),
     "POLICYSQL_FORBIDDEN_ACCESS");
@@ -94,4 +96,49 @@ test("in-process: failures are codes, never statuses, and body checks run withou
   await failure(p.engine.execute({ bodyText: "{}", extra: true }, context), "POLICYSQL_INTERNAL");
   await failure(p.engine.callbackQuery({ validationId: `cval_${"0".repeat(32)}`, capability: "", bodyText: "{}" }),
     "POLICYSQL_TRANSACTION_UNAVAILABLE");
+});
+
+// ADR 0025, "Escaped lone surrogates": the engine rejects the escaped form as it rejects the
+// raw one, before anything reaches the owner or core. The two observable differences.
+test("in-process: an escaped lone surrogate in a statement is rejected before the owner, and the transaction stays open", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const p = createInProcessPolicySql(getRuntime);
+  t.after(() => p.close());
+  const context = { database: p.binding, session: session("tenant_a") };
+  const begun = await p.engine.begin({ bodyText: JSON.stringify({ mode: "write" }) }, context);
+  assert.equal(begun.ok, true, JSON.stringify(begun));
+  const { transactionId } = begun.value;
+  const sql = "INSERT INTO projects (id, name) VALUES (:id, :name) RETURNING id, name";
+  for (const escaped of ["\\ud800", "\\udc00"]) {
+    const bodyText = `{"sequence":1,"sql":${JSON.stringify(sql)},"params":{"id":"s1","name":"${escaped}"}}`;
+    const rejected = await p.engine.statement({ transactionId, bodyText }, context);
+    assert.equal(rejected.ok, false);
+    assert.deepEqual(rejected.error, { code: "POLICYSQL_INVALID_REQUEST", message: "Request body is not valid UTF-8.", path: null });
+  }
+  // Before ADR 0025 the owner's compile error closed the transaction as failed; now it is open.
+  const next = await p.engine.statement({
+    transactionId, bodyText: JSON.stringify({ sequence: 1, sql, params: { id: "s1", name: "kept" } }),
+  }, context);
+  assert.equal(next.ok, true, JSON.stringify(next));
+  const committed = await p.engine.commit({ transactionId, bodyText: JSON.stringify({ sequence: 2 }) }, context);
+  assert.equal(committed.value.status, "committed");
+  assert.equal(p.database.prepare("SELECT name FROM projects WHERE id = 's1'").get().name, "kept");
+});
+
+test("in-process: a begin whose expected versions contain an escaped lone surrogate is invalid, not stale", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const p = createInProcessPolicySql(getRuntime);
+  t.after(() => p.close());
+  const context = { database: p.binding, session: session("tenant_a") };
+  for (const expected of [
+    '{"schemaVersion":"\\ud800","policyVersion":"p"}',
+    '{"schemaVersion":"s","policyVersion":"x\\udc00"}',
+  ]) {
+    const begun = await p.engine.begin({ bodyText: `{"mode":"write","expected":${expected}}` }, context);
+    assert.equal(begun.ok, false);
+    assert.equal(begun.error.code, "POLICYSQL_INVALID_REQUEST", expected);
+  }
+  // Other wrong versions are still stale.
+  const stale = await p.engine.begin({ bodyText: '{"mode":"write","expected":{"schemaVersion":"\\u00e9","policyVersion":"p"}}' }, context);
+  assert.equal(stale.error.code, "POLICYSQL_STALE_OPERATION");
 });
