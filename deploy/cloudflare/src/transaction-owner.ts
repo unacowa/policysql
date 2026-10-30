@@ -20,31 +20,39 @@
 // closes that connection and drops every reference to it: `reset` and the fail-closed paths
 // emit no `rollback` effect (ADR 0024 pull request 4 obligation).
 //
-// Until ADR 0024 pull request 8 the atomic owner path stays in TypeScript
-// (`LegacyTransactionOwnerCore`): `atomic` inputs, and the callback queries, timer, and client
-// inputs of an owner whose record that path wrote, are served by it. Names never collide
-// (an atomic owner is `tx_` + a key hash or random hex of its own), so an interactive owner
-// never holds such a record.
+// Atomic executions on an owner (an execute whose envelope could trigger a commit check) run
+// the same machine since ADR 0024 pull request 8: the engine's `request` step forwards the
+// owner input, and the owner's step answers it. The TypeScript decision path
+// (`LegacyTransactionOwnerCore`) is no longer reachable from here; it stays only as the
+// differential harnesses' reference until pull request 9 deletes it. A record it wrote is an
+// old-format record: the machine discards it (an atomic input ignores it and resolves a keyed
+// retry through `policysql_idempotency`).
 import { EngineError, operationError } from "./errors.ts";
-import { authIdentity } from "./core-identity.ts";
 import { checkDatabaseBinding, databaseTransportFactory, validateDatabaseProvider } from "./database.ts";
 import type { DatabaseProvider } from "./database.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { runtimeBytesLimit } from "./binary.ts";
 import { validateConfig } from "./engine-config.ts";
-import type { ValidatedConfig } from "./engine-config.ts";
+import type { PolicySqlConfig, ValidatedConfig } from "./engine-config.ts";
 import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
 import { parseExact, stringifyExact } from "./exact-json.ts";
-import { decodeArgs, encodeResults, failureClass, observeCost, validatorFailureClass } from "./step-effects.ts";
-import { LegacyTransactionOwnerCore } from "./transaction-owner-legacy.ts";
-import type { TransactionOwnerDependencies } from "./transaction-owner-legacy.ts";
+import { checkBatch, decodeArgs, encodeResults, entropyHex, failureClass, observeCost, validatorFailureClass } from "./step-effects.ts";
 import { OWNER_NAME, runInBackground, validateOwnerFacilities } from "./transaction-owner-port.ts";
 import type {
   OwnerAtomicInput, OwnerBeginInput, OwnerCallbackInput, OwnerCommandInput, OwnerCommandKind,
   OwnerFacilities, OwnerReply, TransactionOwnerHandle,
 } from "./transaction-owner-port.ts";
 
-export type { TransactionOwnerDependencies } from "./transaction-owner-legacy.ts";
+/** What a transaction owner needs. It receives the same `config` as `createApp` (ADR 0021). */
+export type TransactionOwnerDependencies = {
+  getRuntime: () => any;
+  database: DatabaseProvider;
+  config: PolicySqlConfig;
+  /** Omitted: commit-check calls use the host fetch through fetchNoFollow. */
+  fetchImpl?: OutboundFetch;
+};
+
+export { checkBatch } from "./step-effects.ts";
 
 const KEY = "transaction";
 type Lane = "client" | "callback";
@@ -55,9 +63,6 @@ const internalReply = (): OwnerReply => ({
 
 const replyRequestId = (requestId: unknown) =>
   typeof requestId === "string" && requestId !== "" ? requestId : crypto.randomUUID();
-
-const randomHex = () => [...crypto.getRandomValues(new Uint8Array(32))]
-  .map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
@@ -76,10 +81,6 @@ const namedOwner = (input: unknown): string | null => {
   return id !== null && OWNER_NAME.test(id) ? id : null;
 };
 
-/** A record the TypeScript atomic path wrote (an object with an `atomic_` transaction id). */
-const legacyAtomicRecord = (stored: unknown) =>
-  isObject(stored) && typeof stored.transactionId === "string" && stored.transactionId.startsWith("atomic_");
-
 /** The owner a stored record names, so a timer can run before any message arrived. */
 const recordOwner = (stored: unknown): string | null => {
   let value = stored;
@@ -91,21 +92,6 @@ const recordOwner = (stored: unknown): string | null => {
   return typeof name === "string" && OWNER_NAME.test(name) ? name : null;
 };
 
-const IMMEDIATE = new Set(["respond", "log", "observe", "reset"]);
-
-/**
- * The batch rule (ADR 0024 "Effects"): any number of immediate effects, then at most one
- * awaited effect, last. Anything else is an engine fault (Abandon follows), checked before any
- * effect of the batch runs, so no outcome is ever dropped.
- */
-export const checkBatch = (effects: unknown) => {
-  if (!Array.isArray(effects)) throw new Error("step output without effects");
-  const awaited = effects.flatMap((effect, index) => (IMMEDIATE.has(effect?.type) ? [] : [index]));
-  if (awaited.length > 1 || (awaited.length === 1 && awaited[0] !== effects.length - 1)) {
-    throw new Error("an awaited effect is not last in its batch");
-  }
-};
-
 /** The re-check at the outbound exit (`commit-checks.ts` `secureUrl`). */
 const secureUrl = (raw: string) => {
   const url = new URL(raw);
@@ -114,12 +100,12 @@ const secureUrl = (raw: string) => {
 };
 
 /**
- * The step-machine executor for every owner input, including `atomic` (the machine's own
- * atomic owner path). Production uses `TransactionOwnerCore`, which keeps the atomic owner
- * path in TypeScript until ADR 0024 pull request 8; the atomic differential harness runs this
- * class as the machine's side.
+ * The owner of one transaction name (ADR 0007, ADR 0022, ADR 0024). An adapter creates one
+ * instance per live owner, injects its durable store, timer, and background tasks, and
+ * delivers every call for that name to it. Every input (begin, statement, commit, rollback,
+ * atomic, callback query) and every timer runs the step machine.
  */
-export class StepTransactionOwner implements TransactionOwnerHandle {
+export class TransactionOwnerCore implements TransactionOwnerHandle {
   facilities: OwnerFacilities;
   config: ValidatedConfig;
   getRuntime: () => any;
@@ -219,13 +205,6 @@ export class StepTransactionOwner implements TransactionOwnerHandle {
     } while (lanes[0] !== this.queues.client || lanes[1] !== this.queues.callback);
   }
 
-  // ---- routing hook (overridden by TransactionOwnerCore until pull request 8) -----------
-
-  /** A reply from another path for this input, or null to run the machine. */
-  async alternative(_lane: Lane, _event: any, _input: unknown, _requestId: string): Promise<OwnerReply | null> {
-    return null;
-  }
-
   // ---- the executor ---------------------------------------------------------------------
 
   /**
@@ -237,16 +216,6 @@ export class StepTransactionOwner implements TransactionOwnerHandle {
     let resolveReply: (reply: OwnerReply) => void;
     const reply = new Promise<OwnerReply>((resolve) => { resolveReply = resolve; });
     const run = this.queues[lane].then(async () => {
-      try {
-        const other = await this.alternative(lane, event, input, requestId);
-        if (other !== null) {
-          resolveReply(other);
-          return;
-        }
-      } catch {
-        resolveReply(internalReply());
-        return;
-      }
       if (this.name === null) this.name = namedOwner(input);
       if (this.name === null) {
         // The adapter delivered a message without an owner name: a port fault.
@@ -287,7 +256,7 @@ export class StepTransactionOwner implements TransactionOwnerHandle {
 
   step(event: any, requestId: string) {
     const host = JSON.stringify({
-      nowMs: Date.now(), entropy: randomHex(), requestId, owner: this.name, configuredChecks: this.configuredChecks,
+      nowMs: Date.now(), entropy: entropyHex(), requestId, owner: this.name, configuredChecks: this.configuredChecks,
     });
     const eventText = stringifyExact(event);
     const outputText: string = this.getRuntime().step_json(this.durable ?? undefined, this.volatile ?? undefined, eventText, host);
@@ -469,70 +438,5 @@ export class StepTransactionOwner implements TransactionOwnerHandle {
     } catch (error) {
       return { type: "validatorFailed", id, class: validatorFailureClass(error) };
     }
-  }
-}
-
-/**
- * The owner of one transaction name (ADR 0007, ADR 0022, ADR 0024). An adapter creates one
- * instance per live owner, injects its durable store, timer, and background tasks, and
- * delivers every call for that name to it.
- *
- * Interactive transactions (begin, statement, commit, rollback, and their commit checks'
- * callback queries and timer) run the step machine. The atomic owner path stays in TypeScript
- * until ADR 0024 pull request 8: an `atomic` input, and any input or timer of an owner whose
- * record that path wrote, is served by `LegacyTransactionOwnerCore`, exactly as before.
- */
-export class TransactionOwnerCore extends StepTransactionOwner {
-  legacy: LegacyTransactionOwnerCore;
-
-  constructor(facilities: OwnerFacilities, dependencies: TransactionOwnerDependencies) {
-    super(facilities, dependencies);
-    this.legacy = new LegacyTransactionOwnerCore(facilities, dependencies);
-  }
-
-  atomic(input: OwnerAtomicInput, requestId: string): Promise<OwnerReply> {
-    // Queued on the client lane, so atomic and interactive inputs keep their arrival order.
-    return this.lane("client", input, null, requestId);
-  }
-
-  async onTimer(): Promise<void> {
-    if (await this.legacyOwned()) {
-      await this.legacy.onTimer();
-      return;
-    }
-    await super.onTimer();
-  }
-
-  /**
-   * Whether the TypeScript atomic path owns this name: its execution is in flight, or the
-   * store holds a record it wrote. The machine's own state, once present, decides alone.
-   */
-  async legacyOwned(): Promise<boolean> {
-    if (this.legacy.transaction || this.legacy.validation) return true;
-    if (this.volatile !== null || (this.loaded && this.durable !== null)) return false;
-    if (!legacyAtomicRecord(await this.facilities.store.get(KEY))) return false;
-    // The machine never read this record; it reads the store again if it is ever asked.
-    this.loaded = false;
-    return true;
-  }
-
-  async alternative(lane: Lane, event: any, input: unknown, requestId: string): Promise<OwnerReply | null> {
-    if (event === null) return await this.legacy.atomic(input as OwnerAtomicInput, requestId);
-    if (!await this.legacyOwned()) return null;
-    const fields: Record<string, unknown> = isObject(input) ? input : {};
-    const command = (() => {
-      try { return typeof fields.command === "string" ? JSON.parse(fields.command) : null; } catch { return null; }
-    })();
-    if (lane === "callback") {
-      return await this.legacy.callbackQuery({ capability: event.input.capability, command }, requestId);
-    }
-    // An interactive input that names an atomic owner: answered by the TypeScript owner, as
-    // before (it holds no interactive record, so it rejects without writing).
-    const authFingerprint = (() => {
-      try { return authIdentity(this.getRuntime(), fields.auth as any, fields.databaseBinding as any); } catch { return "0".repeat(64); }
-    })();
-    const { kind, auth, ...rest } = event.input;
-    if (kind === "begin") return await this.legacy.begin({ ...rest, auth, authFingerprint } as any, requestId);
-    return await this.legacy.command(kind, { ...rest, authFingerprint, command } as any, requestId);
   }
 }

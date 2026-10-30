@@ -88,17 +88,13 @@ export type LegacyCallbackInput = { capability: string; command: unknown };
 /**
  * The TypeScript owner of ADR 0007 and ADR 0022, before the step machine (ADR 0024).
  *
- * Since pull request 7, production serves interactive transactions with the step machine
- * (`TransactionOwnerCore`, transaction-owner.ts), which keeps this class for two purposes
- * only, until pull requests 8 and 9 delete it:
- *
- * - the atomic owner path: `atomic`, and the callback queries and timer of an owner whose
- *   record this class wrote for an atomic execution (pull request 8 switches it);
- * - the reference of the differential harness for interactive transactions
- *   (test/step-differential.test.mjs). Production never calls `begin` or `command` for an
- *   owner that holds an interactive record or none: only for an owner whose record this class
- *   wrote for an atomic execution, where they answer as before (unavailable or conflict) and
- *   write nothing.
+ * Since pull request 7 production serves interactive transactions, and since pull request 8
+ * atomic executions, with the step machine (`TransactionOwnerCore`, transaction-owner.ts). No
+ * production path reaches this class. It stays, with `turso.ts`, `cost.ts`, and
+ * `commit-checks.ts`, only as the reference of the differential harnesses
+ * (test/step-differential.test.mjs, test/step-atomic-differential.test.mjs) and as the
+ * previous release's writer in the tests of keyed retries across the deployment, until pull
+ * request 9 deletes it. A record it wrote is an old-format record to the machine.
  */
 export class LegacyTransactionOwnerCore {
   facilities: OwnerFacilities;

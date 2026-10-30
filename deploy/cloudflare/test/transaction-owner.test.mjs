@@ -16,8 +16,9 @@ import { limitsJson } from "./helpers/limits.mjs";
 // which needs the real WASM runtime; its scenarios run through the differential harness
 // (step-differential.test.mjs) and the port conformance suite. The interactive cases below,
 // over a fake compiler, therefore test `LegacyTransactionOwnerCore`, the harness's reference
-// until pull request 9. The atomic cases test the production `TransactionOwnerCore`, which
-// keeps the TypeScript atomic path until pull request 8.
+// until pull request 9. Since pull request 8 the same holds for the atomic cases: production
+// runs atomic executions on the machine too (test/atomic-switch.test.mjs, the atomic
+// differential harness, and `crates/policysql-transaction/tests/atomic.rs`).
 const makeStorage = () => {
   const values = new Map();
   const facilities = {
@@ -119,7 +120,7 @@ const auth = { principal: "test:u1", subject: "u1", role: "member", roles: ["mem
 
 test("malformed delegated idempotency cannot silently disable replay protection", async () => {
   const fixture = JSON.parse(readFileSync(new URL("./fixtures/optional-idempotency.json", import.meta.url), "utf8"));
-  const owner = new TransactionOwnerCore(makeStorage(), { config, getRuntime: () => runtime(), database: {
+  const owner = new LegacyTransactionOwnerCore(makeStorage(), { config, getRuntime: () => runtime(), database: {
     check() { assert.fail("must reject before checking or opening a database"); },
     connect() { assert.fail("must not execute"); },
   } });
@@ -401,7 +402,7 @@ test("atomic mutation runs commit check and callback query before idempotency co
     assert.equal(query.status, 200);
     return new Response(JSON.stringify({ version: "1", allowed: true }), { status: 200 });
   };
-  owner = new TransactionOwnerCore(storage, {
+  owner = new LegacyTransactionOwnerCore(storage, {
     config: checkedConfig,
     getRuntime: () => compiler,
     database: ownerProvider(database),
@@ -437,7 +438,7 @@ test("atomic replay rejects malformed database-owned response JSON", async () =>
     rowsAffected: 0,
     usage: { rowsRead: 1, rowsWritten: 0, queryDurationMs: 1 },
   }];
-  const owner = new TransactionOwnerCore(storage, {
+  const owner = new LegacyTransactionOwnerCore(storage, {
     config,
     getRuntime: () => commitRuntime(),
     database: ownerProvider(database),

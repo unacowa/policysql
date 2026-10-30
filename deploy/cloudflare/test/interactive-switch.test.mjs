@@ -55,8 +55,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   test(`${ownerAdapter}: #70: an integer beyond 2^53 is bound exactly, also in a callback query`, async (t) => {
     t.mock.method(console, "log", () => {});
     const h = await setup(t, { hooks: true, fixture });
-    // (The atomic path stays in TypeScript until ADR 0024 pull request 8 and still binds the
-    // value through a JavaScript number; pull request 8 switches it to the machine.)
+    // (The atomic side of #70 is pinned by test/atomic-switch.test.mjs since pull request 8.)
     const id = await begin(h);
     const path = `/v1/transactions/${id}`;
     const text = `{"sequence":1,"sql":"INSERT INTO nullabletexts (id, label, count) VALUES (:id, :label, :value)","params":{"id":"interactive_big","label":"x","value":${BIG}}}`;
@@ -207,33 +206,35 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(h.rows("a").filter((row) => row.id === "stray").length, 1);
   });
 
-  // Until pull request 8 an atomic execute that can trigger a check runs on the TypeScript
-  // owner path. Interactive inputs, stray callbacks, and timers that reach such an owner are
-  // served by that path too, so the machine never discards its record and a keyed retry still
-  // replays.
-  test(`${ownerAdapter}: an atomic owner's record stays the TypeScript path's until pull request 8`, async (t) => {
+  // Since pull request 8 an atomic execute that can trigger a check runs on the machine's owner
+  // path too: its record is the machine's (`kind: atomic`), which serializes work and answers
+  // no request. Interactive inputs, stray callbacks, and timers that reach such an owner change
+  // nothing, and a keyed retry still replays from its `policysql_idempotency` row.
+  test(`${ownerAdapter}: an atomic owner's record is the machine's and answers no request`, async (t) => {
     t.mock.method(console, "log", () => {});
     const h = await setup(t);
     const body = { statements: [insert("atomic_owned")] };
     const key = "atomic-owner-kept-0001";
     const first = await h.request("a", "/v1/transactions:execute", body, key);
     assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(first.body.meta.commitChecks, "passed");
     const [name] = h.ownerNames();
-    const record = await h.ownerRecord(name);
-    assert.equal(typeof record, "object");
-    assert.match(record.transactionId, /^atomic_/u);
-    const statement = await h.request("a", `/v1/transactions/${name}/statements`, { sequence: 1, ...read }, null);
-    assert.equal(statement.status, 409, JSON.stringify(statement.body));
-    assert.equal(statement.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
-    const commit = await h.request("a", `/v1/transactions/${name}/commit`, { sequence: 1 }, null);
-    assert.equal(commit.status, 409, JSON.stringify(commit.body));
+    const record = await h.ownerRecordRaw(name);
+    assert.equal(typeof record, "string", "the machine's durable text");
+    assert.equal(JSON.parse(record).kind, "atomic");
+    assert.equal(JSON.parse(record).phase, "committed");
+    for (const [path, command] of [["statements", { sequence: 1, ...read }], ["commit", { sequence: 1 }], ["rollback", { sequence: 1 }]]) {
+      const reply = await h.request("a", `/v1/transactions/${name}/${path}`, command, null);
+      assert.equal(reply.status, 409, `${path}: ${JSON.stringify(reply.body)}`);
+      assert.equal(reply.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", path);
+    }
     const stray = await h.request("a", `/v1/commit-checks/${name.replace(/^tx_/u, "cval_")}/query`, { sequence: 1, ...read }, undefined, "A".repeat(43));
     assert.equal(stray.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
     await h.ownerCore(name).onTimer();
-    assert.deepEqual(await h.ownerRecord(name), record, "the record is untouched");
+    assert.equal(await h.ownerRecordRaw(name), record, "the record is untouched");
     const retry = await h.request("a", "/v1/transactions:execute", body, key);
     assert.equal(retry.status, 200, JSON.stringify(retry.body));
-    assert.deepEqual(retry.body.results, first.body.results);
+    assert.deepEqual(retry.body, first.body, "the replay names the original request and checks");
     assert.equal(h.rows("a").filter((row) => row.id === "atomic_owned").length, 1);
   });
 

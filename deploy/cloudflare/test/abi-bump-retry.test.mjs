@@ -28,9 +28,12 @@ const legacySha256 = async (value) => {
 const legacyAuthFingerprint = ({ principal, subject, role, session }, databaseBinding) =>
   legacySha256(legacyStableJson({ principal, subject, role, session, databaseBinding }));
 const legacyCommandDigest = (kind, command) => legacySha256(legacyStableJson({ kind, command }));
-const legacyKeyHash = ({ principal, subject, role, session }, endpoint, binding, key) => legacySha256(`${legacyStableJson({
+const legacyIdentity = ({ principal, subject, role, session }, endpoint, binding) => legacyStableJson({
   principal, subject, role, session, endpoint, database: { scope: binding.scope, databaseId: binding.databaseId },
-})}:${key}`);
+});
+const legacyKeyHash = (auth, endpoint, binding, key) => legacySha256(`${legacyIdentity(auth, endpoint, binding)}:${key}`);
+const legacyFingerprint = (auth, endpoint, binding, body) =>
+  legacySha256(`${legacyIdentity(auth, endpoint, binding)}:${legacyStableJson(body)}:${legacyStableJson(binding)}`);
 
 const { goldens } = JSON.parse(readFileSync(new URL("../../../tests/fixtures/identity-goldens.json", import.meta.url), "utf8"));
 
@@ -142,28 +145,37 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     }
   });
 
+  // The row the ABI 4 direct path wrote, with the values the frozen ABI 4 rules computed. Since
+  // ADR 0024 pull request 8 the snapshot check of an execute is core's (the step machine reads
+  // the runtime's own snapshot), so the earlier release's row is planted rather than written by
+  // a runtime whose snapshot is faked.
   test(`${ownerAdapter}: a keyed atomic retry across the bump finds its ABI 4 row and conflicts; it never executes twice`, async (t) => {
-    const { h, at, send, credential } = await setup(t);
+    const { h, send, credential } = await setup(t);
     const key = "abi-bump-key-000001";
     const body = { statements: [insert("abi_keyed")] };
-    at(4);
-    const first = await send("/v1/transactions:execute", body, key);
-    assert.equal(first.status, 200, JSON.stringify(first.body));
-    // The row's key hash is the one ABI 4 computed.
     const auth = { principal: credential.principal, subject: credential.subject, role: credential.defaultRole, session: credential.session };
-    const keyHash = await legacyKeyHash(auth, "execute", h.binding("a"), key);
-    const rows = h.databases.get("a").database.prepare("SELECT key_hash FROM policysql_idempotency").all();
-    assert.deepEqual(rows.map((row) => row.key_hash), [keyHash]);
-    // Under the same snapshot the retry replays.
-    const replay = await send("/v1/transactions:execute", body, key);
-    assert.equal(replay.status, 200, JSON.stringify(replay.body));
-    at("current");
+    const abi4 = { ...h.binding("a"), snapshot: h.runtime.snapshot.replace(/:abi-\d+$/u, ":abi-4") };
+    const keyHash = await legacyKeyHash(auth, "execute", abi4, key);
+    const fingerprint = await legacyFingerprint(auth, "execute", abi4, body);
+    const database = h.databases.get("a").database;
+    database.prepare("INSERT INTO policysql_idempotency (key_hash, fingerprint, response_json) VALUES (?, ?, ?)").run(keyHash, fingerprint, JSON.stringify({
+      version: 1, results: [{ columns: ["id", "name"], rows: [{ id: "abi_keyed", name: "abi_keyed" }], rowCount: 1, affectedRows: 1 }],
+      usage: { rowsReturned: 1, rowsAffected: 1, rowsRead: 1, rowsWritten: 1, queryDurationMs: 0 },
+      originalRequestId: "abi4", transactionId: `atomic_${keyHash.slice(0, 24)}`, replayed: false,
+    }));
     const retry = await send("/v1/transactions:execute", body, key);
-    // The same key hash finds the row; its fingerprint includes the old snapshot.
+    // The same key hash (it has no snapshot) finds the row; its fingerprint has the old snapshot.
     assert.equal(retry.status, 409, JSON.stringify(retry.body));
     assert.equal(retry.body.error.code, "POLICYSQL_IDEMPOTENCY_CONFLICT");
-    committedOnce(h, "abi_keyed");
-    assert.equal(h.databases.get("a").database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, 1);
+    assert.equal(h.rows("a").some((row) => row.id === "abi_keyed"), false, "nothing executed");
+    assert.equal(database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, 1);
+    // Control: the same row under the current snapshot's fingerprint replays.
+    const current = await legacyFingerprint(auth, "execute", h.binding("a"), body);
+    database.prepare("UPDATE policysql_idempotency SET fingerprint = ?").run(current);
+    const replay = await send("/v1/transactions:execute", body, key);
+    assert.equal(replay.status, 200, JSON.stringify(replay.body));
+    assert.equal(replay.body.meta.requestId, "abi4");
+    assert.equal(h.rows("a").some((row) => row.id === "abi_keyed"), false, "a replay executes nothing");
   });
 
   test(`${ownerAdapter}: a keyed begin retry across a deployment reaches the same owner and conflicts`, async (t) => {

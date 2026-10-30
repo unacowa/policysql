@@ -15,8 +15,8 @@
 //! notes of pull request 7).
 //!
 //! The JSON entry point is [`step_json`]; `policysql-wasm` exports it as `step_json`. Since
-//! pull request 7 production owners run interactive transactions on it; atomic execution
-//! switches in pull request 8.
+//! pull request 7 production owners run interactive transactions on it, and since pull request
+//! 8 the engine (`request` kind, placement `direct`) and owners run atomic execution on it.
 
 pub mod compiler;
 pub mod io;

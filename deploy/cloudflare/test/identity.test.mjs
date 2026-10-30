@@ -228,10 +228,13 @@ test("a core failure is POLICYSQL_INTERNAL before any database work", async (t) 
   const context = { database: p.binding, session, requestId: "req_core_failure" };
   const rows = () => p.database.prepare("SELECT count(*) AS n FROM projects").get().n;
   const before = rows();
-  broken = "request";
+  // Since ADR 0024 pull request 8 an execute is the engine's `request` step, which computes the
+  // identity itself: a failing step is INTERNAL and nothing executes.
+  broken = "step";
   const insert = JSON.stringify({ statements: [{ sql: "INSERT INTO projects (id, name) VALUES (:id, :name)", params: { id: "p1", name: "x" } }] });
   assert.equal((await p.engine.execute({ bodyText: insert, idempotencyKey: KEY }, context)).error.code, "POLICYSQL_INTERNAL");
   assert.equal(rows(), before, "nothing executed");
+  assert.equal(broken, null, "the request step was called");
   broken = "start";
   assert.equal((await p.engine.begin({ bodyText: "{\"mode\":\"write\"}" }, context)).error.code, "POLICYSQL_INTERNAL");
   broken = null;

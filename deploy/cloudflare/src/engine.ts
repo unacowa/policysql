@@ -15,10 +15,9 @@ import { requestIdentity, startDigest } from "./core-identity.ts";
 import { authorizeSession } from "./session.ts";
 import type { RequiredAccess } from "./session.ts";
 import { capabilities as capabilitiesValue, explainResponse, parsedRuntimeCall } from "./presenters.ts";
-import { observeCostEnvelope } from "./cost.ts";
-import { executeSealedEnvelope } from "./turso.ts";
+import { runRequestStep } from "./request-step.ts";
 import {
-  checkDatabaseBinding, databaseRequired, databaseTransportFactory, validateDatabaseBinding, validateDatabaseProvider,
+  checkDatabaseBinding, databaseRequired, validateDatabaseBinding, validateDatabaseProvider,
 } from "./database.ts";
 import type { DatabaseBinding } from "./database.ts";
 import { runtimeBytesLimit } from "./binary.ts";
@@ -26,7 +25,7 @@ import { runtimeLimits } from "./limits.ts";
 import { POLICY_VERSION, SCHEMA_VERSION } from "./config.ts";
 import { validateConfig } from "./engine-config.ts";
 import {
-  checkedOwnerReply, isOwnerHandle, OWNER_NAME, runInBackground, validateBackgroundTasks, validateTransactionOwnerPort,
+  checkedOwnerReply, isOwnerHandle, OWNER_NAME, validateBackgroundTasks, validateTransactionOwnerPort,
 } from "./transaction-owner-port.ts";
 import type { BackgroundTasks, OwnerReply, TransactionOwnerHandle } from "./transaction-owner-port.ts";
 import type { AppDependencies, AuthContext, EngineDependencies, RequestContext } from "./types.ts";
@@ -321,94 +320,38 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       const auth = authorize(checked, fields.role, "execute");
       const runtime = dependencies.getRuntime();
       const { requestId } = checked;
+      // ADR 0023 order: the provider decides the binding before the body is read. The step
+      // machine's own binding check of this request is answered with this outcome, so the
+      // provider is asked once (src/request-step.ts).
       const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, runtime.snapshot);
-      const maxBytesPerValue = runtimeBytesLimit(runtime);
-      const { costTimeoutMs } = runtimeLimits(runtime);
-      const transportFactory = databaseTransportFactory(dependencies.database, databaseBinding, maxBytesPerValue);
+      // A misconfigured runtime fails here, before the body is read and before BEGIN.
+      const maxBytes = runtimeBytesLimit(runtime);
+      runtimeLimits(runtime);
       const body = await parseBodyText(fields.bodyText);
-      const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body.text, "execute"));
-      const debugAuthorized = dependencies.executionTrace?.enabled === true && auth.access.includes("debug");
-      let idempotency;
-      try {
-        idempotency = compiled.transactionMode === "write"
-          ? requestIdentity(runtime, { key: fields.idempotencyKey, auth, bodyText: body.text, endpoint: "execute", databaseBinding })
-          : null;
-      } catch (error) {
-        runtime.release_execution(BigInt(compiled.executionHandle));
-        throw error;
+      // Everything else is the step machine's `request` kind (ADR 0024 pull request 8): the
+      // binding check, compile of the verified text (#70), idempotency, placement (direct, or
+      // the owner of an envelope that could trigger a commit check), and the response.
+      const reply = await runRequestStep({
+        getRuntime: dependencies.getRuntime,
+        database: dependencies.database,
+        costCatalog: dependencies.config.costCatalog,
+        owner,
+        executionTrace: dependencies.executionTrace,
+      }, {
+        kind: "execute",
+        auth,
+        databaseBinding,
+        snapshot: runtime.snapshot,
+        bodyText: body.text,
+        ...(fields.idempotencyKey === undefined ? {} : { idempotencyKey: fields.idempotencyKey }),
+        trace: dependencies.executionTrace?.enabled === true,
+      }, { requestId, checked: databaseBinding, maxBytes, background: checked.background });
+      const result = fromOwner(reply, requestId);
+      if (!result.ok) {
+        const { error } = result as OperationFailure;
+        logRejected(new EngineError(error.code, error.message, error.path), requestId);
       }
-      const potentiallyTriggered = compiled.transactionMode === "write" &&
-        (compiled.commitChecks ?? []).some((check: any) => compiled.statements.some((statement: any) =>
-          statement.operation !== "select" && check.triggeredBy.includes(statement.resource),
-        ));
-
-      if (potentiallyTriggered) {
-        runtime.release_execution(BigInt(compiled.executionHandle));
-        const validationId = `cval_${idempotency?.keyHash.slice(0, 32) ?? crypto.randomUUID().replaceAll("-", "")}`;
-        const reply = fromOwner(await owner(`tx_${validationId.slice("cval_".length)}`).atomic({
-          validationId, auth, request: body.text, idempotency, databaseBinding, snapshot: runtime.snapshot,
-        }, requestId), requestId);
-        if (!reply.ok) return reply;
-        const executed: any = reply.value;
-        return {
-          ok: true,
-          requestId,
-          value: {
-            transactionId: executed.transactionId,
-            status: "committed",
-            results: executed.results,
-            meta: {
-              requestId: executed.originalRequestId ?? requestId,
-              policyVersion: compiled.policyVersion,
-              schemaVersion: compiled.schemaVersion,
-              role: auth.role,
-              commitChecks: executed.commitChecks,
-            },
-            ...(debugAuthorized && executed.executionTrace
-              ? { debug: { executionTrace: executed.executionTrace } }
-              : {}),
-          },
-        };
-      }
-
-      const executed = await executeSealedEnvelope(
-        runtime,
-        compiled,
-        requestId,
-        transportFactory,
-        idempotency,
-        dependencies.executionTrace?.enabled ? {
-          enabled: true,
-          sink: dependencies.executionTrace.sink,
-          inputStatements: body.value.statements,
-        } : null,
-      );
-      runInBackground(
-        checked.background,
-        observeCostEnvelope(
-          compiled, dependencies.config.costCatalog, `${requestId}-cost`, transportFactory, maxBytesPerValue, costTimeoutMs,
-        ),
-        requestId,
-      );
-      return {
-        ok: true,
-        requestId,
-        value: {
-          transactionId: executed.transactionId ?? `atomic_${requestId}`,
-          status: "committed",
-          results: executed.results,
-          meta: {
-            requestId: executed.originalRequestId ?? requestId,
-            policyVersion: compiled.policyVersion,
-            schemaVersion: compiled.schemaVersion,
-            role: auth.role,
-            commitChecks: "not_triggered",
-          },
-          ...(debugAuthorized && executed.executionTrace
-            ? { debug: { executionTrace: executed.executionTrace } }
-            : {}),
-        },
-      };
+      return result;
     }),
 
     begin: (input, context) => run(context, undefined, async (checked): Promise<OperationResult> => {

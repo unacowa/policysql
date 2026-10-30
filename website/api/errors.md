@@ -58,7 +58,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_COST_UNKNOWN` | 403 | queryのcostを安全に見積もれない |
 | `POLICYSQL_NOT_FOUND` | 404 | endpointが存在しない |
 | `POLICYSQL_STALE_OPERATION` | 409 | policyまたはcatalog versionが古い |
-| `POLICYSQL_IDEMPOTENCY_CONFLICT` | 409 | 通常atomicで同じkeyが異なるrequestに使われた |
+| `POLICYSQL_IDEMPOTENCY_CONFLICT` | 409 | Atomic Execute（commit checkを行うDO経路を含む）で同じkeyが異なるrequestに使われた |
 | `POLICYSQL_TRANSACTION_CONFLICT` | 409 | 対話型transactionのcommandが現在の状態（sequenceなど）と矛盾する |
 | `POLICYSQL_TRANSACTION_UNAVAILABLE` | 409 | transactionが存在しない、利用者に属していない、期限切れ、または失敗状態 |
 | `POLICYSQL_COMMIT_CHECK_REJECTED` | 409 | commit checkがtransactionを拒否した、または安全に完了できない |

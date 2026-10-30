@@ -59,7 +59,7 @@ fn action() -> impl Strategy<Value = Action> {
         4 => (-1i8..=1, 0u8..5, any::<bool>()).prop_map(|(offset, sql, alternate)| Action::Statement { offset, sql, alternate }),
         3 => (-1i8..=1).prop_map(|offset| Action::Commit { offset }),
         1 => (-1i8..=1).prop_map(|offset| Action::Rollback { offset }),
-        12 => (prop::bool::weighted(0.8), 0u8..5).prop_map(|(ok, class)| Action::Resolve { ok, class }),
+        12 => (prop::bool::weighted(0.8), 0u8..6).prop_map(|(ok, class)| Action::Resolve { ok, class }),
         2 => Just(Action::Timer),
         2 => prop_oneof![0u16..50, 3_900u16..4_100, 0u16..9_000].prop_map(Action::Advance),
         1 => Just(Action::Abandon),
@@ -78,12 +78,13 @@ const SQL: [&str; 5] = [
     "DELETE FROM projects",
     "BAD",
 ];
-const CLASSES: [&str; 5] = [
+const CLASSES: [&str; 6] = [
     "timeout",
     "unavailable",
     "rejected",
     "not_committed",
     "unknown",
+    "limit",
 ];
 
 fn next_sequence(engine: &Engine) -> u64 {
@@ -470,7 +471,7 @@ fn generators_reach_every_outcome() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 1_000, ..ProptestConfig::default() })]
+    #![proptest_config(common::proptest_config(1_000))]
 
     #[test]
     fn commit_safety_over_random_sequences(actions in prop::collection::vec(action(), 1..60)) {
@@ -506,7 +507,7 @@ fn commit_path() -> impl Strategy<Value = Vec<Action>> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 2_000, ..ProptestConfig::default() })]
+    #![proptest_config(common::proptest_config(2_000))]
 
     #[test]
     fn commit_safety_from_committing(actions in commit_path()) {
@@ -579,7 +580,7 @@ fn tamper(text: &str, how: u8, position: usize, value: i64) -> String {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 1_000, ..ProptestConfig::default() })]
+    #![proptest_config(common::proptest_config(1_000))]
 
     /// Tampered durable state is discarded or behaves as some valid state; it never yields a
     /// COMMIT, and a commit against a discarded record is always outcome-unknown.
@@ -703,7 +704,7 @@ fn host() -> String {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 500, ..ProptestConfig::default() })]
+    #![proptest_config(common::proptest_config(500))]
 
     /// A statement whose completion cannot be stored is not recorded as done: the record
     /// moves to `failed` from the state before it, and a retry of that statement gets the

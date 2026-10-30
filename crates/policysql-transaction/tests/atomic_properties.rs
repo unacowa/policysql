@@ -19,12 +19,13 @@ use serde_json::{Value, json};
 const KEY: &str = "request-key-0001";
 const KEY_HASH: &str = "0123456789abcdef0123456789abcdef00000000000000000000000000000000";
 const FINGERPRINT: &str = "f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00d";
-const CLASSES: [&str; 5] = [
+const CLASSES: [&str; 6] = [
     "timeout",
     "unavailable",
     "rejected",
     "not_committed",
     "unknown",
+    "limit",
 ];
 
 /// The codes the client takes as a definite rejection of `execute` (`REJECTIONS` in
@@ -257,7 +258,7 @@ fn run(setup: &Setup, actions: &[Action]) -> (Engine, Vec<(usize, Option<Value>)
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 768, ..ProptestConfig::default() })]
+    #![proptest_config(common::proptest_config(768))]
 
     #[test]
     fn atomic_execution_properties(setup in setup(), actions in prop::collection::vec(action(), 0..36)) {
@@ -279,6 +280,9 @@ proptest! {
             // One key and one body: a keyed retry never executes twice.
             prop_assert!(engine.observed.envelope_commits <= 1, "{} envelopes committed", engine.observed.envelope_commits);
             prop_assert!(engine.idempotency_rows.len() <= 1 + usize::from(setup.row == 3));
+            // Requests run one after another, so every execution's lookup sees the row of an
+            // earlier committed one: the table's PRIMARY KEY is never what stops a second row.
+            prop_assert_eq!(engine.observed.duplicate_inserts, 0, "the lookup never misses a committed row");
         }
         if setup.body == 3 {
             prop_assert_eq!(engine.observed.envelope_commits, 0, "a failed expectation never commits");
@@ -296,6 +300,42 @@ proptest! {
         let (again, _) = run(&setup, &actions);
         prop_assert_eq!(&again.transcript, &engine.transcript);
     }
+}
+
+/// The counterexample CI found for `atomic_execution_properties` (#77): a keyed direct write
+/// whose COMMIT fails (`timeout`) and whose ROLLBACK then fails too, followed by a retry of the
+/// same key and body. The retry executes once and stores one row. Before the fake database
+/// modelled each execution's own connection, the first execution's uncommitted row survived
+/// the failed ROLLBACK and was committed by the retry's COMMIT: a second row for one key, which
+/// no real database produces (one transaction per Hrana baton, `key_hash` PRIMARY KEY).
+#[test]
+fn a_failed_commit_then_failed_rollback_leaves_no_row_for_the_retry() {
+    let setup = Setup {
+        owner: false,
+        keyed: true,
+        body: 1,
+        row: 0,
+        requests: 3,
+    };
+    let mut actions = vec![Action::Resolve(false, 0); 12];
+    actions.extend([Action::Resolve(true, 0); 5]);
+    actions.extend([Action::Resolve(false, 0); 2]);
+    let (engine, executions) = run(&setup, &actions);
+    // 1: the binding check times out; 2: COMMIT and its ROLLBACK time out; 3: runs and commits.
+    assert_eq!(
+        code(executions[0].1.as_ref().unwrap_or(&Value::Null)),
+        Some("POLICYSQL_DATABASE_TIMEOUT")
+    );
+    assert_eq!(
+        code(executions[1].1.as_ref().unwrap_or(&Value::Null)),
+        Some("POLICYSQL_DATABASE_TIMEOUT")
+    );
+    assert_eq!(
+        executions[2].1.as_ref().map(|reply| reply["ok"].clone()),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(engine.observed.envelope_commits, 1);
+    assert_eq!(engine.idempotency_rows.len(), 1, "one row for one key");
 }
 
 #[test]

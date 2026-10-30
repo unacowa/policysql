@@ -276,6 +276,48 @@ fn a_commit_failure_is_never_a_rejection_and_rolls_back() {
     }
 }
 
+/// ADR 0024 pull request 8: a result the adapter could not carry (`limit`) is the client's
+/// `POLICYSQL_LIMIT_EXCEEDED` on the envelope, as the TypeScript direct path answered, and
+/// `POLICYSQL_INTERNAL` on the idempotency lookup or insert, so a keyed request whose outcome
+/// could not be read is never rejected (never `IDEMPOTENCY_CONFLICT`) and never runs again.
+#[test]
+fn a_limit_failure_is_limit_exceeded_on_the_envelope_and_internal_on_the_idempotency_row() {
+    // Effects of a keyed write: checkBinding, open, lookup, envelope, insert, commit.
+    for (successes, expected) in [
+        (2, "POLICYSQL_INTERNAL"),
+        (3, "POLICYSQL_LIMIT_EXCEEDED"),
+        (4, "POLICYSQL_INTERNAL"),
+    ] {
+        let mut engine = Engine::atomic(false);
+        engine.feed(&execute_request(&insert("p1"), Some(KEY)));
+        for _ in 0..successes {
+            engine.resolve(true, "unknown");
+        }
+        engine.resolve(false, "limit");
+        engine.settle();
+        assert_eq!(
+            code(engine.last_reply().unwrap_or(&Value::Null)),
+            Some(expected),
+            "after {successes} effects"
+        );
+        assert_eq!(engine.observed.commits_emitted, 0);
+        assert_eq!(engine.observed.rollbacks_emitted, 1);
+        assert_eq!(engine.idempotency_rows, Vec::<[String; 3]>::new());
+        assert_eq!(engine.compiler.live_handles(), 0);
+    }
+    // Unkeyed, the envelope's limit is the client's too.
+    let mut engine = Engine::atomic(false);
+    engine.feed(&execute_request(&insert("p1"), None));
+    engine.resolve(true, "unknown");
+    engine.resolve(true, "unknown");
+    engine.resolve(false, "limit");
+    engine.settle();
+    assert_eq!(
+        code(engine.last_reply().unwrap_or(&Value::Null)),
+        Some("POLICYSQL_LIMIT_EXCEEDED")
+    );
+}
+
 #[test]
 fn an_envelope_that_could_trigger_a_check_is_forwarded_and_its_reply_relayed() {
     let mut engine = Engine::atomic(false);
