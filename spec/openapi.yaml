@@ -296,9 +296,11 @@ components:
         lookup and response storage remain in the mutation transaction. Without a key,
         this table is never accessed and each request is a new execution. Interactive
         start without a key creates a new transaction; subsequent commands retain their
-        sequence-based retry rules. Empty or malformed keys are rejected. Read-only
+        sequence-based retry rules. Empty or malformed keys are rejected with 400
+        POLICYSQL_IDEMPOTENCY_KEY_INVALID before any database work. A key is 16-128 ASCII characters
+        from letters, digits and `. _ : - + / =` (base64 keys are accepted unchanged). Read-only
         atomic execution does not use idempotency storage.
-      schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._:-]{16,128}$' }
+      schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._:+/=-]{16,128}$' }
     TransactionId:
       name: transactionId
       in: path

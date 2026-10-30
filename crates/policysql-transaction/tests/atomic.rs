@@ -167,7 +167,7 @@ fn duplicate_rows_and_a_malformed_stored_record_are_internal() {
 fn a_malformed_key_is_rejected_and_an_unkeyed_write_stores_nothing() {
     let mut engine = Engine::atomic(false);
     let bad = engine.run(&execute_request(&insert("p1"), Some("short")));
-    assert_eq!(code(&bad), Some("POLICYSQL_IDEMPOTENCY_KEY_REQUIRED"));
+    assert_eq!(code(&bad), Some("POLICYSQL_IDEMPOTENCY_KEY_INVALID"));
     assert_eq!(engine.observed.commits_emitted, 0);
     let unkeyed = engine.run(&execute_request(&insert("p1"), None));
     assert!(

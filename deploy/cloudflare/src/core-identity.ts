@@ -1,7 +1,7 @@
 // Request identities, fingerprints, and command digests, as core computes them (ADR 0024 pull
 // request 2, ADR 0025). Core's canonical JSON and SHA-256 are the only definition: the engine
 // and the owner use `identity_json`'s result and compute no hash of their own. Core also checks
-// the client's `Idempotency-Key` syntax (POLICYSQL_IDEMPOTENCY_KEY_REQUIRED).
+// the client's `Idempotency-Key` syntax (POLICYSQL_IDEMPOTENCY_KEY_INVALID).
 import { internalError, wasmError } from "./errors.ts";
 import type { DatabaseBinding } from "./database.ts";
 import type { AuthContext } from "./types.ts";
@@ -30,7 +30,7 @@ const fromCore = <T>(runtime: IdentityRuntime, input: unknown, read: (result: an
 };
 
 // The client's key as core reads it: absent when the caller sent none, a string as is, and
-// anything else as `null`, which core rejects with POLICYSQL_IDEMPOTENCY_KEY_REQUIRED. A
+// anything else as `null`, which core rejects with POLICYSQL_IDEMPOTENCY_KEY_INVALID. A
 // transport that can repeat a field (HTTP joins repeated headers with a comma) passes the
 // joined value, which never matches the key syntax.
 const keyMember = (key: unknown) => key === undefined ? {} : { key: typeof key === "string" ? key : null };

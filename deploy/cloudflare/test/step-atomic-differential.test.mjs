@@ -506,7 +506,7 @@ test("a keyed write, its replay, and a conflicting body on the key agree", async
 
 test("a read ignores the key, and a malformed key is rejected before any database work, alike", async (t) => {
   const env = await agree(t, [{ body: selectProjects, key: KEY }, { body: insertProject("p1"), key: "short" }, { body: selectProjects, key: "short" }]);
-  assert.deepEqual(env.answers, [COMMITTED, "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED", COMMITTED]);
+  assert.deepEqual(env.answers, [COMMITTED, "POLICYSQL_IDEMPOTENCY_KEY_INVALID", COMMITTED]);
   assert.equal(env.sides.step.calls.some((call) => call.sql?.includes("policysql_idempotency")), false);
 });
 

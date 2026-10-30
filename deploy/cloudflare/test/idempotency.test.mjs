@@ -29,18 +29,40 @@ test("a different principal with the same subject, role and session has its own 
   assert.equal(authIdentity(runtime, auth, testBinding()), authIdentity(runtime, { ...auth }, testBinding()));
 });
 
-test("key syntax is core's: a bad key is POLICYSQL_IDEMPOTENCY_KEY_REQUIRED, before any hash is used", () => {
+// The accepted key alphabet: letters, digits, `. _ : -` and the standard and URL-safe base64
+// characters `+ / =`, 16-128 bytes. Rejected: anything else, a comma (a repeated header is
+// comma-joined), whitespace, controls, non-ASCII.
+const BAD_KEYS = [
+  null, 1, "", "a".repeat(15), "a".repeat(129), `${key},${key}`, `${key}\n`, `${key}\t`, ` ${key}`, `${key} `,
+  "request key 00001", "request-key-00\u00e91", "request-key-0001\u0000", "request-key-0001\u007f",
+  "request-key-000!", "request-key-000?", "request-key-00\"1", "request-key-000;", "request-key-00\\1",
+  "\uff21".repeat(16), "request-key-0001\u200b",
+];
+const GOOD_KEYS = [
+  "a".repeat(16), "A.b_c:d-0123456789", "z".repeat(128),
+  "dGhpcyBpcyBhIGtleSE=", "dGhpcyBpcyBhIGtleQ==", "ab+cd/ef0123456789+/==", "AAAAAAAAAAAAAAAA", "a-b_c-d_e-f_g-h_",
+  `${"a".repeat(126)}==`, "=".repeat(16), "+".repeat(16), "/".repeat(16),
+];
+
+test("key syntax is core's: a malformed key is POLICYSQL_IDEMPOTENCY_KEY_INVALID, before any hash is used", () => {
   const auth = { principal: "p", subject: "s", role: "member", session: {} };
-  for (const bad of [null, 1, "", "a".repeat(15), "a".repeat(129), `${key},${key}`, `${key}\n`, "request key 00001", "request-key-00\u00e91"]) {
+  for (const bad of BAD_KEYS) {
     assert.throws(
       () => requestIdentity(runtime, { key: bad, auth, bodyText: "{}", endpoint: "execute", databaseBinding: testBinding() }),
-      { code: "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED", message: /^Idempotency-Key must contain 16-128 letters/ },
+      { code: "POLICYSQL_IDEMPOTENCY_KEY_INVALID", message: /^Idempotency-Key must be 16-128 characters/ },
       JSON.stringify(bad),
     );
   }
-  for (const good of ["a".repeat(16), "A.b_c:d-0123456789", "z".repeat(128)]) {
-    assert.match(requestIdentity(runtime, { key: good, auth, bodyText: "{}", endpoint: "execute", databaseBinding: testBinding() }).keyHash, /^[a-f0-9]{64}$/u);
+  for (const good of GOOD_KEYS) {
+    assert.match(requestIdentity(runtime, { key: good, auth, bodyText: "{}", endpoint: "execute", databaseBinding: testBinding() }).keyHash, /^[a-f0-9]{64}$/u, good);
   }
+});
+
+test("a base64 key and its URL-safe form are different keys with different hashes", () => {
+  const auth = { principal: "p", subject: "s", role: "member", session: {} };
+  const hash = (k) => requestIdentity(runtime, { key: k, auth, bodyText: "{}", endpoint: "execute", databaseBinding: testBinding() }).keyHash;
+  assert.notEqual(hash("ab+cd/ef0123456789=="), hash("ab-cd_ef0123456789=="));
+  assert.notEqual(hash("dGhpcyBpcyBhIGtleQ=="), hash("dGhpcyBpcyBhIGtleQ"));
 });
 
 test("an identity input core rejects is POLICYSQL_INTERNAL, never a hash", () => {

@@ -46,7 +46,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_INVALID_PARAMETER` | 400 | parameterの不足、型、値が不正 |
 | `POLICYSQL_AMBIGUOUS_PARAMETER_TYPE` | 400 | Explainでparameter型を一意に証明できない |
 | `POLICYSQL_RESERVED_PARAMETER` | 400 | server用のparameter名を使用した |
-| `POLICYSQL_IDEMPOTENCY_KEY_REQUIRED` | 400 | 明示されたkeyが空または形式不正。省略時には発生しない（互換性のため既存codeを維持） |
+| `POLICYSQL_IDEMPOTENCY_KEY_INVALID` | 400 | `Idempotency-Key`が空または書式不正（16〜128文字のASCII英数字と`. _ : - + / =`以外を含む、長さが範囲外、header重複によるカンマ結合）。keyの省略では発生しない。DB処理の前に拒否するため、再送しても成功しない |
 | `POLICYSQL_FORBIDDEN_ACCESS` | 403 | `PolicySQL-Role`がtrusted sessionの`roles`にない、またはendpointに必要なaccessがない |
 | `POLICYSQL_MISSING_POLICY` | 403 | 適用可能なpolicyがない |
 | `POLICYSQL_FORBIDDEN_OPERATION` | 403 | operationが許可されていない |

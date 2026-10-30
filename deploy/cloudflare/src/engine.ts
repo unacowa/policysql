@@ -46,7 +46,7 @@ export type SnapshotResult<T = unknown> =
 
 export type ExecuteInput = {
   bodyText: BodyText;
-  /** Optional replay key (16-128 of `A-Za-z0-9._:-`). */
+  /** Optional replay key (16-128 of `A-Za-z0-9._:-+/=`). */
   idempotencyKey?: string;
   /** Requested role; omitted selects the session's default role. */
   role?: string;

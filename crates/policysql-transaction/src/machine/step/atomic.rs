@@ -506,7 +506,7 @@ impl<C: Compiler> Step<'_, C> {
     }
 
     /// `identity_json` `request` for `execute`: `None` without a key; a malformed key is the
-    /// client's `POLICYSQL_IDEMPOTENCY_KEY_REQUIRED`.
+    /// client's `POLICYSQL_IDEMPOTENCY_KEY_INVALID`.
     fn request_idempotency(
         request: &ExecuteRequest<'_>,
     ) -> std::result::Result<Option<Idempotency>, Box<RawValue>> {
@@ -534,7 +534,7 @@ impl<C: Compiler> Step<'_, C> {
                     .map(|output| output.idempotency)
                     .map_err(|_| error_reply(Code::Internal))
             }
-            Err(identity::IdentityError::KeyRequired) => Err(error_reply(Code::KeyRequired)),
+            Err(identity::IdentityError::KeyInvalid) => Err(error_reply(Code::KeyInvalid)),
             Err(identity::IdentityError::Internal) => Err(error_reply(Code::Internal)),
         }
     }

@@ -357,3 +357,31 @@ test("rejection pairs follow the public status table: 403 PRESET_COLUMN is defin
     await assert.rejects(u.client.execute(select), error => error instanceof PolicySqlOutcomeUnknownError, code);
   }
 });
+
+test("a key the server rejects as malformed (400 IDEMPOTENCY_KEY_INVALID) is a definite rejection, not an unknown outcome", async () => {
+  const body = errorBody("POLICYSQL_IDEMPOTENCY_KEY_INVALID");
+  const h = setup({}, () => async () => ({ status: 400, body }));
+  await assert.rejects(h.client.execute("UPDATE posts SET title = 'x'", {}, { idempotencyKey: "request-key-0001" }), error =>
+    !(error instanceof PolicySqlOutcomeUnknownError) && error.code === "POLICYSQL_IDEMPOTENCY_KEY_INVALID" && error.status === 400);
+  // The retired name and any other status cannot establish an outcome.
+  for (const [status, code] of [[400, "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED"], [409, "POLICYSQL_IDEMPOTENCY_KEY_INVALID"]]) {
+    const u = setup({}, () => async () => ({ status, body: errorBody(code) }));
+    await assert.rejects(u.client.execute(select, {}, { idempotencyKey: "request-key-0001" }), error => error instanceof PolicySqlOutcomeUnknownError, code);
+  }
+});
+
+test("the client accepts exactly the keys the server accepts (16-128 of A-Za-z0-9._:-+/=) and sends them unchanged", async () => {
+  const good = ["a".repeat(16), "z".repeat(128), "dGhpcyBpcyBhIGtleSE=", "dGhpcyBpcyBhIGtleQ==", "ab+cd/ef0123456789==", "a-b_c-d_e-f_g-h_", "A.b_c:d-0123456789"];
+  for (const key of good) {
+    const h = setup();
+    await h.client.execute("UPDATE posts SET title = 'x'", {}, { idempotencyKey: key });
+    assert.equal(h.calls[0].headers.get("idempotency-key"), key);
+  }
+  const bad = ["", "a".repeat(15), "a".repeat(129), "request-key-0001,request-key-0002", "request-key-0001\n", " request-key-0001",
+    "request key 0001", "request-key-00\u00e91", "request-key-000!", "request-key-000\u0000", null, 1];
+  for (const key of bad) {
+    const h = setup();
+    await assert.rejects(h.client.execute(select, {}, { idempotencyKey: key }), TypeError, JSON.stringify(key));
+    assert.equal(h.calls.length, 0);
+  }
+});
