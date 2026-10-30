@@ -10,6 +10,8 @@
 //   the request reached, so a caller can tell that transaction owners run it too.
 // scripts/provision-dev.mjs waits for consecutive answers that all name the version it just
 // deployed before the release smoke starts, and fails the smoke on any other version.
+import { createErrorResponse } from "../src/http/responses.ts";
+import type { TrustedSession } from "../src/types.ts";
 import type { FetchHandler } from "./rate-limit.ts";
 
 export const DEPLOYMENT_VERSION_HEADER = "policysql-deployment-version";
@@ -40,23 +42,45 @@ export const withDeploymentVersion = (handler: FetchHandler): FetchHandler => as
   return tagged;
 };
 
+/** The access a session needs for `/healthz/owner`: the one transaction endpoints require. */
+export const OWNER_VERSION_ACCESS = "execute";
+
 /**
- * Answers `GET /healthz/owner` for an authenticated request. A fresh object (a new unique id,
- * as each transaction gets its own) reports the version it runs; it holds no transaction and
- * stores nothing.
+ * Answers `GET /healthz/owner` for an authenticated request whose session has `execute`
+ * access, the access that lets it start a transaction and so create an owner anyway; any
+ * other session gets 403 before an object is created. A fresh object (a new unique id, as
+ * each transaction gets its own) reports the version it runs; it holds no transaction and
+ * stores nothing. When the probe fails, `owner` is "unknown" and `ownerError` says why.
  */
-export const ownerVersionRoute = async (request: Request, env: VersionBindings & { TRANSACTION_OWNER?: DurableObjectNamespace }) => {
-  if (request.method !== "GET") return json({ error: { code: "POLICYSQL_NOT_FOUND", message: "Not found." } }, 404);
+export const ownerVersionRoute = async (
+  request: Request,
+  env: VersionBindings & { TRANSACTION_OWNER?: DurableObjectNamespace },
+  session: TrustedSession | undefined,
+  requestId: string,
+) => {
+  if (request.method !== "GET") return createErrorResponse(404, "POLICYSQL_NOT_FOUND", "The resource was not found.", { requestId });
+  const access = (session as { access?: unknown } | undefined)?.access;
+  if (!Array.isArray(access) || !access.includes(OWNER_VERSION_ACCESS)) {
+    return createErrorResponse(403, "POLICYSQL_FORBIDDEN_ACCESS", "The session cannot perform this operation.", { requestId });
+  }
   const namespace = env.TRANSACTION_OWNER;
   let owner = UNKNOWN;
-  if (namespace && typeof namespace.newUniqueId === "function") {
+  let ownerError: string | null = null;
+  if (!namespace || typeof namespace.newUniqueId !== "function") {
+    ownerError = "no_owner_namespace";
+  } else {
     try {
       const reply = await namespace.get(namespace.newUniqueId()).fetch(OWNER_PROBE_URL, { method: "GET" });
-      const body = await reply.json() as { version?: unknown };
-      owner = typeof body?.version === "string" ? body.version : UNKNOWN;
-    } catch { owner = UNKNOWN; }
+      let body: { version?: unknown } | null = null;
+      try { body = await reply.json() as { version?: unknown }; } catch { body = null; }
+      if (!reply.ok) ownerError = `owner_status_${reply.status}`;
+      else if (typeof body?.version !== "string") ownerError = "owner_reply_without_version";
+      else owner = body.version;
+    } catch (error) {
+      ownerError = `owner_unreachable_${(error as Error)?.name ?? "Error"}`;
+    }
   }
-  return json({ worker: deploymentVersion(env), owner });
+  return json({ worker: deploymentVersion(env), owner, ...(ownerError ? { ownerError } : {}) });
 };
 
 /** Object side: true for the probe message, which never reaches the transaction owner core. */
@@ -64,3 +88,23 @@ export const isOwnerVersionProbe = (request: Request): boolean =>
   request.method === "GET" && new URL(request.url).href === OWNER_PROBE_URL;
 
 export const ownerVersionReply = (env: VersionBindings) => json({ version: deploymentVersion(env) });
+
+type OwnerClass = new (...args: any[]) => { fetch(request: Request): Promise<Response> };
+
+/**
+ * The wrapper's TransactionOwner class: the library's Durable Object class plus the version
+ * probe. Every message except the exact probe goes to the library's `fetch`.
+ */
+export const withOwnerVersionProbe = <Base extends OwnerClass>(Library: Base) => {
+  class Probed extends Library {
+    versionEnv: VersionBindings;
+    constructor(...args: any[]) {
+      super(args[0], args[1]);
+      this.versionEnv = { CF_VERSION_METADATA: (args[1] as VersionBindings | undefined)?.CF_VERSION_METADATA };
+    }
+    fetch(request: Request): Promise<Response> {
+      return isOwnerVersionProbe(request) ? Promise.resolve(ownerVersionReply(this.versionEnv)) : super.fetch(request);
+    }
+  }
+  return Probed;
+};

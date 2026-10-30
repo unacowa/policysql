@@ -115,16 +115,24 @@ as `SMOKE_VALIDATOR_HMAC_SECRET` / `HOOK_SECRET`. Neither key is printed.
 the previous Worker version or a Durable Object running the previous code. The wrapper (not the
 library) reads Cloudflare's version metadata binding (`CF_VERSION_METADATA`) and
 - sets `policysql-deployment-version: <version id>` on every response (`wrapper/deployment-version.ts`);
-- answers the authenticated `GET /healthz/owner` with `{ worker, owner }`, where `owner` is the
-  version a fresh Durable Object of `TRANSACTION_OWNER` reports (a wrapper-owned probe message
-  that never reaches the transaction owner core).
+- answers `GET /healthz/owner` with `{ worker, owner }`, where `owner` is the version a fresh
+  Durable Object of `TRANSACTION_OWNER` reports (a wrapper-owned probe message that never
+  reaches the transaction owner core). The route requires an authenticated session with
+  `execute` access, the access that may start a transaction and so create an owner anyway;
+  any other session gets 403 `POLICYSQL_FORBIDDEN_ACCESS` before an object is created. Wrapper
+  routes (`createWrapperFetch`'s `routes`) receive the verified session for this check. When the
+  probe fails, `owner` is `"unknown"` and `ownerError` says why (`owner_status_<n>`,
+  `owner_reply_without_version`, `owner_unreachable_<error>`, `no_owner_namespace`).
 
 `scripts/release-readiness.mjs` starts the smoke only after five consecutive rounds (one second
 apart) in which the Worker, a fresh owner and the validator all report the version ids
 `wrangler deploy` printed, followed by a Capabilities read of the release's snapshot, ABI
 version, limits and `commitChecksConfigured`. During the smoke every response's version header is
 checked; a response from another version, or a 429 of the client rate limit, makes the failure
-retryable (the wait and the smoke rerun, at most three attempts). Any other failure is final.
+retryable (a new token, the wait and the smoke rerun, at most three attempts). A response
+without the header never reached the wrapper (a Cloudflare error page such as 1101 or 52x); it
+is reported under `unversioned` with its status and path and is a final failure, not skew. Any
+other failure is final too.
 
 **What it covers**, beyond the SQL surface, mutations, idempotency, interactive transactions,
 security denials and string literals:
@@ -140,12 +148,31 @@ The development-only resources are `smoke_checks` (`id`, `verdict` of `allow`/`d
 member policies in `config/resources/`. Provisioning empties both tables before each release.
 The validator answers from the newest `smoke_checks` row its callback query returns (probe ids
 grow with time). It verifies the hook version, timestamp and signature, sends the capability only
-to the configured PolicySQL origin's callback path, and uses `fetchNoFollow`. The validator (not
-the PolicySQL Worker) sets the `global_fetch_strictly_public` compatibility flag: without it a
-fetch from one Worker to another on the same account's `workers.dev` subdomain never reaches
-the target (Cloudflare error 1042), so the callback goes out through the public front door as an
-external validator's would. The PolicySQL Worker's own outbound calls (Turso, the hook) are
-unchanged.
+to the configured PolicySQL origin's callback path, and uses `fetchNoFollow`.
+
+The validator (not the PolicySQL Worker) sets the `global_fetch_strictly_public` compatibility
+flag. What was observed without it: the hook request from the PolicySQL Durable Object reached
+the validator, but the validator's callback to `https://policysql-sqlite-turso-dev.<subdomain>.workers.dev`
+returned a non-JSON body and never appeared in the PolicySQL Worker's `wrangler tail`, so every
+check failed with `CALLBACK_FAILED`. With the flag the callback arrives like any external
+request. This matches Cloudflare's documented restriction on a Worker fetching another Worker of
+the same zone (error 1042) without the flag, but the response body was not captured, so the exact
+code is unconfirmed; why the opposite direction (Durable Object to validator) works without the
+flag is likewise only observed, not explained. The PolicySQL Worker's flags and outbound calls
+(Turso, the hook) are unchanged, so the reference deployment does not depend on this flag.
+
+**Timing margin of the allow path.** The hook deadline is the policy's `timeout_ms`, at most
+1,500 ms (`maxHookDurationMs`), and on Atomic Execute also the remaining statement deadline
+(`limits.timeoutMs`, 1,000 ms here, which starts before the INSERT). Inside it the Worker calls
+the validator, the validator calls back through the public front door, and the owner runs the
+callback SELECT on Turso. In the two release runs of #42 the client-measured Atomic allow took
+1,154 and 1,177 ms end to end (INSERT, hook and COMMIT, from the operator's network). Watch
+`acceptance.commitChecks.atomicAllow.elapsedMs` against `acceptance.commitChecks.budgets` in
+`release.json`, and the validator's `smoke_validator` log lines (`elapsedMs` from hook receipt to
+decision, `callbackMs` for the callback). The validator's callback timeout (1,000 ms) is below the
+hook cap, so a slow callback appears as `callback_failed` with `TimeoutError` in its log rather
+than as an expired hook; an allow that fails with neither line logged ran out of the hook
+deadline.
 
 Durable Object owner loss is not exercised in the real environment: the platform gives no
 supported way to evict one object on demand, and a redeploy restarts objects only after the

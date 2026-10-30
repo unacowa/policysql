@@ -30,7 +30,11 @@ const MAX_BODY_BYTES = 65_536;
 // Longer than any hook deadline (policy `timeout_ms` is at most 1500), so `timeout` always
 // expires the check before this validator answers.
 const TIMEOUT_DELAY_MS = 3_000;
-const CALLBACK_TIMEOUT_MS = 1_500;
+// Below the hook deadline (`timeout_ms: 1500`, the policy maximum), so a slow callback is
+// reported here as CALLBACK_FAILED (`callback_failed` with `TimeoutError` in the log) instead of
+// looking like an expired hook. The logs record `elapsedMs` (hook receipt to decision) and
+// `callbackMs`, the allow path's margin against that deadline.
+const CALLBACK_TIMEOUT_MS = 1_000;
 const CALLBACK_PATH = /^\/v1\/commit-checks\/cval_[a-f0-9]{32}\/query$/u;
 const CALLBACK_SQL = "SELECT id, verdict FROM smoke_checks ORDER BY id DESC LIMIT :limit";
 
@@ -64,6 +68,7 @@ const signatureValid = async (secret: string, timestamp: string, body: string, h
 const log = (event: Record<string, unknown>) => console.log(JSON.stringify({ event: "smoke_validator", ...event }));
 
 const check = async (request: Request, env: Env): Promise<Response> => {
+  const received = Date.now();
   const secret = env.HOOK_SECRET ?? "";
   const origin = env.POLICYSQL_ORIGIN ?? "";
   if (secret.length < 16 || !origin.startsWith("https://")) return reply(env, { error: "misconfigured" }, 500);
@@ -89,6 +94,7 @@ const check = async (request: Request, env: Env): Promise<Response> => {
   if (typeof token !== "string" || token === "") return decision(env, false, "CALLBACK_TOKEN");
 
   let verdict: unknown = null;
+  const callbackStarted = Date.now();
   try {
     const response = await fetchNoFollow(callback, {
       method: "POST",
@@ -98,15 +104,15 @@ const check = async (request: Request, env: Env): Promise<Response> => {
     });
     const result = await response.json() as any;
     if (!response.ok) {
-      log({ validationId: payload.validationId, outcome: "callback_rejected", status: response.status, code: result?.error?.code ?? null });
+      log({ validationId: payload.validationId, outcome: "callback_rejected", status: response.status, code: result?.error?.code ?? null, callbackMs: Date.now() - callbackStarted });
       return decision(env, false, "CALLBACK_FAILED");
     }
     verdict = result?.rows?.[0]?.verdict ?? null;
   } catch (error) {
-    log({ validationId: payload.validationId, outcome: "callback_failed", errorClass: (error as Error)?.name ?? "Error" });
+    log({ validationId: payload.validationId, outcome: "callback_failed", errorClass: (error as Error)?.name ?? "Error", callbackMs: Date.now() - callbackStarted });
     return decision(env, false, "CALLBACK_FAILED");
   }
-  log({ validationId: payload.validationId, outcome: "decided", verdict });
+  log({ validationId: payload.validationId, outcome: "decided", verdict, callbackMs: Date.now() - callbackStarted, elapsedMs: Date.now() - received });
   if (verdict === "allow") return decision(env, true);
   if (verdict === "timeout") {
     await new Promise((resolve) => setTimeout(resolve, TIMEOUT_DELAY_MS));

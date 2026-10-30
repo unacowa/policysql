@@ -9,8 +9,7 @@ import { configFromEnv } from "./config.ts";
 import { RUNTIME_LIMITS } from "./limits.ts";
 import { createDeploymentDatabase } from "./database.ts";
 import {
-  isOwnerVersionProbe, OWNER_VERSION_PATH, ownerVersionReply, ownerVersionRoute, withDeploymentVersion,
-  type VersionBindings,
+  OWNER_VERSION_PATH, ownerVersionRoute, withDeploymentVersion, withOwnerVersionProbe, type VersionBindings,
 } from "./deployment-version.ts";
 import { createWrapperFetch } from "./fetch.ts";
 import { authenticateJwt } from "./auth.ts";
@@ -42,7 +41,10 @@ const worker = createPolicySqlWorker<RateLimitedBindings>({
 export default {
   fetch: withDeploymentVersion(createWrapperFetch(
     worker.app, (env) => deploymentDatabase.binding(env), authenticateJwt,
-    { [OWNER_VERSION_PATH]: (request, env) => ownerVersionRoute(request, env as RateLimitedBindings & VersionBindings) },
+    {
+      [OWNER_VERSION_PATH]: (request, env, _context, { session, requestId }) =>
+        ownerVersionRoute(request, env as RateLimitedBindings & VersionBindings, session, requestId),
+    },
   )),
 };
 export { ABI_VERSION };
@@ -51,16 +53,5 @@ export { ABI_VERSION };
 // its owner's ports from its own env through the same deployment function. The wrapper adds
 // one message of its own, the version probe of `/healthz/owner`; every other message is the
 // library's.
-const LibraryTransactionOwner = durableObjectTransactionOwnerClass(worker.ownerDependencies);
-export class TransactionOwner extends LibraryTransactionOwner {
-  readonly versionEnv: VersionBindings;
-
-  constructor(state: DurableObjectState, env: RateLimitedBindings & VersionBindings) {
-    super(state, env);
-    this.versionEnv = { CF_VERSION_METADATA: env.CF_VERSION_METADATA };
-  }
-
-  fetch(request: Request): Promise<Response> {
-    return isOwnerVersionProbe(request) ? Promise.resolve(ownerVersionReply(this.versionEnv)) : super.fetch(request);
-  }
-}
+// test/deployment-version.test.mjs exercises this composition with the library's class.
+export const TransactionOwner = withOwnerVersionProbe(durableObjectTransactionOwnerClass(worker.ownerDependencies));

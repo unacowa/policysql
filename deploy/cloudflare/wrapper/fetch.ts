@@ -1,10 +1,22 @@
 // Deployment-owned request entry point. Not part of the published library.
 import type { PolicySqlWorkerApp } from "../src/package.ts";
 import type { DatabaseBinding } from "../src/database.ts";
+import type { TrustedSession } from "../src/types.ts";
 import { authenticateJwt, authenticateRequest, type Authenticate } from "./auth.ts";
 import {
   CALLBACK_RATE_LIMIT, CLIENT_RATE_LIMIT, withRateLimit, type FetchHandler, type RateLimitedBindings,
 } from "./rate-limit.ts";
+
+/**
+ * A wrapper-owned route. It runs after authentication and receives the verified session and
+ * the request id, so it can check the session's access as the library does for its routes.
+ */
+export type WrapperRoute = (
+  request: Request,
+  env: RateLimitedBindings,
+  context: ExecutionContext | undefined,
+  auth: { session: TrustedSession; requestId: string },
+) => Promise<Response>;
 
 const COMMIT_CHECK_CALLBACK = "/v1/commit-checks/";
 const HEALTH = "/healthz";
@@ -18,13 +30,14 @@ const HEALTH = "/healthz";
  * - Commit-check callbacks use a separate bucket, before `fetchCallback` parses the body
  *   or reaches a Durable Object; their capability is only checked inside the owner.
  * - `routes` are wrapper-owned paths (the reference wrapper's `/healthz/owner`). They are
- *   rate limited and authenticated like any other client request and never reach the library.
+ *   rate limited and authenticated like any other client request, get the verified session to
+ *   authorize it, and never reach the library.
  */
 export const createWrapperFetch = (
   app: PolicySqlWorkerApp<RateLimitedBindings>,
   binding: (env: RateLimitedBindings) => DatabaseBinding,
   authenticate: Authenticate = authenticateJwt,
-  routes: Readonly<Record<string, FetchHandler>> = {},
+  routes: Readonly<Record<string, WrapperRoute>> = {},
 ): FetchHandler => {
   const client = withRateLimit(async (request, env, context) => {
     const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
@@ -34,7 +47,7 @@ export const createWrapperFetch = (
       if ("response" in outcome) return outcome.response;
       session = outcome.session;
       const pathname = new URL(request.url).pathname;
-      if (Object.hasOwn(routes, pathname)) return routes[pathname](request, env, context);
+      if (Object.hasOwn(routes, pathname)) return routes[pathname](request, env, context, { session, requestId });
     }
     // The library reads no platform header; this wrapper passes Cloudflare's ray id.
     return app.fetch(request, env, context, { database: binding(env), session, requestId });

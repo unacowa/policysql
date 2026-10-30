@@ -367,12 +367,15 @@ const smoke = async (baseUrl, token, tracker) => {
   // Development-only resources (#42): commit checks through the dev validator, then bytes
   // (ADR 0016) and NULL assignment (ADR 0017).
   const sectionContext = { call, baseUrl, headers, expected: expectedVersions };
-  const commitChecks = await commitCheckSmoke(sectionContext);
+  const commitChecks = await commitCheckSmoke(sectionContext, {
+    hookTimeoutMs: capabilities.transactions?.maxHookDurationMs ?? null, atomicTimeoutMs: capabilities.limits?.timeoutMs ?? null,
+  });
   const bytesNull = await bytesNullSmoke(sectionContext, { maxBytesPerValue: capabilities.limits?.maxBytesPerValue });
   const visibleRows = execute.results?.[0]?.rows ?? [];
   const expected = localRelease();
   if (
     tracker.skewed.length > 0 ||
+    tracker.unversioned.length > 0 ||
     commitChecks.failures.length > 0 ||
     bytesNull.failures.length > 0 ||
     capabilities.transactions?.commitChecksConfigured !== true ||
@@ -415,6 +418,9 @@ const smoke = async (baseUrl, token, tracker) => {
   ) {
     const failure = new Error(`release smoke failed: ${JSON.stringify({
       versionSkew: tracker.skewed,
+      // Responses without the version header did not come from the wrapper (Cloudflare error
+      // page, e.g. 1101 or 52x): a failure of this release, never skew.
+      unversioned: tracker.unversioned,
       rateLimited: tracker.rateLimited,
       commitChecks,
       bytesNull,
@@ -455,11 +461,11 @@ const smoke = async (baseUrl, token, tracker) => {
     })}`);
     // Only a straggler of the previous version or the client rate limit makes a rerun
     // meaningful; any other failure is a regression.
-    failure.retryable = tracker.skewed.length > 0 || tracker.rateLimited > 0;
+    failure.retryable = tracker.retryable;
     throw failure;
   }
   return {
-    versions: { responses: tracker.responses, allFromRelease: tracker.skewed.length === 0 },
+    versions: { responses: tracker.responses, allFromRelease: tracker.skewed.length === 0 && tracker.unversioned.length === 0 },
     health: { ready: health.ready, snapshot: health.snapshot, abiVersion: health.abiVersion, profile: health.profile },
     capabilities: {
       status: capabilitiesResponse.status, id: capabilities.id, limitsMatch, limits: advertisedLimits(capabilities),
@@ -653,7 +659,9 @@ async function main() {
   const combined = deployed.combined;
   const upload = combined.match(/Total Upload:\s+([0-9.]+) KiB\s+\/ gzip:\s+([0-9.]+) KiB/);
   const startup = combined.match(/Worker Startup Time:\s+(\d+) ms/);
-  const jwt = await new SignJWT({
+  // A fresh 10-minute token per attempt: one attempt (readiness wait of at most 180 s, a
+  // possible 60 s rate-limit pause, the smoke) always ends before it expires.
+  const mintToken = () => new SignJWT({
     policysql: {
       roles: ["member"],
       default_role: "member",
@@ -673,6 +681,7 @@ async function main() {
   const readiness = [];
   let acceptance;
   for (let attempt = 1; ; attempt += 1) {
+    const jwt = await mintToken();
     readiness.push(await waitForRelease({
       baseUrl, token: jwt, version: deployed.version,
       validator: { url: validatorUrl, version: validator.version }, capabilitiesMatch,
@@ -683,7 +692,7 @@ async function main() {
       break;
     } catch (error) {
       if (!error.retryable || attempt >= 3) throw error;
-      process.stderr.write(`release smoke attempt ${attempt} saw ${JSON.stringify(tracker.skewed)} skew / ${tracker.rateLimited} rate-limited answers; waiting again\n`);
+      process.stderr.write(`release smoke attempt ${attempt} saw previous-version answers ${JSON.stringify(tracker.skewed)} / ${tracker.rateLimited} rate-limited answers; waiting again\n`);
       if (tracker.rateLimited > 0) await new Promise((resolve) => setTimeout(resolve, 60_000));
     }
   }

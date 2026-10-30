@@ -41,14 +41,14 @@ const INSERT_PROBE = "INSERT INTO smoke_checks (id, verdict) VALUES (:id, :verdi
  * callback query to see the uncommitted probe row; a denied or timed-out commit must leave no
  * row behind.
  */
-export const commitCheckSmoke = async (context) => {
+export const commitCheckSmoke = async (context, budgets = {}) => {
   const api = client(context);
   const failures = [];
   const expect = (condition, name) => { if (!condition) failures.push(name); };
   const ids = { atomicAllow: unique("ccp"), atomicDeny: unique("ccp"), interactiveAllow: unique("ccp"), interactiveTimeout: unique("ccp") };
 
   const atomicAllow = await api.execute([{ sql: INSERT_PROBE, params: { id: ids.atomicAllow, verdict: "allow" }, expect: { affectedRows: 1 } }]);
-  expect(atomicAllow.status === 200, "atomic allow commits");
+  expect(atomicAllow.status === 200 && atomicAllow.body?.meta?.commitChecks === "passed", "atomic allow commits after the check ran and passed");
   const atomicDeny = await api.execute([{ sql: INSERT_PROBE, params: { id: ids.atomicDeny, verdict: "deny" }, expect: { affectedRows: 1 } }]);
   expect(atomicDeny.status === 409 && errorCode(atomicDeny) === "POLICYSQL_COMMIT_CHECK_REJECTED", "atomic deny is rejected");
 
@@ -64,7 +64,8 @@ export const commitCheckSmoke = async (context) => {
     return { begin, statement, commit };
   };
   const interactiveAllow = await interactive("allow", ids.interactiveAllow);
-  expect(interactiveAllow.commit.status === 200 && interactiveAllow.commit.body?.status === "committed", "interactive allow commits");
+  expect(interactiveAllow.commit.status === 200 && interactiveAllow.commit.body?.status === "committed"
+    && interactiveAllow.commit.body?.meta?.commitChecks === "passed", "interactive allow commits after the check ran and passed");
   const interactiveTimeout = await interactive("timeout", ids.interactiveTimeout);
   expect(interactiveTimeout.statement.status === 200, "interactive timeout probe statement runs");
   expect(interactiveTimeout.commit.status === 409 && errorCode(interactiveTimeout.commit) === "POLICYSQL_COMMIT_CHECK_REJECTED",
@@ -84,9 +85,15 @@ export const commitCheckSmoke = async (context) => {
   return {
     failures,
     report: {
+      // The allow path must fit the hook deadline: at most `maxHookDurationMs`, and on Atomic
+      // Execute also within the statement deadline `timeoutMs` (README, "Release smoke").
+      budgets,
       atomicAllow: { ...summary(atomicAllow), commitChecks: atomicAllow.body?.meta?.commitChecks ?? null },
       atomicDeny: summary(atomicDeny),
-      interactiveAllow: { begin: interactiveAllow.begin.status, statement: interactiveAllow.statement.status, commit: summary(interactiveAllow.commit) },
+      interactiveAllow: {
+        begin: interactiveAllow.begin.status, statement: interactiveAllow.statement.status,
+        commit: { ...summary(interactiveAllow.commit), commitChecks: interactiveAllow.commit.body?.meta?.commitChecks ?? null },
+      },
       interactiveTimeout: { begin: interactiveTimeout.begin.status, statement: interactiveTimeout.statement.status, commit: summary(interactiveTimeout.commit) },
       committedProbes: committed?.length ?? null,
       deniedRowsLeft: committed === null ? null : committed.filter((entry) => !entry.endsWith(":allow")).length,

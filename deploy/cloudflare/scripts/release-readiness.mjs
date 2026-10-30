@@ -19,22 +19,32 @@ export const DEPLOYMENT_VERSION_HEADER = "policysql-deployment-version";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Records the version of every response; `skewed` lists versions other than `expected`. */
+/**
+ * Records the version of every response. `skewed` lists version ids other than `expected`
+ * (a previous release still answering: retryable). `unversioned` lists responses without the
+ * header with their status and path: they never reached the wrapper (a Cloudflare error page
+ * such as 1101 or 52x), which is a failure of this release, not skew, and is not retried.
+ */
 export const versionTracker = (expected, fetchImpl = fetch) => {
   const seen = new Map();
+  const unversioned = [];
   let rateLimited = 0;
   const call = async (url, init) => {
     const response = await fetchImpl(url, init);
-    const version = response.headers.get(DEPLOYMENT_VERSION_HEADER) ?? "missing";
-    seen.set(version, (seen.get(version) ?? 0) + 1);
+    const version = response.headers.get(DEPLOYMENT_VERSION_HEADER);
+    if (version === null) unversioned.push({ status: response.status, path: new URL(url).pathname });
+    else seen.set(version, (seen.get(version) ?? 0) + 1);
     if (response.status === 429) rateLimited += 1;
     return response;
   };
   return {
     call,
-    get responses() { return [...seen.values()].reduce((sum, count) => sum + count, 0); },
+    get responses() { return [...seen.values()].reduce((sum, count) => sum + count, unversioned.length); },
     get skewed() { return [...seen.entries()].filter(([version]) => version !== expected).map(([version, count]) => ({ version, count })); },
+    get unversioned() { return [...unversioned]; },
     get rateLimited() { return rateLimited; },
+    /** A failure is worth a rerun only when a previous version answered or the client limit hit. */
+    get retryable() { return unversioned.length === 0 && (this.skewed.length > 0 || rateLimited > 0); },
   };
 };
 

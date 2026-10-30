@@ -5,8 +5,10 @@ import test from "node:test";
 import { createHmac } from "node:crypto";
 import {
   DEPLOYMENT_VERSION_HEADER, deploymentVersion, isOwnerVersionProbe, OWNER_VERSION_PATH, ownerVersionReply,
-  ownerVersionRoute, withDeploymentVersion,
+  ownerVersionRoute, withDeploymentVersion, withOwnerVersionProbe,
 } from "../wrapper/deployment-version.ts";
+import { durableObjectTransactionOwnerClass } from "../src/adapters/durable-objects.ts";
+import { testConfig, testProvider } from "./helpers/database.mjs";
 import { createWrapperFetch } from "../wrapper/fetch.ts";
 import validator from "../dev-validator/index.ts";
 
@@ -55,13 +57,16 @@ test("/healthz/owner is authenticated and reports the Worker's and a fresh owner
   let authenticated = 0;
   const authenticate = async (request) => {
     authenticated += 1;
-    if (request.headers.get("authorization") !== "Bearer good") {
+    const access = { "Bearer good": ["execute"], "Bearer catalog": ["catalog", "explain"] }[request.headers.get("authorization")];
+    if (!access) {
       const { JwtAuthenticationError } = await import("../src/adapters/jwt.ts");
       throw new JwtAuthenticationError();
     }
-    return { principal: "p", subject: "s", roles: ["member"], defaultRole: "member", access: ["execute"], session: {} };
+    return { principal: "p", subject: "s", roles: ["member"], defaultRole: "member", access, session: {} };
   };
-  const fetch = createWrapperFetch(app, () => ({}), authenticate, { [OWNER_VERSION_PATH]: (request, env) => ownerVersionRoute(request, env) });
+  const fetch = createWrapperFetch(app, () => ({}), authenticate, {
+    [OWNER_VERSION_PATH]: (request, env, _context, { session, requestId }) => ownerVersionRoute(request, env, session, requestId),
+  });
   const denied = await fetch(new Request(`https://worker.test${OWNER_VERSION_PATH}`), env, undefined);
   assert.equal(denied.status, 401);
   assert.equal(namespace.calls.length, 0, "no Durable Object is reached before authentication");
@@ -72,6 +77,50 @@ test("/healthz/owner is authenticated and reports the Worker's and a fresh owner
   assert.equal(authenticated, 2);
   const post = await fetch(new Request(`https://worker.test${OWNER_VERSION_PATH}`, { method: "POST", headers: { authorization: "Bearer good" } }), env, undefined);
   assert.equal(post.status, 404);
+  // A session without `execute` (the access transactions need) creates no object.
+  const catalogOnly = await fetch(new Request(`https://worker.test${OWNER_VERSION_PATH}`, { headers: { authorization: "Bearer catalog" } }), env, undefined);
+  assert.equal(catalogOnly.status, 403);
+  assert.equal((await catalogOnly.json()).error.code, "POLICYSQL_FORBIDDEN_ACCESS");
+  assert.equal(namespace.calls.length, 1, "no Durable Object is created for a session without execute access");
+});
+
+test("a failed owner probe reports why instead of a bare unknown", async () => {
+  const session = { access: ["execute"] };
+  const route = (namespace) => ownerVersionRoute(new Request(`https://worker.test${OWNER_VERSION_PATH}`), { CF_VERSION_METADATA: { id: VERSION }, TRANSACTION_OWNER: namespace }, session, "req");
+  const stub = (fetch) => ({ newUniqueId: () => ({}), get: () => ({ fetch }) });
+  for (const [namespace, ownerError] of [
+    [undefined, "no_owner_namespace"],
+    [stub(async () => new Response("{}", { status: 500 })), "owner_status_500"],
+    [stub(async () => new Response("<html>", { status: 200 })), "owner_reply_without_version"],
+    [stub(async () => { throw new TypeError("network"); }), "owner_unreachable_TypeError"],
+  ]) {
+    assert.deepEqual(await (await route(namespace)).json(), { worker: VERSION, owner: "unknown", ownerError });
+  }
+});
+
+test("the wrapper's TransactionOwner answers the probe itself and hands every other message to the library", async () => {
+  let runtimeReads = 0;
+  const Library = durableObjectTransactionOwnerClass(() => ({
+    getRuntime: () => { runtimeReads += 1; throw new Error("the probe must not reach the owner core"); },
+    database: testProvider(),
+    config: testConfig(),
+  }));
+  const TransactionOwner = withOwnerVersionProbe(Library);
+  const values = new Map();
+  const state = { waitUntil() {}, storage: { async get(key) { return values.get(key); }, async put(key, value) { values.set(key, value); }, async setAlarm() {} } };
+  const object = new TransactionOwner(state, { CF_VERSION_METADATA: { id: VERSION } });
+  assert.ok(object instanceof Library);
+  const probe = await object.fetch(new Request("https://owner/deployment-version"));
+  assert.deepEqual(await probe.json(), { version: VERSION });
+  assert.equal(runtimeReads, 0);
+  assert.equal(values.size, 0, "the probe stores nothing");
+  // A library message still reaches the library's object: its reply carries the owner wire
+  // marker and the request id, which only the library's object sends.
+  const begin = await object.fetch(new Request("https://owner/begin", {
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_probe", "x-policysql-owner-wire": "1" }, body: "{",
+  }));
+  assert.equal(begin.headers.get("x-policysql-owner-wire"), "1");
+  assert.equal((await begin.json()).error.requestId, "req_probe");
 });
 
 test("an owner probe message is only the exact internal GET", () => {
@@ -202,4 +251,17 @@ test("the readiness wait needs consecutive rounds of the new Worker, owner and v
   assert.equal(tracker.responses, 4);
   assert.deepEqual(tracker.skewed, [{ version: OTHER, count: 1 }]);
   assert.equal(tracker.rateLimited, 1);
+  assert.deepEqual(tracker.unversioned, []);
+  assert.equal(tracker.retryable, true, "a previous version's answer makes the failure worth a rerun");
+
+  // A Cloudflare error page (1101, 52x) carries no version header: it is a failure of this
+  // release, reported with its status, never counted as skew and never retried.
+  const broken = versionTracker(VERSION, async (url) => (url.endsWith("crash")
+    ? new Response("<html>error 1101</html>", { status: 500 })
+    : new Response("{}", { headers: { [DEPLOYMENT_VERSION_HEADER]: url.endsWith("old") ? OTHER : VERSION } })));
+  for (const path of ["a", "old", "crash"]) await broken.call(`https://worker.test/v1/${path}`);
+  assert.equal(broken.responses, 3);
+  assert.deepEqual(broken.skewed, [{ version: OTHER, count: 1 }]);
+  assert.deepEqual(broken.unversioned, [{ status: 500, path: "/v1/crash" }]);
+  assert.equal(broken.retryable, false);
 });
