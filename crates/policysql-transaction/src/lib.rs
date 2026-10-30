@@ -7,8 +7,8 @@
 //! the command digests here; ADR 0025 makes core's canonical form the only definition. Pull
 //! request 4 adds the `step` machine ([`machine`]) for interactive transactions, pull request 5
 //! its commit checks and callbacks, and pull request 6 atomic execution and the cost evaluation
-//! ([`cost`]); no production path uses the machine before the switch-over (pull requests 7 and
-//! 8).
+//! ([`cost`]). Production owners run interactive transactions on the machine since pull request
+//! 7; atomic execution switches in pull request 8.
 
 pub mod canonical;
 pub mod cost;

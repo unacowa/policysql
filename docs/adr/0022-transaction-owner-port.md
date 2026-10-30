@@ -2,6 +2,9 @@
 
 - Status: accepted
 - Issue: #31 (stage 2 of [ADR 0019](0019-library-layers-and-the-wrapper-boundary.md))
+- Amended by: [ADR 0024](0024-transaction-step-machine.md) pull request 7 (the interactive
+  inputs are the step machine's owner inputs; `OwnerFacilities.name`; the owner name on the
+  Durable Objects wire)
 - Related: [ADR 0007](0007-transaction-retry-and-commit-check-protocol.md),
   [ADR 0014](0014-wrapper-provided-database-bindings.md),
   [ADR 0021](0021-explicit-engine-config.md)
@@ -75,6 +78,12 @@ callbacks). That wire form is an adapter detail. It lets a Worker and an object 
 versions talk during a rollout, and it needs no `cloudflare:workers` RPC base class, so the
 production adapter runs in the Node test harness. Moving to Durable Object RPC later changes
 only the adapter.
+
+Since [ADR 0024](0024-transaction-step-machine.md) pull request 7 the body of an interactive
+command or callback query is the step machine's owner input (the callback capability travels
+in it, not in `authorization`), every message names the owner it was routed to in
+`x-policysql-owner`, and a message in the earlier body shape (with `authFingerprint`) is
+answered `POLICYSQL_INTERNAL`.
 
 ### The Durable Objects adapter (`src/adapters/durable-objects.ts`)
 

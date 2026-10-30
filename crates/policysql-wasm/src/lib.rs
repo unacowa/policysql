@@ -655,8 +655,9 @@ impl PolicySqlRuntime {
     /// Adding this method bumped `ABI_VERSION` to 6; commit checks and callbacks (pull request
     /// 5) changed what it returns for some inputs and bumped it to 7; atomic execution (pull
     /// request 6: an `atomic` input is executed instead of answered `POLICYSQL_INTERNAL`, the
-    /// `request` event, `Execute.trace`, and the `Observe` context) bumped it to 8. No
-    /// production path calls it before the switch-over (ADR 0024 pull requests 7 and 8).
+    /// `request` event, `Execute.trace`, and the `Observe` context) bumped it to 8. Production
+    /// owners call it for interactive transactions since ADR 0024 pull request 7, which did not
+    /// change it; atomic execution switches in pull request 8.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn step_json(
