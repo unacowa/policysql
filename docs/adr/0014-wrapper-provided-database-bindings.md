@@ -57,6 +57,14 @@ keyed `interactive-start`):
   with the original request id and transaction id. Its `meta.policyVersion` and
   `meta.schemaVersion` are those of the deployment that answered (the stored record has no
   versions), as for every replay.
+- This holds only when the body still compiles and is authorized under the new snapshot. On
+  both placements the session check, the compile (which applies the role's policy), and the
+  binding check run before the idempotency lookup (`atomic.rs`: `request_checked` in the
+  engine, `atomic_input_checked` on the owner). A deployment whose policy, schema, or the
+  caller's access now forbids the committed statement (for example a policy that no longer
+  allows the insert) answers the retry with that error, for example
+  `POLICYSQL_FORBIDDEN_OPERATION`, which the client takes as a definite rejection although the
+  write committed. #80 does not change this; it is tracked in #85.
 - Another body, or another generation of the same database, still conflicts. Another scope or
   database id has another key hash.
 - The snapshot is still checked before any lookup: a request whose binding names another

@@ -19,7 +19,7 @@
 // step-differential.test.mjs.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -269,7 +269,7 @@ const signedBy = (secret, timestamp, body, signature) =>
 const ALLOW = () => Response.json({ version: "1", allowed: true });
 
 /** Both sides with a fake clock. `limits` are the runtime limits; `trace` enables tracing. */
-const environment = (t, { limits = {}, trace = false, engineConfig = config } = {}) => {
+const environment = (t, { limits = {}, trace = false, engineConfig = config, recorded = true } = {}) => {
   const directory = mkdtempSync(join(tmpdir(), "policysql-step-atomic-"));
   const runtime = makeRuntime(limits);
   const clock = { now: T0 };
@@ -288,7 +288,8 @@ const environment = (t, { limits = {}, trace = false, engineConfig = config } = 
     runtime, clock, faults, logs, sides: {},
     hooks: { ts: [], step: [] }, tokens: { ts: [], step: [] }, callbacks: { ts: [], step: [] }, traces: { ts: [], step: [] },
     validator: ALLOW, validatorErrors: [],
-    reference: reference.of(t),
+    // A test with no recorded scenario of its own has no reference side.
+    reference: recorded ? reference.of(t) : null,
     setSide(side) { current = side; },
     /** The side whose operation runs now (fault scripts act on that side). */
     currentSide: () => current,
@@ -690,6 +691,51 @@ test(`allowlist stored-record-shape: ${ALLOWLIST["stored-record-shape"]}`, async
   assert.equal(Object.hasOwn(ts.record, "status") || Object.hasOwn(ts.record, "commitChecks"), false);
   assert.equal(step.record.status, "committed");
   assert.equal(step.record.commitChecks, "not_triggered");
+});
+
+// The request fingerprint construction (ADR 0025 table):
+// `sha256(identity + ":" + canonical(body) + ":" + canonical(binding))`. For the stability-set
+// inputs here (ASCII keys, small integers) core's canonical form is sorted-key `JSON.stringify`.
+const canonicalJson = (value) => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+const requestFingerprint = (body, binding) => {
+  const { principal, subject, defaultRole: role, session: claims } = session();
+  const identity = canonicalJson({ principal, subject, role, session: claims, endpoint: "execute", database: { scope: binding.scope, databaseId: binding.databaseId } });
+  return createHash("sha256").update(`${identity}:${canonicalJson(body)}:${canonicalJson(binding)}`).digest("hex");
+};
+
+test(`allowlist request-fingerprint-without-snapshot: ${ALLOWLIST["request-fingerprint-without-snapshot"]}`, async (t) => {
+  // The "ts" side: the row the previous release stored in "a keyed write, its replay, and a
+  // conflicting body on the key agree", recorded under its snapshot (ABI 8, before #80).
+  const recorded = JSON.parse(readFileSync(new URL("./fixtures/reference/step-atomic-differential.json", import.meta.url), "utf8"));
+  const [label, rows] = recorded["a keyed write, its replay, and a conflicting body on the key agree"].at(-1);
+  assert.equal(label, "rows");
+  const [ts] = rows.idempotency;
+  // The step side: the same keyed write through production.
+  const env = environment(t, { recorded: false });
+  const body = insertProject("p1");
+  const { seen } = await runSide(env, "step", { body, key: KEY }, env.nextRequest(), env.clock.now);
+  assert.equal(seen.result.ok, true, JSON.stringify(seen.result));
+  const [step] = env.rows("step").idempotency;
+  assert.equal(step.keyHash, ts.keyHash, "the key hash is unchanged");
+  assert.deepEqual(step.record.results, ts.record.results);
+  const binding = bindingOf(env.runtime);
+  assert.match(binding.snapshot, /:abi-9$/u);
+  const { snapshot: _snapshot, ...withoutSnapshot } = binding;
+  // The recorded side hashed the binding with its release's snapshot (ABI 8); core hashes it
+  // without any snapshot.
+  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-9$/u, ":abi-8") }));
+  assert.equal(step.fingerprint, requestFingerprint(body, withoutSnapshot));
+  assert.notEqual(step.fingerprint, requestFingerprint(body, binding), "nor the current snapshot");
+  // The relabeling maps both to the same name: it hides the value and nothing else.
+  const relabeled = (row) => relabelFingerprints(new Map(), { keyHash: row.keyHash, fingerprint: row.fingerprint });
+  assert.deepEqual(relabeled(step), relabeled(ts));
+  assert.deepEqual(relabeled(step), { keyHash: ts.keyHash, fingerprint: "<fingerprint 1>" });
 });
 
 test(`allowlist owner-prior-record-of-another-binding: ${ALLOWLIST["owner-prior-record-of-another-binding"]}`, async (t) => {
