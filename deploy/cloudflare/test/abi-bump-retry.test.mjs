@@ -1,8 +1,11 @@
 // ADR 0025, "What happens at the deployment that switches the rule": retries that straddle
 // the deployment from ABI 4 (byte equality with `stableJson`) to ABI 5 (core-defined canonical
-// JSON), and on to the current ABI (6 since ADR 0024 pull request 4, which keeps ADR 0025's
-// stability requirements). The records and rows below hold the values the ABI 4 implementation wrote, computed
-// by a frozen copy of it, and the retries run on the current code under the new snapshot.
+// JSON), and on to the current ABI (which keeps ADR 0025's stability requirements). The rows
+// and keys below hold the values the ABI 4 implementation computed, by a frozen copy of it.
+// Interactive records of ABI 4 were written by the TypeScript owner; since ADR 0024 pull
+// request 7 they are discarded, not read (the one-time incompatibility), so only their commit
+// answer (unknown, never a rejection) is pinned here. The step machine's own records keep the
+// stability requirements: the control test shows what a changed digest would do.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -66,25 +69,6 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     return { h, at: (abi) => at(abi === "current" ? current : abi), send, credential };
   };
 
-  // Rewrites the stored record with the digests the ABI 4 implementation computed for it.
-  const asWrittenByAbi4 = async (h, id) => {
-    const record = await h.ownerRecord(id);
-    const authFingerprint = await legacyAuthFingerprint(record.auth, record.databaseBinding);
-    const commitDigest = await legacyCommandDigest("commit", { sequence: 2 });
-    // Equal by ADR 0025 (a)-(d): the new rule computes the same bytes for these inputs.
-    assert.equal(record.authFingerprint, authFingerprint, "auth fingerprint is byte-identical across the bump");
-    assert.equal(record.commitSent.digest, commitDigest, "commit digest is byte-identical across the bump");
-    assert.equal(commitDigest, goldens.find(({ name }) => name === "commit sequence 2").output.digest);
-    const value = {
-      ...record,
-      authFingerprint,
-      commitSent: { ...record.commitSent, digest: commitDigest },
-      ...(record.status === "committed" ? { last: { ...record.last, digest: commitDigest } } : {}),
-    };
-    await h.ownerCore(id).persist(value);
-    return value;
-  };
-
   const openWrite = async (send, label) => {
     const begun = await send("/v1/transactions", { mode: "write" });
     assert.equal(begun.status, 201, JSON.stringify(begun.body));
@@ -96,55 +80,62 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
 
   const committedOnce = (h, id) => assert.equal(h.rows("a").filter((row) => row.id === id).length, 1, id);
 
-  test(`${ownerAdapter}: a committed record written by ABI 4 replays its commit for an ABI 5 caller`, async (t) => {
-    const { h, at, send } = await setup(t);
-    at(4);
-    const { id, commit } = await openWrite(send, "abi_committed");
-    const first = await commit();
-    assert.equal(first.status, 200, JSON.stringify(first.body));
-    const record = await asWrittenByAbi4(h, id);
-    assert.match(record.databaseBinding.snapshot, /:abi-4$/u);
-    at("current");
-    const retry = await commit();
-    assert.equal(retry.status, 200, JSON.stringify(retry.body));
-    assert.deepEqual(retry.body, first.body);
-    committedOnce(h, "abi_committed");
-  });
+  // A record the ABI 4 owner wrote, computed with the frozen ABI 4 rules. Since ADR 0024 pull
+  // request 7 every record of the TypeScript owner, ABI 4's included, is discarded, not read:
+  // a commit retry is unknown (never a rejection), anything else unavailable. That is the
+  // one-time incompatibility of the switch-over; ADR 0007 holds across it.
+  const abi4Record = async (h, id, credential, status) => {
+    const binding = { ...h.binding("a"), snapshot: h.runtime.snapshot.replace(/:abi-\d+$/u, ":abi-4") };
+    const auth = { principal: credential.principal, subject: credential.subject, role: credential.defaultRole, roles: credential.roles, access: credential.access, session: credential.session };
+    const commitDigest = await legacyCommandDigest("commit", { sequence: 2 });
+    const reply = { transactionId: id, status: "committed", meta: { requestId: "abi4", commitChecks: "not_triggered" } };
+    return {
+      databaseBinding: binding, snapshot: binding.snapshot, transactionId: id,
+      authFingerprint: await legacyAuthFingerprint(auth, binding), startFingerprint: "c".repeat(64), mode: "write", auth,
+      status, commitRecording: 1, commitSent: { sequence: 2, digest: commitDigest },
+      nextSequence: status === "committed" ? 3 : 2,
+      ...(status === "committed" ? { last: { digest: commitDigest, response: reply } } : { expiresAtMs: Date.now() + 60_000 }),
+      usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 0 }, statementCount: 1, resultBytes: 10,
+      mutations: [], commitChecks: [], schemaVersion: "schema_routing_1", policyVersion: "policy_routing_1",
+    };
+  };
 
-  test(`${ownerAdapter}: a committing record written by ABI 4 leaves an ABI 5 commit retry unknown, never rejected`, async (t) => {
-    const { h, at, send } = await setup(t);
-    at(4);
-    const { id, commit } = await openWrite(send, "abi_committing");
-    let lost = false;
-    h.afterDatabaseStatement(({ sql }) => {
-      if (!lost && sql === "COMMIT") { lost = true; h.loseOwner(id); }
+  for (const status of ["committed", "committing"]) {
+    test(`${ownerAdapter}: a ${status} record written by ABI 4 is discarded: the commit retry is unknown, never rejected`, async (t) => {
+      const { h, send, credential } = await setup(t);
+      const id = `tx_${(status === "committed" ? "4" : "5").repeat(32)}`;
+      h.plantOwnerRecord(id, await abi4Record(h, id, credential, status));
+      for (const attempt of [1, 2]) {
+        const retry = await send(`/v1/transactions/${id}/commit`, { sequence: 2 });
+        assert.equal(retry.status, 503, `${attempt}: ${JSON.stringify(retry.body)}`);
+        assert.equal(retry.body.error.code, UNKNOWN);
+      }
+      const statement = await send(`/v1/transactions/${id}/statements`, { sequence: 2, ...insert("abi_never") });
+      assert.equal(statement.status, 409);
+      assert.equal(statement.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+      assert.equal((await h.ownerRecord(id)).status, "discarded");
+      assert.equal(h.rows("a").some((row) => row.id === "abi_never"), false);
     });
-    await commit();
-    const record = await asWrittenByAbi4(h, id);
-    assert.equal(record.status, "committing");
-    at("current");
-    for (const attempt of [1, 2]) {
-      const retry = await commit();
-      assert.equal(retry.status, 503, `${attempt}: ${JSON.stringify(retry.body)}`);
-      assert.equal(retry.body.error.code, UNKNOWN);
-    }
-    committedOnce(h, "abi_committing");
-  });
+  }
 
-  test(`${ownerAdapter}: control: a stored digest the new rule does not reproduce would be a definite rejection`, async (t) => {
-    // Why ADR 0025 needs (a)-(d) with the bump: had the auth fingerprint or the `{sequence}`
-    // digest changed, the retry below would be the 409 that ADR 0007 forbids after COMMIT.
+  test(`${ownerAdapter}: control: a stored digest or replay identity the rule does not reproduce would be a definite rejection`, async (t) => {
+    // Why ADR 0025's stability requirements hold for the step machine's records too: a
+    // commit retry after a deployment (another snapshot) is answered from `last` only when the
+    // replay identity and the digest match; otherwise it is the 409 that ADR 0007 forbids
+    // after COMMIT.
     const { h, at, send } = await setup(t);
-    for (const field of ["authFingerprint", "commitSent"]) {
-      at(4);
-      const { id, commit } = await openWrite(send, `abi_control_${field}`);
-      assert.equal((await commit()).status, 200);
-      const record = await h.ownerRecord(id);
-      const changed = field === "authFingerprint"
-        ? { ...record, authFingerprint: "0".repeat(64) }
-        : { ...record, commitSent: { ...record.commitSent, digest: "0".repeat(64) }, last: { ...record.last, digest: "0".repeat(64) } };
-      await h.ownerCore(id).persist(changed);
+    for (const field of ["replay", "digest"]) {
       at("current");
+      const { id, commit } = await openWrite(send, `abi_control_${field}`);
+      const first = await commit();
+      assert.equal(first.status, 200);
+      at(4);
+      assert.deepEqual((await commit()).body, first.body, `${field}: the untampered record replays across the deployment`);
+      const record = JSON.parse(await h.ownerRecordRaw(id));
+      if (field === "replay") record.identity.replay = "0".repeat(64);
+      else record.last.digest = "0".repeat(64);
+      h.ownerCore(id).loaded = false;
+      h.plantOwnerRecord(id, JSON.stringify(record));
       const retry = await commit();
       assert.equal(retry.status, 409, `${field}: ${JSON.stringify(retry.body)}`);
       assert.equal(retry.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", field);
@@ -175,16 +166,17 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(h.databases.get("a").database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, 1);
   });
 
-  test(`${ownerAdapter}: a keyed begin retry across the bump reaches the same owner and conflicts`, async (t) => {
+  test(`${ownerAdapter}: a keyed begin retry across a deployment reaches the same owner and conflicts`, async (t) => {
     const { h, at, send, credential } = await setup(t);
     const key = "abi-bump-begin-0001";
-    at(4);
+    at("current");
     const first = await send("/v1/transactions", { mode: "write" }, key);
     assert.equal(first.status, 201, JSON.stringify(first.body));
+    // The key hash has no snapshot: the transaction id is the one ABI 4 computed.
     const auth = { principal: credential.principal, subject: credential.subject, role: credential.defaultRole, session: credential.session };
     const keyHash = await legacyKeyHash(auth, "interactive-start", h.binding("a"), key);
     assert.equal(first.body.transactionId, `tx_${keyHash.slice(0, 32)}`, "the ABI 4 transaction id");
-    at("current");
+    at(4);
     const retry = await send("/v1/transactions", { mode: "write" }, key);
     assert.equal(retry.status, 409, JSON.stringify(retry.body));
     assert.equal(retry.body.error.code, "POLICYSQL_TRANSACTION_CONFLICT");

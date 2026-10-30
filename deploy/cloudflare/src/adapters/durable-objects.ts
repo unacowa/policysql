@@ -11,8 +11,26 @@
 // object at a time, and a restarted instance keeps its storage but none of its memory.
 //
 // Between the Worker and the object, commands travel as the internal HTTP messages they
-// always used (`https://owner/<command>`, JSON body, request id header, and the callback
-// capability as `authorization: Bearer <capability>`). A reply is a 2xx response whose body
+// always used (`https://owner/<command>`, JSON body, request id header), plus the owner name
+// the Worker routed to (`x-policysql-owner`). Since ADR 0024 pull request 7 the body of an
+// interactive command or a callback query is the step machine's forwarded owner input
+// without its `kind` (the path names it); the callback capability travels in that body.
+//
+// Both sides mark the wire version (`x-policysql-owner-wire: 1`): the Worker on every message,
+// the object on every reply. During a rollout a Worker and an object of different versions
+// can meet, and on the changed paths each side treats an unmarked counterpart as that skew:
+// - an object answers an unmarked message on a changed path (an earlier Worker; its old body
+//   shapes and the callback capability in `authorization`) with POLICYSQL_INTERNAL;
+// - a Worker turns an unmarked reply on a changed path (an earlier object, which rejects the
+//   new body shapes with POLICYSQL_INVALID_REQUEST) into POLICYSQL_COMMIT_OUTCOME_UNKNOWN for a
+//   commit (a retry of a COMMIT that applied must never be a rejection, ADR 0007) and
+//   POLICYSQL_INTERNAL otherwise.
+// Neither code is a rejection in the client. The `/atomic` message did not change and is not
+// checked, but an atomic execute with a commit check is affected too: its validator's
+// callback crosses `/validation-query`, which the skew answers 500, so the validator denies
+// and the execute gets 409 POLICYSQL_COMMIT_CHECK_REJECTED before COMMIT (nothing is stored
+// under its idempotency key; the same key succeeds once the skew ends).
+// A reply is a 2xx response whose body
 // is the value, or a non-2xx response whose body is `{ error: { code, message, path,
 // requestId } }`. A Worker of this version reads only that distinction. The object still
 // sends exactly the statuses and bodies of earlier versions (201 for a started transaction,
@@ -20,21 +38,26 @@
 // because an earlier Worker forwards them to the client unchanged during a rollout
 // (ADR 0023). The wire needs no `cloudflare:workers` import (RPC
 // stubs), so the adapter also runs in the Node test harness.
-import { internalError } from "../errors.ts";
+import { EngineError, internalError, operationError } from "../errors.ts";
+import { stringifyExact } from "../exact-json.ts";
 import { statusFor } from "../http/status.ts";
 import { TransactionOwnerCore } from "../transaction-owner.ts";
 import type { TransactionOwnerDependencies } from "../transaction-owner.ts";
 import type {
   BackgroundTasks, OwnerCommandKind, OwnerFacilities, OwnerReply, TransactionOwnerHandle, TransactionOwnerPort,
 } from "../transaction-owner-port.ts";
+import { OWNER_NAME } from "../transaction-owner-port.ts";
 
 const OWNER_ORIGIN = "https://owner";
 const REQUEST_ID_HEADER = "x-policysql-request-id";
+const OWNER_HEADER = "x-policysql-owner";
+const WIRE_HEADER = "x-policysql-owner-wire";
+const WIRE_VERSION = "1";
+// The paths whose body changed with ADR 0024 pull request 7.
+const CHANGED_PATHS = new Set(["/begin", "/statement", "/commit", "/rollback", "/validation-query"]);
 const COMMAND_PATHS: Readonly<Record<OwnerCommandKind, string>> = Object.freeze({
   statement: "/statement", commit: "/commit", rollback: "/rollback",
 });
-
-const BEARER = /^Bearer (.*)$/su;
 
 // Worker side: one internal message to the object, its JSON reply back as data.
 const send = async (stub: DurableObjectStub, path: string, body: unknown, headers: Record<string, string>): Promise<OwnerReply> => {
@@ -43,6 +66,17 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
+  if (CHANGED_PATHS.has(path) && response.headers.get(WIRE_HEADER) !== WIRE_VERSION) {
+    // An object of an earlier version: it cannot read this message, and its answer (a 400 for
+    // the new body shape) is not an answer to it. Never a rejection; a commit may have applied
+    // through the earlier wire, so its outcome is unknown.
+    await response.body?.cancel().catch(() => undefined);
+    console.log(JSON.stringify({ event: "owner_wire_skew", path, requestId: headers[REQUEST_ID_HEADER] ?? null }));
+    const error = path === "/commit"
+      ? new EngineError("POLICYSQL_COMMIT_OUTCOME_UNKNOWN", "The commit outcome is unknown.")
+      : internalError();
+    return { ok: false, error: operationError(error) };
+  }
   let parsed: any;
   try { parsed = await response.json(); } catch { throw internalError(); }
   if (response.ok) return { ok: true, value: parsed };
@@ -55,10 +89,10 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
 const replyResponse = (reply: OwnerReply, path: string, requestId: string) => {
   const failure = reply as { ok: false; error: { code: string; message: string; path: string | null } };
   return new Response(
-    JSON.stringify(reply.ok ? reply.value : { error: { ...failure.error, requestId } }),
+    stringifyExact(reply.ok ? reply.value : { error: { ...failure.error, requestId } }),
     {
       status: reply.ok ? (path === "/begin" ? 201 : 200) : statusFor(failure.error.code),
-      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8", [WIRE_HEADER]: WIRE_VERSION },
     },
   );
 };
@@ -71,17 +105,15 @@ export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace
   return {
     route(name: string): TransactionOwnerHandle {
       const stub = namespace.get(namespace.idFromName(name));
+      const headers = (requestId: string) => ({ [REQUEST_ID_HEADER]: requestId, [OWNER_HEADER]: name, [WIRE_HEADER]: WIRE_VERSION });
       return {
-        begin: (input, requestId) => send(stub, "/begin", input, { [REQUEST_ID_HEADER]: requestId }),
-        atomic: (input, requestId) => send(stub, "/atomic", input, { [REQUEST_ID_HEADER]: requestId }),
+        begin: (input, requestId) => send(stub, "/begin", input, headers(requestId)),
+        atomic: (input, requestId) => send(stub, "/atomic", input, headers(requestId)),
         command: (kind, input, requestId) => {
           if (!Object.hasOwn(COMMAND_PATHS, kind)) return Promise.reject(new TypeError("unknown owner command"));
-          return send(stub, COMMAND_PATHS[kind], input, { [REQUEST_ID_HEADER]: requestId });
+          return send(stub, COMMAND_PATHS[kind], input, headers(requestId));
         },
-        callbackQuery: ({ capability, command }, requestId) => send(stub, "/validation-query", command, {
-          authorization: typeof capability === "string" && capability !== "" ? `Bearer ${capability}` : "",
-          [REQUEST_ID_HEADER]: requestId,
-        }),
+        callbackQuery: (input, requestId) => send(stub, "/validation-query", input, headers(requestId)),
       };
     },
   };
@@ -89,6 +121,9 @@ export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace
 
 /** Owner-side facilities over the object's state: storage, its single alarm, waitUntil. */
 export const durableObjectFacilities = (state: DurableObjectState): OwnerFacilities => ({
+  // The object's own name, where the platform reports it; otherwise the owner takes the name
+  // each message carries.
+  ...(typeof (state as any).id?.name === "string" && OWNER_NAME.test((state as any).id.name) ? { name: (state as any).id.name } : {}),
   store: {
     get: (key) => state.storage.get(key),
     put: (key, value) => state.storage.put(key, value),
@@ -106,12 +141,17 @@ const serve = async (core: TransactionOwnerCore, request: Request): Promise<Resp
   try { body = await request.json(); } catch { body = null; }
   const path = new URL(request.url).pathname;
   let reply: OwnerReply;
-  if (path === "/begin") reply = await core.begin(body, requestId);
+  const owner = request.headers.get(OWNER_HEADER);
+  const earlierWire = CHANGED_PATHS.has(path) && (request.headers.get(WIRE_HEADER) !== WIRE_VERSION ||
+    (body !== null && typeof body === "object" && Object.hasOwn(body, "authFingerprint")));
+  if ((owner !== null && !core.bindName(owner)) || earlierWire) {
+    // Routed to another name, or a message of an earlier Worker: an adapter or rollout fault.
+    console.log(JSON.stringify({ event: "owner_message_rejected", requestId, path }));
+    reply = { ok: false, error: operationError(internalError()) };
+  } else if (path === "/begin") reply = await core.begin(body, requestId);
   else if (path === "/atomic") reply = await core.atomic(body, requestId);
-  else if (path === "/validation-query") {
-    const capability = request.headers.get("authorization")?.match(BEARER)?.[1] ?? "";
-    reply = await core.callbackQuery({ capability, command: body }, requestId);
-  } else {
+  else if (path === "/validation-query") reply = await core.callbackQuery(body, requestId);
+  else {
     const kind = (Object.keys(COMMAND_PATHS) as OwnerCommandKind[]).find((name) => COMMAND_PATHS[name] === path);
     // An unknown path reaches the core as an unknown kind, which it rejects as invalid.
     reply = await core.command(kind ?? (path as OwnerCommandKind), body, requestId);

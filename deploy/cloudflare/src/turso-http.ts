@@ -6,6 +6,8 @@ import { discardBody, fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
+const INT64_MIN = -(2n ** 63n);
+const INT64_MAX = 2n ** 63n - 1n;
 const databaseFailure = () =>
   new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
 
@@ -18,6 +20,11 @@ const encodeValue = (value, maxBytes: number) => {
   if (typeof value === "boolean") return { type: "integer", value: value ? "1" : "0" };
   if (typeof value === "number" && Number.isSafeInteger(value)) {
     return { type: "integer", value: String(value) };
+  }
+  // An integer beyond 2^53 - 1 that the step machine bound (ADR 0024 pull request 7, #70)
+  // arrives as a BigInt and keeps its digits. SQLite integers are signed 64-bit.
+  if (typeof value === "bigint" && value >= INT64_MIN && value <= INT64_MAX) {
+    return { type: "integer", value: value.toString() };
   }
   if (typeof value === "number" && Number.isFinite(value)) return { type: "float", value };
   if (value instanceof Uint8Array) {

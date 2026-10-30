@@ -72,8 +72,12 @@
   [ADR 0022](adr/0022-transaction-owner-port.md)). Routing: `route(name)` returns a typed
   handle (`begin`, `atomic`, `command`, `callbackQuery`) to the single owner of a transaction
   or validation id. Owner side: `TransactionOwnerCore(facilities, dependencies)` receives a
-  durable `store`, one `timer`, and `BackgroundTasks` from the adapter. Routes and the core
-  name no platform type;
+  durable `store`, one `timer`, `BackgroundTasks`, and optionally its `name` from the
+  adapter. Routes and the core name no platform type;
+- makes no transaction decision of its own: since [ADR 0024](adr/0024-transaction-step-machine.md)
+  pull request 7 it executes the effects of core's step machine (`step_json`) for interactive
+  transactions, keeping the durable and volatile state as the JSON texts the machine returns;
+  atomic execution on an owner still runs the TypeScript path until pull request 8;
 - the port's contract is at most one live owner per name, every call for the name delivered
   to it, and owner loss visible as a successor with the same store but no memory, which the
   core fails closed (ADR 0007). One conformance suite checks it for every adapter;

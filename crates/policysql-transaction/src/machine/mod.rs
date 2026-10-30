@@ -10,10 +10,13 @@
 //! Pull request 6 adds atomic execution with placements `direct` (in the engine, from a
 //! `request` event for `execute`) and `owner` (a forwarded `atomic` input, with commit checks),
 //! the idempotency lookup, replay, and row, and the cumulative limits. The `request` kind of
-//! interactive commands (pull request 7) is not implemented.
+//! interactive commands is not implemented: since pull request 7 the engine forwards the owner
+//! inputs (`begin`, `statement`, `commit`, `rollback`, `callbackQuery`) itself (ADR 0024,
+//! notes of pull request 7).
 //!
-//! The JSON entry point is [`step_json`]; `policysql-wasm` exports it as `step_json`. The
-//! machine is not used by production paths before the switch-over (pull request 7).
+//! The JSON entry point is [`step_json`]; `policysql-wasm` exports it as `step_json`. Since
+//! pull request 7 production owners run interactive transactions on it; atomic execution
+//! switches in pull request 8.
 
 pub mod compiler;
 pub mod io;

@@ -4,6 +4,7 @@
 import { fetchNoFollow } from "../redirects.ts";
 import type { OutboundFetch } from "../redirects.ts";
 import { callbackQueryUrl } from "../http/routes.ts";
+import { stringifyExact } from "../exact-json.ts";
 
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)]
   .map((byte) => byte.toString(16).padStart(2, "0"))
@@ -42,7 +43,9 @@ export type CommitCheckHookCall = {
  * fetchNoFollow discards unread because following it would forward the signed body.
  */
 export const callCommitCheckHook = async (call: CommitCheckHookCall): Promise<{ ok: boolean; decision: unknown }> => {
-  const body = JSON.stringify({
+  // An integer beyond 2^53 - 1 in the payload (a session value core kept) is written with its
+  // digits, not rounded (ADR 0024 pull request 5 obligation).
+  const body = stringifyExact({
     ...call.payload,
     query: {
       token: call.capability.token,

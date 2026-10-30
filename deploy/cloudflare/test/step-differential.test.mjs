@@ -1,6 +1,7 @@
-// The differential harness of ADR 0024 pull requests 4 and 5: today's `TransactionOwnerCore`
-// and the step machine (`StepOwnerCore`, test/helpers/step-owner.mjs, over the real WASM
-// `step_json`) run the same owner scenarios side by side, with the same fake clock, the same
+// The differential harness of ADR 0024 pull requests 4, 5, and 7: the TypeScript owner of
+// before the switch-over (`LegacyTransactionOwnerCore`, the reference until pull request 9)
+// and the production owner (`TransactionOwnerCore`, which since pull request 7 executes the
+// step machine over the real WASM `step_json`) run the same owner scenarios side by side, with the same fake clock, the same
 // kind of database (one SQLite file each), the same store and timer faults, and the same
 // scripted validator. The harness asserts equal replies, database calls (SQL and arguments),
 // terminal records, transaction log events, validator calls (the signed hook body, with the
@@ -19,8 +20,8 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
+import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
-import { StepOwnerCore } from "./helpers/step-owner.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 
@@ -32,32 +33,32 @@ initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.
 export const ALLOWLIST = Object.freeze({
   "replay-before-liveness":
     "ADR 0024 \"Replay identity\": an exact retry of a completed command is answered from `last` before any " +
-    "snapshot or liveness check. TransactionOwnerCore checks liveness first: after owner loss it answers " +
+    "snapshot or liveness check. LegacyTransactionOwnerCore checks liveness first: after owner loss it answers " +
     "TRANSACTION_UNAVAILABLE, after the deadline DATABASE_TIMEOUT.",
   "expired-command":
     "ADR 0024 \"Events and host facts\": expiry is checked against now_ms on every client event. " +
-    "TransactionOwnerCore checks the binding against the passed deadline first and answers DATABASE_TIMEOUT " +
+    "LegacyTransactionOwnerCore checks the binding against the passed deadline first and answers DATABASE_TIMEOUT " +
     "(failed); core answers TRANSACTION_UNAVAILABLE and records expired.",
   "issue-70":
-    "#70: core compiles and hashes the verified body text. TransactionOwnerCore recompiles JSON.stringify(command): " +
-    "1e400 becomes NULL and 9007199254740993 is rounded (known bug until pull request 7).",
+    "#70: core compiles and hashes the verified body text. LegacyTransactionOwnerCore recompiles JSON.stringify(command): " +
+    "1e400 becomes NULL and 9007199254740993 is rounded (the reference keeps the bug; production is fixed by pull request 7).",
   "persist-failure-before-committing":
     "ADR 0024 failure table, PersistFailed before committing: core rolls back and records failed (from the record " +
     "before the statement, so a retry is unavailable, not replayed) before answering INTERNAL. " +
-    "TransactionOwnerCore answers INTERNAL and leaves the transaction open.",
+    "LegacyTransactionOwnerCore answers INTERNAL and leaves the transaction open.",
   "unrecorded-commit-retry":
     "ADR 0024 failure table, PersistFailed of the terminal record after Committed: a retry gets " +
-    "COMMIT_OUTCOME_UNKNOWN from this owner and a successor alike. TransactionOwnerCore (#48) keeps the terminal " +
+    "COMMIT_OUTCOME_UNKNOWN from this owner and a successor alike. LegacyTransactionOwnerCore (#48) keeps the terminal " +
     "record in memory and replays committed once the store recovers. Neither is a rejection.",
   "timer-during-statement":
     "ADR 0024 failure table, TimerFired while a statement runs: core rolls back when it returns and answers " +
-    "TRANSACTION_UNAVAILABLE. TransactionOwnerCore rolls back concurrently and then records the statement as done.",
+    "TRANSACTION_UNAVAILABLE. LegacyTransactionOwnerCore rolls back concurrently and then records the statement as done.",
   "old-format-record":
     "ADR 0024 \"Old-format records are discarded, not read\": the one-time incompatibility at the switch-over " +
-    "(pull request 7). Core discards a TransactionOwnerCore record: commit gets COMMIT_OUTCOME_UNKNOWN, other " +
+    "(pull request 7). Core discards a LegacyTransactionOwnerCore record: commit gets COMMIT_OUTCOME_UNKNOWN, other " +
     "commands TRANSACTION_UNAVAILABLE.",
   "rollback-failure-keeps-phase":
-    "ADR 0024 failure table, RollbackFailed: the decided phase stays. TransactionOwnerCore turns it into failed.",
+    "ADR 0024 failure table, RollbackFailed: the decided phase stays. LegacyTransactionOwnerCore turns it into failed.",
   "expiry-during-validator":
     "ADR 0024 inconsistency 5 and failure table, TimerFired while validating: core answers the waiting commit " +
     "COMMIT_CHECK_REJECTED at expiry, rolls back, records expired, and ignores the late verdict. TransactionOwnerCore " +
@@ -319,7 +320,7 @@ const callbackOn = async (env, side, token, text) => {
   const requestId = `cb-${++env.callbackCount[side]}`;
   const reply = side === "ts"
     ? await slot.core.callbackQuery({ capability: token, command: JSON.parse(text) }, requestId)
-    : await slot.core.callbackQuery({ validationId: VALIDATION, capability: token, bodyText: text }, requestId);
+    : await slot.core.callbackQuery({ validationId: VALIDATION, capability: token, command: text }, requestId);
   const normalized = normalizedReply(reply);
   env.callbacks[side].push(normalized);
   return normalized;
@@ -386,8 +387,12 @@ const environment = (t, { ownerConfig = config, limits = {} } = {}) => {
     const getRuntime = () => runtimes.current;
     const fetchImpl = hookFetch(env, side);
     const makeCore = side === "ts"
-      ? (facilities) => new TransactionOwnerCore(facilities, { getRuntime, database, config: ownerConfig, fetchImpl })
-      : (facilities) => new StepOwnerCore(facilities, { getRuntime, database, config: ownerConfig, fetchImpl }, TX);
+      ? (facilities) => new LegacyTransactionOwnerCore(facilities, { getRuntime, database, config: ownerConfig, fetchImpl })
+      : (facilities) => {
+        const core = new TransactionOwnerCore({ ...facilities, name: TX }, { getRuntime, database, config: ownerConfig, fetchImpl });
+        core.transcript = [];
+        return core;
+      };
     sides[side] = { path, calls, slot: ownerSlot(makeCore, faults, side === "ts" ? tsPhase : stepPhase) };
   }
   t.after(() => {
@@ -422,7 +427,7 @@ const perform = async (env, side, op, requestId) => {
   const { slot } = env.sides[side];
   // The step side answers as soon as the machine replies (a commit rejected by a failed
   // callback, before its validator returns); the comparison waits until both lanes have run
-  // every effect, as TransactionOwnerCore does before it replies. This owner, even if lost.
+  // every effect, as LegacyTransactionOwnerCore does before it replies. This owner, even if lost.
   const core = slot.core;
   const settle = async (reply) => {
     if (op.settle !== false) await core.settled?.();
@@ -437,7 +442,10 @@ const perform = async (env, side, op, requestId) => {
     case "begin": {
       const startFingerprint = op.startFingerprint ??
         identity(runtime, { op: "start", transactionId: TX, body: JSON.stringify({ mode: op.mode }) }).digest;
-      return await settle(await core.begin({ transactionId: TX, authFingerprint, startFingerprint, mode: op.mode, auth, databaseBinding, snapshot }, requestId));
+      // The production owner computes the auth fingerprint itself (ADR 0024).
+      return await settle(await core.begin(side === "ts"
+        ? { transactionId: TX, authFingerprint, startFingerprint, mode: op.mode, auth, databaseBinding, snapshot }
+        : { transactionId: TX, startFingerprint, mode: op.mode, auth, databaseBinding, snapshot }, requestId));
     }
     case "statement": case "commit": case "rollback": {
       const text = op.text ?? (op.op === "statement"
@@ -446,7 +454,7 @@ const perform = async (env, side, op, requestId) => {
       const command = JSON.parse(text);
       return await settle(await core.command(op.op, side === "ts"
         ? { transactionId: TX, authFingerprint, command, databaseBinding, snapshot }
-        : { transactionId: TX, auth, bodyText: text, databaseBinding, snapshot }, requestId));
+        : { transactionId: TX, auth, command: text, databaseBinding, snapshot }, requestId));
     }
     case "timer":
       await slot.fireTimer(env.clock.now);
@@ -869,7 +877,7 @@ test("an expiry during a callback query's SELECT revokes it alike (#73)", async 
     assert.equal(replies[side].error.code, "POLICYSQL_COMMIT_CHECK_REJECTED", `${side}: commit`);
     assert.equal(env.sides[side].calls.filter((call) => call.op === "commit").length, 0, `${side}: no COMMIT`);
   }
-  // TransactionOwnerCore persists `expired` at the timer, before the callback is answered; the
+  // LegacyTransactionOwnerCore persists `expired` at the timer, before the callback is answered; the
   // machine persists it after the callback's Execute returns, and keeps it to the end.
   assert.equal(seen.ts.phase, "expired", "ts: the record as the expiry wrote it");
   assert.equal(normalizedRecord("step", env.sides.step.slot.record()).phase, "expired", "step: the record as the expiry wrote it");
@@ -1051,7 +1059,7 @@ test(`allowlist rollback-failure-keeps-phase: ${ALLOWLIST["rollback-failure-keep
 test(`allowlist old-format-record: ${ALLOWLIST["old-format-record"]}`, async (t) => {
   const env = environment(t);
   for (const op of [write, insert(1, "p1")]) assertSame(await both(env, op), op.op);
-  // The step side reads the record TransactionOwnerCore wrote.
+  // The step side reads the record LegacyTransactionOwnerCore wrote.
   env.sides.step.slot.setRecord(structuredClone(env.sides.ts.slot.record()));
   env.sides.step.slot.lose();
   env.setSide("step");

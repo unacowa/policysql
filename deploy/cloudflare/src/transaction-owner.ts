@@ -1,109 +1,146 @@
-import { EngineError, operationError, wasmError } from "./errors.ts";
-import { authIdentity, callbackDigest, commandDigest } from "./core-identity.ts";
-import { observeCostEnvelope } from "./cost.ts";
-import { executeSealedOnTransaction } from "./turso.ts";
-import { enforceCumulativeLimits } from "./turso.ts";
-import { runCommitChecks, verifyCapabilityToken } from "./commit-checks.ts";
-import { checkDatabaseBinding, databaseTransportFactory, sameDatabaseBinding, validateDatabaseProvider } from "./database.ts";
+// The transaction owner (ADR 0007, ADR 0022) as an executor of core's step machine (ADR 0024
+// pull request 7). It makes no decision that the specification determines: every client
+// command, callback query, timer, and effect outcome is one call of `runtime.step_json`, and
+// the owner runs the effects it returns, in order ("Effect execution contract"):
+//
+// 1. call `step_json` with the current durable and volatile texts, the event, and fresh host
+//    facts (time, entropy, request id, owner name, configured checks); keep the returned
+//    texts in memory as current, verbatim (never a JavaScript round trip);
+// 2. run the immediate effects (`respond`, `log`, `observe`, `reset`) without awaiting them;
+// 3. run the awaited effect, which is last, map its outcome or exception to exactly one
+//    outcome event with the effect's id and a class, and go to 1.
+//
+// Client commands run one at a time on the client lane, callback queries one at a time on the
+// callback lane, and a timer is fed at once. A lane's caller gets its reply as soon as a
+// `respond` for that lane runs (a commit waiting on its validator is answered at expiry),
+// while the lane's effects run to completion before its next event.
+//
+// The owner holds the database connection the machine opened. Whenever the machine drops its
+// volatile state (`reset`, `abandon`, a discarded record, the end of a transaction) the owner
+// closes that connection and drops every reference to it: `reset` and the fail-closed paths
+// emit no `rollback` effect (ADR 0024 pull request 4 obligation).
+//
+// Until ADR 0024 pull request 8 the atomic owner path stays in TypeScript
+// (`LegacyTransactionOwnerCore`): `atomic` inputs, and the callback queries, timer, and client
+// inputs of an owner whose record that path wrote, are served by it. Names never collide
+// (an atomic owner is `tx_` + a key hash or random hex of its own), so an interactive owner
+// never holds such a record.
+import { EngineError, operationError } from "./errors.ts";
+import { authIdentity } from "./core-identity.ts";
+import { checkDatabaseBinding, databaseTransportFactory, validateDatabaseProvider } from "./database.ts";
 import type { DatabaseProvider } from "./database.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { runtimeBytesLimit } from "./binary.ts";
-import { runtimeLimits } from "./limits.ts";
 import { validateConfig } from "./engine-config.ts";
-import type { PolicySqlConfig, ValidatedConfig } from "./engine-config.ts";
-import { runInBackground, validateOwnerFacilities } from "./transaction-owner-port.ts";
+import type { ValidatedConfig } from "./engine-config.ts";
+import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
+import { parseExact, stringifyExact } from "./exact-json.ts";
+import { decodeArgs, encodeResults, failureClass, observeCost, validatorFailureClass } from "./step-effects.ts";
+import { LegacyTransactionOwnerCore } from "./transaction-owner-legacy.ts";
+import type { TransactionOwnerDependencies } from "./transaction-owner-legacy.ts";
+import { OWNER_NAME, runInBackground, validateOwnerFacilities } from "./transaction-owner-port.ts";
 import type {
   OwnerAtomicInput, OwnerBeginInput, OwnerCallbackInput, OwnerCommandInput, OwnerCommandKind,
   OwnerFacilities, OwnerReply, TransactionOwnerHandle,
 } from "./transaction-owner-port.ts";
 
-const COMMAND_KINDS: readonly OwnerCommandKind[] = ["statement", "commit", "rollback"];
+export type { TransactionOwnerDependencies } from "./transaction-owner-legacy.ts";
+
+const KEY = "transaction";
+type Lane = "client" | "callback";
+
+const internalReply = (): OwnerReply => ({
+  ok: false, error: operationError(new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.")),
+});
 
 const replyRequestId = (requestId: unknown) =>
   typeof requestId === "string" && requestId !== "" ? requestId : crypto.randomUUID();
 
-const invalid = () => new EngineError("POLICYSQL_INVALID_REQUEST", "The request is invalid.");
-const conflict = () => new EngineError("POLICYSQL_TRANSACTION_CONFLICT", "The transaction command conflicts with its current state.");
-const unavailable = () => new EngineError("POLICYSQL_TRANSACTION_UNAVAILABLE", "The transaction is no longer active.");
-const internal = () => new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
-// COMMIT may have been sent and the owner cannot tell whether it applied (#48, ADR 0007).
-// Never a rejection: the client must treat it as an unknown outcome.
-const outcomeUnknown = () => new EngineError("POLICYSQL_COMMIT_OUTCOME_UNKNOWN", "The commit outcome is unknown.");
+const randomHex = () => [...crypto.getRandomValues(new Uint8Array(32))]
+  .map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
-const exactKeys = (value, keys, required = keys) => {
-  if (!value || Array.isArray(value) || typeof value !== "object") return false;
-  const actual = Object.keys(value);
-  return actual.every((key) => keys.includes(key)) && required.every((key) => actual.includes(key));
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** The forwarded input of `kind`: the handle's input with the kind its method names. */
+const forwarded = (kind: string, input: unknown) => {
+  const { kind: _ignored, ...fields } = isObject(input) ? input : {};
+  return { type: "forwarded", input: { kind, ...fields } };
 };
 
-/** The one-statement envelope a statement or callback command compiles as. */
-const statementEnvelope = (command) => JSON.stringify({ statements: [{
-  sql: command.sql,
-  params: command.params,
-  ...(command.expect === undefined ? {} : { expect: command.expect }),
-}] });
-
-// Compile errors that depend on the runtime's state rather than on the command: the plan
-// table is full (POLICYSQL_DATABASE_UNAVAILABLE) or the runtime failed.
-const STATE_DEPENDENT_COMPILE_ERRORS = new Set(["POLICYSQL_DATABASE_UNAVAILABLE", "POLICYSQL_INTERNAL"]);
-
-const storedAtomicTerminal = (responseJson) => {
-  let stored;
-  try { stored = JSON.parse(responseJson); } catch { throw internal(); }
-  if (
-    stored?.version !== 1 || stored.status !== "committed" ||
-    !Array.isArray(stored.results) || typeof stored.originalRequestId !== "string" ||
-    typeof stored.transactionId !== "string" || !stored.transactionId.startsWith("atomic_") ||
-    !stored.usage || Array.isArray(stored.usage) || typeof stored.usage !== "object" ||
-    !["passed", "not_triggered"].includes(stored.commitChecks)
-  ) throw internal();
-  return {
-    version: 1,
-    transactionId: stored.transactionId,
-    status: "committed",
-    results: stored.results,
-    usage: stored.usage,
-    originalRequestId: stored.originalRequestId,
-    replayed: true,
-    commitChecks: stored.commitChecks,
-  };
+/** The owner an input names: its transaction id, or `tx_` and the hex of its validation id. */
+const namedOwner = (input: unknown): string | null => {
+  if (!isObject(input)) return null;
+  const id = typeof input.transactionId === "string" ? input.transactionId
+    : typeof input.validationId === "string" ? input.validationId.replace(/^cval_/u, "tx_") : null;
+  return id !== null && OWNER_NAME.test(id) ? id : null;
 };
 
-/** What a transaction owner needs. It receives the same `config` as `createApp` (ADR 0021). */
-export type TransactionOwnerDependencies = {
-  getRuntime: () => any;
-  database: DatabaseProvider;
-  config: PolicySqlConfig;
-  /** Omitted: commit-check calls use the host fetch through fetchNoFollow. */
-  fetchImpl?: OutboundFetch;
+/** A record the TypeScript atomic path wrote (an object with an `atomic_` transaction id). */
+const legacyAtomicRecord = (stored: unknown) =>
+  isObject(stored) && typeof stored.transactionId === "string" && stored.transactionId.startsWith("atomic_");
+
+/** The owner a stored record names, so a timer can run before any message arrived. */
+const recordOwner = (stored: unknown): string | null => {
+  let value = stored;
+  if (typeof stored === "string") {
+    try { value = JSON.parse(stored); } catch { return null; }
+  }
+  if (!isObject(value)) return null;
+  const name = typeof value.owner === "string" ? value.owner : value.transactionId;
+  return typeof name === "string" && OWNER_NAME.test(name) ? name : null;
+};
+
+const IMMEDIATE = new Set(["respond", "log", "observe", "reset"]);
+
+/**
+ * The batch rule (ADR 0024 "Effects"): any number of immediate effects, then at most one
+ * awaited effect, last. Anything else is an engine fault (Abandon follows), checked before any
+ * effect of the batch runs, so no outcome is ever dropped.
+ */
+export const checkBatch = (effects: unknown) => {
+  if (!Array.isArray(effects)) throw new Error("step output without effects");
+  const awaited = effects.flatMap((effect, index) => (IMMEDIATE.has(effect?.type) ? [] : [index]));
+  if (awaited.length > 1 || (awaited.length === 1 && awaited[0] !== effects.length - 1)) {
+    throw new Error("an awaited effect is not last in its batch");
+  }
+};
+
+/** The re-check at the outbound exit (`commit-checks.ts` `secureUrl`). */
+const secureUrl = (raw: string) => {
+  const url = new URL(raw);
+  if (url.protocol !== "https:" || url.username || url.password) throw new TypeError("insecure validator URL");
+  return url;
 };
 
 /**
- * The owner of one transaction name (ADR 0007, ADR 0022). An adapter creates one instance
- * per live owner, injects its durable store, timer, and background tasks, and delivers every
- * call for that name to it. The instance serializes client commands on one lane and callback
- * queries on another, and keeps the open database transaction in memory only, so a
- * successor after owner loss fails the transaction closed.
+ * The step-machine executor for every owner input, including `atomic` (the machine's own
+ * atomic owner path). Production uses `TransactionOwnerCore`, which keeps the atomic owner
+ * path in TypeScript until ADR 0024 pull request 8; the atomic differential harness runs this
+ * class as the machine's side.
  */
-export class TransactionOwnerCore implements TransactionOwnerHandle {
+export class StepTransactionOwner implements TransactionOwnerHandle {
   facilities: OwnerFacilities;
   config: ValidatedConfig;
-  getRuntime: any;
-  fetchImpl?: OutboundFetch;
-  transaction: any;
-  validation: any;
-  queue: Promise<any>;
-  validationQueue: Promise<any>;
+  getRuntime: () => any;
   database: DatabaseProvider;
-  /** True while this owner's COMMIT is in flight: nothing else may end the transaction. */
-  committing: boolean;
-  /** A terminal commit record whose put failed after COMMIT succeeded; replayed on retry. */
-  unrecorded: { record: any } | null;
+  fetchImpl?: OutboundFetch;
+  configuredChecks: string[];
+  /** The owner name; fixed for the instance's lifetime once known. */
+  name: string | null;
+  loaded: boolean;
+  /** The durable and volatile texts the last step returned, kept verbatim. */
+  durable: string | null;
+  volatile: string | null;
+  /** The open database transaction of the machine's connection, if any. */
+  connection: any;
+  queues: Record<Lane, Promise<unknown>>;
+  waiters: Record<Lane, ((reply: OwnerReply) => void) | null>;
+  /** When set to an array (tests), every step's four inputs and output text (ADR 0024 transcripts). */
+  transcript: Array<Record<string, string | null>> | null;
+  /** Replies the machine sent with no caller waiting on that lane (bounded; tests read it). */
+  unrouted: Array<{ lane: string; reply: unknown }>;
 
-  /**
-   * `facilities` come from the owner adapter; `dependencies` are the same ports the wrapper
-   * gives `createApp`. No platform object is an argument.
-   */
   constructor(facilities: OwnerFacilities, dependencies: TransactionOwnerDependencies) {
     if (typeof dependencies?.getRuntime !== "function") throw new TypeError("getRuntime is required");
     validateDatabaseProvider(dependencies.database);
@@ -111,821 +148,391 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     this.config = validateConfig(dependencies.config);
     this.facilities = validateOwnerFacilities(facilities);
     this.getRuntime = dependencies.getRuntime;
-    this.fetchImpl = dependencies.fetchImpl;
     this.database = dependencies.database;
-    this.transaction = null;
-    this.validation = null;
-    this.committing = false;
-    this.unrecorded = null;
-    this.queue = Promise.resolve();
-    this.validationQueue = Promise.resolve();
+    this.fetchImpl = dependencies.fetchImpl;
+    // The ids with an endpoint; none without a public base URL (ADR 0021).
+    this.configuredChecks = this.config.publicBaseUrl === undefined
+      ? [] : Object.keys(dependencies.config?.commitChecks ?? {}).filter((id) => this.config.commitCheck(id) !== undefined);
+    this.name = this.facilities.name ?? null;
+    this.loaded = false;
+    this.durable = null;
+    this.volatile = null;
+    this.connection = null;
+    this.queues = { client: Promise.resolve(), callback: Promise.resolve() };
+    this.waiters = { client: null, callback: null };
+    this.transcript = null;
+    this.unrouted = [];
   }
 
-  connectionFactory(binding, deadlineMs = undefined) {
-    return databaseTransportFactory(this.database, binding, runtimeBytesLimit(this.getRuntime()), deadlineMs);
+  /**
+   * The name the adapter routed a message to. The first one known is kept; a message routed
+   * to another name is an adapter fault, which the caller answers with POLICYSQL_INTERNAL.
+   */
+  bindName(name: unknown): boolean {
+    if (typeof name !== "string" || !OWNER_NAME.test(name)) return false;
+    if (this.name === null) this.name = name;
+    return this.name === name;
   }
 
-  async checkContext(body) {
-    const snapshot = this.getRuntime().snapshot;
-    if (body.snapshot !== snapshot) throw conflict();
-    const databaseBinding = await checkDatabaseBinding(this.database, body.databaseBinding, snapshot);
-    return { databaseBinding, snapshot };
-  }
-
-  async checkCurrent(current, deadlineMs = current.expiresAtMs) {
-    try {
-      if (current.snapshot !== this.getRuntime().snapshot) throw unavailable();
-      await checkDatabaseBinding(this.database, current.databaseBinding, current.snapshot,
-        ["active", "validating"].includes(current.status) ? deadlineMs : undefined);
-      if (current.snapshot !== this.getRuntime().snapshot ||
-        (["active", "validating"].includes(current.status) && Date.now() >= current.expiresAtMs)) throw unavailable();
-    } catch (error) {
-      if (this.transaction?.open) await this.close("failed");
-      throw error;
-    }
-  }
-
-  observeCost(compiled, requestId, binding) {
-    runInBackground(this.facilities.background,
-      observeCostEnvelope(
-        compiled, this.config.costCatalog, `${requestId}-cost`, this.connectionFactory(binding),
-        runtimeBytesLimit(this.getRuntime()), runtimeLimits(this.getRuntime()).costTimeoutMs,
-      ),
-      requestId);
-  }
-
-  // Client commands: one at a time, in arrival order.
-  clientLane(work: () => Promise<unknown>): Promise<OwnerReply> {
-    const run = this.queue.then(async (): Promise<OwnerReply> => {
-      try {
-        return { ok: true, value: await work() };
-      } catch (error) {
-        return { ok: false, error: operationError(error) };
-      }
-    });
-    this.queue = run.catch(() => undefined);
-    return run;
-  }
+  // ---- handle methods -------------------------------------------------------------------
 
   begin(input: OwnerBeginInput, requestId: string): Promise<OwnerReply> {
-    const id = replyRequestId(requestId);
-    return this.clientLane(() => this.startTransaction(input, id));
-  }
-
-  atomic(input: OwnerAtomicInput, requestId: string): Promise<OwnerReply> {
-    const id = replyRequestId(requestId);
-    return this.clientLane(() => this.executeAtomic(input, id));
+    return this.lane("client", input, forwarded("begin", input), requestId);
   }
 
   command(kind: OwnerCommandKind, input: OwnerCommandInput, requestId: string): Promise<OwnerReply> {
-    const id = replyRequestId(requestId);
-    return this.clientLane(async () => {
-      if (!COMMAND_KINDS.includes(kind)) throw invalid();
-      return kind === "statement" ? await this.statement(input, id) : await this.terminal(input, id, kind);
-    });
+    // An unknown kind reaches the machine as such, which answers it as invalid.
+    return this.lane("client", input, forwarded(typeof kind === "string" ? kind : "", input), requestId);
   }
 
-  // Callback queries: one at a time on their own lane, because they arrive while a commit
-  // on the client lane waits for the validator. Only a live capability can be called back
-  // (ADR 0007): without one the reply is unavailable and nothing changes (#73). With one,
-  // any failure ends the open transaction, a failure to read the record included. A query
-  // whose capability is revoked while it runs (the verdict, an expiry, or a close then
-  // decided the transaction) is answered unavailable, as in the step machine.
   callbackQuery(input: OwnerCallbackInput, requestId: string): Promise<OwnerReply> {
-    const id = replyRequestId(requestId);
-    const run = this.validationQueue.then(async (): Promise<OwnerReply> => {
-      // Captured before any await: the capability this callback may fail.
-      let session = this.validation;
-      try {
-        if (!await this.liveValidation(session)) {
-          session = null;
-          throw unavailable();
-        }
-        const capability = typeof input?.capability === "string" ? input.capability : "";
-        return { ok: true, value: await this.validationQuery(session, input?.command, capability, id) };
-      } catch (error) {
-        if (!session) return { ok: false, error: operationError(error) };
-        if (this.validation !== session) return { ok: false, error: operationError(unavailable()) };
-        this.validation = null;
-        if (this.transaction?.open) {
-          // The rollback is done before the record is read; a failed put leaves the record to
-          // the waiting commit, which is rejected because the transaction is closed.
-          try { await this.close("failed"); } catch { /* the store failed */ }
-        }
-        return { ok: false, error: operationError(error) };
-      }
-    });
-    this.validationQueue = run.catch(() => undefined);
-    return run;
+    const fields: Record<string, unknown> = isObject(input) ? input : {};
+    // A capability that is not a string is presented as none.
+    const capability = typeof fields.capability === "string" ? fields.capability : "";
+    return this.lane("callback", input, forwarded("callbackQuery", { ...fields, capability }), requestId);
   }
 
-  async stored(): Promise<any> {
-    return await this.facilities.store.get("transaction");
+  atomic(input: OwnerAtomicInput, requestId: string): Promise<OwnerReply> {
+    return this.lane("client", input, forwarded("atomic", input), requestId);
   }
 
-  async persist(value) {
-    await this.facilities.store.put("transaction", value);
-    return value;
-  }
-
-  /** Rolls back an open transaction and records `status`. COMMIT is sent only by `commit`. */
-  async close(status) {
-    // A failing callback query cannot roll back or overwrite a commit in flight; the commit's
-    // outcome alone decides the record.
-    if (this.committing) return "committing";
-    // Any close revokes the callback capability.
-    this.validation = null;
-    if (this.transaction?.open) {
-      try {
-        await this.transaction.rollback();
-      } catch {
-        status = "failed";
-      }
+  /** Called by the adapter when this owner's timer fires; not queued behind either lane. */
+  async onTimer(): Promise<void> {
+    if (this.name === null) {
+      // A restarted owner learns its name from its record; with none, nothing can expire.
+      this.name = recordOwner(await this.facilities.store.get(KEY));
+      if (this.name === null) return;
     }
-    this.transaction = null;
-    const current = await this.stored();
-    if (current) await this.persist({ ...current, status, expiresAt: undefined });
-    return status;
-  }
-
-  /**
-   * The stored record, if it belongs to the caller: the same transaction id, and the same
-   * auth fingerprint and database binding, which both include the snapshot. `sameSnapshot`
-   * is false only for a commit whose caller differs from the record in nothing but the
-   * snapshot (a deployment between the commit and its retry); see `sameExceptSnapshot`.
-   */
-  async owned(body, kind) {
-    const current = await this.stored();
-    if (!current || current.transactionId !== body.transactionId) throw unavailable();
-    if (current.authFingerprint === body.authFingerprint && sameDatabaseBinding(current.databaseBinding, body.databaseBinding)) {
-      return { current, sameSnapshot: true };
-    }
-    if (kind === "commit" && this.sameExceptSnapshot(current, body)) return { current, sameSnapshot: false };
-    throw unavailable();
-  }
-
-  /**
-   * Whether the caller is the record's principal, subject, role, and session on the record's
-   * database (scope, id, and generation), with only the snapshot changed. The record keeps
-   * that identity as its `auth` and `databaseBinding`; the owner recomputes the fingerprint
-   * the caller must present under the caller's snapshot, after checking that the stored
-   * `auth` still produces the stored fingerprint.
-   */
-  sameExceptSnapshot(current, body) {
-    const binding = body.databaseBinding;
-    const stored = current.databaseBinding;
-    if (!binding || typeof binding !== "object" || Array.isArray(binding) || typeof binding.snapshot !== "string" ||
-      !stored || typeof stored !== "object" || !current.auth || typeof current.auth !== "object") return false;
-    if (binding.snapshot === stored.snapshot) return false;
-    if (!sameDatabaseBinding({ ...stored, snapshot: null }, { ...binding, snapshot: null })) return false;
-    const runtime = this.getRuntime();
-    if (authIdentity(runtime, current.auth, stored) !== current.authFingerprint) return false;
-    return authIdentity(runtime, current.auth, binding) === body.authFingerprint;
-  }
-
-  /**
-   * A commit command whose COMMIT may already have been sent (#48, ADR 0007). `commitSent`
-   * is written before COMMIT and never removed, so it records explicitly that every later
-   * status of the record (`committing`, or `failed` after a COMMIT error) was reached after
-   * COMMIT was sent. Called after `owned`, before the snapshot, route, and expiry checks:
-   * such a commit is answered only with its recorded reply (re-recorded first, when this
-   * live owner holds a reply whose put failed), or with POLICYSQL_COMMIT_OUTCOME_UNKNOWN,
-   * never with a rejection. Any other command returns null and is checked as usual.
-   */
-  async commitRetry(current, command) {
-    if (!Number.isSafeInteger(command?.sequence)) return null;
-    const digest = commandDigest(this.getRuntime(), "commit", command);
-    const sent = current.commitSent
-      ? current.commitSent.sequence === command.sequence && current.commitSent.digest === digest
-      // A record of the previous release, which wrote nothing before COMMIT: `committed` with
-      // the earlier command's `last` (between its two puts), or `active`, `failed`, or
-      // `expired`, which it also left after a COMMIT that may have applied. Nothing in it
-      // proves that COMMIT was not sent, so a commit at its next sequence is not rejected. Such
-      // a record is never this owner's open transaction: this release writes the field.
-      : current.commitRecording === undefined && !this.transaction && command.sequence === current.nextSequence &&
-        ["committed", "active", "failed", "expired"].includes(current.status);
-    if (!sent) return null;
-    if (current.status === "committed" && current.nextSequence - 1 === command.sequence && current.last?.digest === digest) {
-      return current.last.response;
-    }
-    // This owner saw COMMIT succeed, and only its terminal put failed: record it again.
-    const unrecorded = this.unrecorded;
-    if (current.status === "committing" && unrecorded?.record.transactionId === current.transactionId &&
-      unrecorded.record.last.digest === digest && unrecorded.record.nextSequence - 1 === command.sequence) {
-      try {
-        await this.persist(unrecorded.record);
-        this.unrecorded = null;
-        return unrecorded.record.last.response;
-      } catch {
-        console.log(JSON.stringify({ event: "transaction_terminal_unrecorded", transactionId: current.transactionId }));
-      }
-    }
-    console.log(JSON.stringify({
-      event: "transaction_commit_outcome_unknown", transactionId: current.transactionId, status: current.status,
-    }));
-    throw outcomeUnknown();
-  }
-
-  async active(body, current) {
-    if (body.snapshot !== undefined && current.snapshot !== body.snapshot) throw unavailable();
-    await this.checkCurrent(current);
-    if (current.status !== "active") return current;
-    if (!this.transaction || Date.now() >= current.expiresAtMs) {
-      console.log(JSON.stringify({
-        event: "transaction_owner_unavailable",
-        transactionId: current.transactionId,
-        reason: Date.now() >= current.expiresAtMs ? "expired" : "owner_lost",
-      }));
-      await this.close(Date.now() >= current.expiresAtMs ? "expired" : "failed");
-      throw unavailable();
-    }
-    return current;
-  }
-
-  async startTransaction(body, requestId) {
-    if (!exactKeys(body, ["transactionId", "authFingerprint", "startFingerprint", "mode", "auth", "expected", "databaseBinding", "snapshot"], ["transactionId", "authFingerprint", "startFingerprint", "mode", "auth"]) ||
-      !/^tx_[a-f0-9]{32}$/.test(body.transactionId) ||
-      !/^[a-f0-9]{64}$/.test(body.authFingerprint) ||
-      !/^[a-f0-9]{64}$/.test(body.startFingerprint) ||
-      !["read", "write"].includes(body.mode)) throw invalid();
-    const bindingContext = await this.checkContext(body);
-    const previous = await this.stored();
-    if (previous) {
-      if (previous.startFingerprint !== body.startFingerprint || previous.authFingerprint !== body.authFingerprint ||
-        previous.snapshot !== bindingContext.snapshot || !sameDatabaseBinding(previous.databaseBinding, bindingContext.databaseBinding)) {
-        throw conflict();
-      }
-      // COMMIT may be in flight or its outcome unrecorded; only the commit command answers.
-      if (previous.status === "committing") throw unavailable();
-      if (previous.status === "active" && !this.transaction) {
-        await this.persist({ ...previous, status: "failed", expiresAt: undefined });
-        throw unavailable();
-      }
-      return this.publicState(previous, requestId);
-    }
-    const limits = runtimeLimits(this.getRuntime());
-    const expiresAtMs = Date.now() + limits.transactionMs;
-    const transport = await this.connectionFactory(bindingContext.databaseBinding, expiresAtMs)(requestId);
-    this.transaction = await transport.begin(body.mode, limits.beginTimeoutMs);
-    const value = await this.persist({
-      ...bindingContext,
-      transactionId: body.transactionId,
-      authFingerprint: body.authFingerprint,
-      startFingerprint: body.startFingerprint,
-      mode: body.mode,
-      auth: body.auth,
-      status: "active",
-      // This release records `commitSent` before every COMMIT (#48); a record without this
-      // field was written by the previous release.
-      commitRecording: 1,
-      nextSequence: 1,
-      expiresAtMs,
-      last: null,
-      usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 0 },
-      statementCount: 0,
-      resultBytes: 0,
-      mutations: [],
-      commitChecks: [],
-      schemaVersion: null,
-      policyVersion: null,
-    });
-    await this.facilities.timer.schedule(expiresAtMs);
-    console.log(JSON.stringify({ event: "transaction_started", transactionId: value.transactionId, mode: value.mode, requestId }));
-    return this.publicState(value, requestId);
-  }
-
-  publicState(value, requestId) {
-    return {
-      transactionId: value.transactionId,
-      status: value.status,
-      ...(value.status === "active" ? {
-        nextSequence: value.nextSequence,
-        expiresAt: new Date(value.expiresAtMs).toISOString(),
-      } : {}),
-      meta: { requestId },
-    };
-  }
-
-  async prepareCommand(body, kind, requestId) {
-    const { current: owned, sameSnapshot } = await this.owned(body, kind);
-    if (kind === "commit") {
-      const replay = await this.commitRetry(owned, body.command);
-      if (replay) return { replay };
-    }
-    // Across a snapshot change only a commit whose COMMIT was sent is answered.
-    if (!sameSnapshot) throw unavailable();
-    const current = await this.active(body, owned);
-    if (!Number.isSafeInteger(body.command?.sequence) || body.command.sequence < 1) throw invalid();
-    // A statement's digest decides only two things: whether it repeats `last` (an exact
-    // retry, possible only at `nextSequence - 1`), and what a successful statement records.
-    // So a statement's digest is computed here only for a possible retry that compiles
-    // (see `mayRepeat`), and otherwise after its compile succeeds, before it executes
-    // (`statement`), before any database work. A body that cannot compile is never hashed
-    // (#55 review: a 1 MB body of numbers cost hashes before compile). A body that compiles is
-    // hashed in full, by core's canonicalization, in time linear in its size.
-    const retry = body.command.sequence === current.nextSequence - 1 && current.last !== undefined && current.last !== null;
-    let digest = null;
-    if (kind !== "statement" || (retry && this.mayRepeat(current.auth, statementEnvelope(body.command)))) {
-      digest = commandDigest(this.getRuntime(), kind, body.command);
-      if (retry && current.last.digest === digest) return { replay: current.last.response };
-    }
-    if (current.status !== "active") throw unavailable();
-    if (body.command.sequence !== current.nextSequence) {
-      await this.close("failed");
-      throw conflict();
-    }
-    return { current, digest };
-  }
-
-  /**
-   * Whether a command may equal the recorded `last` one, judged by compiling it (a pure call
-   * whose plan is released at once). `last` compiled under the same `auth`, and every caller
-   * first requires the record's snapshot to equal the runtime's, so the same command compiles
-   * again: a compile that rejects the command for a reason of its own proves that it is not
-   * `last` without hashing it. This spares only the hashes of commands that cannot compile;
-   * it does not bound what is hashed: a command that compiles, such as one with a large
-   * JSON-typed parameter, is hashed in full, at a cost linear in its size. A state-dependent
-   * failure is inconclusive and the caller hashes as before.
-   */
-  mayRepeat(auth, envelope) {
-    const runtime = this.getRuntime();
-    let compiled;
     try {
-      compiled = JSON.parse(runtime.compile_json(JSON.stringify(auth), envelope, "execute"));
+      await this.drive({ type: "timerFired" }, crypto.randomUUID());
     } catch {
-      return true;
+      await this.abandon(crypto.randomUUID());
     }
-    const error = wasmError(compiled);
-    if (error) return STATE_DEPENDENT_COMPILE_ERRORS.has(error.code);
-    runtime.release_execution(BigInt(compiled.executionHandle));
+  }
+
+  /** Resolves once both lanes have run every effect of every event they were given. */
+  async settled(): Promise<void> {
+    let lanes: Array<Promise<unknown>>;
+    do {
+      lanes = [this.queues.client, this.queues.callback];
+      await Promise.all(lanes);
+    } while (lanes[0] !== this.queues.client || lanes[1] !== this.queues.callback);
+  }
+
+  // ---- routing hook (overridden by TransactionOwnerCore until pull request 8) -----------
+
+  /** A reply from another path for this input, or null to run the machine. */
+  async alternative(_lane: Lane, _event: any, _input: unknown, _requestId: string): Promise<OwnerReply | null> {
+    return null;
+  }
+
+  // ---- the executor ---------------------------------------------------------------------
+
+  /**
+   * Runs `event` on `lane` after the lane's previous event ran all its effects, and resolves
+   * with the lane's reply as soon as the machine sends it.
+   */
+  lane(lane: Lane, input: unknown, event: any, rawRequestId: string): Promise<OwnerReply> {
+    const requestId = replyRequestId(rawRequestId);
+    let resolveReply: (reply: OwnerReply) => void;
+    const reply = new Promise<OwnerReply>((resolve) => { resolveReply = resolve; });
+    const run = this.queues[lane].then(async () => {
+      try {
+        const other = await this.alternative(lane, event, input, requestId);
+        if (other !== null) {
+          resolveReply(other);
+          return;
+        }
+      } catch {
+        resolveReply(internalReply());
+        return;
+      }
+      if (this.name === null) this.name = namedOwner(input);
+      if (this.name === null) {
+        // The adapter delivered a message without an owner name: a port fault.
+        resolveReply(internalReply());
+        return;
+      }
+      this.waiters[lane] = resolveReply;
+      try {
+        await this.drive(event, requestId);
+      } catch {
+        // Invalid host facts or an engine fault: Abandon with the previous state, then 500.
+        await this.abandon(requestId);
+        if (this.waiters[lane] === resolveReply) {
+          this.waiters[lane] = null;
+          resolveReply(internalReply());
+        }
+      }
+      // Every event is answered by the step that decides it.
+      if (this.waiters[lane] === resolveReply) {
+        this.waiters[lane] = null;
+        this.noteUnrouted(lane, "no reply");
+        resolveReply(internalReply());
+      }
+    });
+    this.queues[lane] = run.catch(() => undefined);
+    return reply;
+  }
+
+  async load() {
+    if (this.loaded) return;
+    const stored = await this.facilities.store.get(KEY);
+    // A record of the TypeScript owner is an object: the machine reads it as JSON text and
+    // discards it (ADR 0024 "Old-format records are discarded, not read").
+    this.durable = stored === undefined || stored === null ? null : typeof stored === "string" ? stored : JSON.stringify(stored);
+    this.volatile = null;
+    this.loaded = true;
+  }
+
+  step(event: any, requestId: string) {
+    const host = JSON.stringify({
+      nowMs: Date.now(), entropy: randomHex(), requestId, owner: this.name, configuredChecks: this.configuredChecks,
+    });
+    const eventText = stringifyExact(event);
+    const outputText: string = this.getRuntime().step_json(this.durable ?? undefined, this.volatile ?? undefined, eventText, host);
+    this.transcript?.push({ durable: this.durable, volatile: this.volatile, event: eventText, host, output: outputText });
+    const output = parseExact(outputText);
+    if (output.error) throw new EngineError(output.error.code, output.error.message);
+    this.durable = output.durable;
+    this.volatile = output.volatile;
+    // No volatile part: the machine holds no connection. Close any the owner still has.
+    if (output.volatile === null) this.closeConnection();
+    return output;
+  }
+
+  closeConnection() {
+    const connection = this.connection;
+    this.connection = null;
+    if (connection?.open) connection.rollback().catch(() => undefined);
+  }
+
+  /** Drops the in-memory state; the next event starts from the store, as a successor would. */
+  reset() {
+    this.closeConnection();
+    this.loaded = false;
+    this.durable = null;
+    this.volatile = null;
+  }
+
+  /** `abandon` for the current state; its one `persist` runs before the state is dropped. */
+  async abandon(requestId: string) {
+    try { await this.drive({ type: "abandon" }, requestId); } catch { /* discarded below */ }
+    this.reset();
+  }
+
+  noteUnrouted(lane: string, reply: unknown) {
+    console.log(JSON.stringify({ event: "owner_reply_unrouted", transactionId: this.name, lane }));
+    if (this.unrouted.length < 16) this.unrouted.push({ lane, reply });
+  }
+
+  /** Runs one event and every effect it leads to. */
+  async drive(event: any, requestId: string) {
+    let next = event;
+    while (next) {
+      // A `reset` on another lane dropped the state: reload it, as a successor would.
+      await this.load();
+      const output = this.step(next, requestId);
+      next = null;
+      checkBatch(output.effects);
+      for (const effect of output.effects) {
+        switch (effect.type) {
+          case "respond": {
+            const lane: Lane = effect.lane === "callback" ? "callback" : "client";
+            const waiter = this.waiters[lane];
+            this.waiters[lane] = null;
+            if (waiter) waiter(effect.reply); else this.noteUnrouted(lane, effect.reply);
+            break;
+          }
+          case "log":
+            try { console.log(stringifyExact(effect.record)); } catch { /* a log write never fails the lane */ }
+            break;
+          case "observe":
+            runInBackground(this.facilities.background, observeCost(effect, {
+              getRuntime: this.getRuntime, database: this.database, costCatalog: this.config.costCatalog,
+            }), requestId);
+            break;
+          case "reset":
+            this.reset();
+            break;
+          default:
+            next = await this.perform(effect, output, requestId);
+        }
+      }
+    }
+  }
+
+  async perform(effect: any, output: any, requestId: string) {
+    const { id } = effect;
+    const runtime = this.getRuntime();
+    switch (effect.type) {
+      case "checkBinding":
+        try {
+          await checkDatabaseBinding(this.database, effect.binding, effect.binding?.snapshot, effect.deadlineMs ?? undefined);
+          return { type: "bindingChecked", id, allowed: true };
+        } catch (error) {
+          const errorClass = failureClass(error);
+          return errorClass === "rejected" ? { type: "bindingChecked", id, allowed: false } : { type: "bindingCheckFailed", id, class: errorClass };
+        }
+      case "open":
+        try {
+          this.closeConnection();
+          const factory = databaseTransportFactory(this.database, effect.binding, runtimeBytesLimit(runtime), effect.deadlineMs);
+          const transport = await factory(requestId);
+          this.connection = await transport.begin(effect.mode, effect.timeoutMs);
+          return { type: "opened", id };
+        } catch (error) {
+          return { type: "openFailed", id, class: failureClass(error) };
+        }
+      case "execute":
+        try {
+          if (!this.connection) throw new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
+          const maxBytes = runtimeBytesLimit(runtime);
+          const results = await this.connection.execute(effect.statements.map((statement) => ({
+            sql: statement.sql,
+            args: decodeArgs(statement.args, maxBytes),
+          })));
+          return { type: "executed", id, results: encodeResults(results, maxBytes) };
+        } catch (error) {
+          return { type: "executeFailed", id, class: failureClass(error) };
+        }
+      case "commit":
+        try {
+          if (!this.connection) throw new Error("no connection");
+          await this.connection.commit();
+          return { type: "committed", id };
+        } catch {
+          // A COMMIT error never proves that nothing committed (ADR 0007).
+          return { type: "commitFailed", id, class: "unknown" };
+        } finally {
+          this.connection = null;
+        }
+      case "rollback":
+        try {
+          await this.connection?.rollback();
+          return { type: "rolledBack", id };
+        } catch (error) {
+          return { type: "rollbackFailed", id, class: failureClass(error) };
+        } finally {
+          this.connection = null;
+        }
+      case "setTimer":
+        try {
+          await this.facilities.timer.schedule(effect.atMs);
+          return { type: "timerSet", id };
+        } catch {
+          return { type: "timerFailed", id };
+        }
+      case "persist":
+        try {
+          // The durable text returned by the step that emitted this effect.
+          await this.facilities.store.put(KEY, output.durable);
+          return { type: "persisted", id };
+        } catch {
+          return { type: "persistFailed", id };
+        }
+      case "callValidator":
+        return await this.callValidator(effect);
+      default:
+        // An effect this executor does not know: an engine fault (Abandon follows).
+        throw new Error(`unknown effect ${effect.type}`);
+    }
+  }
+
+  async callValidator(effect: any) {
+    const { id } = effect;
+    // The endpoint and secret are looked up by check id; core never sees them. The hook
+    // adapter adds `query` (token, callback URL, expiry) and signs.
+    const endpoint = this.config.commitCheck(effect.check);
+    let url: URL;
+    let publicBaseUrl: URL;
+    try {
+      if (endpoint === undefined || this.config.publicBaseUrl === undefined) throw new TypeError("unconfigured");
+      url = secureUrl(endpoint.url);
+      publicBaseUrl = secureUrl(this.config.publicBaseUrl);
+      if (typeof endpoint.hmacSecret !== "string" || endpoint.hmacSecret.length < 16) throw new TypeError("secret");
+    } catch {
+      return { type: "validatorFailed", id, class: "rejected" };
+    }
+    try {
+      const reply = await callCommitCheckHook({
+        url,
+        hmacSecret: endpoint.hmacSecret,
+        publicBaseUrl,
+        validationId: effect.payload.validationId,
+        payload: effect.payload,
+        capability: effect.capability,
+        timeoutMs: effect.timeoutMs,
+        fetchImpl: this.fetchImpl,
+      });
+      return { type: "validatorReplied", id, ok: reply.ok, decision: reply.decision ?? null };
+    } catch (error) {
+      return { type: "validatorFailed", id, class: validatorFailureClass(error) };
+    }
+  }
+}
+
+/**
+ * The owner of one transaction name (ADR 0007, ADR 0022, ADR 0024). An adapter creates one
+ * instance per live owner, injects its durable store, timer, and background tasks, and
+ * delivers every call for that name to it.
+ *
+ * Interactive transactions (begin, statement, commit, rollback, and their commit checks'
+ * callback queries and timer) run the step machine. The atomic owner path stays in TypeScript
+ * until ADR 0024 pull request 8: an `atomic` input, and any input or timer of an owner whose
+ * record that path wrote, is served by `LegacyTransactionOwnerCore`, exactly as before.
+ */
+export class TransactionOwnerCore extends StepTransactionOwner {
+  legacy: LegacyTransactionOwnerCore;
+
+  constructor(facilities: OwnerFacilities, dependencies: TransactionOwnerDependencies) {
+    super(facilities, dependencies);
+    this.legacy = new LegacyTransactionOwnerCore(facilities, dependencies);
+  }
+
+  atomic(input: OwnerAtomicInput, requestId: string): Promise<OwnerReply> {
+    // Queued on the client lane, so atomic and interactive inputs keep their arrival order.
+    return this.lane("client", input, null, requestId);
+  }
+
+  async onTimer(): Promise<void> {
+    if (await this.legacyOwned()) {
+      await this.legacy.onTimer();
+      return;
+    }
+    await super.onTimer();
+  }
+
+  /**
+   * Whether the TypeScript atomic path owns this name: its execution is in flight, or the
+   * store holds a record it wrote. The machine's own state, once present, decides alone.
+   */
+  async legacyOwned(): Promise<boolean> {
+    if (this.legacy.transaction || this.legacy.validation) return true;
+    if (this.volatile !== null || (this.loaded && this.durable !== null)) return false;
+    if (!legacyAtomicRecord(await this.facilities.store.get(KEY))) return false;
+    // The machine never read this record; it reads the store again if it is ever asked.
+    this.loaded = false;
     return true;
   }
 
-  async saveCommand(current, digest, response, usage) {
-    await this.persist({
-      ...current,
-      nextSequence: current.nextSequence + 1,
-      last: { digest, response },
-      usage,
-    });
-    return response;
-  }
-
-  async statement(body, requestId) {
-    if (!exactKeys(body, ["transactionId", "authFingerprint", "command", "databaseBinding", "snapshot"], ["transactionId", "authFingerprint", "command"]) ||
-      !exactKeys(body.command, ["sequence", "sql", "params", "expect"], ["sequence", "sql", "params"]) ||
-      typeof body.command.sql !== "string" ||
-      !body.command.params || Array.isArray(body.command.params) || typeof body.command.params !== "object") throw invalid();
-    const prepared = await this.prepareCommand(body, "statement", requestId);
-    if (prepared.replay) return prepared.replay;
-    const { current } = prepared;
-    const limits = runtimeLimits(this.getRuntime());
-    if (current.statementCount >= limits.maxTransactionStatements) {
-      await this.close("failed");
-      throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
+  async alternative(lane: Lane, event: any, input: unknown, requestId: string): Promise<OwnerReply | null> {
+    if (event === null) return await this.legacy.atomic(input as OwnerAtomicInput, requestId);
+    if (!await this.legacyOwned()) return null;
+    const fields: Record<string, unknown> = isObject(input) ? input : {};
+    const command = (() => {
+      try { return typeof fields.command === "string" ? JSON.parse(fields.command) : null; } catch { return null; }
+    })();
+    if (lane === "callback") {
+      return await this.legacy.callbackQuery({ capability: event.input.capability, command }, requestId);
     }
-    const runtime = this.getRuntime();
-    const compiled = JSON.parse(runtime.compile_json(JSON.stringify(current.auth), statementEnvelope(body.command), "execute"));
-    const compileError = wasmError(compiled);
-    if (compileError) {
-      await this.close("failed");
-      throw compileError;
-    }
-    if (current.mode === "read" && compiled.transactionMode !== "read") {
-      runtime.release_execution(BigInt(compiled.executionHandle));
-      await this.close("failed");
-      throw new EngineError("POLICYSQL_TRANSACTION_MODE_VIOLATION", "A read transaction cannot execute a mutation.");
-    }
-    // The digest this statement records, computed by core before any database work.
-    let digest = prepared.digest;
-    if (digest === null) {
-      try {
-        digest = commandDigest(runtime, "statement", body.command);
-      } catch (error) {
-        runtime.release_execution(BigInt(compiled.executionHandle));
-        throw error;
-      }
-    }
-    let executed;
-    try {
-      executed = await executeSealedOnTransaction(runtime, compiled, this.transaction, requestId);
-    } catch (error) {
-      await this.close("failed");
-      throw error;
-    }
-    this.observeCost(compiled, requestId, current.databaseBinding);
-    const usage = {
-      rowsRead: current.usage.rowsRead + executed.usage.rowsRead,
-      rowsWritten: current.usage.rowsWritten + executed.usage.rowsWritten,
-      queryDurationMs: Math.round((current.usage.queryDurationMs + executed.usage.queryDurationMs) * 1000) / 1000,
-    };
-    const response = {
-      transactionId: current.transactionId,
-      status: "active",
-      nextSequence: current.nextSequence + 1,
-      result: { sequence: current.nextSequence, ...executed.results[0] },
-      meta: { requestId },
-    };
-    const resultBytes = current.resultBytes + new TextEncoder().encode(JSON.stringify(response.result)).byteLength;
-    if (resultBytes > limits.maxTransactionResultBytes) {
-      await this.close("failed");
-      throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
-    }
-    console.log(JSON.stringify({
-      event: "transaction_usage",
-      transactionId: current.transactionId,
-      requestId,
-      usage,
-    }));
-    return await this.saveCommand({
-      ...current,
-      statementCount: current.statementCount + 1,
-      resultBytes,
-      mutations: compiled.statements[0].operation !== "select" && (executed.results[0].affectedRows ?? 0) > 0
-        ? [...current.mutations, {
-          index: current.statementCount,
-          type: compiled.statements[0].operation,
-          resource: compiled.statements[0].resource,
-        }]
-        : current.mutations,
-      commitChecks: this.mergeChecks(current.commitChecks, compiled.commitChecks ?? []),
-      schemaVersion: compiled.schemaVersion,
-      policyVersion: compiled.policyVersion,
-    }, digest, response, usage);
-  }
-
-  async terminal(body, requestId, kind) {
-    if (!exactKeys(body, ["transactionId", "authFingerprint", "command", "databaseBinding", "snapshot"], ["transactionId", "authFingerprint", "command"]) ||
-      !exactKeys(body.command, ["sequence"], ["sequence"])) throw invalid();
-    const prepared = await this.prepareCommand(body, kind, requestId);
-    if (prepared.replay) return prepared.replay;
-    const { current, digest } = prepared;
-    let commitChecks = "not_triggered";
-    if (kind === "commit" && current.mutations.length > 0) {
-      try {
-        commitChecks = await this.checksForCurrent(current, requestId);
-      } catch (error) {
-        await this.close("failed");
-        throw error;
-      }
-    }
-    if (kind === "commit") return await this.commit(current, digest, requestId, commitChecks);
-    const status = await this.close("rolled_back");
-    const response = {
-      transactionId: current.transactionId,
-      status,
-      meta: { requestId, commitChecks },
-    };
-    await this.persist({
-      ...current,
-      status,
-      nextSequence: current.nextSequence + 1,
-      expiresAtMs: undefined,
-      last: { digest, response },
-    });
-    console.log(JSON.stringify({
-      event: "transaction_terminal",
-      transactionId: current.transactionId,
-      status,
-      requestId,
-      usage: current.usage,
-    }));
-    return response;
-  }
-
-  /**
-   * Sends COMMIT for `current`, which passed its commit checks. The record says `committing`
-   * (with the command's sequence and digest as `commitSent`) before COMMIT is sent, and the
-   * terminal record (`committed`, the next sequence, and the reply as `last`) is one put, so
-   * neither a successor nor a retry after a failed put reads a state that rejects a commit
-   * that applied (#48).
-   */
-  async commit(current, digest, requestId, commitChecks) {
-    // A route can be revoked while an external validator is running.
-    await this.checkCurrent(current);
-    // Nothing was sent: an expiry or failure already ended the transaction.
-    if (!this.transaction?.open) throw unavailable();
-    let committing;
-    try {
-      committing = await this.persist({ ...current, status: "committing", commitSent: { sequence: current.nextSequence, digest } });
-    } catch (error) {
-      // COMMIT was not sent. If the put did land, the failed record keeps `commitSent`, and a
-      // retry gets the unknown outcome rather than a rejection.
-      await this.close("failed");
-      throw error;
-    }
-    // The deadline can pass while `committing` is stored. COMMIT is then never sent: roll
-    // back, record `expired` without `commitSent`, and only then reject (ADR 0024). If that
-    // record cannot be stored, `committing` stays, so a retry gets the unknown outcome.
-    if (Date.now() >= current.expiresAtMs) {
-      try { await this.transaction.rollback(); } catch { /* the database deadline ends it */ }
-      this.transaction = null;
-      try {
-        await this.persist({ ...current, status: "expired", expiresAtMs: undefined });
-      } catch {
-        throw internal();
-      }
-      throw unavailable();
-    }
-    this.committing = true;
-    try {
-      await this.transaction.commit();
-    } catch {
-      // A transport error during COMMIT does not prove that nothing committed. Whatever the
-      // store does, the reply is the unknown outcome; an unstored `failed` leaves
-      // `committing`, which a retry answers the same way.
-      this.committing = false;
-      this.transaction = null;
-      console.log(JSON.stringify({ event: "transaction_commit_outcome_unknown", transactionId: current.transactionId, requestId }));
-      try {
-        await this.persist({ ...committing, status: "failed", expiresAtMs: undefined });
-      } catch {
-        console.log(JSON.stringify({ event: "transaction_terminal_unrecorded", transactionId: current.transactionId, requestId }));
-      }
-      throw outcomeUnknown();
-    }
-    this.committing = false;
-    this.transaction = null;
-    const response = {
-      transactionId: current.transactionId,
-      status: "committed",
-      meta: { requestId, commitChecks },
-    };
-    const terminal = {
-      ...committing,
-      status: "committed",
-      nextSequence: current.nextSequence + 1,
-      expiresAtMs: undefined,
-      last: { digest, response },
-    };
-    try {
-      await this.persist(terminal);
-    } catch {
-      // The commit applied, so the reply says so. The record stays `committing`. This owner
-      // keeps the terminal record and stores it again on a retry; a successor, or a second
-      // failed put, answers the retry with the unknown outcome, never a rejection.
-      this.unrecorded = { record: terminal };
-      console.log(JSON.stringify({ event: "transaction_terminal_unrecorded", transactionId: current.transactionId, requestId }));
-    }
-    console.log(JSON.stringify({
-      event: "transaction_terminal",
-      transactionId: current.transactionId,
-      status: "committed",
-      requestId,
-      usage: current.usage,
-    }));
-    return response;
-  }
-
-  /**
-   * Called by the adapter when this owner's timer fires: an open transaction expires. It is
-   * not queued behind the client lane, so expiry also ends a commit that waits on a validator.
-   */
-  async onTimer() {
-    const current = await this.stored();
-    if (["active", "validating"].includes(current?.status)) await this.close("expired");
-  }
-
-  mergeChecks(current, incoming) {
-    return [...new Map([...current, ...incoming].map((check) => [check.id, check])).values()]
-      .sort((left, right) => left.id.localeCompare(right.id));
-  }
-
-  async activateValidation(current, session) {
-    this.validation = { ...session, databaseBinding: current.databaseBinding, snapshot: current.snapshot };
-    await this.persist({ ...current, status: "validating" });
-  }
-
-  async deactivateValidation(current) {
-    this.validation = null;
-    if (!this.transaction?.open) {
-      throw new EngineError("POLICYSQL_COMMIT_CHECK_REJECTED", "A commit check rejected the transaction.");
-    }
-    await this.persist({ ...current, status: "active" });
-  }
-
-  async checksForCurrent(current, requestId, compiled = null, results = null) {
-    const context = compiled ?? {
-      statements: current.mutations.map((mutation) => ({
-        operation: mutation.type,
-        resource: mutation.resource,
-      })),
-      commitChecks: current.commitChecks,
-      policyVersion: current.policyVersion,
-      schemaVersion: current.schemaVersion,
-    };
-    const outcomes = results ?? current.mutations.map(() => ({ affectedRows: 1 }));
-    return await runCommitChecks({
-      compiled: context,
-      results: outcomes,
-      auth: current.auth,
-      config: this.config,
-      requestId,
-      validationId: current.validationId ?? current.transactionId.replace(/^tx_/u, "cval_"),
-      activate: (session) => this.activateValidation(current, session),
-      deactivate: () => this.deactivateValidation(current),
-      fetchImpl: this.fetchImpl,
-      deadlineMs: current.expiresAtMs,
-    });
-  }
-
-  /**
-   * The live capability, or null: a validator is awaited (the verdict's
-   * `deactivateValidation` and every close clear `this.validation`), the record is
-   * `validating`, and the transaction is open. Read before the token is looked at, so a
-   * callback that finds no live capability (none granted, after the verdict, after an expiry,
-   * on a successor) cannot end the transaction (#73). `session` was captured before any
-   * await; a failed read of the record throws, which the caller treats as a failure of that
-   * live capability (fail closed).
-   */
-  async liveValidation(session) {
-    if (!session || this.validation !== session || !this.transaction?.open) return null;
-    const current = await this.stored();
-    return current?.status === "validating" && this.validation === session && this.transaction?.open ? session : null;
-  }
-
-  async validationQuery(session, command, capability, requestId) {
-    const current = await this.stored();
-    if (!current || current.status !== "validating" || !this.transaction?.open ||
-      !await verifyCapabilityToken(capability, session) ||
-      !exactKeys(command, ["sequence", "sql", "params"], ["sequence", "sql", "params"]) ||
-      !Number.isSafeInteger(command.sequence) || command.sequence < 1 ||
-      typeof command.sql !== "string" || !command.params || Array.isArray(command.params) ||
-      typeof command.params !== "object") throw unavailable();
-    if (!sameDatabaseBinding(session.databaseBinding, current.databaseBinding) || session.snapshot !== current.snapshot) throw unavailable();
-    await this.checkCurrent(current, Math.min(current.expiresAtMs, session.expiresAtMs));
-    if (Date.now() >= session.expiresAtMs) throw unavailable();
-    // As for statements (`prepareCommand`): hashed for a possible exact retry that compiles,
-    // otherwise after the compile succeeds and before the query executes.
-    const envelope = statementEnvelope(command);
-    let digest = null;
-    if (command.sequence === session.nextSequence - 1 && session.last && this.mayRepeat(session.auth, envelope)) {
-      digest = callbackDigest(this.getRuntime(), command);
-      if (session.last.digest === digest) return session.last.response;
-    }
-    const runtime = this.getRuntime();
-    const limits = runtimeLimits(runtime);
-    if (command.sequence !== session.nextSequence || command.sequence > limits.maxTransactionStatements) throw conflict();
-    const compiled = JSON.parse(runtime.compile_json(JSON.stringify(session.auth), envelope, "execute"));
-    const compileError = wasmError(compiled);
-    if (compileError) throw compileError;
-    if (compiled.transactionMode !== "read" || compiled.statements.length !== 1) {
-      runtime.release_execution(BigInt(compiled.executionHandle));
-      throw conflict();
-    }
-    if (digest === null) {
-      try {
-        digest = callbackDigest(runtime, command);
-      } catch (error) {
-        runtime.release_execution(BigInt(compiled.executionHandle));
-        throw error;
-      }
-    }
-    const executed = await executeSealedOnTransaction(runtime, compiled, this.transaction, requestId);
-    const response = {
-      sequence: command.sequence,
-      ...executed.results[0],
-      meta: {
-        ...executed.results[0].meta,
-        requestId,
-        policyVersion: compiled.policyVersion,
-        schemaVersion: compiled.schemaVersion,
-        role: session.auth.role,
-      },
-    };
-    const rowsReturned = session.rowsReturned + executed.results[0].rowCount;
-    const resultBytes = session.resultBytes + new TextEncoder().encode(JSON.stringify(response)).byteLength;
-    if (rowsReturned > limits.maxCallbackRows || resultBytes > limits.maxTransactionResultBytes) {
-      throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
-    }
-    // Revoked while the query ran (the verdict, an expiry, or a close): its rows are not
-    // returned, and the revoked capability is not restored.
-    if (this.validation !== session) throw unavailable();
-    this.validation = {
-      ...session,
-      nextSequence: session.nextSequence + 1,
-      last: { digest, response },
-      rowsReturned,
-      resultBytes,
-    };
-    return response;
-  }
-
-  async executeAtomic(body, requestId) {
-    if (!exactKeys(body, ["validationId", "auth", "request", "idempotency", "databaseBinding", "snapshot"], ["validationId", "auth", "request"]) ||
-      !/^cval_[a-f0-9]{32}$/u.test(body.validationId) || typeof body.request !== "string" ||
-      (body.idempotency != null && (
-        !exactKeys(body.idempotency, ["keyHash", "fingerprint"]) ||
-        typeof body.idempotency.keyHash !== "string" || !/^[a-f0-9]{64}$/.test(body.idempotency.keyHash) ||
-        typeof body.idempotency.fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(body.idempotency.fingerprint)
-      ))) throw invalid();
-    const bindingContext = await this.checkContext(body);
-    const previous = await this.stored();
-    if (previous && (!sameDatabaseBinding(previous.databaseBinding, bindingContext.databaseBinding) ||
-      previous.snapshot !== bindingContext.snapshot)) throw conflict();
-    const runtime = this.getRuntime();
-    const compiled = JSON.parse(runtime.compile_json(JSON.stringify(body.auth), body.request, "execute"));
-    const compileError = wasmError(compiled);
-    if (compileError) throw compileError;
-    if (compiled.transactionMode !== "write") {
-      runtime.release_execution(BigInt(compiled.executionHandle));
-      throw invalid();
-    }
-    let released = false;
-    const expiresAtMs = Date.now() + runtimeLimits(runtime).transactionMs;
-    try {
-      const transport = await this.connectionFactory(bindingContext.databaseBinding, expiresAtMs)(requestId);
-      this.transaction = await transport.begin("write", Math.min(...compiled.statements.map((item) => item.limits.timeoutMs)));
-    } catch (error) {
-      runtime.release_execution(BigInt(compiled.executionHandle));
-      throw error;
-    }
-    const current = {
-      ...bindingContext,
-      transactionId: `atomic_${body.idempotency?.keyHash.slice(0, 24) ?? body.validationId.slice("cval_".length)}`,
-      validationId: body.validationId,
-      auth: body.auth,
-      status: "active",
-      expiresAtMs,
-    };
-    const started = performance.now();
-    let terminal = null;
-    try {
-      await this.persist(current);
-      await this.facilities.timer.schedule(current.expiresAtMs);
-      if (body.idempotency) {
-        const [existing] = await this.transaction.execute([{
-          sql: "SELECT fingerprint, response_json FROM policysql_idempotency WHERE key_hash = :key_hash",
-          args: { key_hash: body.idempotency.keyHash },
-        }]);
-        if (existing.rows.length === 1) {
-          const [fingerprint, responseJson] = existing.rows[0];
-          if (fingerprint !== body.idempotency.fingerprint) throw conflict();
-          const stored = storedAtomicTerminal(responseJson);
-          runtime.release_execution(BigInt(compiled.executionHandle));
-          released = true;
-          await this.transaction.rollback();
-          this.transaction = null;
-          await this.persist({ ...current, status: "committed" });
-          return stored;
-        }
-        if (existing.rows.length !== 0) throw conflict();
-      }
-      // executeSealedOnTransaction releases its handle on both success and failure.
-      released = true;
-      const executed = await executeSealedOnTransaction(runtime, compiled, this.transaction, requestId);
-      this.observeCost(compiled, requestId, current.databaseBinding);
-      enforceCumulativeLimits(compiled, executed.results, performance.now() - started);
-      const commitChecks = await this.checksForCurrent(current, requestId, compiled, executed.results);
-      await this.checkCurrent(current);
-      const usage = {
-        rowsReturned: executed.results.reduce((sum, result) => sum + result.rowCount, 0),
-        rowsAffected: executed.results.reduce((sum, result) => sum + (result.affectedRows ?? 0), 0),
-        rowsRead: executed.usage.rowsRead,
-        rowsWritten: executed.usage.rowsWritten,
-        queryDurationMs: Math.round(executed.usage.queryDurationMs * 1000) / 1000,
-      };
-      const reply = {
-        version: 1,
-        transactionId: current.transactionId,
-        status: "committed",
-        results: executed.results,
-        usage,
-        originalRequestId: requestId,
-        replayed: false,
-        commitChecks,
-      };
-      if (body.idempotency) {
-        await this.transaction.execute([{
-          sql: "INSERT INTO policysql_idempotency (key_hash, fingerprint, response_json) VALUES (:key_hash, :fingerprint, :response_json)",
-          args: {
-            key_hash: body.idempotency.keyHash,
-            fingerprint: body.idempotency.fingerprint,
-            response_json: JSON.stringify(reply),
-          },
-        }]);
-      }
-      await this.transaction.commit();
-      terminal = reply;
-      this.transaction = null;
-      this.validation = null;
-      await this.persist({ ...current, status: "committed" });
-      return terminal;
-    } catch (error) {
-      // The commit applied: a failed put of the owner record does not change the outcome. A
-      // keyed retry resolves through `policysql_idempotency`, never through this record.
-      if (terminal) {
-        console.log(JSON.stringify({ event: "transaction_terminal_unrecorded", transactionId: current.transactionId, requestId }));
-        return terminal;
-      }
-      if (!released) runtime.release_execution(BigInt(compiled.executionHandle));
-      if (this.transaction?.open) {
-        try { await this.transaction.rollback(); } catch { /* terminal */ }
-      }
-      this.transaction = null;
-      this.validation = null;
-      await this.persist({ ...current, status: "failed" });
-      throw error;
-    }
+    // An interactive input that names an atomic owner: answered by the TypeScript owner, as
+    // before (it holds no interactive record, so it rejects without writing).
+    const authFingerprint = (() => {
+      try { return authIdentity(this.getRuntime(), fields.auth as any, fields.databaseBinding as any); } catch { return "0".repeat(64); }
+    })();
+    const { kind, auth, ...rest } = event.input;
+    if (kind === "begin") return await this.legacy.begin({ ...rest, auth, authFingerprint } as any, requestId);
+    return await this.legacy.command(kind, { ...rest, authFingerprint, command } as any, requestId);
   }
 }

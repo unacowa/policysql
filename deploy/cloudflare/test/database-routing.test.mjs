@@ -100,13 +100,18 @@ test("the callback entrypoint cannot be used to bypass required DB injection", a
 test("missing DB binding in an internal owner command fails before a connection is opened", async (t) => {
   const h = await harness(t);
   const owner = h.transactionOwners.route(`tx_${"a".repeat(32)}`);
-  const reply = await owner.begin({
-    transactionId: `tx_${"a".repeat(32)}`, authFingerprint: "b".repeat(64), startFingerprint: "c".repeat(64),
-    mode: "read", auth: {}, snapshot: h.runtime.snapshot,
-  }, "req");
-  assert.equal(reply.ok, false);
-  assert.equal(reply.error.code, "POLICYSQL_DATABASE_REQUIRED");
+  // The step machine reads the owner input exactly (ADR 0024): a begin without its binding is
+  // malformed, and a binding that is not one is rejected, before any database work.
+  for (const [databaseBinding, code] of [[undefined, "POLICYSQL_INVALID_REQUEST"], [null, "POLICYSQL_DATABASE_BINDING_REJECTED"]]) {
+    const reply = await owner.begin({
+      transactionId: `tx_${"a".repeat(32)}`, startFingerprint: "c".repeat(64),
+      mode: "read", auth: {}, snapshot: h.runtime.snapshot, ...(databaseBinding === undefined ? {} : { databaseBinding }),
+    }, "req");
+    assert.equal(reply.ok, false);
+    assert.equal(reply.error.code, code);
+  }
   assert.equal(h.counts().connects, 0);
+  assert.equal(h.counts().checks, 0);
 });
 
 test("client headers, body fields, and SQL cannot replace the wrapper-selected database", async (t) => {
@@ -432,13 +437,19 @@ test("a capability revoked by expiry changes nothing: the expired record stays (
   assert.notEqual(id, idle);
   assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("expired_cap") })).status, 200);
   let seen;
+  let validated;
+  const done = new Promise((resolve) => { validated = resolve; });
   h.setValidator(async (hook) => {
     assert.equal(await h.fireTimer(id), true);
     const late = await h.request("a", new URL(hook.query.url).pathname, { sequence: 1, ...read }, undefined, hook.query.token);
     seen = { late, status: (await h.ownerRecord(id)).status };
+    validated();
     return true;
   });
+  // The expiry answers the waiting commit at once (ADR 0024 inconsistency 5); the validator
+  // finishes after it.
   const commit = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 });
+  await done;
   assert.equal(seen.late.status, 409, JSON.stringify(seen.late));
   assert.equal(seen.late.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
   assert.equal(seen.status, "expired", "the late callback did not overwrite the expiry");
@@ -469,34 +480,29 @@ test("a wrong or malformed token while a capability is live still fails the vali
   }
 });
 
-test("a failed record read during a live validation fails it and rolls back (#73 review)", async (t) => {
+test("a store read fault during a live validation cannot touch its capability: the machine reads nothing (#73 review)", async (t) => {
   const h = await harness(t);
   const id = (await h.request("a", "/v1/transactions", { mode: "write" })).body.transactionId;
   assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("store_fault") })).status, 200);
-  let failed;
-  let after;
+  let armed = false;
+  let answered;
+  // Every owner store read throws while the validator runs. The step machine keeps its record
+  // in memory (ADR 0007 "Callback rules of the step machine"), so a callback reads nothing and
+  // a store fault can neither fail nor extend the live capability.
+  h.interceptOwnerGet(() => (armed ? { fail: true } : undefined));
   h.setValidator(async (hook) => {
-    let armed = true;
-    // The next owner store read, the callback's read of the record, throws.
-    h.interceptOwnerGet(() => {
-      if (!armed) return undefined;
-      armed = false;
-      return { fail: true };
-    });
-    failed = await h.request("a", new URL(hook.query.url).pathname, { sequence: 1, ...read }, undefined, hook.query.token);
-    h.interceptOwnerGet(null);
-    assert.equal(armed, false, "the callback read the record");
-    after = await h.request("a", new URL(hook.query.url).pathname, { sequence: 1, ...read }, undefined, hook.query.token);
+    armed = true;
+    answered = await h.request("a", new URL(hook.query.url).pathname, { sequence: 1, ...read }, undefined, hook.query.token);
+    armed = false;
     return true;
   });
   const commit = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 });
-  assert.ok(failed.status >= 400, JSON.stringify(failed));
-  assert.equal(after.status, 409, JSON.stringify(after));
-  assert.equal(after.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", "the failure revoked the capability");
-  assert.equal(commit.status, 409, JSON.stringify(commit));
-  assert.equal(commit.body.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
-  assert.equal((await h.ownerRecord(id)).status, "failed");
-  assert.equal(h.rows("a").some((row) => row.id === "store_fault"), false);
+  h.interceptOwnerGet(null);
+  assert.equal(answered.status, 200, JSON.stringify(answered));
+  assert.equal(commit.status, 200, JSON.stringify(commit));
+  assert.equal(commit.body.meta.commitChecks, "passed");
+  assert.equal((await h.ownerRecord(id)).status, "committed");
+  assert.equal(h.rows("a").some((row) => row.id === "store_fault"), true);
 });
 
 test("a changed runtime snapshot fails before another statement and rolls back", async (t) => {
@@ -504,23 +510,30 @@ test("a changed runtime snapshot fails before another statement and rolls back",
   const start = await h.request("a", "/v1/transactions", { mode: "write" });
   const id = start.body.transactionId;
   assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("stale") })).status, 200);
-  // A later runtime: another snapshot, the same core identity computation.
-  h.ownerCore(id).getRuntime = () => ({ snapshot: "new_snapshot", identity_json: (input) => h.runtime.identity_json(input) });
-  assert.equal((await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 })).status, 409);
+  // A later runtime on the owner: another snapshot (another policy version).
+  const later = h.makeRuntime({ policyVersion: "policy_routing_2" });
+  assert.notEqual(later.snapshot, h.runtime.snapshot);
+  h.ownerCore(id).getRuntime = () => later;
+  const commit = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 });
+  assert.equal(commit.status, 409, JSON.stringify(commit.body));
+  assert.equal(commit.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
+  assert.equal(h.events.some(({ sql }) => sql === "COMMIT"), false);
   assert.equal(h.rows("a").some((row) => row.id === "stale"), false);
 });
 
 test("Worker/DO provider configuration mismatch fails before connecting", async (t) => {
   const h = await harness(t);
   const start = await h.request("a", "/v1/transactions", { mode: "read" });
-  const message = await h.ownerRecord(start.body.transactionId);
+  // The begin input the engine forwarded (ADR 0024: the session and the binding).
+  const message = h.ownerInputs(start.body.transactionId)[0].input;
   // An owner whose deployment registers no such database checks the binding first.
   const ownerWithoutProvider = createMemoryTransactionOwners(() => ({ getRuntime: () => h.runtime, config: h.config, database: {
     check: () => false,
     connect: () => { assert.fail("No default database is available"); },
   } })).port.route(start.body.transactionId);
   const reply = await ownerWithoutProvider.begin({
-    transactionId: message.transactionId, authFingerprint: message.authFingerprint, startFingerprint: message.startFingerprint,
+    transactionId: message.transactionId, startFingerprint: message.startFingerprint,
     mode: "read", auth: message.auth, databaseBinding: message.databaseBinding, snapshot: message.snapshot,
   }, "req");
   assert.equal(reply.ok, false);

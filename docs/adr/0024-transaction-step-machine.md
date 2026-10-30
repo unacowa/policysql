@@ -704,7 +704,8 @@ see no regression at the switch-over. For a commit that #48 could still replay f
 7. **Switch interactive transactions.** `TransactionOwnerCore` becomes the effect executor for
    `interactive`; `engine.ts` begin and commands run the `request` kind; old-format records are
    discarded, including #48's `committing` records. The TypeScript decision path remains only as
-   the harness's reference. Smoke.
+   the harness's reference. Smoke. (Implemented with the engine forwarding the owner inputs
+   instead of the `request` kind, which moves to pull request 8; see its notes below.)
 8. **Switch atomic execution.** `engine.ts` execute and the owner's atomic input run the
    machine. Smoke.
 9. **Delete.** The TypeScript decision code: the decision parts of `transaction-owner.ts`,
@@ -1095,6 +1096,122 @@ switches atomic execution).
   engine's request id as the owner's request id, which becomes the owner's
   `HostFacts.request_id`, so the owner's reply keeps `meta.requestId` (and the stored
   `originalRequestId`) equal to the engine's request id, as today.
+
+Recorded by pull request 7 (ABI unchanged at 8), which switches interactive transactions in
+production to the machine (`deploy/cloudflare/src/transaction-owner.ts`).
+
+- **The executor.** `TransactionOwnerCore` is the effect executor of the contract above
+  (`StepTransactionOwner`, which it extends): every begin, statement, commit, rollback, callback
+  query, timer, and effect outcome is one `step_json` call with fresh host facts (`Date.now()`,
+  32 bytes of `crypto.getRandomValues`, the request id the engine passed, the owner name, and
+  the configured check ids when `publicBaseUrl` is set). The durable and volatile parts are kept
+  and stored as the JSON texts the step returned; the step output is parsed with integers
+  beyond 2^53 − 1 as `BigInt` and effects are written back with their digits
+  (`src/exact-json.ts`), so nothing round-trips through a JavaScript number. One awaited effect
+  runs per batch, last; its outcome or exception becomes exactly one outcome event with the
+  effect's id (`src/step-effects.ts` classifies database failures: a query timeout or
+  `POLICYSQL_DATABASE_TIMEOUT` is `timeout`, `POLICYSQL_DATABASE_UNAVAILABLE` `unavailable`, a
+  rejected binding `rejected`, anything else `unknown`; a COMMIT failure is always `unknown`;
+  a validator call that produced no answer is `timeout` or `unavailable`). `callValidator` runs
+  through `callCommitCheckHook` with the endpoint and secret looked up by check id and
+  re-checked at the exit (`rejected` when that fails); the HMAC inputs are unchanged, and the
+  hook body writes a `BigInt` with its digits. `observe` runs `cost_estimate_json` in the
+  background on a `${requestId}-cost` read connection with the runtime's `costTimeoutMs`.
+- **Connections.** Whenever a step returns no volatile part (`reset`, `abandon`, a discarded
+  record, the end of a transaction) the owner closes the connection it holds and drops every
+  reference to it; `reset` also drops the in-memory state, so the next event reads the store as
+  a successor would. An engine fault (a step output that is not JSON, an effect the executor
+  does not know) feeds `abandon` with the previous state, runs its `persist`, closes the
+  connection, and answers the waiting request `POLICYSQL_INTERNAL`.
+- **Owner name.** The machine needs the owner name in the host facts and checks inputs and
+  records against it. `OwnerFacilities` gains an optional `name` (the in-memory adapter and the
+  in-process example pass it; the Durable Objects facilities pass `state.id.name` where the
+  platform reports it); the Durable Objects wire carries the routed name in
+  `x-policysql-owner`, and a message routed to another name than the one the instance serves is
+  `POLICYSQL_INTERNAL`. Without either, an owner takes the name its first input names; a timer
+  that fires on a restarted object before any message reads the name from the stored record.
+- **The engine side uses the owner input shapes, not the `request` kind.** `engine.ts` keeps
+  its order (context, session, binding, body) and forwards the machine's owner inputs:
+  `begin` `{transactionId, startFingerprint, mode, auth, expected?, databaseBinding, snapshot}`
+  (the auth fingerprint is now computed by the owner's step), `statement`/`commit`/`rollback`
+  `{transactionId, auth, command, databaseBinding, snapshot}` and `callbackQuery`
+  `{validationId, capability, command}`, where `command` is the verified body text (#70). The
+  handle method names the kind. The `request` kind of these commands is left to pull request 8
+  with `execute`, for one reason: a `request` event carries the body text, so the engine would
+  read the body before the step's `CheckBinding`, which breaks ADR 0023's order (a body is
+  never read for a caller whose binding is rejected; `engine-order.test.mjs`), and keeping the
+  engine's binding check as well would call the provider twice per command. `execute` has the
+  same question, so both are resolved together. Until then the begin body checks (`mode`,
+  `expected`) and the transaction id and start fingerprint (both from core's `identity_json`)
+  stay in `engine.ts`; the owner validates the forwarded input again.
+- **Wire and version skew.** The Durable Objects paths are unchanged; the body of an
+  interactive command or a callback query is the owner input above (the callback capability
+  moved from the `authorization` header into the body). During a rollout a Worker and an
+  object of different versions can meet, in either direction, so both sides mark the wire
+  version (`x-policysql-owner-wire: 1`): the Worker on every message, the object on every
+  reply. On the changed paths (`/begin`, `/statement`, `/commit`, `/rollback`,
+  `/validation-query`; `/atomic` did not change):
+  - **earlier Worker, this object**: a message without the marker (the earlier body shapes,
+    with `authFingerprint`, or the earlier callback with the capability in `authorization`)
+    is answered `POLICYSQL_INTERNAL` and never reaches the machine (which would answer the
+    old shape `POLICYSQL_INVALID_REQUEST`, a definite rejection);
+  - **this Worker, earlier object**: the earlier object rejects the new body shape with 400
+    `POLICYSQL_INVALID_REQUEST`, and its reply carries no marker. The Worker does not read such
+    a reply: a commit becomes 503 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (its COMMIT may have
+    applied through the earlier wire, and a retry of it must never be a rejection, ADR 0007),
+    anything else 500 `POLICYSQL_INTERNAL`. Neither is a rejection in the client.
+
+  Interactive transactions are therefore unavailable while the versions are skewed (the first
+  deployment of this pull request showed one such window), but never misreported. So is an
+  atomic execute with a commit check whose validator calls back: the `/atomic` message itself
+  is unchanged, but the callback crosses `/validation-query`, which the skew answers 500, so a
+  validator that fails closed denies and the execute gets 409
+  `POLICYSQL_COMMIT_CHECK_REJECTED`. That rejection is true: COMMIT was never sent and nothing
+  is stored under its idempotency key, so the same key succeeds once the skew ends. A later
+  change of the owner wire bumps the marker. The object still answers with the statuses and
+  bodies of ADR 0023. A test freezes origin/main's object (`serve` over
+  `LegacyTransactionOwnerCore`) and drives the production port against it, and another sends
+  origin/main's Worker messages to this object.
+- **BigInt in the transport.** `TursoHttpTransport` encodes a `BigInt` argument within the
+  signed 64-bit range as a Hrana `integer` with its digits; anything else stays
+  `POLICYSQL_INTERNAL`. With that, #70 holds through the HTTP path: `1e400` gets the compile
+  error an atomic execute gets (it never becomes NULL), and `9007199254740993` is bound,
+  hashed, and matched by a callback query exactly. The TypeScript atomic path, which pull
+  request 8 switches, still binds such an integer through a JavaScript number
+  (`9007199254740992`); the test of #70 pins the interactive side only.
+- **The TypeScript decision path.** `TransactionOwnerCore` of before is
+  `LegacyTransactionOwnerCore` (`src/transaction-owner-legacy.ts`), kept for the atomic owner
+  path until pull request 8 (an `atomic` input, and the callback queries, timer, and client
+  inputs of an owner whose record it wrote: such an owner holds an object whose transaction id
+  starts with `atomic_`, which the executor checks before the machine's state exists) and as
+  the differential harness's reference until pull request 9, which deletes it. Its interactive
+  decisions are unreachable for every owner that holds an interactive record or none; for a
+  name holding an atomic record it answers interactive inputs as before (unavailable or
+  conflict) and writes nothing. `commit-checks.ts`, `turso.ts`, and `cost.ts` stay for that
+  path.
+- **Old-format records** are discarded by the machine's rule (logged `tx_state_discarded`,
+  replaced by a tombstone): every record of the TypeScript owner, #48's `committing`
+  included, answers a commit `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` and any other command or
+  callback query `POLICYSQL_TRANSACTION_UNAVAILABLE`, from the record and its tombstone alike;
+  a timer of such a record discards it too. The conformance suite plants each status on both
+  adapters.
+- **Differential harness.** `step-differential.test.mjs` now runs `LegacyTransactionOwnerCore`
+  against the production `TransactionOwnerCore` (not a test executor) with the same allowlist;
+  the atomic harness keeps `StepOwnerCore` (`test/helpers/step-owner.mjs`, now a thin subclass
+  of the production executor with the machine's atomic owner path) until pull request 8.
+- **Tests that changed with the switch** (each is an allowlisted difference or the discard
+  rule): the timer during a validator records `expired` and answers at once; a failed
+  terminal put after COMMIT, a COMMIT transport error, and window A record or answer
+  `commit_unknown` (never `failed`, never a replay from memory); the TypeScript owner's
+  record-format tests (`commitSent`, the previous release's records) became the old-format
+  discard tests; a store read fault during a live validation does nothing (the machine reads
+  no record for a callback); an internal begin without a binding is `POLICYSQL_INVALID_REQUEST`
+  (`POLICYSQL_DATABASE_REQUIRED` before; only an adapter fault can send one); the ~1 MB statement
+  of exponents gets `POLICYSQL_INVALID_PARAMETER` as in an atomic execute (the owner no longer
+  re-serializes it past the request limit); the engine and the owner call `identity_json` for
+  no command (core hashes inside the step). Test alarms fire at their time (the machine checks
+  the deadline against `nowMs`, where `TransactionOwnerCore.onTimer` expired whatever the
+  clock said).
 
 ## Decided during review
 

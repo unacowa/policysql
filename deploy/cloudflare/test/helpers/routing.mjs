@@ -33,10 +33,36 @@ export const MAX_BYTES_PER_VALUE = (() => {
   );
   try { return runtime.max_bytes_per_value; } finally { runtime.free(); }
 })();
+// A Hrana integer is a 64-bit decimal string: bind it exactly (beyond 2^53 as a BigInt).
+const exactInteger = (digits) => (Number.isSafeInteger(Number(digits)) ? Number(digits) : BigInt(digits));
 // Match Hrana's STANDARD_NO_PAD BLOB serializer, independently of the adapter codec.
 const encode = (value) => value === null ? { type: "null" } : typeof value === "number"
   ? { type: "integer", value: String(value) } : value instanceof Uint8Array
     ? { type: "blob", base64: Buffer.from(value).toString("base64").replace(/=+$/, "") } : { type: "text", value };
+
+/** A request body sent as this exact text (numbers JavaScript cannot hold, such as `1e400`). */
+export class RawJson {
+  constructor(text) { this.text = text; }
+}
+
+/**
+ * A stored owner record as tests read it. The step machine stores its durable state as JSON
+ * text (ADR 0024); the view adds the field names the TypeScript owner used, so assertions read
+ * alike: `status` (the phase), `mode`, `authFingerprint`, `databaseBinding`, and `statementCount`. Anything else
+ * (a TypeScript-owner object, nothing) is returned as stored.
+ */
+export const recordView = (value) => {
+  if (typeof value !== "string") return value;
+  const record = JSON.parse(value);
+  return {
+    ...record,
+    status: record.phase,
+    mode: record.identity?.mode,
+    authFingerprint: record.identity?.authFingerprint,
+    databaseBinding: record.binding,
+    statementCount: record.counters?.statements,
+  };
+};
 
 // The TransactionOwner adapters the harness can run on (ADR 0022). The default is the
 // production Durable Objects adapter over a simulated platform.
@@ -54,13 +80,15 @@ export const countingOwners = (port) => {
 export const harness = async (t, { hooks = true, idempotencyTable = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding, customizePolicy = (policy) => policy, customizeConfig = (config) => config, fixture, runtimeLimits = limits, ownerAdapter = process.env.POLICYSQL_TEST_OWNER_ADAPTER ?? "durable-objects" } = {}) => {
   assert.ok(OWNER_ADAPTERS.includes(ownerAdapter), "known owner adapter");
   const directory = mkdtempSync(join(tmpdir(), "policysql-routing-"));
-  const runtime = PolicySqlRuntime.newWithPhysicalSchema(
+  const makeRuntime = (versions = {}) => PolicySqlRuntime.newWithPhysicalSchema(
     fixture?.catalog ?? example("catalog.yaml"), customizePolicy(hooks ? (fixture?.policy ?? example("policy.yaml")) : (fixture?.policy ?? example("policy.yaml")).split("commit_checks:")[0]),
-    schemaVersion, policyVersion,
+    versions.schemaVersion ?? schemaVersion, versions.policyVersion ?? policyVersion,
     // The wrapper's `RuntimeLimits`, mapped exactly as `createRuntimeFactory` maps them.
     runtimeLimitsJson(runtimeLimits),
     fixture?.physicalSchema ?? example("physical-schema.json"),
   );
+  const runtime = makeRuntime();
+  const extraRuntimes = [];
   const databases = new Map();
   for (const tenant of ["a", "b"]) {
     const path = join(directory, `${tenant}.sqlite`);
@@ -111,7 +139,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
       try {
         const statement = connection.database.prepare(sql);
         statement.setReturnArrays(true);
-        const params = Object.fromEntries(args.map(({ name, value }) => [name, value.type === "null" ? null : value.type === "integer" ? Number(value.value) : value.type === "blob" ? Buffer.from(value.base64, "base64") : value.value]));
+        const params = Object.fromEntries(args.map(({ name, value }) => [name, value.type === "null" ? null : value.type === "integer" ? exactInteger(value.value) : value.type === "blob" ? Buffer.from(value.base64, "base64") : value.value]));
         const rows = args.length ? statement.all(params) : statement.all();
         const columns = statement.columns().map((column) => ({ name: column.name, decltype: column.type ?? "TEXT" }));
         const affected = /^(INSERT|UPDATE|DELETE)\b/i.test(sql)
@@ -179,7 +207,23 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   const owners = ownerAdapter === "memory"
     ? createMemoryTransactionOwners(ownerDependencies, { background })
     : createSimulatedDurableObjects(ownerDependencies, { background });
-  const transactionOwners = owners.port;
+  // Every input the engine forwarded, per owner name, as it left the engine.
+  const forwarded = new Map();
+  const note = (name, kind, input) => {
+    if (!forwarded.has(name)) forwarded.set(name, []);
+    forwarded.get(name).push({ kind, input: structuredClone(input) });
+  };
+  const transactionOwners = {
+    route(name) {
+      const handle = owners.port.route(name);
+      return {
+        begin: (input, requestId) => { note(name, "begin", input); return handle.begin(input, requestId); },
+        atomic: (input, requestId) => { note(name, "atomic", input); return handle.atomic(input, requestId); },
+        command: (kind, input, requestId) => { note(name, kind, input); return handle.command(kind, input, requestId); },
+        callbackQuery: (input, requestId) => { note(name, "callbackQuery", input); return handle.callbackQuery(input, requestId); },
+      };
+    },
+  };
   const publicConfig = { schemaVersion, policyVersion };
   const appWith = (ports) => createApp({ getRuntime: () => runtime, database, config, transactionOwners: ports, publicConfig });
   app = appWith(transactionOwners);
@@ -209,7 +253,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
         ...(typeof credential === "string" ? { authorization: `Bearer ${credential}` } : {}),
         "content-type": "application/json", ...(key === null ? {} : { "idempotency-key": key }), ...extraHeaders,
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(body === undefined ? {} : { body: body instanceof RawJson ? body.text : JSON.stringify(body) }),
     });
     let response;
     if (path.startsWith("/v1/commit-checks/")) {
@@ -233,27 +277,48 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     for (const { database: connection } of connections.values()) connection.close();
     for (const { database: db } of databases.values()) db.close();
     runtime.free();
+    for (const extra of extraRuntimes) extra.free();
     rmSync(directory, { recursive: true, force: true });
   });
   return {
     runtime, env, config, app, ctx, background, database, databases, events, hooksSeen, token, session, request, flush,
     ownerAdapter, transactionOwners, workerApp, appWith,
+    /** Another runtime over the same catalog and policy, e.g. with another policy version (another snapshot). */
+    makeRuntime(versions) { const extra = makeRuntime(versions); extraRuntimes.push(extra); return extra; },
     binding: (tenant) => registry.binding(`db_${tenant}`, env),
     setValidator(value) { validator = value; },
     counts: () => ({ checks, connects }),
     // Port-level views of the owners, identical for both adapters.
     ownerNames: () => owners.names(),
-    ownerRecord: (name) => owners.record(name),
+    /**
+     * The owner's stored record as a view (see `recordView`): the step machine's durable text
+     * (ADR 0024) with `status` for its phase, or a TypeScript-owner object as stored.
+     */
+    ownerRecord: async (name) => recordView(await owners.record(name)),
+    /** The stored value as it is (the machine's durable JSON text). */
+    ownerRecordRaw: (name) => owners.record(name),
+    /** Writes a stored value directly, as an earlier release would have (old-format records). */
+    plantOwnerRecord: (name, value) => owners.plant(name, value),
     ownerCore: (name) => owners.core(name),
+    /** The inputs the engine forwarded to `name`, in order: `{ kind, input }`. */
+    ownerInputs: (name) => forwarded.get(name) ?? [],
     ownerTimerAt: (name) => owners.timerAt(name),
     loseOwner: (name) => owners.lose(name),
     /** Fault injection on owner store puts, for both adapters (see helpers/memory-owner.mjs). */
-    interceptOwnerPut: (hook) => owners.interceptPut(hook),
+    // The hook sees `value` as a record view and `raw` as stored; a returned `value` is stored as is.
+    interceptOwnerPut: (hook) => owners.interceptPut(hook && ((input) => hook({ ...input, raw: input.value, value: recordView(input.value) }))),
     /** Fault injection on owner store reads, for both adapters (see helpers/memory-owner.mjs). */
     interceptOwnerGet: (hook) => owners.interceptGet(hook),
     /** `hook({ tenant, sql })` runs after the remote database executed each statement. */
     afterDatabaseStatement(hook) { afterStatement = hook; },
-    fireTimer: (name) => owners.fireTimer(name),
+    // A platform alarm fires at its time, not before: the owner's clock reads at least that
+    // time while it runs (the step machine checks the deadline against it, ADR 0024).
+    async fireTimer(name) {
+      const at = owners.timerAt(name);
+      const realNow = Date.now;
+      if (at !== null) Date.now = () => Math.max(realNow.call(Date), at);
+      try { return await owners.fireTimer(name); } finally { Date.now = realNow; }
+    },
     delayNextOwnerBody: (ms) => owners.delayNextBody(ms),
     /** Durable Objects only: every raw reply the object sent over its wire. */
     ownerWire: () => owners.wire,

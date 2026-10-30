@@ -10,6 +10,9 @@ import { createApp } from "../src/app.ts";
 import { durableObjectTransactionOwners, durableObjectTransactionOwnerClass, executionContextTasks } from "../src/adapters/durable-objects.ts";
 import { testBinding, testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { limitsJson } from "./helpers/limits.mjs";
+import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
+import { authIdentity } from "../src/core-identity.ts";
+import { statusFor } from "../src/http/status.ts";
 
 const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
 const insert = (id) => ({ sql: "INSERT INTO projects (id, name) VALUES (:id, :name) RETURNING id, name", params: { id, name: id } });
@@ -48,9 +51,10 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   test(`${ownerAdapter}: commands are processed in the order they reach the owner, whatever their body timing`, async (t) => {
     const h = await setup(t, { hooks: false });
     const id = await start(h, "write");
-    const { authFingerprint, databaseBinding, snapshot } = await h.ownerRecord(id);
+    // The owner input the engine forwards: the session and the verified body text (ADR 0024).
+    const { auth, databaseBinding, snapshot } = h.ownerInputs(id)[0].input;
     const owner = h.transactionOwners.route(id);
-    const input = (command) => ({ transactionId: id, authFingerprint, command, databaseBinding, snapshot });
+    const input = (command) => ({ transactionId: id, auth, command: JSON.stringify(command), databaseBinding, snapshot });
     // The first message's body is delivered late. A later command must not overtake it:
     // overtaking would put sequence 2 before 1 and fail the transaction (ADR 0007).
     h.delayNextOwnerBody(30);
@@ -73,10 +77,11 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       const commit = await h.request("a", `${path}/commit`, { sequence: 2 }, null);
       const retry = await h.request("a", `${path}/commit`, { sequence: 2 }, null);
       if (label === "expired") {
-        // Expiry ends the commit on the waiting lane: the check is rejected and rolled back.
+        // Expiry ends the commit on the waiting lane at once: the check is rejected, rolled
+        // back, and recorded expired; the late verdict is ignored (ADR 0024 inconsistency 5).
         assert.equal(commit.status, 409, label);
         assert.equal(commit.body.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED", label);
-        assert.equal((await h.ownerRecord(id)).status, "failed", label);
+        assert.equal((await h.ownerRecord(id)).status, "expired", label);
       } else {
         // The lost owner cannot record anything; its successor has no open transaction.
         assert.equal(commit.status, 500, label);
@@ -200,13 +205,13 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       assert.equal(first.status, 200, JSON.stringify(first.body));
       assert.equal(first.body.status, "committed");
       assert.equal(record.status, "committing", "the successor finds the record written before COMMIT");
-      assert.equal(record.commitSent.sequence, 2);
-      assert.equal((await h.ownerRecord(id)).status, "committing", "a retry never rewrites the record");
+      // The successor records the unknown outcome (ADR 0024 failure table); never a rejection.
+      assert.equal((await h.ownerRecord(id)).status, "commit_unknown");
       committedOnce(h, label);
       // Other commands are still unavailable: nothing executes on a lost connection.
       assert.equal((await h.request("a", `/v1/transactions/${id}/rollback`, { sequence: 2 }, null)).status, 409);
       assert.equal(await h.fireTimer(id), true);
-      assert.equal((await h.ownerRecord(id)).status, "committing", "the timer never expires a commit that was sent");
+      assert.equal((await h.ownerRecord(id)).status, "commit_unknown", "the timer never expires a commit that was sent");
       unknown(await commit(), `${label} after the timer`);
     }
   });
@@ -232,108 +237,107 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     committedOnce(h, "window_b");
   });
 
-  test(`${ownerAdapter}: a committed record without its reply, as the previous release wrote it, leaves a commit retry unknown`, async (t) => {
-    t.mock.method(console, "log", () => {});
-    for (const legacy of [true, false]) {
-      const h = await setup(t, { hooks: false });
-      const label = legacy ? "window_b_legacy" : "window_b_stale";
-      const { id, commit } = await openWrite(h, label);
-      let before;
-      // The record as the previous release's first put wrote it: `committed`, but `last` and
-      // `nextSequence` still the statement's; then the owner is lost.
-      h.interceptOwnerPut(once(({ value }) => {
-        if (value?.status === "committing") before = value;
-        if (value?.status !== "committed") return undefined;
-        const stale = { ...value, last: before.last, nextSequence: before.nextSequence };
-        if (legacy) { delete stale.commitSent; delete stale.commitRecording; }
-        return { value: stale, lose: true };
-      }));
-      await commit();
-      unknown(await commit(), label);
-      committedOnce(h, label);
-    }
-  });
+  // ADR 0024 "Old-format records are discarded, not read": a record the TypeScript owner wrote
+  // before the switch-over (pull request 7) is unreadable to the step machine. Whatever its
+  // status, a commit gets POLICYSQL_COMMIT_OUTCOME_UNKNOWN (nothing in it proves that COMMIT was
+  // not sent) and every other command POLICYSQL_TRANSACTION_UNAVAILABLE; nothing executes, and
+  // the record is replaced by a tombstone that is answered alike. A one-time incompatibility.
+  const oldFormatRecords = (id, binding) => {
+    const base = {
+      databaseBinding: binding, snapshot: binding.snapshot, transactionId: id, authFingerprint: "b".repeat(64),
+      startFingerprint: "c".repeat(64), mode: "write",
+      auth: { principal: "x", subject: "u", role: "member", roles: ["member"], access: ["execute"], session: {} },
+      nextSequence: 2, usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 0 }, statementCount: 1, resultBytes: 10,
+      mutations: [], commitChecks: [], schemaVersion: "schema_routing_1", policyVersion: "policy_routing_1",
+    };
+    const reply = { transactionId: id, status: "committed", meta: { requestId: "old", commitChecks: "not_triggered" } };
+    return {
+      // #48's records, and the release before it.
+      committing: { ...base, status: "committing", commitRecording: 1, commitSent: { sequence: 2, digest: "d".repeat(64) }, expiresAtMs: Date.now() + 60_000 },
+      committed: { ...base, status: "committed", commitRecording: 1, nextSequence: 3, last: { digest: "d".repeat(64), response: reply } },
+      committedStale: { ...base, status: "committed", last: { digest: "e".repeat(64), response: {} } },
+      active: { ...base, status: "active", expiresAtMs: Date.now() + 60_000, last: null },
+      failed: { ...base, status: "failed", commitRecording: 1, commitSent: { sequence: 2, digest: "d".repeat(64) } },
+      expired: { ...base, status: "expired" },
+      rolledBack: { ...base, status: "rolled_back", nextSequence: 3, last: { digest: "f".repeat(64), response: { ...reply, status: "rolled_back" } } },
+    };
+  };
+  const KINDS = ["commit", "statement", "rollback"];
 
-  // Every put as the previous release would have written it: no `commitRecording`, no
-  // `commitSent`, and no `committing` (it wrote nothing before COMMIT).
-  const previousRelease = (h, more = () => undefined) => h.interceptOwnerPut((input) => {
-    const extra = more(input);
-    if (extra?.fail) return extra;
-    const value = structuredClone(extra?.value ?? input.value);
-    if (value && typeof value === "object") {
-      delete value.commitRecording;
-      delete value.commitSent;
-      if (value.status === "committing") value.status = "active";
-    }
-    return { ...extra, value };
-  });
-
-  test(`${ownerAdapter}: active and failed records of the previous release leave a commit retry unknown, not rejected`, async (t) => {
+  test(`${ownerAdapter}: a record of the TypeScript owner is discarded: commit unknown, other commands unavailable`, async (t) => {
     t.mock.method(console, "log", () => {});
     const h = await setup(t, { hooks: false });
-    // Its window A: the record stays `active`, and the successor marks it `failed`.
-    previousRelease(h);
-    const lost = await openWrite(h, "previous_window_a");
-    h.afterDatabaseStatement(once(({ sql }) => sql === "COMMIT" && (h.loseOwner(lost.id), true)));
-    await lost.commit();
-    assert.equal((await h.ownerRecord(lost.id)).status, "active");
-    for (const attempt of [1, 2]) unknown(await lost.commit(), `previous window A retry ${attempt}`);
-    committedOnce(h, "previous_window_a");
-    // Its COMMIT error: `failed`.
-    const errored = await openWrite(h, "previous_commit_error");
-    h.afterDatabaseStatement(once(({ sql }) => {
-      if (sql === "COMMIT") throw new Error("connection reset");
-      return undefined;
-    }));
-    await errored.commit();
-    assert.equal((await h.ownerRecord(errored.id)).status, "failed");
-    unknown(await errored.commit(), "previous COMMIT error");
-    committedOnce(h, "previous_commit_error");
-    // A rolled-back transaction, or a commit at another sequence, is still rejected.
-    const rolled = await openWrite(h, "previous_rolled_back");
-    assert.equal((await h.request("a", `/v1/transactions/${rolled.id}/rollback`, { sequence: 2 }, null)).status, 200);
-    assert.equal((await rolled.commit()).status, 409);
-    const skipped = await h.request("a", `/v1/transactions/${errored.id}/commit`, { sequence: 3 }, null);
-    assert.equal(skipped.status, 409);
-    h.interceptOwnerPut(null);
+    const binding = h.binding("a");
+    const labels = Object.keys(oldFormatRecords("tx_", binding));
+    for (const [index, label] of labels.entries()) {
+      for (const [order, first] of KINDS.entries()) {
+        const id = `tx_${index.toString(16).padStart(2, "0")}${order}${"a".repeat(29)}`;
+        h.plantOwnerRecord(id, oldFormatRecords(id, binding)[label]);
+        const connects = h.counts().connects;
+        const events = h.events.length;
+        const path = `/v1/transactions/${id}`;
+        const send = (kind) => kind === "commit" ? h.request("a", `${path}/commit`, { sequence: 2 }, null)
+          : kind === "rollback" ? h.request("a", `${path}/rollback`, { sequence: 2 }, null)
+            : h.request("a", `${path}/statements`, { sequence: 2, ...read }, null);
+        // The first command finds the old record, the later ones its tombstone: all alike.
+        for (const kind of [first, ...KINDS]) {
+          const reply = await send(kind);
+          if (kind === "commit") unknown(reply, `${label}: commit (first ${first})`);
+          else {
+            assert.equal(reply.status, 409, `${label}: ${kind} (first ${first}): ${JSON.stringify(reply.body)}`);
+            assert.equal(reply.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", `${label}: ${kind}`);
+          }
+        }
+        assert.equal(h.counts().connects, connects, `${label}: no connection is opened`);
+        assert.equal(h.events.length, events, `${label}: no SQL runs`);
+        const record = await h.ownerRecord(id);
+        assert.equal(record.status, "discarded", `${label}: replaced by a tombstone`);
+        assert.equal(record.owner, id);
+      }
+    }
+  });
+
+  test(`${ownerAdapter}: a timer or callback query for a record of the TypeScript owner never makes its commit a rejection`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, { hooks: false });
+    const binding = h.binding("a");
+    const id = `tx_${"7".repeat(32)}`;
+    h.plantOwnerRecord(id, oldFormatRecords(id, binding).committing);
+    // A callback query: no validation runs on this owner, so it is unavailable.
+    const callback = await h.request("a", `/v1/commit-checks/cval_${"7".repeat(32)}/query`, { sequence: 1, ...read }, undefined, "A".repeat(43));
+    assert.equal(callback.status, 409, JSON.stringify(callback.body));
+    assert.equal(callback.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+    unknown(await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 }, null), "commit after the callback");
+    // The old owner's alarm, delivered to the new one.
+    const timed = `tx_${"8".repeat(32)}`;
+    h.plantOwnerRecord(timed, oldFormatRecords(timed, binding).active);
+    await h.ownerCore(timed).onTimer();
+    assert.equal((await h.ownerRecord(timed)).status, "discarded");
+    unknown(await h.request("a", `/v1/transactions/${timed}/commit`, { sequence: 2 }, null), "commit after the timer");
   });
 
   test(`${ownerAdapter}: a failed store put after COMMIT, without owner loss, never makes a commit retry a rejection`, async (t) => {
     t.mock.method(console, "log", () => {});
     const h = await setup(t, { hooks: false });
-    // The put keeps failing: the same live owner answers every retry with the unknown outcome.
+    // The terminal put fails: the reply says committed (true), and the owner resets, so it
+    // answers every retry from the store as a successor would: `committing`, so unknown
+    // (ADR 0007 "No in-memory re-recording", ADR 0024 failure table).
     const stuck = await openWrite(h, "put_failed");
     let failing = true;
     h.interceptOwnerPut(({ value }) => (failing && value?.status === "committed" ? { fail: true } : undefined));
     const first = await stuck.commit();
-    for (const attempt of [1, 2]) unknown(await stuck.commit(), `retry ${attempt}`);
     assert.equal(first.status, 200, JSON.stringify(first.body));
     assert.equal(first.body.status, "committed");
     assert.equal((await h.ownerRecord(stuck.id)).status, "committing");
+    for (const attempt of [1, 2]) unknown(await stuck.commit(), `retry ${attempt}`);
     committedOnce(h, "put_failed");
-    // The store recovers: the live owner, which saw COMMIT succeed, stores its terminal
-    // record on the next retry and replays the reply.
+    // The store recovers: still unknown, from this owner and a successor alike.
     failing = false;
-    const recovered = await stuck.commit();
-    assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
-    assert.deepEqual(recovered.body, first.body);
-    const record = await h.ownerRecord(stuck.id);
-    assert.equal(record.status, "committed");
-    assert.deepEqual(record.last.response, first.body);
-    assert.deepEqual((await stuck.commit()).body, first.body);
-    // One failed put, then a working store: the first retry already replays.
-    const transient = await openWrite(h, "put_transient");
-    h.interceptOwnerPut(once(({ value }) => value?.status === "committed" && { fail: true }));
-    const original = await transient.commit();
-    assert.deepEqual((await transient.commit()).body, original.body);
-    committedOnce(h, "put_transient");
-    // A successor has no such memory and stays unknown.
-    const lost = await openWrite(h, "put_then_lost");
-    h.interceptOwnerPut(once(({ value }) => value?.status === "committed" && { fail: true }));
-    assert.equal((await lost.commit()).status, 200);
-    h.loseOwner(lost.id);
-    unknown(await lost.commit(), "successor");
-    committedOnce(h, "put_then_lost");
+    unknown(await stuck.commit(), "after the store recovered");
+    assert.equal((await h.ownerRecord(stuck.id)).status, "commit_unknown");
+    h.loseOwner(stuck.id);
+    unknown(await stuck.commit(), "successor");
+    committedOnce(h, "put_failed");
   });
 
   test(`${ownerAdapter}: a store failure after a COMMIT transport error still answers the unknown outcome`, async (t) => {
@@ -344,10 +348,11 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       if (sql === "COMMIT") throw new Error("connection reset");
       return undefined;
     }));
-    h.interceptOwnerPut(once(({ value }) => value?.status === "failed" && { fail: true }));
+    h.interceptOwnerPut(once(({ value }) => value?.status === "commit_unknown" && { fail: true }));
     unknown(await commit(), "first reply");
     assert.equal((await h.ownerRecord(id)).status, "committing");
     unknown(await commit(), "retry");
+    assert.equal((await h.ownerRecord(id)).status, "commit_unknown");
     committedOnce(h, "commit_lost_put_failed");
   });
 
@@ -372,9 +377,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(rejected.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
     assert.equal(h.events.some(({ sql }) => sql === "COMMIT"), false, "COMMIT was never sent");
     assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
-    const record = await h.ownerRecord(expired.id);
-    assert.equal(record.status, "expired");
-    assert.equal(record.commitSent, undefined);
+    assert.equal((await h.ownerRecord(expired.id)).status, "expired");
     assert.equal((await expired.commit()).status, 409);
     assert.equal(h.rows("a").some((row) => row.id === "deadline_passed"), false);
     // If `expired` cannot be stored, `committing` stays: 500 now, and the retry is unknown.
@@ -473,9 +476,8 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     }));
     const first = await commit();
     unknown(first, "first reply");
-    const record = await h.ownerRecord(id);
-    assert.equal(record.status, "failed");
-    assert.equal(record.commitSent.sequence, 2, "the failure is recorded as after COMMIT was sent");
+    // Recorded as an unknown outcome, never as failed (ADR 0024 inconsistency 4).
+    assert.equal((await h.ownerRecord(id)).status, "commit_unknown");
     unknown(await commit(), "retry");
     committedOnce(h, "commit_lost");
   });
@@ -585,10 +587,11 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
     get: (id) => ({
       async fetch(url, init) {
         sent.push({ name: id.name, url, method: init.method, headers: init.headers, body: JSON.parse(init.body) });
+        const marked = { headers: { "x-policysql-owner-wire": "1" } };
         if (new URL(url).pathname === "/rollback") {
-          return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null, requestId: "old" } }, { status: 409 });
+          return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null, requestId: "old" } }, { status: 409, ...marked });
         }
-        return Response.json({ started: true }, { status: 201 });
+        return Response.json({ started: true }, { status: 201, ...marked });
       },
     }),
   };
@@ -598,12 +601,16 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
   await owner.command("statement", { transactionId: "x" }, "req_2");
   assert.deepEqual(await owner.command("rollback", { transactionId: "x" }, "req_3"),
     { ok: false, error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null } });
-  await owner.callbackQuery({ capability: "cap", command: { sequence: 1 } }, "req_4");
+  await owner.callbackQuery({ validationId: `cval_${"a".repeat(32)}`, capability: "cap", command: '{"sequence":1}' }, "req_4");
   assert.deepEqual(sent.map(({ url }) => new URL(url).pathname), ["/begin", "/statement", "/rollback", "/validation-query"]);
   assert.ok(sent.every(({ name, method }) => name === `tx_${"a".repeat(32)}` && method === "POST"));
-  assert.equal(sent[3].headers.authorization, "Bearer cap");
+  // Every message names the owner it was routed to (ADR 0024: the machine checks it).
+  assert.ok(sent.every(({ headers }) => headers["x-policysql-owner"] === `tx_${"a".repeat(32)}`));
+  assert.ok(sent.every(({ headers }) => headers["x-policysql-owner-wire"] === "1"), "every message carries the wire version");
+  // The callback is the forwarded owner input, the capability and the verified text included.
+  assert.equal(sent[3].headers.authorization, undefined);
   assert.equal(sent[3].headers["x-policysql-request-id"], "req_4");
-  assert.deepEqual(sent[3].body, { sequence: 1 });
+  assert.deepEqual(sent[3].body, { validationId: `cval_${"a".repeat(32)}`, capability: "cap", command: '{"sequence":1}' });
   await assert.rejects(owner.command("unknown", {}, "req"), TypeError);
   assert.throws(() => durableObjectTransactionOwners(undefined), TypeError);
   assert.throws(() => durableObjectTransactionOwners({ get() {} }), TypeError);
@@ -623,39 +630,57 @@ test("durable-objects: a non-JSON object reply is a safe 500, never forwarded", 
   assert.equal(text.includes("internal detail"), false);
 });
 
-test("durable-objects: the object class decodes the internal messages and fails malformed ones as invalid", async () => {
+test("durable-objects: the object class decodes the internal messages and fails malformed ones as invalid", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const h = await harness(t, { ownerAdapter: "durable-objects", hooks: false });
   const values = new Map();
   let alarm = null;
   const state = {
     waitUntil() {},
     storage: { async get(key) { return values.get(key); }, async put(key, value) { values.set(key, value); }, async setAlarm(at) { alarm = at; } },
   };
+  const snapshot = h.runtime.snapshot;
   const OwnerObject = durableObjectTransactionOwnerClass(() => ({
-    getRuntime: () => ({ snapshot: "test-snapshot", max_bytes_per_value: 1_024, limits_json: limitsJson() }),
+    getRuntime: () => h.runtime,
     database: testProvider(() => ({ begin: async () => ({ open: true, usage: [], async rollback() { this.open = false; } }) })),
     config: testConfig(),
   }));
   const object = new OwnerObject(state, {});
+  const name = `tx_${"a".repeat(32)}`;
   const send = (path, body, headers = {}) => object.fetch(new Request(`https://owner${path}`, {
-    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", ...headers }, body,
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": "1", ...headers }, body,
   }));
   for (const [path, body] of [["/begin", "{"], ["/atomic", "null"], ["/statement", "[]"], ["/unknown", "{}"]]) {
     const response = await send(path, body);
     // The same status and body as earlier objects, which an earlier Worker forwards (ADR 0023).
     assert.equal(response.status, 400, path);
     assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("x-policysql-owner-wire"), "1", "every reply carries the wire version");
     const reply = await response.json();
     assert.deepEqual(reply, { error: { code: "POLICYSQL_INVALID_REQUEST", message: "The request is invalid.", path: null, requestId: "req_obj" } }, path);
   }
+  // A message in the earlier wire shape (only an earlier Worker sends `authFingerprint`), or
+  // one routed to another name: an internal fault, which no client takes as a rejection.
+  for (const [headers, body] of [[{}, { transactionId: name, authFingerprint: "b".repeat(64) }], [{ "x-policysql-owner": `tx_${"b".repeat(32)}` }, {}]]) {
+    const response = await send("/commit", JSON.stringify(body), headers);
+    assert.equal(response.status, 500);
+    assert.equal((await response.json()).error.code, "POLICYSQL_INTERNAL");
+  }
+  const auth = JSON.parse(h.runtime.authorize_session_json(JSON.stringify(h.session("a")), undefined, "execute")).auth;
   const begun = await send("/begin", JSON.stringify({
-    transactionId: `tx_${"a".repeat(32)}`, authFingerprint: "b".repeat(64), startFingerprint: "c".repeat(64), mode: "read",
-    auth: {}, databaseBinding: testBinding(), snapshot: "test-snapshot",
+    transactionId: name, startFingerprint: "c".repeat(64), mode: "read", auth, databaseBinding: testBinding(snapshot), snapshot,
   }));
   assert.equal(begun.status, 201);
-  assert.equal((await begun.json()).transactionId, `tx_${"a".repeat(32)}`);
-  assert.equal(alarm, values.get("transaction").expiresAtMs, "the core's timer is the object's alarm");
-  await object.alarm();
-  assert.equal(values.get("transaction").status, "expired");
+  assert.equal((await begun.json()).transactionId, name);
+  assert.equal(typeof values.get("transaction"), "string", "the machine's durable text is stored verbatim");
+  const stored = JSON.parse(values.get("transaction"));
+  assert.equal(stored.phase, "active");
+  assert.equal(alarm, stored.expiresAtMs, "the core's timer is the object's alarm");
+  // The platform fires the alarm at its time.
+  const realNow = Date.now;
+  Date.now = () => alarm;
+  try { await object.alarm(); } finally { Date.now = realNow; }
+  assert.equal(JSON.parse(values.get("transaction")).phase, "expired");
 });
 
 test("durable-objects: ExecutionContext.waitUntil backs per-request BackgroundTasks", () => {
@@ -788,4 +813,134 @@ test("durable-objects: an earlier Worker forwarding this object's replies shows 
   const replayConflict = await forwarded("atomic key reuse", "/atomic",
     () => h.request("a", "/v1/transactions:execute", { statements: [insert("atomic_other")] }, "rollout-atomic-key-01"), { atomic: true });
   assert.equal(replayConflict.status, 409);
+});
+
+// Mixed-version rollout (ADR 0024 pull request 7): the owner input of the interactive paths
+// changed, so a Worker and an object of different versions cannot understand each other there.
+// The earlier object below is origin/main's (8e597cf) `serve` (Bearer capability, body as is)
+// over its TypeScript owner, `LegacyTransactionOwnerCore`, and its reply framing (no wire
+// marker). The production port must never turn what it answers into a definite rejection.
+const earlierObject = (core) => async (url, init) => {
+  const request = new Request(url, init);
+  const requestId = request.headers.get("x-policysql-request-id") || crypto.randomUUID();
+  let body = null;
+  try { body = await request.json(); } catch { body = null; }
+  const path = new URL(request.url).pathname;
+  const kinds = { "/statement": "statement", "/commit": "commit", "/rollback": "rollback" };
+  let reply;
+  if (path === "/begin") reply = await core.begin(body, requestId);
+  else if (path === "/atomic") reply = await core.atomic(body, requestId);
+  else if (path === "/validation-query") {
+    const capability = request.headers.get("authorization")?.match(/^Bearer (.*)$/su)?.[1] ?? "";
+    reply = await core.callbackQuery({ capability, command: body }, requestId);
+  } else reply = await core.command(kinds[path] ?? path, body, requestId);
+  return new Response(JSON.stringify(reply.ok ? reply.value : { error: { ...reply.error, requestId } }), {
+    status: reply.ok ? (path === "/begin" ? 201 : 200) : statusFor(reply.error.code),
+    headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+  });
+};
+
+test("durable-objects: a Worker of this version never turns an earlier object's answer into a rejection", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const h = await harness(t, { ownerAdapter: "durable-objects", hooks: false });
+  const objects = new Map();
+  const namespace = {
+    idFromName: (name) => ({ name }),
+    get: (id) => {
+      if (!objects.has(id.name)) {
+        const data = new Map();
+        const facilities = {
+          store: { async get(key) { return structuredClone(data.get(key)); }, async put(key, value) { data.set(key, structuredClone(value)); } },
+          timer: { async schedule() {} },
+          background: { run() {} },
+        };
+        objects.set(id.name, earlierObject(new LegacyTransactionOwnerCore(facilities, { getRuntime: () => h.runtime, database: h.database, config: h.config })));
+      }
+      return { fetch: objects.get(id.name) };
+    },
+  };
+  const id = `tx_${"e".repeat(32)}`;
+  const runtime = h.runtime;
+  const auth = JSON.parse(runtime.authorize_session_json(JSON.stringify(h.session("a")), undefined, "execute")).auth;
+  const databaseBinding = h.binding("a");
+  const old = (path, body) => namespace.get({ name: id }).fetch(`https://owner${path}`, {
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": `old${path}` }, body: JSON.stringify(body),
+  });
+  const authFingerprint = authIdentity(runtime, auth, databaseBinding);
+  const base = { transactionId: id, authFingerprint, databaseBinding, snapshot: runtime.snapshot };
+  // An earlier Worker begins, writes, and commits through the earlier wire: COMMIT applies.
+  assert.equal((await old("/begin", { ...base, startFingerprint: "c".repeat(64), mode: "write", auth })).status, 201);
+  assert.equal((await old("/statement", { ...base, command: { sequence: 1, ...insert("skewed") } })).status, 200);
+  const applied = await old("/commit", { ...base, command: { sequence: 2 } });
+  assert.equal(applied.status, 200);
+  assert.equal((await applied.json()).status, "committed");
+  // The client's commit response was lost; it retries through a Worker of this version.
+  const app = h.appWith(durableObjectTransactionOwners(namespace));
+  const send = async (path, body) => {
+    const response = await app.fetch(new Request(`https://worker.test${path}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    }), { database: databaseBinding, session: h.session("a") }, h.background);
+    return { status: response.status, body: await response.json() };
+  };
+  const { sendCommand, PolicySqlOutcomeUnknownError } = await import("../../../packages/client/protocol.js");
+  const neverRejected = async (kind, reply) => {
+    await assert.rejects(sendCommand(async () => reply, { kind }, {}, () => {}), PolicySqlOutcomeUnknownError, kind);
+  };
+  const retry = await send(`/v1/transactions/${id}/commit`, { sequence: 2 });
+  assert.equal(retry.status, 503, JSON.stringify(retry.body));
+  assert.equal(retry.body.error.code, "POLICYSQL_COMMIT_OUTCOME_UNKNOWN");
+  await neverRejected("commit", retry);
+  for (const [kind, path, body] of [
+    ["begin", "/v1/transactions", { mode: "write" }],
+    ["statement", `/v1/transactions/${id}/statements`, { sequence: 3, sql: "SELECT id, name FROM projects", params: {} }],
+    ["rollback", `/v1/transactions/${id}/rollback`, { sequence: 3 }],
+  ]) {
+    const reply = await send(path, body);
+    assert.equal(reply.status, 500, `${kind}: ${JSON.stringify(reply.body)}`);
+    assert.equal(reply.body.error.code, "POLICYSQL_INTERNAL", kind);
+    await neverRejected(kind, reply);
+  }
+  const callback = await app.fetchCallback(new Request(`https://worker.test/v1/commit-checks/cval_${"e".repeat(32)}/query`, {
+    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${"A".repeat(43)}` },
+    body: JSON.stringify({ sequence: 1, sql: "SELECT id, name FROM projects", params: {} }),
+  }));
+  assert.equal(callback.status, 500);
+  assert.equal(h.rows("a").filter((row) => row.id === "skewed").length, 1, "the commit applied exactly once");
+});
+
+test("durable-objects: an object of this version answers an earlier Worker's messages without a rejection", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const h = await harness(t, { ownerAdapter: "durable-objects", hooks: false });
+  const id = await (async () => {
+    const begun = await h.request("a", "/v1/transactions", { mode: "write" }, null);
+    return begun.body.transactionId;
+  })();
+  assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("new_object") }, null)).status, 200);
+  const committed = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 }, null);
+  assert.equal(committed.status, 200);
+  const OwnerObject = durableObjectTransactionOwnerClass(() => ({ getRuntime: () => h.runtime, database: h.database, config: h.config }));
+  const values = new Map();
+  const object = new OwnerObject({
+    waitUntil() {},
+    storage: { async get(key) { return values.get(key); }, async put(key, value) { values.set(key, value); }, async setAlarm() {} },
+  }, {});
+  values.set("transaction", await h.ownerRecordRaw(id));
+  const { REJECTIONS } = await import("../../../packages/client/protocol.js");
+  // origin/main's Worker: the earlier bodies, the capability as Bearer, no wire marker.
+  for (const [path, body, headers] of [
+    ["/commit", { transactionId: id, authFingerprint: "b".repeat(64), command: { sequence: 2 } }, {}],
+    ["/statement", { transactionId: id, authFingerprint: "b".repeat(64), command: { sequence: 3, sql: "SELECT id FROM projects", params: {} } }, {}],
+    ["/rollback", { transactionId: id, authFingerprint: "b".repeat(64), command: { sequence: 3 } }, {}],
+    ["/begin", { transactionId: id, authFingerprint: "b".repeat(64), startFingerprint: "c".repeat(64), mode: "write", auth: {} }, {}],
+    ["/validation-query", { sequence: 1, sql: "SELECT id FROM projects", params: {} }, { authorization: `Bearer ${"A".repeat(43)}` }],
+  ]) {
+    const response = await object.fetch(new Request(`https://owner${path}`, {
+      method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_old", ...headers }, body: JSON.stringify(body),
+    }));
+    const reply = await response.json();
+    assert.equal(response.status, 500, `${path}: ${JSON.stringify(reply)}`);
+    assert.equal(reply.error.code, "POLICYSQL_INTERNAL", path);
+    assert.equal([...REJECTIONS.values()].flat().includes(reply.error.code.slice("POLICYSQL_".length)), false);
+  }
+  assert.equal(JSON.parse(values.get("transaction")).phase, "committed", "nothing reached the machine");
 });
