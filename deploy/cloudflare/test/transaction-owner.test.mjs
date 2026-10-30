@@ -4,11 +4,19 @@ import { readFileSync } from "node:fs";
 import { testBinding, testProvider } from "./helpers/database.mjs";
 import { identity_json } from "./helpers/identity.mjs";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
+import { LegacyTransactionOwnerCore } from "../src/transaction-owner-legacy.ts";
 import { statusFor } from "../src/http/status.ts";
 import { limitsJson } from "./helpers/limits.mjs";
 
 // Unit tests of the owner core through the port's owner-side facilities (ADR 0022): an
 // in-memory store, a recorded timer, and background tasks. No platform object is involved.
+//
+// Since ADR 0024 pull request 7 production runs interactive transactions on the step machine,
+// which needs the real WASM runtime; its scenarios run through the differential harness
+// (step-differential.test.mjs) and the port conformance suite. The interactive cases below,
+// over a fake compiler, therefore test `LegacyTransactionOwnerCore`, the harness's reference
+// until pull request 9. The atomic cases test the production `TransactionOwnerCore`, which
+// keeps the TypeScript atomic path until pull request 8.
 const makeStorage = () => {
   const values = new Map();
   const facilities = {
@@ -30,8 +38,12 @@ const makeStorage = () => {
 const ownerResponse = (reply, okStatus = 200, requestId = "req") => reply.ok
   ? Response.json(reply.value, { status: okStatus })
   : Response.json({ error: { ...reply.error, requestId } }, { status: statusFor(reply.error.code) });
+// The legacy owner takes the parsed command; the production owner the port's input (the
+// validation id and the verified text).
 const callbackQuery = async (owner, token, command, requestId = "callback_req") =>
-  ownerResponse(await owner.callbackQuery({ capability: token, command }, requestId), 200, requestId);
+  ownerResponse(await (owner instanceof LegacyTransactionOwnerCore
+    ? owner.callbackQuery({ capability: token, command }, requestId)
+    : owner.callbackQuery({ validationId: `cval_${"d".repeat(32)}`, capability: token, command: JSON.stringify(command) }, requestId)), 200, requestId);
 
 const transaction = () => ({
   open: true,
@@ -132,7 +144,7 @@ const setup = async () => {
   const storage = makeStorage();
   const database = transaction();
   const compiler = runtime();
-  const owner = new TransactionOwnerCore(storage, {
+  const owner = new LegacyTransactionOwnerCore(storage, {
     config,
     getRuntime: () => compiler,
     database: ownerProvider(database),
@@ -166,7 +178,7 @@ test("rolls back on a sequence gap", async () => {
 
 test("fails closed after owner replacement and on alarm expiry", async () => {
   const { storage, database, compiler } = await setup();
-  const replacement = new TransactionOwnerCore(storage, {
+  const replacement = new LegacyTransactionOwnerCore(storage, {
     config, getRuntime: () => compiler, database: testProvider(() => ({ begin: async () => transaction() })),
   });
   const lost = await call(replacement, "statement", { transactionId: txId, authFingerprint: fingerprint, command: { sequence: 1, sql: "SELECT id FROM projects", params: {} } });
@@ -250,7 +262,7 @@ test("commit check callback SELECT uses the same owner transaction before commit
     assert.deepEqual(await replay.json(), result);
     return new Response(JSON.stringify({ version: "1", allowed: true }), { status: 200 });
   };
-  owner = new TransactionOwnerCore(storage, {
+  owner = new LegacyTransactionOwnerCore(storage, {
     config: checkedConfig,
     getRuntime: () => compiler,
     database: ownerProvider(database),
@@ -303,7 +315,7 @@ test("a callback query revoked by expiry mid-query returns no rows and restores 
     seen.again = { status: again.status, body: await again.json() };
     return new Response(JSON.stringify({ version: "1", allowed: true }), { status: 200 });
   };
-  owner = new TransactionOwnerCore(storage, {
+  owner = new LegacyTransactionOwnerCore(storage, {
     config: checkedConfig,
     getRuntime: () => commitRuntime(),
     database: ownerProvider(database),
@@ -338,7 +350,7 @@ test("commit check denial rolls back and suppresses commit", async () => {
     rowsAffected: 1,
     usage: { rowsRead: 1, rowsWritten: 1, queryDurationMs: 1 },
   }];
-  const owner = new TransactionOwnerCore(storage, {
+  const owner = new LegacyTransactionOwnerCore(storage, {
     config: checkedConfig,
     getRuntime: () => commitRuntime(),
     database: ownerProvider(database),

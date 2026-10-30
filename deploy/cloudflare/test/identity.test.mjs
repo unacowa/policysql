@@ -124,17 +124,18 @@ const numberArrayBody = (sequence, make) => {
 
 // Regression fixture (#55 re-review): ~1 MB number arrays in `params`. The owner compiles such
 // a statement before hashing it, so one that cannot compile is never hashed. The responses
-// are main's before ADR 0024 pull request 2, byte for byte.
+// are main's before ADR 0024 pull request 2, byte for byte, except the exponents (below).
 const INVALID_PARAMETER = { code: "POLICYSQL_INVALID_PARAMETER", message: "A statement parameter is missing or invalid.", path: "/statements/0" };
-// Re-serialized, these exponents (`1e300` as `1e+300`) make the envelope exceed core's request
-// limit, so compile rejects the envelope before its parameters.
-const INVALID_ENVELOPE = { code: "POLICYSQL_INVALID_REQUEST", message: "Request envelope is invalid.", path: null };
+// Before ADR 0024 pull request 7 the owner re-serialized the command, and these exponents
+// (`1e300` as `1e+300`) made the envelope exceed core's request limit, so compile rejected the
+// envelope (POLICYSQL_INVALID_REQUEST). The step machine compiles the verified text itself
+// (#70), which is within the limit, so its parameters are rejected, as an atomic execute does.
 const CONFLICT = { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "The transaction command conflicts with its current state.", path: null };
 const NUMBER_SHAPES = {
   "17-digit decimals": [(index) => `${90071992547409 + index * 7}.${String(index % 1000).padStart(3, "0")}`, INVALID_PARAMETER],
   "short decimals": [(index) => `${index % 100}.${index % 10}`, INVALID_PARAMETER],
   "small integers": [(index) => String(index % 1000), INVALID_PARAMETER],
-  "exponents": [(index) => `${(index % 9) + 1}.${index % 97}e${(index % 600) - 300}`, INVALID_ENVELOPE],
+  "exponents": [(index) => `${(index % 9) + 1}.${index % 97}e${(index % 600) - 300}`, INVALID_PARAMETER],
 };
 
 test("regression: a statement of ~1 MB of numbers that cannot compile is answered as before and never hashed", async (t) => {
@@ -155,8 +156,10 @@ test("regression: a statement of ~1 MB of numbers that cannot compile is answere
       const result = await p.engine.statement({ transactionId, bodyText }, context);
       const elapsed = performance.now() - started;
       assert.deepEqual(result.error, mode === "next sequence" ? compileError : CONFLICT, `${name}, ${mode}`);
-      // The engine's caller fingerprint only: the owner computed no command digest.
-      assert.deepEqual(calls, ["auth"], `${name}, ${mode}`);
+      // Neither the engine nor the owner calls identity_json for a command any more: the
+      // owner's step machine computes the fingerprint and digest in core (ADR 0024 pull
+      // request 7), after compile, and never for a command that cannot compile (its tests).
+      assert.deepEqual(calls, [], `${name}, ${mode}`);
       assert.ok(elapsed < 500, `${name}, ${mode}: ${elapsed.toFixed(1)} ms`);
       // The transaction is closed.
       const after = await p.engine.statement({ transactionId, bodyText: JSON.stringify({ sequence: 2, sql: "SELECT id FROM projects", params: {} }) }, context);
@@ -176,7 +179,7 @@ test("a wide statement body that cannot compile is answered definitely and never
   // The compiler rejects parameters the statement does not use: a definite client error.
   assert.equal(result.ok, false);
   assert.notEqual(result.error.code, "POLICYSQL_INTERNAL", JSON.stringify(result.error));
-  assert.deepEqual(calls, ["auth"]);
+  assert.deepEqual(calls, []);
 });
 
 test("a statement that compiles is hashed by core once, and its exact retry replays", async (t) => {
@@ -187,11 +190,12 @@ test("a statement that compiles is hashed by core once, and its exact retry repl
   calls.length = 0;
   const first = await p.engine.statement({ transactionId, bodyText }, context);
   assert.equal(first.ok, true, JSON.stringify(first));
-  assert.deepEqual(calls, ["auth", "command"], "hashed after compile, before execution");
+  // Hashed inside the owner's step (core), not through identity_json.
+  assert.deepEqual(calls, []);
   calls.length = 0;
   const retried = await p.engine.statement({ transactionId, bodyText }, context);
   assert.deepEqual(retried, { ...first, requestId: retried.requestId });
-  assert.deepEqual(calls, ["auth", "command"], "a retry that compiles is hashed before it is answered");
+  assert.deepEqual(calls, []);
 });
 
 test("a core failure is POLICYSQL_INTERNAL before any database work", async (t) => {
@@ -202,6 +206,14 @@ test("a core failure is POLICYSQL_INTERNAL before any database work", async (t) 
     get(target, key) {
       if (key === "identity_json") {
         return (input) => JSON.parse(input).op === broken ? "not json" : target.identity_json(input);
+      }
+      // One failing step of the owner's machine (its output is not JSON).
+      if (key === "step_json") {
+        return (...args) => {
+          if (broken !== "step") return target.step_json(...args);
+          broken = null;
+          return "not json";
+        };
       }
       const value = Reflect.get(target, key, target);
       return typeof value === "function" ? value.bind(target) : value;
@@ -225,8 +237,12 @@ test("a core failure is POLICYSQL_INTERNAL before any database work", async (t) 
   broken = null;
   const begun = await p.engine.begin({ bodyText: "{\"mode\":\"write\"}" }, context);
   const { transactionId } = begun.value;
-  broken = "command";
+  // The owner's step machine fails: the owner abandons its state and answers 500 (ADR 0024).
+  broken = "step";
   const statement = JSON.stringify({ sequence: 1, sql: "INSERT INTO projects (id, name) VALUES (:id, :name)", params: { id: "p2", name: "x" } });
   assert.equal((await p.engine.statement({ transactionId, bodyText: statement }, context)).error.code, "POLICYSQL_INTERNAL");
+  assert.equal(rows(), before);
+  // The abandoned transaction is closed: nothing runs on it afterwards.
+  assert.equal((await p.engine.statement({ transactionId, bodyText: statement }, context)).error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
   assert.equal(rows(), before);
 });

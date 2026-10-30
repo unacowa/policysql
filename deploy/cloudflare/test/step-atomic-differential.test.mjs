@@ -312,8 +312,10 @@ const environment = (t, { limits = {}, trace = false, engineConfig = config } = 
       const query = async (text) => {
         const requestId = `cb-${++callbackCount}`;
         const owner = env.sides[side].owner(`tx_${hook.validationId.slice("cval_".length)}`);
+        // The port's callback input since pull request 7 (the TypeScript side's production owner
+        // hands it to the TypeScript atomic path); the step side's helper takes `bodyText`.
         const reply = side === "ts"
-          ? await owner.callbackQuery({ capability: hook.query.token, command: JSON.parse(text) }, requestId)
+          ? await owner.callbackQuery({ validationId: hook.validationId, capability: hook.query.token, command: text }, requestId)
           : await owner.callbackQuery({ validationId: hook.validationId, capability: hook.query.token, bodyText: text }, requestId);
         const normalized = reply.ok ? { ok: true, value: reply.value } : { ok: false, code: reply.error.code };
         env.callbacks[side].push(normalized);

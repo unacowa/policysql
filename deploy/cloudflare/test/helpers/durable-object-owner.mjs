@@ -58,6 +58,16 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
     slot.owner = incarnate(name, slot);
   };
 
+  const ensure = (name) => {
+    let slot = objects.get(name);
+    if (!slot) {
+      slot = { data: new Map(), alarmAt: null, owner: null };
+      objects.set(name, slot);
+      slot.owner = incarnate(name, slot);
+    }
+    return slot;
+  };
+
   const lookups = { idFromName: 0, get: 0 };
   // Every reply the object sent, as the wire carried it (status and parsed body).
   const wire = [];
@@ -73,12 +83,7 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
       lookups.get++;
       return {
         fetch: (input, init) => {
-          let slot = objects.get(id.name);
-          if (!slot) {
-            slot = { data: new Map(), alarmAt: null, owner: null };
-            objects.set(id.name, slot);
-            slot.owner = incarnate(id.name, slot);
-          }
+          const slot = ensure(id.name);
           // The platform may deliver a message's body later than its arrival; a delayed body
           // must not let a later message overtake it.
           const delay = nextBodyDelayMs;
@@ -105,6 +110,8 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
     port: durableObjectTransactionOwners(namespace),
     names: () => [...objects.keys()],
     record: async (name) => structuredClone(objects.get(name)?.data.get("transaction")),
+    /** Stores `value` for `name` directly (a record an earlier release wrote). */
+    plant(name, value) { ensure(name).data.set("transaction", structuredClone(value)); },
     core: (name) => objects.get(name)?.owner.object.core,
     timerAt: (name) => objects.get(name)?.alarmAt ?? null,
     /** The next message's body reaches the object only after `ms`. */

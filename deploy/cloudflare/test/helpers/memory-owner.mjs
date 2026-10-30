@@ -13,8 +13,11 @@
 // - `fireTimer(name)` delivers the owner's single pending timer, as an alarm would.
 import { TransactionOwnerCore } from "../../src/transaction-owner.ts";
 import { OWNER_NAME } from "../../src/transaction-owner-port.ts";
+import { stringifyExact } from "../../src/exact-json.ts";
 
-const wire = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
+// The Durable Objects wire writes integers beyond 2^53 - 1 with their digits and reads them
+// back as numbers; so does this one.
+const wire = (value) => (value === undefined ? undefined : JSON.parse(stringifyExact(value)));
 
 export class OwnerLostError extends Error {}
 
@@ -62,6 +65,8 @@ export const createMemoryTransactionOwners = (dependencies, { background = { run
       },
       timer: { async schedule(atMs) { alive(); slot.timerAt = atMs; } },
       background: { run(task) { background.run(task); } },
+      // The adapter knows the name it routes to (ADR 0024: the machine checks it).
+      name,
     };
     return { life, core: new TransactionOwnerCore(facilities, dependencies(name)) };
   };
@@ -100,6 +105,8 @@ export const createMemoryTransactionOwners = (dependencies, { background = { run
     port,
     names: () => [...slots.keys()],
     record: async (name) => structuredClone(slots.get(name)?.data.get("transaction")),
+    /** Stores `value` for `name` directly (a record an earlier release wrote). */
+    plant(name, value) { live(name); slots.get(name).data.set("transaction", structuredClone(value)); },
     core: (name) => slots.get(name)?.owner.core,
     timerAt: (name) => slots.get(name)?.timerAt ?? null,
     /** No message body to deliver late: calls reach the owner synchronously, in call order. */
