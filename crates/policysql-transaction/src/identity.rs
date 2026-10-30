@@ -31,13 +31,13 @@ use std::fmt::Write as _;
 pub const MAX_INPUT_BYTES: usize = 4 * 1_048_576;
 
 const INTERNAL: &str = r#"{"error":{"code":"POLICYSQL_INTERNAL","message":"The request could not be completed.","path":null}}"#;
-const KEY_REQUIRED: &str = r#"{"error":{"code":"POLICYSQL_IDEMPOTENCY_KEY_REQUIRED","message":"Idempotency-Key must contain 16-128 letters, digits, dots, underscores, colons, or hyphens when provided.","path":null}}"#;
+const KEY_INVALID: &str = r#"{"error":{"code":"POLICYSQL_IDEMPOTENCY_KEY_INVALID","message":"Idempotency-Key must be 16-128 characters from letters, digits, and . _ : - + / = when provided.","path":null}}"#;
 
 /// Why an identity could not be computed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityError {
     /// The client's `Idempotency-Key` violates the key syntax (a client error).
-    KeyRequired,
+    KeyInvalid,
     /// The input violates this contract: a library or wrapper fault.
     Internal,
 }
@@ -53,13 +53,20 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// The key syntax: 16-128 of `A-Za-z0-9._:-`.
+/// The key syntax: 16-128 bytes of `A-Za-z0-9._:-+/=`, which is ASCII only: every letter and
+/// digit, the separators of UUIDs and prefixed ids (`.`, `_`, `:`, `-`), and the characters of
+/// standard and URL-safe base64 with padding (`+`, `/`, `=`), so a base64 key can be sent
+/// unchanged. A comma is excluded because a repeated header field is joined with commas;
+/// whitespace, controls, quotes, and non-ASCII are excluded so a key is one header token.
+/// The minimum of 16 keeps a guessable key such as `1` out of the principal's key space (128
+/// bits of a random identifier is 22 base64 characters); the maximum bounds the stored text.
 #[must_use]
 pub fn valid_idempotency_key(key: &str) -> bool {
     (16..=128).contains(&key.len())
-        && key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+        && key.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'.' | b'_' | b':' | b'-' | b'+' | b'/' | b'=')
+        })
 }
 
 /// Computes one identity from a JSON input and returns the result as JSON.
@@ -70,7 +77,7 @@ pub fn valid_idempotency_key(key: &str) -> bool {
 /// - `{"op":"request","endpoint":"execute"|"interactive-start","auth":…,"binding":…,"body":"…","key"?:…}`
 ///   → `{"idempotency":null}` without `key`, `{"idempotency":{"keyHash":…,"fingerprint":…}}`
 ///   with a valid key; a `key` that is not a valid key string is
-///   `POLICYSQL_IDEMPOTENCY_KEY_REQUIRED`.
+///   `POLICYSQL_IDEMPOTENCY_KEY_INVALID`.
 /// - `{"op":"auth","auth":…,"binding":…}` → `{"fingerprint":…}`
 /// - `{"op":"start","transactionId":"tx_…","body":"…"}` → `{"digest":…}`
 /// - `{"op":"command","kind":"statement"|"commit"|"rollback","command":…}` → `{"digest":…}`
@@ -81,7 +88,7 @@ pub fn valid_idempotency_key(key: &str) -> bool {
 pub fn identity_json(input: &str) -> String {
     match compute(input) {
         Ok(output) => output,
-        Err(IdentityError::KeyRequired) => KEY_REQUIRED.to_owned(),
+        Err(IdentityError::KeyInvalid) => KEY_INVALID.to_owned(),
         Err(IdentityError::Internal) => INTERNAL.to_owned(),
     }
 }
@@ -214,9 +221,9 @@ fn request(input: &Json) -> Result<String, IdentityError> {
     let Some(key) = input.get("key") else {
         return Ok(r#"{"idempotency":null}"#.to_owned());
     };
-    let key = key.as_text().ok_or(IdentityError::KeyRequired)?;
+    let key = key.as_text().ok_or(IdentityError::KeyInvalid)?;
     if !valid_idempotency_key(key) {
-        return Err(IdentityError::KeyRequired);
+        return Err(IdentityError::KeyInvalid);
     }
     let part = |name: &str| binding.get(name).cloned().ok_or(IdentityError::Internal);
     let identity = canonical::to_canonical(&Json::Object(vec![
@@ -415,6 +422,36 @@ mod tests {
         assert!(!valid_idempotency_key("request-key-0001,request-key-0002"));
         assert!(!valid_idempotency_key("request key 0001"));
         assert!(!valid_idempotency_key("request-key-00é1"));
+        // Base64, standard and URL-safe, with and without padding.
+        for key in [
+            "dGhpcyBpcyBhIGtleSE=",
+            "dGhpcyBpcyBhIGtleQ==",
+            "ab+cd/ef0123456789==",
+            "a-b_c-d_e-f_g-h_",
+        ] {
+            assert!(valid_idempotency_key(key), "{key}");
+        }
+        assert!(valid_idempotency_key(&"=".repeat(16)));
+        assert!(valid_idempotency_key(&format!("{}==", "a".repeat(126))));
+        assert!(!valid_idempotency_key(&format!("{}==", "a".repeat(127))));
+        for key in [
+            "",
+            "request-key-0001\n",
+            "request-key-0001\t",
+            " request-key-0001",
+            "request-key-0001 ",
+            "request-key-0001\0",
+            "request-key-0001\u{7f}",
+            "request-key-000!",
+            "request-key-000?",
+            "request-key-00\"1",
+            "request-key-00\\1",
+            "request-key-000;",
+            "\u{ff21}\u{ff21}\u{ff21}\u{ff21}\u{ff21}\u{ff21}",
+            "request-key-0001\u{200b}",
+        ] {
+            assert!(!valid_idempotency_key(key), "{key:?}");
+        }
     }
 
     #[test]
@@ -423,7 +460,7 @@ mod tests {
         assert_eq!(identity_json(&request("", body)), r#"{"idempotency":null}"#);
         for key in [r#","key":null"#, r#","key":1"#, r#","key":"short""#] {
             assert!(
-                identity_json(&request(key, body)).contains("POLICYSQL_IDEMPOTENCY_KEY_REQUIRED"),
+                identity_json(&request(key, body)).contains("POLICYSQL_IDEMPOTENCY_KEY_INVALID"),
                 "{key}"
             );
         }

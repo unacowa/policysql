@@ -258,17 +258,52 @@ test("interactive starts without keys are distinct and retain command retries wi
   assert.equal(h.events.some(({ sql }) => /policysql_idempotency/i.test(sql)), false);
 });
 
-test("explicit invalid keys remain errors before database execution", async (t) => {
+test("explicit invalid keys are POLICYSQL_IDEMPOTENCY_KEY_INVALID before database execution", async (t) => {
   const h = await harness(t);
-  for (const key of ["", "short", "a".repeat(129), "request-key-0001,request-key-0002", "invalid key with spaces"]) {
+  const bad = ["", "short", "a".repeat(15), "a".repeat(129), "request-key-0001,request-key-0002", "invalid key with spaces",
+    "request-key-00é1", "request-key-000!", "request-key-000\"1", "request-key-000;", "request-key-000?"];
+  for (const key of bad) {
     for (const [path, body] of [["/v1/transactions:execute", envelope(insert("invalid"))], ["/v1/transactions", { mode: "read" }]]) {
       const result = await h.request("a", path, body, key);
-      assert.equal(result.status, 400);
-      assert.equal(result.body.error.code, "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED");
+      assert.equal(result.status, 400, JSON.stringify(key));
+      assert.equal(result.body.error.code, "POLICYSQL_IDEMPOTENCY_KEY_INVALID");
+      assert.match(result.body.error.message, /^Idempotency-Key must be 16-128 characters/u);
     }
   }
   assert.equal(h.events.length, 0);
   assert.equal(h.ownerNames().length, 0);
+});
+
+test("a repeated Idempotency-Key header is rejected, never first-wins or last-wins", async (t) => {
+  const h = await harness(t);
+  for (const path of ["/v1/transactions:execute", "/v1/transactions"]) {
+    const headers = new Headers({ "content-type": "application/json" });
+    headers.append("idempotency-key", "request-key-0001");
+    headers.append("idempotency-key", "request-key-0001");
+    const response = await h.app.fetch(new Request(`https://worker.test${path}`, {
+      method: "POST", headers, body: JSON.stringify(path.endsWith("execute") ? envelope(insert("dup")) : { mode: "read" }),
+    }), { database: h.binding("a"), session: h.session("a") }, h.background);
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, "POLICYSQL_IDEMPOTENCY_KEY_INVALID");
+  }
+  assert.equal(h.events.length, 0);
+});
+
+test("base64 keys (standard, URL-safe, padded or not) are accepted and each is its own key", async (t) => {
+  const h = await harness(t);
+  const keys = ["dGhpcyBpcyBhIGtleSE=", "ab+cd/ef0123456789==", "ab-cd_ef0123456789==", "Zm9vYmFyYmF6cXV4MTIz", "a".repeat(128)];
+  for (const [index, key] of keys.entries()) {
+    const body = envelope(insert(`b64_${index}`));
+    const first = await h.request("a", "/v1/transactions:execute", body, key);
+    assert.equal(first.status, 200, key);
+    const replay = await h.request("a", "/v1/transactions:execute", body, key);
+    assert.equal(replay.status, 200, key);
+    // The same key with another payload is a conflict: the key reached the idempotency table.
+    const other = await h.request("a", "/v1/transactions:execute", envelope(insert(`b64_other_${index}`)), key);
+    assert.equal(other.status, 409, key);
+    assert.equal(other.body.error.code, "POLICYSQL_IDEMPOTENCY_CONFLICT");
+  }
+  assert.equal(h.rows("a").filter((row) => String(row.id).startsWith("b64_")).length, keys.length);
 });
 
 test("DO atomic callbacks see uncommitted rows on the initiating database and replay without another hook", async (t) => {

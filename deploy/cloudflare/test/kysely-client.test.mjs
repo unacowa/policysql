@@ -331,3 +331,21 @@ test("raw redaction metadata retains row/column correspondence before result plu
   assert.deepEqual(raw.meta.result.redactions, [{ row: 1, column: "display_name", code: "POLICY_REDACTED" }]);
   assert.deepEqual(rows, [{ id: "seed", displayName: null }, { id: "a_visible", displayName: "Visible" }]);
 });
+
+for (const hooks of [false, true]) test(`the real client sends a base64 key unchanged and the server deduplicates on it (hooks=${hooks})`, async (t) => {
+  const h = await harness(t, { hooks });
+  const { db, requests } = await makeClient(t, h);
+  const keys = ["dGhpcyBpcyBhIGtleSE=", "ab+cd/ef0123456789==", "ab-cd_ef0123456789=="];
+  for (const [index, key] of keys.entries()) {
+    const operation = db.insertInto("projects").values({ id: `keyed_${index}`, name: "Keyed" }).returning(["id"])
+      .withPlugin(policyOptions({ idempotencyKey: key }));
+    const first = await operation.execute();
+    assert.deepEqual(await operation.execute(), first);
+    assert.equal(requests.at(-1).headers.get("idempotency-key"), key);
+  }
+  assert.equal(h.rows("a").filter(row => row.name === "Keyed").length, 3);
+  // A key the client's own syntax rejects never reaches the network.
+  const before = requests.length;
+  assert.throws(() => policyOptions({ idempotencyKey: "has space in key 12345" }), TypeError);
+  assert.equal(requests.length, before);
+});

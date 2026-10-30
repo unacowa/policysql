@@ -26,8 +26,8 @@ export const required = (value, name) => {
   return value;
 };
 export const validateKey = (key) => {
-  if (key !== undefined && (typeof key !== "string" || !/^[A-Za-z0-9._:-]{16,128}$/.test(key))) {
-    throw new TypeError("idempotencyKey must contain 16-128 letters, digits, dots, underscores, colons, or hyphens");
+  if (key !== undefined && (typeof key !== "string" || !/^[A-Za-z0-9._:+\/=-]{16,128}$/.test(key))) {
+    throw new TypeError("idempotencyKey must be 16-128 characters from letters, digits, and . _ : - + / =");
   }
   return key;
 };
@@ -103,7 +103,7 @@ export const REJECTIONS = new Map([
   [403, ["FORBIDDEN_ACCESS", "MISSING_POLICY", "FORBIDDEN_OPERATION", "FORBIDDEN_COLUMN",
     "FORBIDDEN_COLUMN_CONTEXT", "PRESET_COLUMN", "TRANSACTION_MODE_VIOLATION"]],
   [400, ["INVALID_REQUEST", "INVALID_SQL", "MULTIPLE_STATEMENTS", "UNSUPPORTED_SQL", "DUPLICATE_RESULT_COLUMN",
-    "INVALID_PARAMETER", "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER"]],
+    "INVALID_PARAMETER", "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER", "IDEMPOTENCY_KEY_INVALID"]],
   [409, ["STALE_OPERATION", "IDEMPOTENCY_CONFLICT", "TRANSACTION_CONFLICT", "TRANSACTION_UNAVAILABLE", "COMMIT_CHECK_REJECTED"]],
   [413, ["LIMIT_EXCEEDED", "TRANSACTION_LIMIT_EXCEEDED"]],
   [422, ["EXPECTATION_FAILED", "SCHEMA_MISMATCH"]],
@@ -119,6 +119,8 @@ const rejectsCommand = ({ error, status }, kind) => {
   if (!REJECTIONS.get(status)?.includes(code)) return false;
   if (sqlRejections.has(code)) return kind === "execute" || kind === "statement";
   if (code === "IDEMPOTENCY_CONFLICT") return kind === "execute";
+  // A key rejected before any database work: the client sends a key only on execute (default deny for other kinds).
+  if (code === "IDEMPOTENCY_KEY_INVALID") return kind === "execute";
   if (code === "COMMIT_CHECK_REJECTED") return kind === "execute" || kind === "commit";
   if (code === "TRANSACTION_MODE_VIOLATION") return kind === "statement";
   // Atomic commit checks also run through a transaction owner.

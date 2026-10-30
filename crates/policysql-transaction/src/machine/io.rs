@@ -431,7 +431,7 @@ pub enum Code {
     SchemaMismatch,
     LimitExceeded,
     IdempotencyConflict,
-    KeyRequired,
+    KeyInvalid,
     Timeout,
 }
 
@@ -493,9 +493,9 @@ impl Code {
                 "POLICYSQL_IDEMPOTENCY_CONFLICT",
                 "The idempotency key is already bound to a different request.",
             ),
-            Self::KeyRequired => (
-                "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED",
-                "Idempotency-Key must contain 16-128 letters, digits, dots, underscores, colons, or hyphens when provided.",
+            Self::KeyInvalid => (
+                "POLICYSQL_IDEMPOTENCY_KEY_INVALID",
+                "Idempotency-Key must be 16-128 characters from letters, digits, and . _ : - + / = when provided.",
             ),
             Self::Timeout => ("POLICYSQL_TIMEOUT", "The database operation timed out."),
         }

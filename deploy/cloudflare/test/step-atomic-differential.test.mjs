@@ -506,7 +506,7 @@ test("a keyed write, its replay, and a conflicting body on the key agree", async
 
 test("a read ignores the key, and a malformed key is rejected before any database work, alike", async (t) => {
   const env = await agree(t, [{ body: selectProjects, key: KEY }, { body: insertProject("p1"), key: "short" }, { body: selectProjects, key: "short" }]);
-  assert.deepEqual(env.answers, [COMMITTED, "POLICYSQL_IDEMPOTENCY_KEY_REQUIRED", COMMITTED]);
+  assert.deepEqual(env.answers, [COMMITTED, "POLICYSQL_IDEMPOTENCY_KEY_INVALID", COMMITTED]);
   assert.equal(env.sides.step.calls.some((call) => call.sql?.includes("policysql_idempotency")), false);
 });
 
@@ -725,11 +725,11 @@ test(`allowlist request-fingerprint-without-snapshot: ${ALLOWLIST["request-finge
   assert.equal(step.keyHash, ts.keyHash, "the key hash is unchanged");
   assert.deepEqual(step.record.results, ts.record.results);
   const binding = bindingOf(env.runtime);
-  assert.match(binding.snapshot, /:abi-9$/u);
+  assert.match(binding.snapshot, /:abi-10$/u);
   const { snapshot: _snapshot, ...withoutSnapshot } = binding;
   // The recorded side hashed the binding with its release's snapshot (ABI 8); core hashes it
   // without any snapshot.
-  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-9$/u, ":abi-8") }));
+  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-10$/u, ":abi-8") }));
   assert.equal(step.fingerprint, requestFingerprint(body, withoutSnapshot));
   assert.notEqual(step.fingerprint, requestFingerprint(body, binding), "nor the current snapshot");
   // The relabeling maps both to the same name: it hides the value and nothing else.

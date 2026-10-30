@@ -620,8 +620,9 @@ that compares the client table with the status table (`website/api/errors.md`) c
 10. The session JSON bound becomes 65,536 bytes (was 1 MiB).
 11. A response over `maxResponseBytes` is now 413 and rolls back.
 12. `PolicySqlRuntime.max_bytes_per_value` is removed and the `limits_json` shape grows: WASM
-    ABI 9. The snapshot changes, so open transactions and idempotency fingerprints from ABI 8
-    do not match (as for every ABI change).
+    the next ABI (11, unless another bump lands first; 9 was used by #80 and 10 by #65). The
+    snapshot changes, so open transactions from the previous ABI do not match (as for every ABI
+    change).
 13. `DatabaseProvider` gains the `streamedReadCap` capability.
 14. Reference wrapper: `cpu_ms` 50 → 1,000 (provisional), runbook alert threshold relative to
     `cpu_ms`.
@@ -657,7 +658,7 @@ smoke (`deploy/cloudflare/scripts/provision-dev.mjs`) before merge.
    understated length, chunked, exact and one over, invalid UTF-8, a stalled body). The
    statement cap stays 2 MiB until pull request 6. The 65,536 control-response bound is
    **not** in this pull request; it moves to pull request 3.
-3. **Request budget and ABI 9.** `maxRequestBytes`, `maxJsonValues` (body side),
+3. **Request budget and the ABI bump.** `maxRequestBytes`, `maxJsonValues` (body side),
    `maxSqlBytes` in `RuntimeLimits`; the HTTP adapter and engine read them; derived WASM input,
    event, and hash-input bounds; session bound 65,536; SQL over limit becomes 413; the client
    `REJECTIONS` change and its table test. The ABI change of this ADR happens here, once:

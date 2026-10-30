@@ -985,7 +985,7 @@ switches atomic execution).
   use it, never a re-serialization), `trace` whether the deployment records execution traces.
   The step checks the binding (`CheckBinding`), compiles, computes the idempotency identity of a
   write envelope (a read ignores the key, as today; a malformed key is
-  `POLICYSQL_IDEMPOTENCY_KEY_REQUIRED`), and, when a mutated resource could trigger a commit check
+  `POLICYSQL_IDEMPOTENCY_KEY_INVALID`), and, when a mutated resource could trigger a commit check
   (`Compiler::triggered_checks`), releases the plan and emits `Forward { owner: tx_<hex>, lane:
   "client", input }`, where `hex` is the key hash's first 32 digits or entropy bytes 16..32 (the
   bytes that seed effect ids are 0..6). `OwnerReplied` is relayed after a shape check (an
