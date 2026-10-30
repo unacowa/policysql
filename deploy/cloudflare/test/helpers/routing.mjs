@@ -89,6 +89,9 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   );
   // The deployed runtime; `redeploy` replaces it for the engine, every owner, and the registry.
   let runtime = makeRuntime();
+  // The runtime the owners use when it differs from the Worker's (a rollout in which the
+  // Worker and the Durable Objects are different deployments); null while they agree.
+  let ownerRuntime = null;
   const extraRuntimes = [];
   const databases = new Map();
   for (const tenant of ["a", "b"]) {
@@ -209,7 +212,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   };
   // Each new owner gets the same ports a wrapper's deployment(env) builds (ADR 0021).
   const ownerDependencies = () => ({
-    getRuntime: () => runtime, database, config,
+    getRuntime: () => ownerRuntime ?? runtime, database, config,
     fetchImpl: async (_url, options) => Response.json({ version: "1", allowed: await validator(JSON.parse(options.body)) }),
   });
   const owners = ownerAdapter === "memory"
@@ -294,6 +297,17 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     ownerAdapter, transactionOwners, workerApp, appWith,
     /** Another runtime over the same catalog and policy, e.g. with another policy version (another snapshot). */
     makeRuntime(versions) { const extra = makeRuntime(versions); extraRuntimes.push(extra); return extra; },
+    /**
+     * A rollout in which the owners run another runtime than the Worker (another policy
+     * version: the snapshot is what differs between ABIs too) while the Worker keeps its own.
+     * Owners created from now on use it; `skewOwners(null)` ends the skew. Returns it.
+     */
+    skewOwners(versions) {
+      if (versions === null) { ownerRuntime = null; return null; }
+      ownerRuntime = makeRuntime(versions);
+      extraRuntimes.push(ownerRuntime);
+      return ownerRuntime;
+    },
     /**
      * A deployment that changes the snapshot (e.g. another policy version): the engine, every
      * owner, and the registry use the new runtime from now on. Returns it.
