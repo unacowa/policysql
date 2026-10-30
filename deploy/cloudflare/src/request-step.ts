@@ -22,7 +22,8 @@
 // so a body is never read for a caller whose database is rejected. The machine then emits its
 // own `checkBinding` for that same binding; the executor answers that one effect with the
 // outcome it already has (`checked`), so the provider is asked once per request, as before.
-// Any other `checkBinding` (another binding, a deadline) calls the provider.
+// The cache is consumed by the first `checkBinding` whatever it names; that one when it does
+// not match (another binding, a deadline), and every later one, calls the provider.
 import { EngineError, internalError, operationError } from "./errors.ts";
 import { checkDatabaseBinding, databaseTransportFactory, sameDatabaseBinding } from "./database.ts";
 import type { DatabaseBinding, DatabaseProvider } from "./database.ts";
@@ -105,10 +106,16 @@ export const runRequestStep = async (
     const { id } = effect;
     switch (effect.type) {
       case "checkBinding":
-        if (checked !== null && effect.deadlineMs == null && sameDatabaseBinding(effect.binding, checked)) {
-          // The engine's own provider call for this binding, made before the body was read.
+        {
+          // Only the first `checkBinding` of the request may be answered by the engine's own
+          // provider call (made before the body was read), and only when it names the same
+          // binding with no deadline. The cache is consumed either way, so no later check can
+          // ever be answered from it.
+          const cached = checked;
           checked = null;
-          return { type: "bindingChecked", id, allowed: true };
+          if (cached !== null && effect.deadlineMs == null && sameDatabaseBinding(effect.binding, cached)) {
+            return { type: "bindingChecked", id, allowed: true };
+          }
         }
         try {
           await checkDatabaseBinding(dependencies.database, effect.binding, effect.binding?.snapshot, effect.deadlineMs ?? undefined);
