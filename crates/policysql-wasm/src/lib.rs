@@ -2359,6 +2359,23 @@ mod tests {
         logical_result_value,
     };
 
+    #[test]
+    fn decimal_parameters_read_as_the_correctly_rounded_double() {
+        // ADR 0025: compile and core's canonical form read a decimal as the same, correctly
+        // rounded double (`float_roundtrip`); serde_json's default read these one unit off.
+        for (text, expected) in [
+            ("9007199254740991.0", 9_007_199_254_740_991.0_f64),
+            ("4503599627370495.5", 4_503_599_627_370_495.5),
+            ("0.1", 0.1),
+        ] {
+            let value: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
+            assert!(
+                matches!(super::logical_value(value, None), Ok(LogicalValue::Number(number)) if number.to_bits() == expected.to_bits()),
+                "{text}"
+            );
+        }
+    }
+
     const CATALOG: &str = r"
 version: 1
 resources:
