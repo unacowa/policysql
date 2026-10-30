@@ -1,0 +1,25 @@
+{
+  // Development-only commit-check validator for the release smoke (#42).
+  // scripts/provision-dev.mjs deploys it and sets POLICYSQL_ORIGIN and HOOK_SECRET.
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "policysql-dev-validator",
+  "main": "./index.ts",
+  "compatibility_date": "2026-08-05",
+  // The callback goes to the PolicySQL Worker on the same account's workers.dev subdomain.
+  // Without this flag such a fetch never reaches that Worker (Cloudflare error 1042), so the
+  // callback must go out through the public front door like any external validator's would.
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": true }
+  },
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  "vars": {
+    "POLICYSQL_ORIGIN": "https://gateway.example.com"
+  },
+  "secrets": {
+    "required": ["HOOK_SECRET"]
+  }
+}

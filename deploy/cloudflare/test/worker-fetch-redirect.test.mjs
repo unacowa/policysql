@@ -13,7 +13,7 @@ import { scanOutboundFetch } from "./helpers/outbound-fetch-scan.mjs";
 // unread. This guard is structural: only redirects.ts may name `redirect` or use
 // the global fetch, whatever value or spelling another file would use.
 const repository = fileURLToPath(new URL("../../../", import.meta.url));
-const workerTrees = ["deploy/cloudflare/src", "deploy/cloudflare/wrapper", "examples"];
+const workerTrees = ["deploy/cloudflare/src", "deploy/cloudflare/wrapper", "deploy/cloudflare/dev-validator", "examples"];
 const exit = "deploy/cloudflare/src/redirects.ts";
 
 const sources = (directory) => readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -28,7 +28,7 @@ const files = workerTrees.flatMap((tree) => sources(join(repository, tree)))
 
 test("only redirects.ts sets a redirect mode or calls the global fetch in Worker source", () => {
   for (const required of [exit, "deploy/cloudflare/src/turso-http.ts", "deploy/cloudflare/src/adapters/commit-check-hook.ts",
-    "deploy/cloudflare/wrapper/index.ts", "examples/database-routing/worker.ts"]) {
+    "deploy/cloudflare/wrapper/index.ts", "deploy/cloudflare/dev-validator/index.ts", "examples/database-routing/worker.ts"]) {
     assert.ok(files.includes(required), `the scan covers ${required}`);
   }
   const findings = files

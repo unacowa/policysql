@@ -1,0 +1,17 @@
+# Development-only (#42). The verdict of the newest row tells the dev validator
+# (dev-validator/) how to answer the smoke_check commit check of the writing transaction.
+resource: smoke_checks
+roles:
+  member:
+    select:
+      columns: [id, verdict]
+      filter: { tenant_id: { eq: { session: tenant_id } } }
+      limit: 100
+      allow_aggregations: false
+      allow_windows: false
+    insert:
+      columns: [id, verdict]
+      presets:
+        tenant_id: { session: tenant_id }
+      check: { tenant_id: { eq: { session: tenant_id } } }
+      returning: { columns: [id, verdict] }

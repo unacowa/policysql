@@ -17,10 +17,15 @@ export type WrapperBindings = {
 };
 
 /**
- * Policy commit-check id -> the env names holding its validator URL and HMAC secret.
- * The development policy defines no commit checks; add an entry per check id it defines.
+ * Policy commit-check id -> the env names holding its validator URL and HMAC secret, one
+ * entry per check id the policy defines. Both are required: a missing value rejects the
+ * whole configuration (500 before any database, owner, or validator call).
+ * The development policy's only check is `smoke_check`, answered by the dev validator Worker
+ * (dev-validator/, #42); the release smoke drives it.
  */
-export const COMMIT_CHECK_ENV: Readonly<Record<string, Readonly<{ url: string; hmacSecret: string }>>> = Object.freeze({});
+export const COMMIT_CHECK_ENV: Readonly<Record<string, Readonly<{ url: string; hmacSecret: string }>>> = Object.freeze({
+  smoke_check: Object.freeze({ url: "SMOKE_VALIDATOR_URL", hmacSecret: "SMOKE_VALIDATOR_HMAC_SECRET" }),
+});
 
 const text = (env: WrapperBindings, name: string) => {
   const value = env[name];

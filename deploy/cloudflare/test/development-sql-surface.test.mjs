@@ -118,7 +118,55 @@ const accepted = [
     sql: "DELETE FROM posts WHERE id = :id RETURNING id",
     params: { id: "post_probe" },
   },
+  // The release smoke's development-only resources (#42, scripts/provision-dev.mjs).
+  {
+    name: "smoke commit-check probe insert",
+    sql: "INSERT INTO smoke_checks (id, verdict) VALUES (:id, :verdict) RETURNING id, verdict",
+    params: { id: "ccp_1", verdict: "allow" },
+  },
+  {
+    name: "dev validator callback query",
+    sql: "SELECT id, verdict FROM smoke_checks ORDER BY id DESC LIMIT :limit",
+    params: { limit: 1 },
+  },
+  {
+    name: "smoke bytes insert",
+    sql: "INSERT INTO smoke_values (id, label, note, payload) VALUES (:id, :label, :note, :payload) RETURNING id, label, note, payload",
+    params: { id: "sv_1", label: "bytes", note: "n", payload: "AAEC/w==" },
+  },
+  {
+    name: "smoke empty bytes insert",
+    sql: "INSERT INTO smoke_values (id, label, note, payload) VALUES (:id, :label, :note, :payload) RETURNING id, label, note, payload",
+    params: { id: "sv_2", label: "empty", note: "n", payload: "" },
+  },
+  {
+    name: "smoke NULL assignment to nullable columns",
+    sql: "UPDATE smoke_values SET note = :note, payload = :payload WHERE id = :id RETURNING id, label, note, payload",
+    params: { id: "sv_1", note: null, payload: null },
+  },
+  {
+    name: "smoke stored NULL read",
+    sql: "SELECT id, note, payload FROM smoke_values WHERE id = :id AND note IS NULL AND payload IS NULL",
+    params: { id: "sv_1" },
+  },
+  {
+    name: "smoke cleanup",
+    sql: "DELETE FROM smoke_values WHERE id = :id RETURNING id",
+    params: { id: "sv_1" },
+  },
 ];
+
+test("development smoke resources reject NULL outside a nullable assignment and non-canonical bytes", () => {
+  const code = (sql, params) => JSON.parse(runtime.compile_json(
+    auth, JSON.stringify({ statements: [{ sql, params }] }), "execute",
+  )).error?.code;
+  assert.equal(code("UPDATE smoke_values SET label = :label WHERE id = :id RETURNING id", { id: "sv_1", label: null }), "POLICYSQL_INVALID_PARAMETER");
+  assert.equal(code("SELECT id FROM smoke_values WHERE note = :note", { note: null }), "POLICYSQL_INVALID_PARAMETER");
+  assert.equal(code("UPDATE smoke_values SET payload = :payload WHERE id = :id RETURNING id", { id: "sv_1", payload: "AAEC/w" }), "POLICYSQL_INVALID_PARAMETER");
+  assert.equal(typeof code("SELECT tenant_id FROM smoke_values", {}), "string");
+  assert.equal(typeof code("INSERT INTO smoke_checks (id, tenant_id, verdict) VALUES (:id, :tenant, :verdict)", { id: "x", tenant: "tenant_b", verdict: "allow" }), "string");
+  assert.equal(typeof code("UPDATE smoke_checks SET verdict = :verdict WHERE id = :id", { id: "x", verdict: "deny" }), "string");
+});
 
 test("development Catalog and policy compile every advertised SQL family", () => {
   for (const fixture of accepted) {

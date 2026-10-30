@@ -8,7 +8,11 @@ import { POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
 import { configFromEnv } from "./config.ts";
 import { RUNTIME_LIMITS } from "./limits.ts";
 import { createDeploymentDatabase } from "./database.ts";
+import {
+  OWNER_VERSION_PATH, ownerVersionRoute, withDeploymentVersion, withOwnerVersionProbe, type VersionBindings,
+} from "./deployment-version.ts";
 import { createWrapperFetch } from "./fetch.ts";
+import { authenticateJwt } from "./auth.ts";
 import type { RateLimitedBindings } from "./rate-limit.ts";
 
 const ABI_VERSION = 1;
@@ -33,9 +37,21 @@ const worker = createPolicySqlWorker<RateLimitedBindings>({
 });
 
 // Rate limiting runs here, before app.fetch and before binding() initializes WASM (ADR 0018).
-export default { fetch: createWrapperFetch(worker.app, (env) => deploymentDatabase.binding(env)) };
+// Every response names the Worker version that produced it (#42, wrapper/deployment-version.ts).
+export default {
+  fetch: withDeploymentVersion(createWrapperFetch(
+    worker.app, (env) => deploymentDatabase.binding(env), authenticateJwt,
+    {
+      [OWNER_VERSION_PATH]: (request, env, _context, { session, requestId }) =>
+        ownerVersionRoute(request, env as RateLimitedBindings & VersionBindings, session, requestId),
+    },
+  )),
+};
 export { ABI_VERSION };
 
 // The Durable Object class bound as TRANSACTION_OWNER (wrangler.jsonc). Each object builds
-// its owner's ports from its own env through the same deployment function.
-export const TransactionOwner = durableObjectTransactionOwnerClass(worker.ownerDependencies);
+// its owner's ports from its own env through the same deployment function. The wrapper adds
+// one message of its own, the version probe of `/healthz/owner`; every other message is the
+// library's.
+// test/deployment-version.test.mjs exercises this composition with the library's class.
+export const TransactionOwner = withOwnerVersionProbe(durableObjectTransactionOwnerClass(worker.ownerDependencies));
