@@ -4,6 +4,7 @@ import type { DatabaseTransportOptions } from "./database.ts";
 import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.ts";
 import { discardBody, fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
+import { BodyTooLargeError, readBoundedText } from "./bounded-body.ts";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
 const INT64_MIN = -(2n ** 63n);
@@ -135,7 +136,16 @@ export class TursoHttpTransport {
   // make it that large, and retrying cannot shrink stored data. BEGIN and
   // COMMIT/ROLLBACK keep the 503 default, because an oversized control response is
   // a transport anomaly and a COMMIT outcome must not be reported as a limit error.
+  //
+  // The body is streamed and counted in bytes as it arrives (#53, src/bounded-body.ts):
+  // a declared or received size over the bound cancels the stream instead of buffering
+  // the rest. A read failure or malformed UTF-8 is a transport failure (503), and the
+  // request's timeout also bounds the body read (504). None of these is a rejection, so a
+  // COMMIT whose reply fails here is never reported as not committed (ADR 0007).
   async pipeline(requests, baton = undefined, timeoutMs = 1_000, oversized = databaseFailure) {
+    const signal = AbortSignal.timeout(timeoutMs);
+    const timedOut = () => new EngineError("POLICYSQL_DATABASE_TIMEOUT", "The database operation timed out.");
+    const isAbort = (error) => error?.name === "TimeoutError" || error?.name === "AbortError";
     // fetchNoFollow never follows a redirect (it would forward the bearer token) and
     // rejects one unread; that rejection is a 503 like any other transport failure.
     const response = await fetchNoFollow(this.url, {
@@ -146,24 +156,20 @@ export class TursoHttpTransport {
         "x-turso-request-identity": this.requestId,
       },
       body: JSON.stringify({ ...(baton ? { baton } : {}), requests }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal,
     }, this.fetchImpl).catch((error) => {
-      if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-        throw new EngineError("POLICYSQL_DATABASE_TIMEOUT", "The database operation timed out.");
-      }
+      if (isAbort(error)) throw timedOut();
       throw databaseFailure();
     });
     if (!response.ok) {
       await discardBody(response);
       throw databaseFailure();
     }
-    const declared = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
-      await discardBody(response);
-      throw oversized();
-    }
-    const text = await response.text();
-    if (text.length > MAX_RESPONSE_BYTES) throw oversized();
+    const text = await readBoundedText(response, MAX_RESPONSE_BYTES, signal).catch((error) => {
+      if (error instanceof BodyTooLargeError) throw oversized();
+      if (isAbort(error)) throw timedOut();
+      throw databaseFailure();
+    });
     let body;
     try { body = JSON.parse(text); } catch { throw databaseFailure(); }
     if (

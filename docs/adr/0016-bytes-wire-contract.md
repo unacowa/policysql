@@ -60,6 +60,9 @@ over the Turso HTTP transport bound (2 MiB) uses `POLICYSQL_LIMIT_EXCEEDED` (413
 even when every value is within the per-value limit. Oversized `BEGIN`, `COMMIT` or
 `ROLLBACK` responses and non-success HTTP responses remain transport failures (503),
 because they are not result data and a commit outcome is never reported as a limit.
+The Turso HTTP bound counts the UTF-8 bytes received as the response streams in, whatever
+its `Content-Length` says, and cancels the stream at the first chunk over it (#53); a
+response that is not valid UTF-8 is a transport failure (503).
 
 Malformed bytes parameters use `POLICYSQL_INVALID_PARAMETER` (400) regardless of
 their length; only well-formed input whose decoded size exceeds the per-value limit
