@@ -69,6 +69,19 @@ export class PolicySqlRuntime {
      */
     release_execution(handle: bigint): boolean;
     /**
+     * One step of the transaction machine (ADR 0024): the current durable and volatile state
+     * (the JSON texts a previous step returned, or `None`), one event, and the host facts.
+     * Returns `{"durable": string|null, "volatile": string|null, "effects": [...]}`; the engine
+     * keeps both texts verbatim, writes `durable` when an effect says `persist`, and passes
+     * both back with the next event. Invalid host facts or an unreadable event give
+     * `{"error":{"code":"POLICYSQL_INTERNAL",...}}` and no state. The contract is
+     * [`policysql_transaction::machine`].
+     *
+     * Adding this method bumped `ABI_VERSION` to 6. No production path calls it before the
+     * switch-over (ADR 0024 pull request 7).
+     */
+    step_json(durable_json: string | null | undefined, volatile_json: string | null | undefined, event_json: string, host_json: string): string;
+    /**
      * Validates a raw remote result against a previously sealed statement.
      */
     validate_result_json(handle: bigint, index: number, raw_result_json: string): string;
@@ -97,6 +110,7 @@ export interface InitOutput {
     readonly policysqlruntime_profile: (a: number) => [number, number];
     readonly policysqlruntime_release_execution: (a: number, b: bigint) => number;
     readonly policysqlruntime_snapshot: (a: number) => [number, number];
+    readonly policysqlruntime_step_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly policysqlruntime_validate_result_json: (a: number, b: bigint, c: number, d: number, e: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

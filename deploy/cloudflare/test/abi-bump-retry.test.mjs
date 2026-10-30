@@ -1,6 +1,7 @@
 // ADR 0025, "What happens at the deployment that switches the rule": retries that straddle
 // the deployment from ABI 4 (byte equality with `stableJson`) to ABI 5 (core-defined canonical
-// JSON). The records and rows below hold the values the ABI 4 implementation wrote, computed
+// JSON), and on to the current ABI (6 since ADR 0024 pull request 4, which keeps ADR 0025's
+// stability requirements). The records and rows below hold the values the ABI 4 implementation wrote, computed
 // by a frozen copy of it, and the retries run on the current code under the new snapshot.
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -50,17 +51,19 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     t.mock.method(console, "log", () => {});
     const h = await harness(t, { ownerAdapter, hooks: false });
     const real = h.runtime.snapshot;
-    // This code is ABI 5; the previous release's snapshot differed only in its ABI suffix.
-    assert.match(real, /:abi-5$/u);
-    assert.equal(h.runtime.abi_version, 5);
+    // This code is ABI 5 or later; the previous releases' snapshots differed only in their ABI
+    // suffix.
+    const current = h.runtime.abi_version;
+    assert.ok(current >= 5);
+    assert.match(real, new RegExp(`:abi-${current}$`, "u"));
     const at = (abi) => {
-      if (abi === 5) delete h.runtime.snapshot;
-      else Object.defineProperty(h.runtime, "snapshot", { value: real.replace(/:abi-5$/u, `:abi-${abi}`), configurable: true });
+      if (abi === current) delete h.runtime.snapshot;
+      else Object.defineProperty(h.runtime, "snapshot", { value: real.replace(/:abi-\d+$/u, `:abi-${abi}`), configurable: true });
       assert.match(h.runtime.snapshot, new RegExp(`:abi-${abi}$`, "u"));
     };
     const credential = h.session("a", { principal: `https://issuer.test:${SUBJECT}`, subject: SUBJECT, session: { tenant_id: "tenant_a" } });
     const send = (path, body, key = null) => h.request("a", path, body, key, credential);
-    return { h, at, send, credential };
+    return { h, at: (abi) => at(abi === "current" ? current : abi), send, credential };
   };
 
   // Rewrites the stored record with the digests the ABI 4 implementation computed for it.
@@ -101,7 +104,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(first.status, 200, JSON.stringify(first.body));
     const record = await asWrittenByAbi4(h, id);
     assert.match(record.databaseBinding.snapshot, /:abi-4$/u);
-    at(5);
+    at("current");
     const retry = await commit();
     assert.equal(retry.status, 200, JSON.stringify(retry.body));
     assert.deepEqual(retry.body, first.body);
@@ -119,7 +122,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     await commit();
     const record = await asWrittenByAbi4(h, id);
     assert.equal(record.status, "committing");
-    at(5);
+    at("current");
     for (const attempt of [1, 2]) {
       const retry = await commit();
       assert.equal(retry.status, 503, `${attempt}: ${JSON.stringify(retry.body)}`);
@@ -141,7 +144,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         ? { ...record, authFingerprint: "0".repeat(64) }
         : { ...record, commitSent: { ...record.commitSent, digest: "0".repeat(64) }, last: { ...record.last, digest: "0".repeat(64) } };
       await h.ownerCore(id).persist(changed);
-      at(5);
+      at("current");
       const retry = await commit();
       assert.equal(retry.status, 409, `${field}: ${JSON.stringify(retry.body)}`);
       assert.equal(retry.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", field);
@@ -163,7 +166,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     // Under the same snapshot the retry replays.
     const replay = await send("/v1/transactions:execute", body, key);
     assert.equal(replay.status, 200, JSON.stringify(replay.body));
-    at(5);
+    at("current");
     const retry = await send("/v1/transactions:execute", body, key);
     // The same key hash finds the row; its fingerprint includes the old snapshot.
     assert.equal(retry.status, 409, JSON.stringify(retry.body));
@@ -181,7 +184,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     const auth = { principal: credential.principal, subject: credential.subject, role: credential.defaultRole, session: credential.session };
     const keyHash = await legacyKeyHash(auth, "interactive-start", h.binding("a"), key);
     assert.equal(first.body.transactionId, `tx_${keyHash.slice(0, 32)}`, "the ABI 4 transaction id");
-    at(5);
+    at("current");
     const retry = await send("/v1/transactions", { mode: "write" }, key);
     assert.equal(retry.status, 409, JSON.stringify(retry.body));
     assert.equal(retry.body.error.code, "POLICYSQL_TRANSACTION_CONFLICT");

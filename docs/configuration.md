@@ -79,6 +79,13 @@ limits").
 
 The `maxTransactionResultBytes` ceiling keeps an owner record, which stores the last
 response, inside a Durable Object value. Ranges keep every value an exact JavaScript integer.
+Construction also rejects a combination that could make the step machine's durable
+transaction record exceed its 96 KiB bound (ADR 0024 "Bounds"): the last reply, bounded by
+`maxTransactionResultBytes`, plus one recorded mutation per statement
+(`maxTransactionStatements` times the longest Catalog resource name), plus the snapshot and
+version strings. With the defaults every Catalog fits (resource names up to 1,024 bytes); at
+both maxima (256 statements, 65,536 bytes) resource names of up to about 50 bytes fit. The
+error names both fields.
 
 Fixed protocol constants are enforced by core and not configurable; the runtime reports them
 with the limits so Capabilities reads them from the same place: `maxRequestBytes` (1,048,576;

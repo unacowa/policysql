@@ -270,6 +270,43 @@ export class PolicySqlRuntime {
         }
     }
     /**
+     * One step of the transaction machine (ADR 0024): the current durable and volatile state
+     * (the JSON texts a previous step returned, or `None`), one event, and the host facts.
+     * Returns `{"durable": string|null, "volatile": string|null, "effects": [...]}`; the engine
+     * keeps both texts verbatim, writes `durable` when an effect says `persist`, and passes
+     * both back with the next event. Invalid host facts or an unreadable event give
+     * `{"error":{"code":"POLICYSQL_INTERNAL",...}}` and no state. The contract is
+     * [`policysql_transaction::machine`].
+     *
+     * Adding this method bumped `ABI_VERSION` to 6. No production path calls it before the
+     * switch-over (ADR 0024 pull request 7).
+     * @param {string | null | undefined} durable_json
+     * @param {string | null | undefined} volatile_json
+     * @param {string} event_json
+     * @param {string} host_json
+     * @returns {string}
+     */
+    step_json(durable_json, volatile_json, event_json, host_json) {
+        let deferred5_0;
+        let deferred5_1;
+        try {
+            var ptr0 = isLikeNone(durable_json) ? 0 : passStringToWasm0(durable_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len0 = WASM_VECTOR_LEN;
+            var ptr1 = isLikeNone(volatile_json) ? 0 : passStringToWasm0(volatile_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(event_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len2 = WASM_VECTOR_LEN;
+            const ptr3 = passStringToWasm0(host_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len3 = WASM_VECTOR_LEN;
+            const ret = wasm.policysqlruntime_step_json(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+            deferred5_0 = ret[0];
+            deferred5_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+        }
+    }
+    /**
      * Validates a raw remote result against a previously sealed statement.
      * @param {bigint} handle
      * @param {number} index
