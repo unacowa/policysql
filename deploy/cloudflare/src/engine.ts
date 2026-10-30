@@ -11,7 +11,7 @@ import { internalError, operationError, EngineError } from "./errors.ts";
 import type { OperationError } from "./errors.ts";
 import { parseBodyText } from "./request-body.ts";
 import type { BodyText } from "./request-body.ts";
-import { authIdentity, requestIdentity, startDigest } from "./core-identity.ts";
+import { requestIdentity, startDigest } from "./core-identity.ts";
 import { authorizeSession } from "./session.ts";
 import type { RequiredAccess } from "./session.ts";
 import { capabilities as capabilitiesValue, explainResponse, parsedRuntimeCall } from "./presenters.ts";
@@ -271,9 +271,10 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         const snapshot = dependencies.getRuntime().snapshot;
         const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, snapshot);
         const body = await parseBodyText(fields.bodyText);
-        const fingerprint = authIdentity(dependencies.getRuntime(), auth, databaseBinding);
+        // The owner's step machine compiles and hashes the verified text itself (ADR 0024 pull
+        // request 7, #70), and derives the auth fingerprint from `auth` and the binding.
         const reply = await owner(fields.transactionId).command(kind, {
-          transactionId: fields.transactionId, authFingerprint: fingerprint, command: body.value, databaseBinding, snapshot,
+          transactionId: fields.transactionId, auth, command: body.text, databaseBinding, snapshot,
         }, checked.requestId);
         return fromOwner(reply, checked.requestId);
       });
@@ -440,12 +441,11 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         key: fields.idempotencyKey, auth, bodyText: body.text, endpoint: "interactive-start", databaseBinding,
       });
       const transactionId = `tx_${idempotency?.keyHash.slice(0, 32) ?? crypto.randomUUID().replaceAll("-", "")}`;
-      const fingerprint = authIdentity(runtime, auth, databaseBinding);
       // The owner still validates its start command; this digest is not a public retry key.
+      // The owner computes the auth fingerprint from `auth` and the binding (ADR 0024).
       const startFingerprint = idempotency?.fingerprint ?? startDigest(runtime, transactionId, body.text);
       const reply: OwnerReply = await owner(transactionId).begin({
         transactionId,
-        authFingerprint: fingerprint,
         startFingerprint,
         mode: body.value.mode,
         auth,
@@ -472,8 +472,10 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         if (typeof fields.validationId !== "string" || !VALIDATION_ID.test(fields.validationId)) throw invalidRequest();
         const body = await parseBodyText(fields.bodyText);
         const reply = await owner(`tx_${fields.validationId.slice("cval_".length)}`).callbackQuery({
+          validationId: fields.validationId,
           capability: typeof fields.capability === "string" ? fields.capability : "",
-          command: body.value,
+          // The verified text: the owner compiles and hashes it, never a re-serialization (#70).
+          command: body.text,
         }, requestId);
         return fromOwner(reply, requestId);
       } catch (error) {

@@ -96,6 +96,8 @@ const inProcessOwners = (dependencies: ConstructorParameters<typeof TransactionO
             },
           },
           background: { run: (task) => { void task; } },
+          // The name this owner serves; the step machine checks inputs and records against it.
+          name,
         }, dependencies);
         owner = core;
         owners.set(name, owner);

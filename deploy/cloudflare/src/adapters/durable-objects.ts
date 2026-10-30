@@ -11,8 +11,13 @@
 // object at a time, and a restarted instance keeps its storage but none of its memory.
 //
 // Between the Worker and the object, commands travel as the internal HTTP messages they
-// always used (`https://owner/<command>`, JSON body, request id header, and the callback
-// capability as `authorization: Bearer <capability>`). A reply is a 2xx response whose body
+// always used (`https://owner/<command>`, JSON body, request id header), plus the owner name
+// the Worker routed to (`x-policysql-owner`). Since ADR 0024 pull request 7 the body of an
+// interactive command or a callback query is the step machine's forwarded owner input
+// without its `kind` (the path names it); the callback capability travels in that body. A
+// message in the earlier wire shape (an `authFingerprint` member, which only an earlier
+// Worker sends during a rollout) is answered POLICYSQL_INTERNAL, which no client takes as a
+// rejection. A reply is a 2xx response whose body
 // is the value, or a non-2xx response whose body is `{ error: { code, message, path,
 // requestId } }`. A Worker of this version reads only that distinction. The object still
 // sends exactly the statuses and bodies of earlier versions (201 for a started transaction,
@@ -20,21 +25,22 @@
 // because an earlier Worker forwards them to the client unchanged during a rollout
 // (ADR 0023). The wire needs no `cloudflare:workers` import (RPC
 // stubs), so the adapter also runs in the Node test harness.
-import { internalError } from "../errors.ts";
+import { internalError, operationError } from "../errors.ts";
+import { stringifyExact } from "../exact-json.ts";
 import { statusFor } from "../http/status.ts";
 import { TransactionOwnerCore } from "../transaction-owner.ts";
 import type { TransactionOwnerDependencies } from "../transaction-owner.ts";
 import type {
   BackgroundTasks, OwnerCommandKind, OwnerFacilities, OwnerReply, TransactionOwnerHandle, TransactionOwnerPort,
 } from "../transaction-owner-port.ts";
+import { OWNER_NAME } from "../transaction-owner-port.ts";
 
 const OWNER_ORIGIN = "https://owner";
 const REQUEST_ID_HEADER = "x-policysql-request-id";
+const OWNER_HEADER = "x-policysql-owner";
 const COMMAND_PATHS: Readonly<Record<OwnerCommandKind, string>> = Object.freeze({
   statement: "/statement", commit: "/commit", rollback: "/rollback",
 });
-
-const BEARER = /^Bearer (.*)$/su;
 
 // Worker side: one internal message to the object, its JSON reply back as data.
 const send = async (stub: DurableObjectStub, path: string, body: unknown, headers: Record<string, string>): Promise<OwnerReply> => {
@@ -55,7 +61,7 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
 const replyResponse = (reply: OwnerReply, path: string, requestId: string) => {
   const failure = reply as { ok: false; error: { code: string; message: string; path: string | null } };
   return new Response(
-    JSON.stringify(reply.ok ? reply.value : { error: { ...failure.error, requestId } }),
+    stringifyExact(reply.ok ? reply.value : { error: { ...failure.error, requestId } }),
     {
       status: reply.ok ? (path === "/begin" ? 201 : 200) : statusFor(failure.error.code),
       headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
@@ -71,17 +77,15 @@ export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace
   return {
     route(name: string): TransactionOwnerHandle {
       const stub = namespace.get(namespace.idFromName(name));
+      const headers = (requestId: string) => ({ [REQUEST_ID_HEADER]: requestId, [OWNER_HEADER]: name });
       return {
-        begin: (input, requestId) => send(stub, "/begin", input, { [REQUEST_ID_HEADER]: requestId }),
-        atomic: (input, requestId) => send(stub, "/atomic", input, { [REQUEST_ID_HEADER]: requestId }),
+        begin: (input, requestId) => send(stub, "/begin", input, headers(requestId)),
+        atomic: (input, requestId) => send(stub, "/atomic", input, headers(requestId)),
         command: (kind, input, requestId) => {
           if (!Object.hasOwn(COMMAND_PATHS, kind)) return Promise.reject(new TypeError("unknown owner command"));
-          return send(stub, COMMAND_PATHS[kind], input, { [REQUEST_ID_HEADER]: requestId });
+          return send(stub, COMMAND_PATHS[kind], input, headers(requestId));
         },
-        callbackQuery: ({ capability, command }, requestId) => send(stub, "/validation-query", command, {
-          authorization: typeof capability === "string" && capability !== "" ? `Bearer ${capability}` : "",
-          [REQUEST_ID_HEADER]: requestId,
-        }),
+        callbackQuery: (input, requestId) => send(stub, "/validation-query", input, headers(requestId)),
       };
     },
   };
@@ -89,6 +93,9 @@ export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace
 
 /** Owner-side facilities over the object's state: storage, its single alarm, waitUntil. */
 export const durableObjectFacilities = (state: DurableObjectState): OwnerFacilities => ({
+  // The object's own name, where the platform reports it; otherwise the owner takes the name
+  // each message carries.
+  ...(typeof (state as any).id?.name === "string" && OWNER_NAME.test((state as any).id.name) ? { name: (state as any).id.name } : {}),
   store: {
     get: (key) => state.storage.get(key),
     put: (key, value) => state.storage.put(key, value),
@@ -106,12 +113,15 @@ const serve = async (core: TransactionOwnerCore, request: Request): Promise<Resp
   try { body = await request.json(); } catch { body = null; }
   const path = new URL(request.url).pathname;
   let reply: OwnerReply;
-  if (path === "/begin") reply = await core.begin(body, requestId);
+  const owner = request.headers.get(OWNER_HEADER);
+  if ((owner !== null && !core.bindName(owner)) || (body !== null && typeof body === "object" && Object.hasOwn(body, "authFingerprint"))) {
+    // Routed to another name, or the earlier wire shape: an adapter or rollout fault.
+    console.log(JSON.stringify({ event: "owner_message_rejected", requestId, path }));
+    reply = { ok: false, error: operationError(internalError()) };
+  } else if (path === "/begin") reply = await core.begin(body, requestId);
   else if (path === "/atomic") reply = await core.atomic(body, requestId);
-  else if (path === "/validation-query") {
-    const capability = request.headers.get("authorization")?.match(BEARER)?.[1] ?? "";
-    reply = await core.callbackQuery({ capability, command: body }, requestId);
-  } else {
+  else if (path === "/validation-query") reply = await core.callbackQuery(body, requestId);
+  else {
     const kind = (Object.keys(COMMAND_PATHS) as OwnerCommandKind[]).find((name) => COMMAND_PATHS[name] === path);
     // An unknown path reaches the core as an unknown kind, which it rejects as invalid.
     reply = await core.command(kind ?? (path as OwnerCommandKind), body, requestId);
