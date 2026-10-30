@@ -29,7 +29,9 @@ pub const MAX_DEPTH: usize = 128;
 pub enum Json {
     Null,
     Bool(bool),
-    Number(f64),
+    /// The double the lexeme reads as, and its shortest digits when the lexeme alone shows
+    /// them (see [`ShortDecimal`]).
+    Number(f64, Option<ShortDecimal>),
     String(Vec<u16>),
     Array(Vec<Json>),
     /// Members with unique keys. [`parse`] returns them sorted by key; the writer sorts every
@@ -315,10 +317,130 @@ impl Parser<'_> {
         }
         // Rust's float parsing is correctly rounded and overflows to infinity, as
         // ECMAScript's StringToNumber does.
-        self.text[start..self.offset]
-            .parse::<f64>()
-            .map(Json::Number)
-            .map_err(|_| ParseError)
+        let lexeme = &self.text[start..self.offset];
+        let short = ShortDecimal::of(lexeme);
+        let value = match short.and_then(|short| short.exact_value(lexeme.starts_with('-'))) {
+            Some(value) => value,
+            None => lexeme.parse::<f64>().map_err(|_| ParseError)?,
+        };
+        Ok(Json::Number(value, short))
+    }
+}
+
+/// The significant digits of a number lexeme with at most 15 of them, in the normal range.
+///
+/// Every decimal of at most 15 significant digits reads back as a distinct normal double
+/// (`DBL_DIG`), so the shortest digits of the double it reads as are its own significant
+/// digits with leading and trailing zeros removed, and the double's exact value decides
+/// nothing (no tie can arise). Most numbers in a body (`37.4`, `-12`, `1E5`) are printed from
+/// these digits, without formatting the double (#55 review).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShortDecimal {
+    /// The digits as an integer, without leading or trailing zeros.
+    digits: u64,
+    /// How many digits (1 to 15).
+    k: u8,
+    /// The value is `0.d₁…d_k × 10^(exponent + 1)`.
+    exponent: i16,
+}
+
+/// `10^0` to `10^22`, every one exactly a double.
+const POWERS_OF_TEN: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+impl ShortDecimal {
+    /// The double the decimal reads as, when one IEEE operation computes it exactly rounded:
+    /// the digits (below 10^15, so exact) times or divided by an exact power of ten (Clinger's
+    /// fast path, the first step of every correctly rounded parser). `None` otherwise.
+    fn exact_value(self, negative: bool) -> Option<f64> {
+        let scale = i64::from(self.exponent) - i64::from(self.k) + 1;
+        let power = *POWERS_OF_TEN.get(usize::try_from(scale.unsigned_abs()).ok()?)?;
+        // Below 10^15 < 2^53, so the conversion is exact.
+        #[allow(clippy::cast_precision_loss)]
+        let digits = self.digits as f64;
+        let magnitude = if scale >= 0 {
+            digits * power
+        } else {
+            digits / power
+        };
+        Some(if negative { -magnitude } else { magnitude })
+    }
+
+    /// `None` for zero, more than 15 significant digits, a magnitude outside `10^±290`, or
+    /// an exponent of more than four digits.
+    fn of(lexeme: &str) -> Option<Self> {
+        const MAX: u8 = 15;
+        let unsigned = lexeme.strip_prefix('-').unwrap_or(lexeme).as_bytes();
+        let (mantissa, exponent) = match unsigned
+            .iter()
+            .position(|&byte| matches!(byte, b'e' | b'E'))
+        {
+            Some(index) => (&unsigned[..index], &unsigned[index + 1..]),
+            None => (unsigned, &[][..]),
+        };
+        let exponent: i64 = if exponent.is_empty() {
+            0
+        } else {
+            let (negative, written) = match exponent {
+                [b'-', rest @ ..] => (true, rest),
+                [b'+', rest @ ..] | rest => (false, rest),
+            };
+            // The parser accepted the lexeme, so these are ASCII digits.
+            if written.is_empty() || written.len() > 4 {
+                return None;
+            }
+            let magnitude = written
+                .iter()
+                .fold(0_i64, |acc, &byte| acc * 10 + i64::from(byte - b'0'));
+            if negative { -magnitude } else { magnitude }
+        };
+        let mut digits = 0_u64;
+        let mut k = 0_u8;
+        // Zeros after the last significant digit so far; trailing ones only scale the value.
+        let mut pending = 0_i64;
+        // Digits of the mantissa after the decimal point.
+        let mut fraction = 0_i64;
+        let mut after_point = false;
+        for &byte in mantissa {
+            if byte == b'.' {
+                after_point = true;
+                continue;
+            }
+            if after_point {
+                fraction += 1;
+            }
+            if byte == b'0' {
+                if k > 0 {
+                    pending += 1;
+                }
+                continue;
+            }
+            let zeros = u8::try_from(pending).ok()?;
+            if k.checked_add(zeros)?.checked_add(1)? > MAX {
+                return None;
+            }
+            for _ in 0..zeros {
+                digits *= 10;
+            }
+            k += zeros + 1;
+            pending = 0;
+            digits = digits * 10 + u64::from(byte - b'0');
+        }
+        if k == 0 {
+            return None;
+        }
+        // The value is `digits × 10^(exponent − fraction + pending)`.
+        let n = i64::from(k) + exponent - fraction + pending;
+        if !(-290 < n && n < 300) {
+            return None;
+        }
+        Some(Self {
+            digits,
+            k,
+            exponent: i16::try_from(n - 1).ok()?,
+        })
     }
 }
 
@@ -327,7 +449,10 @@ fn write_value(value: &Json, out: &mut String) {
         Json::Null => out.push_str("null"),
         Json::Bool(true) => out.push_str("true"),
         Json::Bool(false) => out.push_str("false"),
-        Json::Number(number) => out.push_str(&json_number(*number)),
+        Json::Number(number, short) => match short {
+            Some(short) => write_short(*number, *short, out),
+            None => write_number(*number, out),
+        },
         Json::String(units) => write_string(units, out),
         Json::Array(items) => {
             out.push('[');
@@ -382,108 +507,236 @@ fn write_string(units: &[u16], out: &mut String) {
     out.push('"');
 }
 
-/// `JSON.stringify` of a number: `null` when not finite, else `Number::toString`.
-fn json_number(value: f64) -> String {
-    if value.is_finite() {
-        number_to_string(value)
-    } else {
-        "null".to_owned()
+/// At most 17 significant digits: the shortest round-trip rendering of a double.
+const MAX_DIGITS: usize = 17;
+
+/// A fixed buffer that `{:e}` formats into, so formatting a number allocates nothing.
+struct StackText {
+    bytes: [u8; 32],
+    len: usize,
+}
+
+impl std::fmt::Write for StackText {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let end = self.len + text.len();
+        let slot = self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?;
+        slot.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
     }
 }
 
-/// ECMAScript `Number::toString(x)` (radix 10) for a finite `x`.
-///
-/// The shortest round-trip digits come from Rust's `{:e}` formatting, which, like the
-/// ECMAScript algorithm, picks the fewest digits `s` (and among those the closest to `x`) for
-/// which `s × 10^(n−k)` reads back as `x`. The placement of the decimal point and exponent
-/// follows the specification's steps.
-fn number_to_string(value: f64) -> String {
+/// The shortest digits of a positive double, `x = 0.d₁…d_k × 10^(exponent + 1)`.
+struct Digits {
+    bytes: [u8; MAX_DIGITS],
+    k: usize,
+    exponent: i64,
+}
+
+impl Digits {
+    fn as_u64(&self) -> u64 {
+        self.bytes[..self.k]
+            .iter()
+            .fold(0, |value, digit| value * 10 + u64::from(digit - b'0'))
+    }
+
+    fn set_u64(&mut self, mut value: u64) {
+        for slot in self.bytes[..self.k].iter_mut().rev() {
+            // `value % 10 < 10`, so the cast is exact.
+            #[allow(clippy::cast_possible_truncation)]
+            let digit = (value % 10) as u8;
+            *slot = b'0' + digit;
+            value /= 10;
+        }
+    }
+}
+
+/// Appends `JSON.stringify` of a number: `null` when not finite, else `Number::toString`.
+/// Allocates nothing beyond the growth of `out`.
+fn write_number(value: f64, out: &mut String) {
+    if !value.is_finite() {
+        out.push_str("null");
+        return;
+    }
     if value == 0.0 {
-        return "0".to_owned();
+        out.push('0');
+        return;
     }
-    if value < 0.0 {
-        return format!("-{}", number_to_string(-value));
-    }
+    let value = if value < 0.0 {
+        out.push('-');
+        -value
+    } else {
+        value
+    };
     // Fast path: a whole number below 2^53 prints as its integer digits, which is step 6 of
     // the algorithm (k ≤ n ≤ 21) with the shortest digits of an exact integer.
     if value.fract() == 0.0 && value < 9_007_199_254_740_992.0 {
         // Exact: a whole double below 2^53 converts to `u64` without truncation.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let whole = value as u64;
-        return whole.to_string();
+        write_u64(whole, out);
+        return;
     }
-    let (digits, exponent) = shortest_digits(value);
-    let k = i64::try_from(digits.len()).unwrap_or(i64::MAX);
-    let n = exponent + 1;
-    let zeros = |count: i64| "0".repeat(usize::try_from(count).unwrap_or(0));
+    let Some(digits) = shortest_digits(value) else {
+        // Unreachable for a finite positive double; fail closed to the slow, exact path.
+        out.push_str(&value.to_string());
+        return;
+    };
+    place(&digits, out);
+}
+
+/// Appends a number whose lexeme gave its shortest digits ([`ShortDecimal`]); `value` gives
+/// only the sign (a short decimal is never zero).
+fn write_short(value: f64, short: ShortDecimal, out: &mut String) {
+    if value < 0.0 {
+        out.push('-');
+    }
+    let mut digits = Digits {
+        bytes: [b'0'; MAX_DIGITS],
+        k: usize::from(short.k),
+        exponent: i64::from(short.exponent),
+    };
+    digits.set_u64(short.digits);
+    place(&digits, out);
+}
+
+fn write_u64(mut value: u64, out: &mut String) {
+    let mut buffer = [0_u8; 20];
+    let mut start = buffer.len();
+    loop {
+        start -= 1;
+        // `value % 10 < 10`, so the cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        let digit = (value % 10) as u8;
+        buffer[start] = b'0' + digit;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    push_ascii(out, &buffer[start..]);
+}
+
+/// Appends ASCII digits (every caller passes only `0`-`9`).
+fn push_ascii(out: &mut String, bytes: &[u8]) {
+    out.push_str(std::str::from_utf8(bytes).unwrap_or_default());
+}
+
+/// Steps 6-10 of `Number::toString`: places the digits and exponent as ECMAScript does.
+fn place(digits: &Digits, out: &mut String) {
+    let all = &digits.bytes[..digits.k];
+    let push = push_ascii;
+    let zeros = |out: &mut String, count: i64| {
+        for _ in 0..count {
+            out.push('0');
+        }
+    };
+    let k = i64::try_from(digits.k).unwrap_or(i64::MAX);
+    let n = digits.exponent + 1;
     if k <= n && n <= 21 {
-        format!("{digits}{}", zeros(n - k))
+        push(out, all);
+        zeros(out, n - k);
     } else if 0 < n && n <= 21 {
         let split = usize::try_from(n).unwrap_or(0);
-        format!("{}.{}", &digits[..split], &digits[split..])
+        push(out, &all[..split]);
+        out.push('.');
+        push(out, &all[split..]);
     } else if -6 < n && n <= 0 {
-        format!("0.{}{digits}", zeros(-n))
+        out.push_str("0.");
+        zeros(out, -n);
+        push(out, all);
     } else {
-        let sign = if n - 1 < 0 { '-' } else { '+' };
-        let magnitude = (n - 1).abs();
-        if k == 1 {
-            format!("{digits}e{sign}{magnitude}")
-        } else {
-            format!("{}.{}e{sign}{magnitude}", &digits[..1], &digits[1..])
+        push(out, &all[..1]);
+        if digits.k > 1 {
+            out.push('.');
+            push(out, &all[1..]);
         }
+        out.push('e');
+        out.push(if n - 1 < 0 { '-' } else { '+' });
+        write_u64((n - 1).unsigned_abs(), out);
     }
 }
 
-/// Splits Rust's `{:e}` rendering into its digits and its exponent.
-fn scientific(text: &str) -> (String, i64) {
-    let (mantissa, exponent) = text.split_once('e').unwrap_or((text, "0"));
-    (
-        mantissa.chars().filter(char::is_ascii_digit).collect(),
-        exponent.parse().unwrap_or(0),
-    )
+/// ECMAScript `Number::toString(x)` (radix 10) for a finite `x`, as a string (tests).
+#[cfg(test)]
+fn number_to_string(value: f64) -> String {
+    let mut out = String::new();
+    write_number(value, &mut out);
+    out
 }
 
 /// The digits `n` and the exponent `n − 1` of ECMAScript `Number::toString` step 5 for a
 /// finite `x > 0`: the fewest digits `k` for which `n × 10^(e−k+1)` reads back as `x`; among
 /// several such `n` the one closest to `x`, and of two equally close the even one.
 ///
-/// Rust's shortest rendering has the fewest digits and the closest value, but breaks an exact
-/// tie between the two closest candidates upward (`93794707416597.125` prints as `…597.13`,
-/// where ECMAScript prints `…597.12`). This resolves a tie to the even candidate. A tie needs
-/// the exact expansion of `x` to have `k + 1` digits, which for a normal double requires
-/// `k ≥ 15`, because every decimal of at most 15 digits reads back as a distinct double
-/// (a subnormal's exact expansion has hundreds of digits, so it never ties).
-///
-/// The tie test is constant-time integer arithmetic ([`is_exactly`]), not an exact decimal
-/// expansion: a body may hold tens of thousands of numbers.
-fn shortest_digits(value: f64) -> (String, i64) {
-    let (digits, exponent) = scientific(&format!("{value:e}"));
-    if digits.len() < 15 {
-        return (digits, exponent);
-    }
-    let Ok(candidate) = digits.parse::<u64>() else {
-        return (digits, exponent);
+/// The shortest round-trip digits come from Rust's `{:e}` formatting into a stack buffer,
+/// which, like the ECMAScript algorithm, picks the fewest digits (and among those the closest
+/// to `x`). It breaks an exact tie between the two closest candidates upward
+/// (`93794707416597.125` prints as `…597.13`, where ECMAScript prints `…597.12`); this
+/// resolves a tie to the even candidate. A tie needs the exact expansion of `x` to have
+/// `k + 1` digits, which for a normal double requires `k ≥ 15`, because every decimal of at
+/// most 15 digits reads back as a distinct double (a subnormal's exact expansion has hundreds
+/// of digits, so it never ties). The tie test is constant-time integer arithmetic
+/// ([`is_exactly`]).
+fn shortest_digits(value: f64) -> Option<Digits> {
+    use std::fmt::Write as _;
+    let mut text = StackText {
+        bytes: [0; 32],
+        len: 0,
     };
-    if candidate % 2 == 0 {
-        return (digits, exponent);
+    write!(text, "{value:e}").ok()?;
+    let rendered = &text.bytes[..text.len];
+    let e = rendered.iter().position(|&byte| byte == b'e')?;
+    let mut digits = Digits {
+        bytes: [b'0'; MAX_DIGITS],
+        k: 0,
+        exponent: 0,
+    };
+    for &byte in &rendered[..e] {
+        if byte.is_ascii_digit() {
+            *digits.bytes.get_mut(digits.k)? = byte;
+            digits.k += 1;
+        }
     }
-    let k = digits.len();
+    let (negative, magnitude) = match rendered.get(e + 1..)? {
+        [b'-', rest @ ..] => (true, rest),
+        rest => (false, rest),
+    };
+    let magnitude = magnitude.iter().try_fold(0_i64, |acc, &byte| {
+        byte.is_ascii_digit()
+            .then(|| acc * 10 + i64::from(byte - b'0'))
+    })?;
+    digits.exponent = if negative { -magnitude } else { magnitude };
+    if digits.k == 0 {
+        return None;
+    }
+    if digits.k < 15 {
+        return Some(digits);
+    }
+    let candidate = digits.as_u64();
+    if candidate % 2 == 0 {
+        return Some(digits);
+    }
+    let k = digits.k;
     // The candidate's value is `candidate × 10^scale`.
-    let scale = exponent + 1 - i64::try_from(k).unwrap_or(0);
+    let scale = digits.exponent + 1 - i64::try_from(k).unwrap_or(0);
+    let lowest = 10_u64.pow(u32::try_from(k - 1).unwrap_or(0));
+    let highest = lowest.saturating_mul(10);
     for neighbor in [candidate - 1, candidate + 1] {
-        let text = format!("{neighbor:0k$}");
-        if text.len() != k || text.starts_with('0') {
+        if neighbor < lowest || neighbor >= highest {
             continue;
         }
-        // `x` is exactly the midpoint `(10 × lower + 5) × 10^(scale − 1)` of the two.
+        // `x` is exactly the midpoint `(10 × lower + 5) × 10^(scale − 1)` of the two. Ties are
+        // rare, so the round-trip check below may allocate.
         let lower = u128::from(neighbor.min(candidate));
         if is_exactly(value, lower * 10 + 5, scale - 1)
             && format!("{neighbor}e{scale}").parse::<f64>() == Ok(value)
         {
-            return (text, exponent);
+            digits.set_u64(neighbor);
+            return Some(digits);
         }
     }
-    (digits, exponent)
+    Some(digits)
 }
 
 /// Whether the finite `x > 0` equals `m × 10^t` exactly, for `m < 2^64 × 10`.
@@ -567,6 +820,25 @@ mod tests {
             ("0.000001234", "0.000001234"),
             ("1.25e+30", "1.25e+30"),
             ("100", "100"),
+            // Printed from the lexeme's own digits (at most 15 significant digits).
+            ("37.4", "37.4"),
+            ("-37.40", "-37.4"),
+            ("0.001", "0.001"),
+            ("100e-2", "1"),
+            ("1.50E+3", "1500"),
+            ("-0e5", "0"),
+            ("0.0000001", "1e-7"),
+            ("123456789012345", "123456789012345"),
+            ("123456789012345e6", "123456789012345000000"),
+            ("123456789012345e7", "1.23456789012345e+21"),
+            ("1e-289", "1e-289"),
+            ("1e-300", "1e-300"),
+            ("1e299", "1e+299"),
+            ("9.99e307", "9.99e+307"),
+            ("1e+0001", "10"),
+            ("1e00001", "10"),
+            ("0.000000000000000000000000000001", "1e-30"),
+            ("1000000000000000000000000000000", "1e+30"),
             // Exact ties between two shortest candidates resolve to the even one.
             ("93794707416597.1317", "93794707416597.12"),
             ("70368744177664.125", "70368744177664.12"),
@@ -643,6 +915,41 @@ mod tests {
             assert_eq!(parse(text), Err(ParseError), "{text:?}");
         }
         assert_eq!(canonical(" \t\r\n{ \"a\" : [ ] } \n"), r#"{"a":[]}"#);
+    }
+
+    #[test]
+    fn short_decimals_read_as_the_double_the_lexeme_parses_to() {
+        use super::ShortDecimal;
+        for lexeme in [
+            "1",
+            "-1",
+            "37.4",
+            "0.1",
+            "0.3",
+            "123456789012345",
+            "1e22",
+            "1e-22",
+            "4.35",
+            "9.007199254740991e15",
+            "-0.000123",
+            "1e23",
+            "1e-23",
+            "5e-7",
+            "1.5e+300",
+            "7e-290",
+        ] {
+            let parsed: f64 = lexeme.parse().unwrap_or(f64::NAN);
+            let short = ShortDecimal::of(lexeme);
+            if let Some(value) = short.and_then(|short| short.exact_value(lexeme.starts_with('-')))
+            {
+                assert_eq!(value.to_bits(), parsed.to_bits(), "{lexeme}");
+            }
+        }
+        assert_eq!(ShortDecimal::of("0"), None);
+        assert_eq!(ShortDecimal::of("-0.000"), None);
+        assert_eq!(ShortDecimal::of("1234567890123456"), None);
+        assert_eq!(ShortDecimal::of("1e300"), None);
+        assert_eq!(ShortDecimal::of("1e-291"), None);
     }
 
     #[test]

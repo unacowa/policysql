@@ -299,7 +299,7 @@ fn binding(value: Option<&Json>) -> Result<&Json, IdentityError> {
         &["version", "scope", "databaseId", "generation", "snapshot"],
         &[],
     )?;
-    if !matches!(value.get("version"), Some(Json::Number(version)) if version.to_bits() == 1.0_f64.to_bits())
+    if !matches!(value.get("version"), Some(Json::Number(version, _)) if version.to_bits() == 1.0_f64.to_bits())
     {
         return Err(IdentityError::Internal);
     }

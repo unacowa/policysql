@@ -403,7 +403,9 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     // (see `mayRepeat`), and otherwise after its compile succeeds, before it executes
     // (`statement`). The two hashes of the gate are still both computed and compared before
     // any digest is used and before any database work, and a body that cannot compile is
-    // never hashed (#55 review: a 1 MB body of numbers cost two hashes before compile).
+    // never hashed (#55 review: a 1 MB body of numbers cost two hashes before compile). A
+    // body that compiles is hashed in full; core's canonicalization keeps that cost near the
+    // reference's.
     const retry = body.command.sequence === current.nextSequence - 1 && current.last !== undefined && current.last !== null;
     let digest = null;
     if (kind !== "statement" || (retry && this.mayRepeat(current.auth, statementEnvelope(body.command)))) {
@@ -423,9 +425,10 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
    * whose plan is released at once). `last` compiled under the same `auth`, and every caller
    * first requires the record's snapshot to equal the runtime's, so the same command compiles
    * again: a compile that rejects the command for a reason of its own proves that it is not
-   * `last` without hashing it. Compile is bounded by the body and SQL limits (a few ms for
-   * 1 MB), where the two hashes of the gate are not. A state-dependent failure is
-   * inconclusive and the caller hashes as before.
+   * `last` without hashing it. This spares only the hashes of commands that cannot compile;
+   * it does not bound what is hashed: a command that compiles, such as one with a large
+   * JSON-typed parameter, is hashed in full, at a cost linear in its size. A state-dependent
+   * failure is inconclusive and the caller hashes as before.
    */
   mayRepeat(auth, envelope) {
     const runtime = this.getRuntime();
