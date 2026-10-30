@@ -55,7 +55,6 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_PRESET_COLUMN` | 403 | clientがserver-owned columnを指定した |
 | `POLICYSQL_TRANSACTION_MODE_VIOLATION` | 403 | read transactionでmutationを実行しようとした |
 | `POLICYSQL_DATABASE_BINDING_REJECTED` | 403 | DB bindingが不正、未登録、または現在の経路設定で許可されていない |
-| `POLICYSQL_COST_UNKNOWN` | 403 | queryのcostを安全に見積もれない |
 | `POLICYSQL_NOT_FOUND` | 404 | endpointが存在しない |
 | `POLICYSQL_STALE_OPERATION` | 409 | policyまたはcatalog versionが古い |
 | `POLICYSQL_IDEMPOTENCY_CONFLICT` | 409 | Atomic Execute（commit checkを行うDO経路を含む）で同じkeyが異なるrequestに使われた |
@@ -68,16 +67,29 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_EXPECTATION_FAILED` | 422 | transaction operationの期待条件を満たさない |
 | `POLICYSQL_SCHEMA_MISMATCH` | 422 | database値がcompiled logical contractと一致しない |
 | `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` | 429 | transactionの上限を超えた（request rateの制限ではない） |
-| `POLICYSQL_USAGE_BUDGET_EXCEEDED` | 429 | queryの推定usageが予算を超えた（request rateの制限ではない） |
 | `POLICYSQL_INTERNAL` | 500 | 公開できない内部エラー。ラッパーが渡したtrusted sessionや文脈の形が不正な場合もこのcode |
 | `POLICYSQL_DATABASE_REQUIRED` | 500 | ラッパーが必須のDB引数を渡していない |
 | `POLICYSQL_DATABASE_UNAVAILABLE` | 503 | database adapterまたはtransaction ownerを利用できない |
-| `POLICYSQL_COST_ADMISSION_UNAVAILABLE` | 503 | cost admissionを一時的に実行できない |
 | `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` | 503 | commitを送った後に結果を確定できない（transaction ownerの喪失、ownerの記録の保存失敗、COMMIT中の通信エラー）。commit済みの可能性があるため、拒否ではなく結果不明として扱う |
 | `POLICYSQL_TIMEOUT` | 504 | database実行がtimeoutした |
 | `POLICYSQL_DATABASE_TIMEOUT` | 504 | DB接続準備・実行・commit確認の期限を超えた |
 
 error codeはAPI versionごとの安定したcontractです。minor releaseで既存codeの意味やstatusを変更しません。以前この頁に載っていた`POLICYSQL_FORBIDDEN_ROLE`、`POLICYSQL_CHECK_FAILED`、`POLICYSQL_COMMIT_CHECK_UNAVAILABLE`、`POLICYSQL_COMMIT_CHECK_QUERY`、`POLICYSQL_COMMIT_CONFLICT`、`POLICYSQL_TRANSACTION_NOT_FOUND`、`POLICYSQL_TRANSACTION_EXPIRED`、`POLICYSQL_TRANSACTION_SEQUENCE`、`POLICYSQL_TRANSACTION_FAILED`、`POLICYSQL_REQUEST_IN_PROGRESS`は、どのコードも返したことがないため削除しました。役割の拒否は`POLICYSQL_FORBIDDEN_ACCESS`、transactionの不在・期限切れ・失敗は`POLICYSQL_TRANSACTION_UNAVAILABLE`、sequenceの不一致は`POLICYSQL_TRANSACTION_CONFLICT`です。
+
+この表にあった`POLICYSQL_COST_UNKNOWN`（403）、`POLICYSQL_USAGE_BUDGET_EXCEEDED`（429）、`POLICYSQL_COST_ADMISSION_UNAVAILABLE`（503）は、costの見積もりがrequestの受付を判定しない観測になってから、どのresponseにも現れていません。見積もりのlogにだけ現れるため、下の「logだけに現れるcode」へ移しました。clientもこれらを拒否として扱いません。
+
+## logだけに現れるcode
+
+次のcodeはerror responseには現れず、構造化logの`code`にだけ現れます。HTTP statusはありません。
+
+<!-- policysql:log-code-table -->
+| Code | Log event | 意味 |
+| --- | --- | --- |
+| `POLICYSQL_COST_UNKNOWN` | `cost_observation_failed` | queryのcostを安全に見積もれない（`costCatalog`がない、catalogにないresourceを参照した、planの行が想定の形でない） |
+| `POLICYSQL_USAGE_BUDGET_EXCEEDED` | `cost_observation_failed` | queryの推定usageが`costCatalog`の予算を超えた。requestは拒否されない |
+| `POLICYSQL_COST_ADMISSION_UNAVAILABLE` | `cost_observation_failed` | cost見積もり用のdatabase接続や見積もりが失敗した |
+
+cost見積もりはcommit後（direct placementのreplayを含む）に別のread接続で背景実行され、requestの結果には影響しません（[ラッパーからDBを渡す](../admin/database-routing)の`PolicySqlConfig.costCatalog`）。
 
 ## ラッパーが返すエラー
 
