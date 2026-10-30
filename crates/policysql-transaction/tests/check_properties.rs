@@ -712,7 +712,7 @@ fn path() -> impl Strategy<Value = (usize, Vec<Action>)> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 3_000, ..ProptestConfig::default() })]
+    #![proptest_config(common::proptest_config(3_000))]
 
     #[test]
     fn commit_checks_and_callbacks_are_safe((checks, actions) in path()) {

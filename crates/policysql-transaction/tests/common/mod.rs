@@ -12,6 +12,24 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub mod probes;
 
+/// The configuration of every property test of this crate: `cases` unless `PROPTEST_CASES`
+/// sets another count (a longer local run), and failures persisted next to the test file
+/// (`<test>.proptest-regressions`, replayed first on every run). proptest's default looks for
+/// the crate's `lib.rs` from an integration test's directory, finds none, and saves nothing.
+#[must_use]
+pub fn proptest_config(cases: u32) -> proptest::test_runner::Config {
+    proptest::test_runner::Config {
+        cases: std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(cases),
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::WithSource("proptest-regressions"),
+        )),
+        ..proptest::test_runner::Config::default()
+    }
+}
+
 pub const OWNER: &str = "tx_0123456789abcdef0123456789abcdef";
 pub const SNAPSHOT: &str = "sqlite-turso-v1:schema_1:policy_1:abi-6";
 pub const START: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -348,6 +366,8 @@ pub struct Observed {
     pub envelope_executes: usize,
     /// Atomic executions whose envelope ran and whose COMMIT applied.
     pub envelope_commits: usize,
+    /// Idempotency inserts that hit the PRIMARY KEY: the lookup missed a row the database held.
+    pub duplicate_inserts: usize,
     pub rollbacks_emitted: usize,
     /// Every awaited effect type, in order.
     pub awaited: Vec<String>,
@@ -381,7 +401,10 @@ pub struct Engine {
     pub owner: Option<String>,
     /// The committed `policysql_idempotency` rows: `[key_hash, fingerprint, response_json]`.
     pub idempotency_rows: Vec<[String; 3]>,
-    /// Rows inserted by the open database transaction, committed by `Commit`.
+    /// Rows inserted by the open database transaction, committed by `Commit`. Like the real
+    /// database (one transaction per connection, a Hrana baton), they belong to that
+    /// connection: `Open` starts a new one, and a ROLLBACK, failed or not, ends it, so no
+    /// later COMMIT can commit them.
     pub pending_rows: Vec<[String; 3]>,
     /// The open database transaction executed an envelope.
     pub envelope_open: bool,
@@ -648,7 +671,12 @@ impl Engine {
     pub fn resolve_effect(&mut self, effect: &Value, ok: bool, class: &str) -> Option<Value> {
         let id = effect["id"].clone();
         let event = match (effect["type"].as_str(), ok) {
-            (Some("open"), true) => json!({"type": "opened", "id": id}),
+            (Some("open"), true) => {
+                // A new connection: nothing of an earlier one is in its transaction.
+                self.pending_rows.clear();
+                self.envelope_open = false;
+                json!({"type": "opened", "id": id})
+            }
             (Some("open"), false) => json!({"type": "openFailed", "id": id, "class": class}),
             (Some("checkBinding"), true) => {
                 json!({"type": "bindingChecked", "id": id, "allowed": true})
@@ -675,6 +703,17 @@ impl Engine {
                         "columns": ["fingerprint", "response_json"], "rows": rows, "rowsAffected": 0,
                         "usage": {"rowsRead": 1, "rowsWritten": 0, "queryDurationMs": 0.25},
                     }]})
+                } else if self
+                    .idempotency_rows
+                    .iter()
+                    .chain(&self.pending_rows)
+                    .any(|row| row[0] == text("key_hash"))
+                {
+                    // `key_hash` is the table's PRIMARY KEY (examples/database-routing/
+                    // idempotency.sql): a second row fails, which the adapter reports as
+                    // `unavailable`.
+                    self.observed.duplicate_inserts += 1;
+                    json!({"type": "executeFailed", "id": id, "class": "unavailable"})
                 } else {
                     self.pending_rows.push([
                         text("key_hash"),
@@ -746,6 +785,10 @@ impl Engine {
             }
             (Some("forward"), false) => json!({"type": "forwardFailed", "id": id, "class": class}),
             (Some("rollback"), false) => {
+                // The engine drops the connection; its transaction never commits (the database
+                // ends it at its deadline).
+                self.pending_rows.clear();
+                self.envelope_open = false;
                 json!({"type": "rollbackFailed", "id": id, "class": class})
             }
             (Some("setTimer"), true) => json!({"type": "timerSet", "id": id}),

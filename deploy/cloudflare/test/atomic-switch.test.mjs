@@ -191,6 +191,26 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(h.events.filter(({ sql }) => sql === "COMMIT").length, 2);
   });
 
+  // The real counterpart of the property-test counterexample of #77: a keyed direct execute
+  // whose COMMIT transport fails (here after the database applied it) is answered without a
+  // rejection, and its retry is answered from the row, with one row and one execution. The
+  // database serializes write transactions (`BEGIN IMMEDIATE`) and `key_hash` is the table's
+  // PRIMARY KEY.
+  test(`${ownerAdapter}: a keyed direct execute whose COMMIT reply is lost resolves through its row, executed once`, async (t) => {
+    const h = await setup(t, { hooks: false });
+    h.afterDatabaseStatement(({ sql }) => { if (sql === "COMMIT") throw new Error("connection reset"); });
+    const body = { statements: [insert("lost_commit")] };
+    const first = await h.request("a", execute, body, KEY);
+    assert.equal(first.status, 503, JSON.stringify(first.body));
+    await neverRejected(first);
+    h.afterDatabaseStatement(null);
+    const retry = await h.request("a", execute, body, KEY);
+    assert.equal(retry.status, 200, JSON.stringify(retry.body));
+    assert.equal(h.rows("a").filter((row) => row.id === "lost_commit").length, 1);
+    assert.equal(idempotencyRows(h).length, 1);
+    assert.ok(h.events.some(({ sql }) => sql === "BEGIN IMMEDIATE"), "write transactions take the write lock");
+  });
+
   // ADR 0024: the machine observes cost after COMMIT (and for a direct replay); the TypeScript
   // owner path observed after the envelope, before its checks, so also an execution a check
   // then rejected.

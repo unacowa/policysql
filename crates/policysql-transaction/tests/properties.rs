@@ -471,7 +471,7 @@ fn generators_reach_every_outcome() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 1_000, ..ProptestConfig::default() })]
+    #![proptest_config(common::proptest_config(1_000))]
 
     #[test]
     fn commit_safety_over_random_sequences(actions in prop::collection::vec(action(), 1..60)) {
@@ -507,7 +507,7 @@ fn commit_path() -> impl Strategy<Value = Vec<Action>> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 2_000, ..ProptestConfig::default() })]
+    #![proptest_config(common::proptest_config(2_000))]
 
     #[test]
     fn commit_safety_from_committing(actions in commit_path()) {
@@ -580,7 +580,7 @@ fn tamper(text: &str, how: u8, position: usize, value: i64) -> String {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 1_000, ..ProptestConfig::default() })]
+    #![proptest_config(common::proptest_config(1_000))]
 
     /// Tampered durable state is discarded or behaves as some valid state; it never yields a
     /// COMMIT, and a commit against a discarded record is always outcome-unknown.
@@ -704,7 +704,7 @@ fn host() -> String {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 500, ..ProptestConfig::default() })]
+    #![proptest_config(common::proptest_config(500))]
 
     /// A statement whose completion cannot be stored is not recorded as done: the record
     /// moves to `failed` from the state before it, and a retry of that statement gets the
