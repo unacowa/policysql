@@ -13,12 +13,17 @@ export type OwnerReply = { ok: true; value: unknown } | { ok: false; error: Oper
 
 export type OwnerCommandKind = "statement" | "commit" | "rollback";
 
+// The interactive inputs are the step machine's forwarded owner inputs (ADR 0024 pull
+// request 7) without their `kind`, which the handle method names. The owner computes the auth
+// fingerprint and the replay identity itself from `auth` and `databaseBinding`, and compiles
+// and hashes `command`, the verified body text, never a re-serialization (#70).
+
 /** Start of an interactive transaction (`POST /v1/transactions`). */
 export type OwnerBeginInput = {
   transactionId: string;
-  authFingerprint: string;
   startFingerprint: string;
   mode: "read" | "write";
+  /** The canonical session core authorized for this request. */
   auth: unknown;
   expected?: unknown;
   databaseBinding: unknown;
@@ -28,8 +33,10 @@ export type OwnerBeginInput = {
 /** A statement, commit, or rollback of an open interactive transaction. */
 export type OwnerCommandInput = {
   transactionId: string;
-  authFingerprint: string;
-  command: unknown;
+  /** The canonical session core authorized for this command. */
+  auth: unknown;
+  /** The verified body text of the command. */
+  command: string;
   databaseBinding: unknown;
   snapshot: string;
 };
@@ -44,8 +51,11 @@ export type OwnerAtomicInput = {
   snapshot: string;
 };
 
-/** A validator's callback SELECT, with the opaque capability it presented ("" for none). */
-export type OwnerCallbackInput = { capability: string; command: unknown };
+/**
+ * A validator's callback SELECT: the validation id it called, the opaque capability it
+ * presented ("" for none), and the verified body text of its command (#70).
+ */
+export type OwnerCallbackInput = { validationId: string; capability: string; command: string };
 
 /**
  * A handle to the single owner of one name. Every input and reply is plain JSON data: an
@@ -116,6 +126,13 @@ export type OwnerFacilities = {
   store: OwnerStore;
   timer: OwnerTimer;
   background: BackgroundTasks;
+  /**
+   * The owner name this instance serves (`tx_` + 32 hex), when the adapter knows it at
+   * construction. The step machine checks every input and stored record against it (ADR
+   * 0024). Omitted, the owner takes the name its adapter passes with each message, or else
+   * the one its first input names, and keeps it for its lifetime.
+   */
+  name?: string;
 };
 
 export const OWNER_NAME = /^tx_[a-f0-9]{32}$/u;
@@ -164,6 +181,9 @@ export const validateOwnerFacilities = (facilities: unknown): OwnerFacilities =>
   if (!isObject(facilities) || !hasMethods(facilities.store, ["get", "put"]) ||
     !hasMethods(facilities.timer, ["schedule"]) || !hasMethods(facilities.background, ["run"])) {
     throw new TypeError("owner facilities are required: { store: { get, put }, timer: { schedule }, background: { run } }");
+  }
+  if (facilities.name !== undefined && (typeof facilities.name !== "string" || !OWNER_NAME.test(facilities.name))) {
+    throw new TypeError("owner facilities name must be tx_ followed by 32 lowercase hex digits");
   }
   return facilities as OwnerFacilities;
 };
