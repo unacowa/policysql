@@ -933,8 +933,9 @@ Recorded by pull request 5 (ABI 7), which adds commit checks and callbacks to th
   owner's open transaction, so anyone holding the validation id of an active transaction
   could end it; ADR 0007 "Callback rules of the step machine" scopes its rollback rule to a
   running validation accordingly, and `docs/commit-checks.md` says the same; while a capability
-  is live, a malformed or wrong token still rolls back, as today. A separate fix aligns the
-  TypeScript owner; that entry goes when it merges), and `loss-between-checks` (the machine writes nothing between checks, so an
+  is live, a malformed or wrong token still rolls back, as today. The fix for #73 aligned the
+  TypeScript owner and removed that entry; the harness now asserts that both sides answer such a
+  callback `POLICYSQL_TRANSACTION_UNAVAILABLE`, make no database call, and commit afterwards), and `loss-between-checks` (the machine writes nothing between checks, so an
   owner lost during one check still calls the next validator before its `Persist(committing)`
   fails; no COMMIT either way, and both answer `POLICYSQL_INTERNAL`). The harness compares validator calls (the signed hook body with the token
   masked, and the signature) and callback replies as well, and adds generated commit-check

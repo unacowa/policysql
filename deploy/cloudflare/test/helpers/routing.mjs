@@ -249,6 +249,8 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     loseOwner: (name) => owners.lose(name),
     /** Fault injection on owner store puts, for both adapters (see helpers/memory-owner.mjs). */
     interceptOwnerPut: (hook) => owners.interceptPut(hook),
+    /** Fault injection on owner store reads, for both adapters (see helpers/memory-owner.mjs). */
+    interceptOwnerGet: (hook) => owners.interceptGet(hook),
     /** `hook({ tenant, sql })` runs after the remote database executed each statement. */
     afterDatabaseStatement(hook) { afterStatement = hook; },
     fireTimer: (name) => owners.fireTimer(name),

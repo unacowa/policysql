@@ -67,11 +67,6 @@ export const ALLOWLIST = Object.freeze({
     "nothing between checks, so an owner lost during one check calls the next validator before its next write " +
     "(Persist(committing)) fails; no COMMIT is sent and the reply is INTERNAL on both sides. TransactionOwnerCore " +
     "writes active between checks, which fails on the lost owner before the next validator is called.",
-  "callback-without-validation":
-    "ADR 0007 \"The callback capability authorizes only policy-compiled SELECT against the owned open transaction\": " +
-    "core answers a callback query that reaches an owner with no live capability (no validation running) " +
-    "TRANSACTION_UNAVAILABLE and changes nothing. TransactionOwnerCore also fails that owner's open transaction, so a " +
-    "request naming the validation id of an active transaction could end it.",
 });
 
 const CATALOG = `version: 1
@@ -835,6 +830,55 @@ test(`allowlist expiry-during-validator: ${ALLOWLIST["expiry-during-validator"]}
   assert.deepEqual(env.sides.step.slot.core.unrouted, [], "the late verdict answered nobody");
 });
 
+// #73 review: an expiry while a callback query's SELECT runs revokes the capability mid-query.
+// Both sides answer that callback TRANSACTION_UNAVAILABLE with no rows, run nothing more for
+// its token, and roll back once; the record is expired right after. The waiting commit then
+// differs only as `expiry-during-validator` describes (when it is answered, and the final
+// phase).
+test("an expiry during a callback query's SELECT revokes it alike (#73)", async (t) => {
+  const env = environment(t);
+  for (const op of [write, audit(1, "x1")]) assertSame(await both(env, op), op.op);
+  const seen = { ts: {}, step: {} };
+  env.validator = async ({ side, query: run }) => {
+    if (seen[side].revoked) return ALLOW();
+    let fired = false;
+    env.faults.execute = async (sql) => {
+      if (fired || !/^\s*SELECT\b/iu.test(sql)) return;
+      fired = true;
+      env.clock.now = T0 + 4_000;
+      await env.sides[side].slot.fireTimer(env.clock.now);
+    };
+    const calls = env.sides[side].calls.length;
+    seen[side].revoked = await run(query(1));
+    env.faults.execute = undefined;
+    seen[side].phase = normalizedRecord(side, env.sides[side].slot.record()).phase;
+    seen[side].again = await run(query(1));
+    seen[side].calls = env.sides[side].calls.slice(calls);
+    return ALLOW();
+  };
+  const replies = {};
+  for (const side of ["ts", "step"]) {
+    env.setSide(side);
+    replies[side] = await perform(env, side, commit(2), env.nextRequest());
+    env.clock.now = T0;
+  }
+  for (const side of ["ts", "step"]) {
+    assert.equal(seen[side].revoked.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", `${side}: the revoked query`);
+    assert.equal(seen[side].revoked.rows, undefined, `${side}: no rows`);
+    assert.equal(seen[side].again.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", `${side}: not restored`);
+    assert.equal(replies[side].error.code, "POLICYSQL_COMMIT_CHECK_REJECTED", `${side}: commit`);
+    assert.equal(env.sides[side].calls.filter((call) => call.op === "commit").length, 0, `${side}: no COMMIT`);
+  }
+  // TransactionOwnerCore persists `expired` at the timer, before the callback is answered; the
+  // machine persists it after the callback's Execute returns, and keeps it to the end.
+  assert.equal(seen.ts.phase, "expired", "ts: the record as the expiry wrote it");
+  assert.equal(normalizedRecord("step", env.sides.step.slot.record()).phase, "expired", "step: the record as the expiry wrote it");
+  assert.deepEqual(seen.step.revoked, seen.ts.revoked, "callback reply");
+  assert.deepEqual(seen.step.again, seen.ts.again, "callback reply after revocation");
+  assert.deepEqual(seen.step.calls, seen.ts.calls, "database calls from the callback on");
+  assert.deepEqual(env.rows("step"), env.rows("ts"));
+});
+
 test(`allowlist loss-between-checks: ${ALLOWLIST["loss-between-checks"]}`, async (t) => {
   const env = environment(t);
   for (const op of [write, audit(1, "x1")]) assertSame(await both(env, op), op.op);
@@ -857,17 +901,17 @@ test(`allowlist loss-between-checks: ${ALLOWLIST["loss-between-checks"]}`, async
   assertSameEnd(env, "end");
 });
 
-test(`allowlist callback-without-validation: ${ALLOWLIST["callback-without-validation"]}`, async (t) => {
-  const env = environment(t);
-  for (const op of [write, audit(1, "x1")]) assertSame(await both(env, op), op.op);
-  const stray = await both(env, { op: "callback", token: "A".repeat(43), text: query(1) });
-  assert.equal(stray.ts.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
-  assert.equal(stray.step.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
-  assert.deepEqual(stray.ts.calls, [{ op: "rollback" }], "TS ended the active transaction");
-  assert.deepEqual(stray.step.calls, [], "core changed nothing");
-  const next = await both(env, commit(2));
-  assert.equal(next.ts.reply.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
-  assert.equal(next.step.reply.value.status, "committed");
+// Formerly the `callback-without-validation` allowlist entry (#73): a callback that reaches an
+// owner with no live capability (before any check, or with any token) changes nothing on either
+// side, and the transaction goes on to its next statement and commit.
+test("a callback with no validation running changes nothing, alike (#73)", async (t) => {
+  const stray = (token) => ({ op: "callback", token, text: query(1) });
+  const env = await agree(t, [
+    write, audit(1, "x1"), stray("A".repeat(43)), stray("malformed"), stray(""), select(2), commit(3),
+  ]);
+  const strays = env.callbacks.step.slice(0, 3);
+  assert.deepEqual(strays.map((reply) => reply.code), Array(3).fill("POLICYSQL_TRANSACTION_UNAVAILABLE"));
+  assert.equal(normalizedRecord("step", env.sides.step.slot.record()).phase, "committed");
 });
 
 test(`allowlist issue-70: ${ALLOWLIST["issue-70"]}`, async (t) => {

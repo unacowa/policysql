@@ -274,6 +274,61 @@ test("commit check callback SELECT uses the same owner transaction before commit
   assert.equal(executedSql.some((sql) => sql.startsWith("SELECT id FROM projects")), true);
 });
 
+// #73 review: a callback query whose capability is revoked while it runs (here by an expiry
+// that fires while the database executes its SELECT) returns no rows, does not restore the
+// capability, and leaves the record as the timer wrote it.
+test("a callback query revoked by expiry mid-query returns no rows and restores nothing (#73)", async () => {
+  const storage = makeStorage();
+  const database = transaction();
+  const selects = [];
+  let owner;
+  database.execute = async (statements) => {
+    if (statements[0].sql.startsWith("UPDATE")) {
+      return [{ columns: ["id", "__policysql_check"], rows: [["p1", 1]], rowsAffected: 1, usage: { rowsRead: 1, rowsWritten: 1, queryDurationMs: 1 } }];
+    }
+    selects.push(statements[0].sql);
+    // The expiry fires while the SELECT runs; the remote statement still completes.
+    await owner.onTimer();
+    return [{ columns: ["id"], rows: [["p1"]], rowsAffected: 0, usage: { rowsRead: 1, rowsWritten: 0, queryDurationMs: 1 } }];
+  };
+  const seen = {};
+  const hookFetch = async (_url, init) => {
+    const hook = JSON.parse(init.body);
+    const query = { sequence: 1, sql: "SELECT id FROM projects", params: {} };
+    const revoked = await callbackQuery(owner, hook.query.token, query);
+    seen.revoked = { status: revoked.status, body: await revoked.json() };
+    seen.afterTimer = structuredClone(await storage.get("transaction"));
+    seen.validation = owner.validation;
+    const again = await callbackQuery(owner, hook.query.token, query);
+    seen.again = { status: again.status, body: await again.json() };
+    return new Response(JSON.stringify({ version: "1", allowed: true }), { status: 200 });
+  };
+  owner = new TransactionOwnerCore(storage, {
+    config: checkedConfig,
+    getRuntime: () => commitRuntime(),
+    database: ownerProvider(database),
+    fetchImpl: hookFetch,
+  });
+  await call(owner, "begin", { transactionId: txId, authFingerprint: fingerprint, startFingerprint, mode: "write", auth });
+  await call(owner, "statement", {
+    transactionId: txId,
+    authFingerprint: fingerprint,
+    command: { sequence: 1, sql: "UPDATE projects SET name = :name", params: { name: "changed" } },
+  });
+  const committed = await call(owner, "commit", { transactionId: txId, authFingerprint: fingerprint, command: { sequence: 2 } });
+  assert.equal(seen.revoked.status, 409);
+  assert.equal(seen.revoked.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  assert.equal(seen.revoked.body.rows, undefined, "no rows of the revoked query");
+  assert.equal(seen.afterTimer.status, "expired", "the record as the timer wrote it");
+  assert.equal(seen.validation, null, "the revoked capability is not restored");
+  assert.equal(seen.again.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  assert.equal(selects.length, 1, "the revoked token runs no further query");
+  assert.equal(committed.status, 409);
+  assert.equal((await committed.json()).error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
+  assert.equal(database.rolledBack, true);
+  assert.equal(database.committed, false);
+});
+
 test("commit check denial rolls back and suppresses commit", async () => {
   const storage = makeStorage();
   const database = transaction();

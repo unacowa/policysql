@@ -186,16 +186,32 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   }
 
   // Callback queries: one at a time on their own lane, because they arrive while a commit
-  // on the client lane waits for the validator. Any failure ends the open transaction.
+  // on the client lane waits for the validator. Only a live capability can be called back
+  // (ADR 0007): without one the reply is unavailable and nothing changes (#73). With one,
+  // any failure ends the open transaction, a failure to read the record included. A query
+  // whose capability is revoked while it runs (the verdict, an expiry, or a close then
+  // decided the transaction) is answered unavailable, as in the step machine.
   callbackQuery(input: OwnerCallbackInput, requestId: string): Promise<OwnerReply> {
     const id = replyRequestId(requestId);
     const run = this.validationQueue.then(async (): Promise<OwnerReply> => {
+      // Captured before any await: the capability this callback may fail.
+      let session = this.validation;
       try {
+        if (!await this.liveValidation(session)) {
+          session = null;
+          throw unavailable();
+        }
         const capability = typeof input?.capability === "string" ? input.capability : "";
-        return { ok: true, value: await this.validationQuery(input?.command, capability, id) };
+        return { ok: true, value: await this.validationQuery(session, input?.command, capability, id) };
       } catch (error) {
-        if (this.transaction?.open) await this.close("failed");
+        if (!session) return { ok: false, error: operationError(error) };
+        if (this.validation !== session) return { ok: false, error: operationError(unavailable()) };
         this.validation = null;
+        if (this.transaction?.open) {
+          // The rollback is done before the record is read; a failed put leaves the record to
+          // the waiting commit, which is rejected because the transaction is closed.
+          try { await this.close("failed"); } catch { /* the store failed */ }
+        }
         return { ok: false, error: operationError(error) };
       }
     });
@@ -217,6 +233,8 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     // A failing callback query cannot roll back or overwrite a commit in flight; the commit's
     // outcome alone decides the record.
     if (this.committing) return "committing";
+    // Any close revokes the callback capability.
+    this.validation = null;
     if (this.transaction?.open) {
       try {
         await this.transaction.rollback();
@@ -711,8 +729,22 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     });
   }
 
-  async validationQuery(command, capability, requestId) {
-    const session = this.validation;
+  /**
+   * The live capability, or null: a validator is awaited (the verdict's
+   * `deactivateValidation` and every close clear `this.validation`), the record is
+   * `validating`, and the transaction is open. Read before the token is looked at, so a
+   * callback that finds no live capability (none granted, after the verdict, after an expiry,
+   * on a successor) cannot end the transaction (#73). `session` was captured before any
+   * await; a failed read of the record throws, which the caller treats as a failure of that
+   * live capability (fail closed).
+   */
+  async liveValidation(session) {
+    if (!session || this.validation !== session || !this.transaction?.open) return null;
+    const current = await this.stored();
+    return current?.status === "validating" && this.validation === session && this.transaction?.open ? session : null;
+  }
+
+  async validationQuery(session, command, capability, requestId) {
     const current = await this.stored();
     if (!current || current.status !== "validating" || !this.transaction?.open ||
       !await verifyCapabilityToken(capability, session) ||
@@ -766,6 +798,9 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     if (rowsReturned > limits.maxCallbackRows || resultBytes > limits.maxTransactionResultBytes) {
       throw new EngineError("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "The transaction limit was exceeded.");
     }
+    // Revoked while the query ran (the verdict, an expiry, or a close): its rows are not
+    // returned, and the revoked capability is not restored.
+    if (this.validation !== session) throw unavailable();
     this.validation = {
       ...session,
       nextSequence: session.nextSequence + 1,
