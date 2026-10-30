@@ -794,6 +794,58 @@ see no regression at the switch-over. For a commit that #48 could still replay f
   `cargo fuzz` job (all approved for this stage), a WASM call per effect outcome, and durable
   writes at `committing` in addition to the terminal write.
 
+## Implementation notes
+
+Recorded by pull request 4 (ABI 6), which adds the machine for `kind: interactive` on an
+owner (`crates/policysql-transaction/src/machine/`) and `step_json`; no production path calls
+it yet.
+
+- **ABI.** `step_json(durable, volatile, event, host)` returns `durable` and `volatile` as JSON
+  *texts* (`{"durable": string|null, "volatile": string|null, "effects": [...]}`), which the
+  engine keeps and stores verbatim, so a recorded response keeps its exact bytes (a
+  JavaScript round trip would round integers beyond 2^53). `Open` carries the pinned binding
+  the engine connects to. `Execute.trace` is `null` until pull request 6.
+- **Forwarded input.** An owner event is `{"type":"forwarded","input":{"kind",...}}`.
+  `statement`, `commit`, and `rollback` carry `auth` (the canonical session) and `command`, the
+  verified body text: compile builds its envelope from the text's raw members and the digest
+  is computed from the text (#70). Core computes the auth fingerprint and the replay identity
+  itself (`sha256(canonical({replay:"v1", principal, subject, role, session, database}))`, the
+  binding without `snapshot`); `begin` takes `startFingerprint` from the engine until the
+  `request` kind (pull request 7). `atomic` is answered with `POLICYSQL_INTERNAL` and
+  `callbackQuery` with `POLICYSQL_TRANSACTION_UNAVAILABLE`, without effects, until pull
+  requests 6 and 5.
+- **Commit checks.** `Compiler::triggered_checks` recomputes the checks from the recorded
+  mutations; until pull request 5 any triggered check rejects the commit with
+  `POLICYSQL_COMMIT_CHECK_REJECTED` before `Persist(committing)`. `validating` records are read
+  and handled by the successor rules (commands unavailable, the timer expires them).
+- **Order of checks for a command.** Shape, then the record and the replay identity, then an
+  exact retry (replayed from `last`), then `committing`/`commit_unknown` (a commit at the
+  committing sequence is outcome-unknown, any other command unavailable), then the snapshot,
+  liveness and expiry, the sequence, and only then `CheckBinding` before work. A commit has one
+  binding check, before `Persist(committing)`; `TransactionOwnerCore` checks twice.
+- **Effect ids** of a new volatile part start from host entropy, so an outcome addressed to an
+  effect of an earlier incarnation (after `Reset`) cannot match a new one.
+- **Fail closed.** A fault inside a transition, an outcome that is not pending, or invalid
+  volatile state replies `POLICYSQL_INTERNAL` (or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for a
+  commit after `Persist(committing)`), persists `failed`/`commit_unknown`, then `Reset`. The
+  handles of an invalid volatile part are released when its `handles` member still reads.
+  `Abandon` does not reply; the engine answers the waiting request itself.
+- **Bounds.** Runtime construction rejects limits for which `durable_bound_holds` fails (the
+  last reply, one mutation per statement of the longest resource name, and the deployment
+  strings must fit 96 KiB; `docs/configuration.md`). A transition that would still exceed a
+  bound closes the transaction with `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`.
+- **`RollbackFailed`** of a rollback command keeps `rolled_back` (the decided phase), as the
+  failure table says; `TransactionOwnerCore` reports `failed`.
+- **Tests.** Property tests (`tests/properties.rs`, proptest), transcripts of inconsistencies
+  3, 4, and 6, the deadline after `committing`, #70, and old-format records
+  (`tests/fixtures/transactions/`, replayed byte for byte by `tests/transcripts.rs`), and the
+  differential harness (`deploy/cloudflare/test/step-differential.test.mjs`) with its
+  allowlist. The `cargo fuzz` targets are not part of this pull request; a property test feeds
+  arbitrary strings for all four inputs in the meantime.
+- **Not yet in the engine's codec.** The test executor passes integers beyond 2^53 − 1 from
+  the step output as `BigInt`; `TursoHttpTransport` does not encode `BigInt` yet, which the
+  switch-over (pull request 7) adds.
+
 ## Decided during review
 
 - **One place for limits.** `publicConfig.limits` is removed. Today `presenters.ts` (81) merges
