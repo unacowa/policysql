@@ -10,6 +10,8 @@ import { capabilities } from "../src/presenters.ts";
 import { MAX_BODY_BYTES } from "../src/request-body.ts";
 import { ENFORCED_LIMIT_KEYS, runtimeLimits, runtimeLimitsJson } from "../src/limits.ts";
 import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
+import { createEngine } from "../src/engine.ts";
+import { testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
 import { RUNTIME_DEFAULT_LIMITS, limitsJson } from "./helpers/limits.mjs";
 
@@ -142,6 +144,17 @@ test("construction rejects every invalid limit and names the field", () => {
   assert.throws(() => new PolicySqlRuntime(example("catalog.yaml"), example("policy.yaml"), "s", "p",
     JSON.stringify({ max_rows: 1, max_result_bytes: 1, timeout_ms: 1, max_statements: 1, transactionMs: 1 })),
   (error) => String(error).includes("unknown field `transactionMs`"));
+});
+
+test("createEngine rejects publicConfig.limits and any other unknown public setting", () => {
+  const ports = { getRuntime: () => ({}), database: testProvider(), config: testConfig(), transactionOwners: testOwners() };
+  const versions = { schemaVersion: "s", policyVersion: "p" };
+  createEngine({ ...ports, publicConfig: versions });
+  createEngine(ports);
+  assert.throws(() => createEngine({ ...ports, publicConfig: { ...versions, limits: {} } }), /publicConfig\.limits was removed/u);
+  assert.throws(() => createEngine({ ...ports, publicConfig: { ...versions, maxRows: 1 } }), /publicConfig\.maxRows is not a setting/u);
+  assert.throws(() => createEngine({ ...ports, publicConfig: { schemaVersion: 1 } }), /must be a string/u);
+  for (const publicConfig of [null, [], "x"]) assert.throws(() => createEngine({ ...ports, publicConfig }), TypeError);
 });
 
 test("the engine reads limits only from a well-formed runtime report", () => {

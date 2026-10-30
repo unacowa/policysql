@@ -127,7 +127,7 @@ export const createInProcessPolicySql = (getRuntime: () => PolicySqlRuntime): In
   const engine = createEngine({
     ...ownerDependencies,
     transactionOwners: inProcessOwners(ownerDependencies),
-    publicConfig: { schemaVersion: SCHEMA_VERSION, policyVersion: POLICY_VERSION, limits: {} },
+    publicConfig: { schemaVersion: SCHEMA_VERSION, policyVersion: POLICY_VERSION },
   });
   return { engine, database, binding, close: () => database.close() };
 };

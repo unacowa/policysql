@@ -113,13 +113,13 @@ Catalogはroleとpolicyに依存します。clientがCatalogや生成型をcache
     "commitChecks": true,
     "commitCheckQueries": true,
     "modes": ["read", "write"],
-    "maxStatements": 20,
+    "maxStatements": 8,
     "maxResultBytes": 64000,
     "maxInteractiveDurationMs": 4000,
     "maxCommitChecks": 4,
     "maxCallbackQueriesPerCheck": 8,
-    "maxCallbackRowsPerCheck": 1000,
-    "maxCallbackBytesPerCheck": 1048576,
+    "maxCallbackRowsPerCheck": 100,
+    "maxCallbackBytesPerCheck": 64000,
     "maxHookDurationMs": 1500
   },
   "limits": {
