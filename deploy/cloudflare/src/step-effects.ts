@@ -12,11 +12,12 @@ import type { CostCatalog } from "./engine-config.ts";
 import { stringifyExact } from "./exact-json.ts";
 
 /** An outcome class core accepts (ADR 0024 "Events and host facts"). */
-export type FailureClass = "timeout" | "unavailable" | "rejected" | "not_committed" | "unknown";
+export type FailureClass = "timeout" | "unavailable" | "rejected" | "not_committed" | "unknown" | "limit";
 
 /**
  * The class of a database or provider failure on an owner: a query timeout is `timeout`, the
- * engine's own database codes map to their class, anything else is `unknown`.
+ * engine's own database codes map to their class (a result the transport could not carry over
+ * a byte bound, `POLICYSQL_LIMIT_EXCEEDED`, is `limit`), anything else is `unknown`.
  */
 export const failureClass = (error: unknown): FailureClass => {
   const coded = error as { name?: unknown; code?: unknown };
@@ -25,6 +26,7 @@ export const failureClass = (error: unknown): FailureClass => {
     if (error.code === "POLICYSQL_DATABASE_TIMEOUT") return "timeout";
     if (error.code === "POLICYSQL_DATABASE_UNAVAILABLE") return "unavailable";
     if (error.code === "POLICYSQL_DATABASE_BINDING_REJECTED") return "rejected";
+    if (error.code === "POLICYSQL_LIMIT_EXCEEDED") return "limit";
   }
   return "unknown";
 };

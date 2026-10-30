@@ -384,6 +384,22 @@ for (const hooks of [false, true]) test(`oversized physical BLOB returns 413 and
   assert.ok(h.events.some(event => event.sql === "ROLLBACK"));
 });
 
+// ADR 0024 pull request 8: the transport's result limit reaches core as the outcome class
+// `limit`, so an interactive statement gets the same permanent 413 (pull request 7 answered 500).
+test("oversized physical BLOB in an interactive statement's result is 413 and ends the transaction", async t => {
+  const h = await harness(t, { hooks: false, fixture });
+  h.databases.get("a").database.prepare("UPDATE projects SET state=? WHERE id='seed'").run(Buffer.alloc(MAX_BYTES_PER_VALUE + 1));
+  const begun = await h.request("a", "/v1/transactions", { mode: "write" }, null);
+  const path = `/v1/transactions/${begun.body.transactionId}`;
+  assert.equal((await h.request("a", `${path}/statements`, { sequence: 1, ...insert("undo-interactive", "AA==") }, null)).status, 200);
+  const result = await h.request("a", `${path}/statements`, { sequence: 2, sql: "SELECT state FROM projects WHERE id=:id", params: { id: "seed" } }, null);
+  assert.equal(result.status, 413, JSON.stringify(result.body));
+  assert.equal(result.body.error.code, "POLICYSQL_LIMIT_EXCEEDED");
+  const commit = await h.request("a", `${path}/commit`, { sequence: 3 }, null);
+  assert.equal(commit.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
+  assert.equal(physical(h, "undo-interactive"), undefined);
+});
+
 // Regression (PR #23 review): in-limit BLOB rows whose raw result exceeds the private
 // result ABI bound, and a BLOB large enough to exceed the Hrana response bound, are
 // result-budget failures (413) that roll back, not 400 or retryable 503.

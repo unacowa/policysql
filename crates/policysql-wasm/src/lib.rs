@@ -656,8 +656,12 @@ impl PolicySqlRuntime {
     /// 5) changed what it returns for some inputs and bumped it to 7; atomic execution (pull
     /// request 6: an `atomic` input is executed instead of answered `POLICYSQL_INTERNAL`, the
     /// `request` event, `Execute.trace`, and the `Observe` context) bumped it to 8. Production
-    /// owners call it for interactive transactions since ADR 0024 pull request 7, which did not
-    /// change it; atomic execution switches in pull request 8.
+    /// owners call it for interactive transactions since ADR 0024 pull request 7, and the
+    /// engine and owners for atomic execution since pull request 8. Pull request 8 added the
+    /// outcome class `limit` without a bump: every input this method read before is answered
+    /// byte for byte as before (the transcripts replay unchanged), only an `executeFailed` it
+    /// rejected as unreadable is now read, and keeping the snapshot is what keeps keyed atomic
+    /// retries replaying across that deployment.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn step_json(

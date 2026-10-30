@@ -59,7 +59,7 @@ fn action() -> impl Strategy<Value = Action> {
         4 => (-1i8..=1, 0u8..5, any::<bool>()).prop_map(|(offset, sql, alternate)| Action::Statement { offset, sql, alternate }),
         3 => (-1i8..=1).prop_map(|offset| Action::Commit { offset }),
         1 => (-1i8..=1).prop_map(|offset| Action::Rollback { offset }),
-        12 => (prop::bool::weighted(0.8), 0u8..5).prop_map(|(ok, class)| Action::Resolve { ok, class }),
+        12 => (prop::bool::weighted(0.8), 0u8..6).prop_map(|(ok, class)| Action::Resolve { ok, class }),
         2 => Just(Action::Timer),
         2 => prop_oneof![0u16..50, 3_900u16..4_100, 0u16..9_000].prop_map(Action::Advance),
         1 => Just(Action::Abandon),
@@ -78,12 +78,13 @@ const SQL: [&str; 5] = [
     "DELETE FROM projects",
     "BAD",
 ];
-const CLASSES: [&str; 5] = [
+const CLASSES: [&str; 6] = [
     "timeout",
     "unavailable",
     "rejected",
     "not_committed",
     "unknown",
+    "limit",
 ];
 
 fn next_sequence(engine: &Engine) -> u64 {

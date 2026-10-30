@@ -61,8 +61,8 @@ enum Action {
 fn action() -> impl Strategy<Value = Action> {
     prop_oneof![
         10 => (prop_oneof![8 => Just(0u8), 1 => Just(1u8), 1 => Just(2u8)], prop_oneof![8 => Just(0i8), 1 => Just(-1i8), 1 => Just(1i8)], prop_oneof![8 => Just(0u8), 1 => Just(1u8), 1 => Just(2u8)], prop::bool::weighted(0.75)).prop_map(|(token, offset, sql, whole)| Action::Callback { token, offset, sql, whole }),
-        6 => (prop::bool::weighted(0.92), 0u8..5).prop_map(|(ok, class)| Action::ResolveCallback { ok, class }),
-        6 => (prop::bool::weighted(0.9), 0u8..5).prop_map(|(ok, class)| Action::Resolve { ok, class }),
+        6 => (prop::bool::weighted(0.92), 0u8..6).prop_map(|(ok, class)| Action::ResolveCallback { ok, class }),
+        6 => (prop::bool::weighted(0.9), 0u8..6).prop_map(|(ok, class)| Action::Resolve { ok, class }),
         4 => (0u8..5).prop_map(Action::Decide),
         2 => Just(Action::Timer),
         2 => prop_oneof![0u16..50, 900u16..1_100, 3_900u16..4_100].prop_map(Action::Advance),
@@ -78,12 +78,13 @@ fn action() -> impl Strategy<Value = Action> {
     ]
 }
 
-const CLASSES: [&str; 5] = [
+const CLASSES: [&str; 6] = [
     "timeout",
     "unavailable",
     "rejected",
     "not_committed",
     "unknown",
+    "limit",
 ];
 
 /// What the properties remember across the run.

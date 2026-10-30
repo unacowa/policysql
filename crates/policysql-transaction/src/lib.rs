@@ -8,7 +8,7 @@
 //! request 4 adds the `step` machine ([`machine`]) for interactive transactions, pull request 5
 //! its commit checks and callbacks, and pull request 6 atomic execution and the cost evaluation
 //! ([`cost`]). Production owners run interactive transactions on the machine since pull request
-//! 7; atomic execution switches in pull request 8.
+//! 7, and the engine and owners atomic execution since pull request 8.
 
 pub mod canonical;
 pub mod cost;

@@ -19,12 +19,13 @@ use serde_json::{Value, json};
 const KEY: &str = "request-key-0001";
 const KEY_HASH: &str = "0123456789abcdef0123456789abcdef00000000000000000000000000000000";
 const FINGERPRINT: &str = "f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00d";
-const CLASSES: [&str; 5] = [
+const CLASSES: [&str; 6] = [
     "timeout",
     "unavailable",
     "rejected",
     "not_committed",
     "unknown",
+    "limit",
 ];
 
 /// The codes the client takes as a definite rejection of `execute` (`REJECTIONS` in

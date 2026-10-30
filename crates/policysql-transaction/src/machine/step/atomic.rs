@@ -320,7 +320,18 @@ const fn commit_failure(class: Class) -> Code {
     match class {
         Class::Timeout => Code::DatabaseTimeout,
         Class::Unavailable => Code::DatabaseUnavailable,
-        Class::Rejected | Class::NotCommitted | Class::Unknown => Code::Internal,
+        Class::Rejected | Class::NotCommitted | Class::Unknown | Class::Limit => Code::Internal,
+    }
+}
+
+/// What a failed atomic `Execute` answers. A limit on the envelope's own results is the
+/// client's `POLICYSQL_LIMIT_EXCEEDED`; on the idempotency lookup or insert it is
+/// `POLICYSQL_INTERNAL`: the outcome of a keyed request that may have committed could not be
+/// read, which is never a rejection.
+const fn execute_failure(task: &Task, class: Class) -> Code {
+    match (task, class) {
+        (Task::AtomicLookup | Task::AtomicInsert, Class::Limit) => Code::Internal,
+        _ => Code::for_class(class),
     }
 }
 
@@ -928,7 +939,7 @@ impl<C: Compiler> Step<'_, C> {
                 self.atomic_executed(lane, request, results)
             }
             (
-                Task::AtomicLookup | Task::AtomicExecute | Task::AtomicInsert,
+                task @ (Task::AtomicLookup | Task::AtomicExecute | Task::AtomicInsert),
                 Event::ExecuteFailed { class, .. },
             ) => {
                 self.set_connection(Connection::Open);
@@ -938,7 +949,7 @@ impl<C: Compiler> Step<'_, C> {
                 self.close(
                     lane,
                     Phase::Failed,
-                    Some(error_reply(Code::for_class(*class))),
+                    Some(error_reply(execute_failure(&task, *class))),
                 )
             }
             (Task::AtomicCommitBinding, Event::BindingChecked { allowed: true, .. }) => {
@@ -1548,6 +1559,7 @@ mod tests {
             Class::Rejected,
             Class::NotCommitted,
             Class::Unknown,
+            Class::Limit,
         ] {
             assert!(matches!(
                 commit_failure(class),

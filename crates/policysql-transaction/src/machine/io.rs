@@ -85,6 +85,12 @@ pub enum Class {
     Rejected,
     NotCommitted,
     Unknown,
+    /// The database answered, but its answer exceeded a bound of the adapter's codec or
+    /// transport (a BLOB over the per-value limit, a response over the transport's size
+    /// bound), so it could not be carried as `executed`. Added by ADR 0024 pull request 8, for
+    /// the `POLICYSQL_LIMIT_EXCEEDED` the TypeScript paths answered; only `executeFailed`
+    /// carries it.
+    Limit,
 }
 
 /// Usage a driver reported for one statement.
@@ -504,6 +510,7 @@ impl Code {
             Class::Unavailable => Self::DatabaseUnavailable,
             Class::Rejected => Self::BindingRejected,
             Class::NotCommitted | Class::Unknown => Self::Internal,
+            Class::Limit => Self::LimitExceeded,
         }
     }
 }
