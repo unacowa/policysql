@@ -8,7 +8,7 @@
 import {
   durableObjectTransactionOwnerClass, durableObjectTransactionOwners,
 } from "../../src/adapters/durable-objects.ts";
-import { OwnerLostError, faultedPut } from "./memory-owner.mjs";
+import { OwnerLostError, faultedGet, faultedPut } from "./memory-owner.mjs";
 
 /**
  * `dependencies(name)` returns the ports for a new object of `name`; `env` is what the
@@ -17,6 +17,7 @@ import { OwnerLostError, faultedPut } from "./memory-owner.mjs";
 export const createSimulatedDurableObjects = (dependencies, { background = { run() {} }, env = {} } = {}) => {
   const objects = new Map();
   let putHook = null;
+  let getHook = null;
   let constructing = null;
   const ObjectClass = durableObjectTransactionOwnerClass(() => dependencies(constructing));
 
@@ -30,7 +31,7 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
       value: {
         waitUntil(task) { background.run(task); },
         storage: {
-          async get(key) { alive(); return structuredClone(slot.data.get(key)); },
+          async get(key) { alive(); return faultedGet(getHook, { name, key, read: () => structuredClone(slot.data.get(key)) }); },
           async put(key, value) {
             alive();
             faultedPut(putHook, { name, key, value, write: (next) => slot.data.set(key, next), lose: () => lose(name) });
@@ -112,6 +113,8 @@ export const createSimulatedDurableObjects = (dependencies, { background = { run
     lose,
     /** Every later storage put passes through `hook` (see `faultedPut`); null removes it. */
     interceptPut(hook) { putHook = hook; },
+    /** Every later storage read passes through `hook` (see `faultedGet`); null removes it. */
+    interceptGet(hook) { getHook = hook; },
     /** The platform delivers the pending alarm to the live object. */
     async fireTimer(name) {
       const slot = objects.get(name);

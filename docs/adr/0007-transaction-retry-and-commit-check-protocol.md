@@ -180,7 +180,11 @@ validations is running, which is today's behavior during validation. `Transactio
 follows the same rule since [#73](https://github.com/unacowa/policysql/issues/73) (it failed an
 active transaction on a stray callback before), and the differential harness asserts that both
 owners agree. In both, any close also revokes the capability, and a callback query still running
-when its capability is revoked returns no rows and does not restore it.
+when its capability is revoked is answered `POLICYSQL_TRANSACTION_UNAVAILABLE`, returns no rows,
+and does not restore it. `TransactionOwnerCore` reads its record from the store to find the live
+capability; a failed read while a validator is awaited is a failure of that validation (it
+rolls back), so a store fault cannot leave a capability live (the machine keeps the record in
+memory and has no such read).
 
 ## Consequences
 

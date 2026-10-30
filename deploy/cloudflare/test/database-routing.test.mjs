@@ -469,6 +469,36 @@ test("a wrong or malformed token while a capability is live still fails the vali
   }
 });
 
+test("a failed record read during a live validation fails it and rolls back (#73 review)", async (t) => {
+  const h = await harness(t);
+  const id = (await h.request("a", "/v1/transactions", { mode: "write" })).body.transactionId;
+  assert.equal((await h.request("a", `/v1/transactions/${id}/statements`, { sequence: 1, ...insert("store_fault") })).status, 200);
+  let failed;
+  let after;
+  h.setValidator(async (hook) => {
+    let armed = true;
+    // The next owner store read, the callback's read of the record, throws.
+    h.interceptOwnerGet(() => {
+      if (!armed) return undefined;
+      armed = false;
+      return { fail: true };
+    });
+    failed = await h.request("a", new URL(hook.query.url).pathname, { sequence: 1, ...read }, undefined, hook.query.token);
+    h.interceptOwnerGet(null);
+    assert.equal(armed, false, "the callback read the record");
+    after = await h.request("a", new URL(hook.query.url).pathname, { sequence: 1, ...read }, undefined, hook.query.token);
+    return true;
+  });
+  const commit = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 });
+  assert.ok(failed.status >= 400, JSON.stringify(failed));
+  assert.equal(after.status, 409, JSON.stringify(after));
+  assert.equal(after.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", "the failure revoked the capability");
+  assert.equal(commit.status, 409, JSON.stringify(commit));
+  assert.equal(commit.body.error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
+  assert.equal((await h.ownerRecord(id)).status, "failed");
+  assert.equal(h.rows("a").some((row) => row.id === "store_fault"), false);
+});
+
 test("a changed runtime snapshot fails before another statement and rolls back", async (t) => {
   const h = await harness(t);
   const start = await h.request("a", "/v1/transactions", { mode: "write" });

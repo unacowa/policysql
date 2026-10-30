@@ -24,6 +24,15 @@ export class OwnerLostError extends Error {}
  * lands), or `{ value, lose }`: `value` (default: the put's own) lands, and with `lose` the
  * owner is lost right after it landed, so its later store calls fail.
  */
+/**
+ * Fault injection for one store read, shared by both test adapters (#73). `hook({ name, key })`
+ * returns nothing (the read succeeds) or `{ fail: true }` (the read throws).
+ */
+export const faultedGet = (hook, { name, key, read }) => {
+  if (hook?.({ name, key })?.fail) throw new Error("store get failed");
+  return read();
+};
+
 export const faultedPut = (hook, { name, key, value, write, lose }) => {
   const fault = hook?.({ name, key, value: structuredClone(value) }) ?? {};
   if (fault.fail) throw new Error("store put failed");
@@ -38,13 +47,14 @@ export const faultedPut = (hook, { name, key, value, write, lose }) => {
 export const createMemoryTransactionOwners = (dependencies, { background = { run() {} } } = {}) => {
   const slots = new Map();
   let putHook = null;
+  let getHook = null;
 
   const incarnate = (name, slot) => {
     const life = { live: true };
     const alive = () => { if (!life.live) throw new OwnerLostError("owner lost"); };
     const facilities = {
       store: {
-        async get(key) { alive(); return structuredClone(slot.data.get(key)); },
+        async get(key) { alive(); return faultedGet(getHook, { name, key, read: () => structuredClone(slot.data.get(key)) }); },
         async put(key, value) {
           alive();
           faultedPut(putHook, { name, key, value, write: (next) => slot.data.set(key, next), lose: () => lose(name) });
@@ -98,6 +108,8 @@ export const createMemoryTransactionOwners = (dependencies, { background = { run
     lose,
     /** Every later store put passes through `hook` (see `faultedPut`); null removes it. */
     interceptPut(hook) { putHook = hook; },
+    /** Every later store read passes through `hook` (see `faultedGet`); null removes it. */
+    interceptGet(hook) { getHook = hook; },
     /** Delivers the pending timer, if any, to the live owner. */
     async fireTimer(name) {
       const slot = slots.get(name);
