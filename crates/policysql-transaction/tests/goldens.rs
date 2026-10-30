@@ -3,6 +3,8 @@
 //! implementation on main before ADR 0025 changed the canonical form, where core's
 //! `identity_json` equalled `stableJson` + `sha256` in TypeScript. The stability requirements
 //! (a)-(d) keep every one of them byte-identical; a golden that changes is a breaking change.
+//! Request fingerprints are a check of (a)-(d) under one binding, not values kept across
+//! releases: #80 (ABI 9) removed the binding's snapshot from them, and they were recomputed.
 
 use policysql_transaction::identity_json;
 use serde_json::Value;

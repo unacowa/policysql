@@ -39,7 +39,8 @@ export class PolicySqlRuntime {
      * ADR 0025 made core's canonical form the only definition, which changes this method's
      * values for some inputs, so it bumped `ABI_VERSION` to 5. `keyHash`, the auth and start
      * fingerprints, and the `{sequence}` digests are unchanged
-     * (`tests/fixtures/identity-goldens.json`).
+     * (`tests/fixtures/identity-goldens.json`). Removing the binding's `snapshot` from the
+     * request fingerprint (#80) changed its values again and bumped `ABI_VERSION` to 9.
      */
     identity_json(input_json: string): string;
     /**

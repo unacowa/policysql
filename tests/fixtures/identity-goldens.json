@@ -1,5 +1,5 @@
 {
-  "description": "Identity goldens captured from origin/main (stableJson + sha256 in idempotency.ts, equal to core's identity_json there) before ADR 0025's canonical-form change. They must never change (ADR 0025, Stability requirements). Request fingerprints here use stability-set bodies (ASCII keys, integers within 2^53 - 1) under a fixed binding, as a check of (a)-(d) only.",
+  "description": "Identity goldens captured from origin/main (stableJson + sha256 in idempotency.ts, equal to core's identity_json there) before ADR 0025's canonical-form change. They must never change (ADR 0025, Stability requirements). Request fingerprints are not among them: they use stability-set bodies (ASCII keys, integers within 2^53 - 1) under a fixed binding, as a check of (a)-(d) only, and were recomputed when #80 (ABI 9) removed the binding's snapshot from the request fingerprint; their keyHash values are unchanged.",
   "goldens": [
     {
       "name": "request execute ascii body 0",
@@ -33,7 +33,7 @@
       "output": {
         "idempotency": {
           "keyHash": "0c4e3b1c85af5722b958dc2a6ca161147c45a3672b7a2676190af189ff546521",
-          "fingerprint": "ec6f3ed80ba89b476289f165fd0ee303e28cc9b64ef39d15ffdacfc8d8fbc0c1"
+          "fingerprint": "4aa9e3292611b7ad019d38a076eb69c20da8b29802ec44d5413541e111f6f001"
         }
       }
     },
@@ -69,7 +69,7 @@
       "output": {
         "idempotency": {
           "keyHash": "0c4e3b1c85af5722b958dc2a6ca161147c45a3672b7a2676190af189ff546521",
-          "fingerprint": "69f4215ef7bc663b53a55db4d0a0018a0417d065b91616a6415300fddd6dbbde"
+          "fingerprint": "868f2b1df09a6f458cd0bdba2737ceb30ecb49b749a5511e4b8dbab6370d0640"
         }
       }
     },
@@ -105,7 +105,7 @@
       "output": {
         "idempotency": {
           "keyHash": "cc90d8cb5e2d8c4f3655b3d3226da4daae5e1019dfb3fd7c2c16d1e4b624e45a",
-          "fingerprint": "c40a390781f431ef606b424f45cb783868a721bff9f865941845f549e7238a06"
+          "fingerprint": "e203511e58dbefe0559ca5cbf645aa3f59c5d8634f4dd44c71cf047afad0356d"
         }
       }
     },
@@ -172,7 +172,7 @@
       "output": {
         "idempotency": {
           "keyHash": "c953a0b1b43b6abb2b542437a67b4093b3ae94004a82344172452f703259d90f",
-          "fingerprint": "435847a6ddf887cdc0b10e684deaf36a67de6d59c8fefa06e0d997a7a051eb54"
+          "fingerprint": "0fc7d2ac90df9d5ab3cbfbdc988cd7cc077db0a3e3f585386ddd44d038551446"
         }
       }
     },
@@ -209,7 +209,7 @@
       "output": {
         "idempotency": {
           "keyHash": "c953a0b1b43b6abb2b542437a67b4093b3ae94004a82344172452f703259d90f",
-          "fingerprint": "6477a09a6fc4c0d623fc80f0fa4967bc20e61b8cbacd1af1ea8c5f12dcfe07fa"
+          "fingerprint": "df8591e8037624e86c3f2cb71f79f2e2e67eb6a6d15bffff82a2138c173c55d4"
         }
       }
     },
@@ -246,7 +246,7 @@
       "output": {
         "idempotency": {
           "keyHash": "98ae43dc52e4a9f61b1a07867a89d47ea7c4b01c6e32290bd286cba66acc4c4e",
-          "fingerprint": "5ecd9874239e9c9bd96a210eb1c20735b582129674f43c844535e6611d969422"
+          "fingerprint": "da244f95f75d5d9bf7f491e44a9d6ddd18c79eb3787399d6068f2d380b02786d"
         }
       }
     },
@@ -314,7 +314,7 @@
       "output": {
         "idempotency": {
           "keyHash": "1c0ea59f3fbb5213350153630ff84881559ef2d2782cb364c2e93532ecfb6280",
-          "fingerprint": "81db2ac475fb99a5ca92902d52013008ff70ea4de65f9cc9eeef3a1d1debf719"
+          "fingerprint": "0a72531052746f33e18c0718d767d2e907be14ff10eae993aa92b4f802aae0f5"
         }
       }
     },
@@ -351,7 +351,7 @@
       "output": {
         "idempotency": {
           "keyHash": "1c0ea59f3fbb5213350153630ff84881559ef2d2782cb364c2e93532ecfb6280",
-          "fingerprint": "9a1fa1876adcdb4841205dfcb99108f3c40bb9b53f535a7b712eb6803cfaac32"
+          "fingerprint": "3ed27b682e49a8c1486ae2a332c6d23c53cc6566bcf89a337a6d52d94f1741ae"
         }
       }
     },
@@ -388,7 +388,7 @@
       "output": {
         "idempotency": {
           "keyHash": "fe86368aedd0028a69a256f2aeb981e44c1781517be8a15abcb433fbebac7a5a",
-          "fingerprint": "61ca621c2eb827f437a67bc65fec79c04b3aa57f5dbf548a0905ba6bd76f71a4"
+          "fingerprint": "479e96833155426773192c80a7dfed5ed47f47524e064624a4b69d07c12db9b6"
         }
       }
     },
@@ -456,7 +456,7 @@
       "output": {
         "idempotency": {
           "keyHash": "9cc0bc6aa8bb2135e7be4685252928f6a172932b2ecf9c12dc41ff9306d3d5f1",
-          "fingerprint": "5ed1e98654c3009aa1a468a62a3420978b364beb666d4ccb8112bbfcec899929"
+          "fingerprint": "4dca916d4105da864d249500974387e0fad579232266ca94afffd88c01e233b2"
         }
       }
     },
@@ -493,7 +493,7 @@
       "output": {
         "idempotency": {
           "keyHash": "9cc0bc6aa8bb2135e7be4685252928f6a172932b2ecf9c12dc41ff9306d3d5f1",
-          "fingerprint": "9b77f117d186e2f729c55ac473f281b0b31a8a4376dff85e2a98aa78f0a45eb0"
+          "fingerprint": "44d2191b424048346a3aa6feed54e4c0eb27a6f446b49cf03105a4f5fadec02e"
         }
       }
     },
@@ -530,7 +530,7 @@
       "output": {
         "idempotency": {
           "keyHash": "7463e4e2881bf58d11803a83c61601b6781c705a40dc6c9a590932900185fd21",
-          "fingerprint": "67e33e22da3fa46461d32296666b3e622a419ca1642afe02fc5e14e33b291b8d"
+          "fingerprint": "553ecbc2bc901dc8e477e515107d60ec34a1d7addf725f2bdef8f4ed61b6e3b5"
         }
       }
     },
@@ -603,7 +603,7 @@
       "output": {
         "idempotency": {
           "keyHash": "333ae13d6c4a09c8593875f3b8106d47e7b084a1a7bb082aeda2ea1ec1d62ed3",
-          "fingerprint": "ba06345674e71a0e3f0ecd7a705c53b5cc1a846aa98b27e14b5d49777a4122a2"
+          "fingerprint": "470f554bde3c52cd456b471b0c03bde5593733fe121e633e6687ea25cb1a703c"
         }
       }
     },
@@ -645,7 +645,7 @@
       "output": {
         "idempotency": {
           "keyHash": "333ae13d6c4a09c8593875f3b8106d47e7b084a1a7bb082aeda2ea1ec1d62ed3",
-          "fingerprint": "8b123a8880efca4f11c43a1848ef91f88091bdc7237849165432623c57d6d912"
+          "fingerprint": "6f6c55e4c0b3d126a3650f412f27b28b76e935fafc6d4fdc9ef30b5d8b677c21"
         }
       }
     },
@@ -687,7 +687,7 @@
       "output": {
         "idempotency": {
           "keyHash": "a06537c33b8b8ce99461e1d02ba25043f670b5db30ccc0d1f51131e6600d4959",
-          "fingerprint": "be3a172df08ca367de044a187c9dbb1757f24cb8b4d0a76872502d71fdb5383d"
+          "fingerprint": "85bb200546dd72bf4e15bbc2ed0c21555547b6d7a61fee8789447fada294dab7"
         }
       }
     },
@@ -764,7 +764,7 @@
       "output": {
         "idempotency": {
           "keyHash": "d400f232f99b57b5ddbe413c095e4f9069e2e0046349bf940cebd0fbf624869d",
-          "fingerprint": "1e9ae1a770ea1f4b89964204a28e8a8b31ef98bf1e67627c39a919b0f83c2266"
+          "fingerprint": "fcfb5b038ae4e881e0adfeff532d62ed3fa99515549d3c2e2ef0e8581b00fb25"
         }
       }
     },
@@ -805,7 +805,7 @@
       "output": {
         "idempotency": {
           "keyHash": "d400f232f99b57b5ddbe413c095e4f9069e2e0046349bf940cebd0fbf624869d",
-          "fingerprint": "44c849f7970fc3c0c20515cbeeb4812c1eedc68dc9ae88472274f625b87d9dfd"
+          "fingerprint": "9cd3dcf425190c4da8d8b62081bb62be1ce92ca297e6fff33777340ec3035843"
         }
       }
     },
@@ -846,7 +846,7 @@
       "output": {
         "idempotency": {
           "keyHash": "7437604fdf7dfc7389f3af444226a024794f554c1282396d57554ba855c322d9",
-          "fingerprint": "fcf14d9870537974f01ab27e86f54b1bba713592f5056eda76f5d31777cf71a8"
+          "fingerprint": "45fbed71dbda73779c2a57ad46efb3934394707a6e0a18921139217248339c67"
         }
       }
     },
@@ -915,7 +915,7 @@
       "output": {
         "idempotency": {
           "keyHash": "2560ae37a9efbc792bcbd32e6852b3227d5f5d5d4492847bf142bd4139f7173e",
-          "fingerprint": "2699bb9e5529938120e149bcbf0b10763f5d7b6f2c76e2fd5e96fce548e3de2d"
+          "fingerprint": "d0d490d746adbe2f4a80d8abdd92a510daa4e42b2c06569ab25a86a1888d17b9"
         }
       }
     },
@@ -949,7 +949,7 @@
       "output": {
         "idempotency": {
           "keyHash": "2560ae37a9efbc792bcbd32e6852b3227d5f5d5d4492847bf142bd4139f7173e",
-          "fingerprint": "717b39bddab0df5af325b7b57d364d733fe2e236d566216f604ee7c6cd8e0428"
+          "fingerprint": "e08869e3e7a5771948e372313a137ae1a99b08967edb5fc1f04093f1897b7d70"
         }
       }
     },
@@ -983,7 +983,7 @@
       "output": {
         "idempotency": {
           "keyHash": "f948c6fd85dbcf7482fbe79421246437fbc9baf3c0dfbefc2741d9de0804724c",
-          "fingerprint": "b20f87d805cfdc73cd7a33608fb5dfb78cec0454d4708eaadfbd74cc217be7e7"
+          "fingerprint": "76b5b7609f261cb7889e3a8b84c7b572d9c23c9e50f5f33b7afeabe190671f91"
         }
       }
     },
@@ -1053,7 +1053,7 @@
       "output": {
         "idempotency": {
           "keyHash": "9caaf3a979ac6cc2de7243d8e71874d271d7adb6dfc615b4987319b17a25d3fc",
-          "fingerprint": "6adf7699e3ad3a07787690e1aecdffc3181e38a6d92fc77e3641f88f01a45dc4"
+          "fingerprint": "c0af413b50df0a117045eae525abacc26a6e1be3eac2a928b6ac03ea00ee0660"
         }
       }
     },
@@ -1095,7 +1095,7 @@
       "output": {
         "idempotency": {
           "keyHash": "700c3e8c0bb77dbf202023ed109757e3ffe56ec92c2d316b41e8ad10db793d78",
-          "fingerprint": "6adf7699e3ad3a07787690e1aecdffc3181e38a6d92fc77e3641f88f01a45dc4"
+          "fingerprint": "c0af413b50df0a117045eae525abacc26a6e1be3eac2a928b6ac03ea00ee0660"
         }
       }
     },
@@ -1137,7 +1137,7 @@
       "output": {
         "idempotency": {
           "keyHash": "787ede952ff34df3619858397541fe1a54df650961534991e00f7d14e81fefe8",
-          "fingerprint": "6adf7699e3ad3a07787690e1aecdffc3181e38a6d92fc77e3641f88f01a45dc4"
+          "fingerprint": "c0af413b50df0a117045eae525abacc26a6e1be3eac2a928b6ac03ea00ee0660"
         }
       }
     },
