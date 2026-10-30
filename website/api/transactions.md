@@ -155,7 +155,7 @@ validation中は`validating`状態です。この間はcommit-check validatorの
 Atomic Executeでmutationを含むrequestと、対話型transaction開始の`Idempotency-Key`は任意です。指定したkeyはtrusted sessionのprincipal、subject、role、session、endpoint、DB識別子へ束縛し、canonical request hashにはDB bindingも含めます。保存済みの結果がある場合、同一要求へその結果を返します。
 
 - 同じkey、同じpayload、完了済み: 保存済みstatusとbody
-- 同じkey、異なるpayloadまたは経路世代: HTTP 409（通常atomicは`POLICYSQL_IDEMPOTENCY_CONFLICT`、DOは`POLICYSQL_TRANSACTION_CONFLICT`）
+- 同じkey、異なるpayloadまたは経路世代: HTTP 409（Atomic Executeはcommit checkを行うDO経路を含めて`POLICYSQL_IDEMPOTENCY_CONFLICT`、対話型transaction開始は`POLICYSQL_TRANSACTION_CONFLICT`）
 - keyなしのAtomic Execute: 要求ごとに実行し、`policysql_idempotency`を参照・追記しない
 - keyなしの対話型transaction開始: 毎回新しいtransaction ID／ownerを作る
 
