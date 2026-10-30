@@ -139,6 +139,8 @@ core):
 - `sha256` in `commit-checks.ts` hashes the capability token. The hash is computed and
   compared inside TypeScript only, and its input is a random token, not canonical JSON. It
   moves to core with capability verification (ADR 0024 pull request 5), not with this ADR.
+  (Pull request 5 hashes and verifies the machine's capabilities in core; the TypeScript
+  copy serves `TransactionOwnerCore` until ADR 0024 pull request 9.)
 
 ### The switch bumps the ABI
 
