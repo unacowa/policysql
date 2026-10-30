@@ -1,6 +1,6 @@
 # ADR 0027: One model for byte, value, and CPU budgets
 
-- Status: proposed
+- Status: accepted (maintainer decisions of 2026-10-31, below)
 - Issues: #56, #52, #63 (also #53, #42)
 - Amends: [ADR 0016](0016-bytes-wire-contract.md) ("Bounds and failures": the per-value
   limit and the fixed internal result bounds),
@@ -499,7 +499,8 @@ cpu_ms ≥ S × F × (C0 + a_b × (R + B) + a_v × (V_req + V_res))
 
 With the defaults (`R` = 1; `B` = max(128,000 + 4,096 + 1,048,576, 1,183,744) = 1.13 MiB;
 `V` = 65,536 each): `5 + 80 × 2.13 + 1.3 µs × 131,072` ≈ 345 ms on the reference machine; with
-`F` = 2.0 and `S` = 1.25, **about 860 ms**. The model is conservative against every
+`F` = 2.0 and `S` = 1.25, **about 860 ms**, which the reference wrapper rounds up to
+1,000 ms. The model is conservative against every
 measurement, using the same definitions: 85 ms predicted for the 1 MB string (measured 22),
 158 ms for 1 MB of 17-digit decimals (66), 30 ms for the 100 × 64 conditional result
 (`5 + 80 × 0.1 + 1.3 µs × 13,029` raw values; measured 18.9–20.3), 96 ms for the 1,000 × 25
@@ -536,7 +537,7 @@ Decisions:
   `cpu_ms` by the formula; one that cannot (Workers Free, 10 ms) lowers the limits instead.
 - **The reference wrapper stays consistent by test.** `deploy/cloudflare/wrapper` gets a test
   that reads `wrangler.jsonc` `limits.cpu_ms` and `RUNTIME_LIMITS` and fails when the CPU
-  formula is violated. Its `cpu_ms` becomes **900** (from 50), provisional: pull request 1
+  formula is violated. Its `cpu_ms` becomes **1,000** (from 50), provisional: pull request 1
   replaces `F` = 2.0 with the measured value and pull request 7 lowers the coefficients, and
   each recomputes `cpu_ms`. No library default is raised before `F` is measured. The runbook
   alert "p95 CPU above 40 ms" becomes "p95 CPU above 50% of `cpu_ms`".
@@ -621,7 +622,7 @@ that compares the client table with the status table (`website/api/errors.md`) c
     ABI 9. The snapshot changes, so open transactions and idempotency fingerprints from ABI 8
     do not match (as for every ABI change).
 13. `DatabaseProvider` gains the `streamedReadCap` capability.
-14. Reference wrapper: `cpu_ms` 50 → 900 (provisional), runbook alert threshold relative to
+14. Reference wrapper: `cpu_ms` 50 → 1,000 (provisional), runbook alert threshold relative to
     `cpu_ms`.
 15. Capabilities `limits` gains fields (additive).
 16. **Idempotency rows written under ABI 8** whose `response_json` exceeds 1,183,744 bytes: a
@@ -646,7 +647,7 @@ smoke (`deploy/cloudflare/scripts/provision-dev.mjs`) before merge.
    the worst shapes at the deployed limits and reads the invocations' CPU time from Workers
    observability, polling until the events are ingested (Workers Logs arrive with a delay) or
    capturing them with `wrangler tail` during the run; it records `F`. Set the reference
-   `cpu_ms` from the formula, add the wrapper consistency test, update the runbook and
+   `cpu_ms` to 1,000 and check it against the formula, add the wrapper consistency test, update the runbook and
    `docs/configuration.md` (formulas, coefficients). No library behaviour change.
 2. **Streamed Turso response (#53).** Byte-counted streaming read with cancel, the 65,536
    control-response bound; the statement cap stays 2 MiB until pull request 6. Regression
@@ -746,41 +747,26 @@ measurements cover the final paths.
 - **Bound the final response only by `maxResultBytes`.** Column descriptors, redactions,
   warnings, and meta are outside it; #52 asks for a bound on what actually leaves.
 
-## Open questions for the maintainer
+## Maintainer decisions (2026-10-31)
 
-Each has a proposed answer from the review of this ADR, pending maintainer confirmation.
+The questions raised during review were decided as follows.
 
-1. **Reference wrapper trade-off.** Keep `maxRequestBytes` at 1 MiB with a provisional
-   `cpu_ms`, or lower it? *Proposed:* keep 1 MiB; `cpu_ms` 900 provisional (the first draft
-   said 700, before the value term and the replay bound were added), finalized after pull
-   request 1 measures `F` and pull request 7 lowers the coefficients.
-2. **`F` before measurement.** *Proposed:* 2.0 as a placeholder; no library default is raised
-   until `F` is measured.
-3. **Interactive result size.** *Proposed:* keep interactive results ≤ 64 KiB (the durable
-   record stores the last reply); larger results use atomic execute.
-4. **Upstream depth error.** *Proposed:* client SQL beyond `turso_parser`'s caps stays 400
-   `POLICYSQL_INVALID_SQL`; emitted SQL beyond them is `POLICYSQL_SQL_TOO_COMPLEX`.
-5. **Hard maxima.** *Proposed by the review:* request 4 MiB, result about 1 MiB, per value
-   3 MiB. *This revision:* the memory measurements (69.5 MiB of WASM for 1 MiB of dense JSON)
-   lower them to request 2 MiB, result 512 KiB, with `maxJsonValues` ≤ 131,072 (the review
-   agreed); per value 1 MiB, with the smallest path limit governing; parameters 16,384; depth
-   64, joins 63, projections 2,000 as input-side bounds, defaults 32 / 8 / 128 unchanged. To be
-   confirmed, or raised after pull request 7.
-6. **Buffering drivers.** *Proposed:* accepted as a declared port capability
-   (`streamedReadCap: false`) with a one-time log when `maxResultBytes` exceeds 64,000.
-7. **Raw expansion.** *Proposed by the review:* a factor of at least 11 plus metadata slack.
-   *This revision:* the compiled per-cell and per-column formula above, with result-side
-   `maxJsonValues` counting raw values (cells, companions, descriptors), which covers the
-   measured 7.9 and 9.7 and the computed 12 and is confirmed by the Hrana-encoded property test.
-   To be confirmed.
-8. **Today's main.** At 32 / 8 the worst measured statement is exactly at the parser's cap of
-   100. *Proposed:* no separate fix; pull request 4 replaces today's 400
-   `POLICYSQL_UNSUPPORTED_SQL` for such a statement with `POLICYSQL_SQL_TOO_COMPLEX`.
-9. **Status for `POLICYSQL_SQL_TOO_COMPLEX`.** *Proposed:* 400, like the other definite SQL
-   rejections, rather than 413 or 422: the request is well formed but cannot be run under the
-   active policy, and retrying it unchanged will not help.
-10. **Complexity messages from the database.** *Proposed:* recognize them only when the Hrana
-    `code` is `SQLITE_ERROR` and the message starts with an entry of the allowlist derived from
-    `SQLITE_LIMIT_*`; the smoke run fails when an entry stops matching on real Turso (for
-    example after Turso's move to its Rust server), so the list is updated before release
-    instead of silently falling back to 503.
+1. **Reference wrapper:** `maxRequestBytes` stays 1 MiB and `cpu_ms` is 1,000 ms. Both are
+   revisited after pull request 1 measures `F` and pull request 7 lowers the coefficients.
+2. **`F` = 2.0** is a placeholder until measured; no library default is raised before then.
+3. **Hard maxima** as proposed: request 2 MiB, result 512 KiB, per value 1 MiB (the smallest
+   limit on each path governs), `maxJsonValues` 131,072, parameters 16,384; input-side depth 64,
+   joins 63, projections 2,000; defaults 32 / 8 / 128 unchanged.
+4. **`POLICYSQL_SQL_TOO_COMPLEX`** as proposed: HTTP 400, fixed message, a definite rejection;
+   database complexity errors are recognized by `SQLITE_ERROR` plus the `SQLITE_LIMIT_*`
+   allowlist, unmatched errors stay 503, and the smoke run confirms every allowlist entry.
+5. **Client SQL beyond the parser's caps** stays 400 `POLICYSQL_INVALID_SQL`.
+6. **Interactive results** stay at most 64 KiB; larger results use atomic execute.
+7. **Buffering drivers** are accepted as a declared port capability (`streamedReadCap`) with a
+   one-time log when `maxResultBytes` exceeds 64,000.
+8. **Raw results** are bounded by the per-cell and per-column formula, and result-side
+   `maxJsonValues` counts raw values.
+9. **Today's main** (emitted height exactly 100 at 32 / 8) gets no separate fix; pull request 4
+   maps that case to `POLICYSQL_SQL_TOO_COMPLEX`.
+
+No questions remain open.
