@@ -1424,7 +1424,14 @@ authoritative Rust (`policysql-transaction`), and no TypeScript decides a transa
   for a log-only table in `errors.md`; the ADR 0023 test now requires every code in the source
   to be in exactly one of the three tables and each log-only code to be produced only by the
   cost observation. The client no longer lists `USAGE_BUDGET_EXCEEDED` as a definite rejection;
-  the server never sends it.
+  the server never sends it. This changes two public exports of `@unacowa/policysql/cloudflare`:
+  `ERROR_STATUS` no longer has the three keys, and `statusFor` answers them 500 (as any code
+  outside the table); `createErrorResponse` refuses them at every status (`LOG_ONLY_CODES` in
+  `src/http/status.ts`), so a wrapper cannot put them into a reply either.
+- **The namespace collision is pinned on every path** that builds an `execute`: an interactive
+  statement (`tests/machine.rs`), an atomic envelope on both placements, keyed and unkeyed
+  (`tests/atomic.rs`), and a callback query (`tests/commit_checks.rs`); each asserts no
+  `execute` of the statement, no COMMIT, and every handle released.
 - **Kept for rollout safety.** The discard of old-format records is the machine's own rule
   (no TypeScript), and it stays: Durable Object storage outlives deployments, so a deployment
   upgrading from a release before pull request 7 or 8 may still hold records the TypeScript
