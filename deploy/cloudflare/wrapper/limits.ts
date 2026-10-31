@@ -14,4 +14,9 @@ export const RUNTIME_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
   maxCallbackRows: 100,
   beginTimeoutMs: 1_000,
   costTimeoutMs: 1_000,
+  // Request-side limits, set explicitly (ADR 0021, ADR 0027); the runtime's defaults are the
+  // same values. The CPU limit in wrangler.jsonc is checked against them by test.
+  maxRequestBytes: 1_048_576,
+  maxJsonValues: 65_536,
+  maxSqlBytes: 65_536,
 });

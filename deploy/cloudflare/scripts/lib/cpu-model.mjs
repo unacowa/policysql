@@ -44,15 +44,6 @@ export const HARDWARE_FACTOR = 2.0;
 export const LOOKUP_BOUND_BYTES = 1_183_744;
 
 /**
- * `maxJsonValues` default (ADR 0027). The runtime does not enforce or report it before the
- * request-budget pull request (ADR 0027 pull request 3), so the model reads this constant.
- */
-export const DEFAULT_MAX_JSON_VALUES = 65_536;
-
-/** `maxRequestBytes` today: a fixed protocol constant the runtime advertises (1 MiB). */
-export const DEFAULT_MAX_REQUEST_BYTES = MIB;
-
-/**
  * The model's `B`: raw result bytes not attributable to values, in bytes (ADR 0027): the larger
  * of `2 * maxResultBytes + 512 * maxStatements + 1,048,576` and the lookup bound.
  */
@@ -60,15 +51,16 @@ export const resultBoundBytes = ({ maxResultBytes, maxStatements }) =>
   Math.max(2 * maxResultBytes + 512 * maxStatements + MIB, LOOKUP_BOUND_BYTES);
 
 /**
- * The model inputs at a deployment's limits. `limits` is the wrapper's `RuntimeLimits` (what the
- * runtime enforces); `maxRequestBytes` and `maxJsonValues` are read from it when the runtime
- * reports them and default to the constants above before then.
+ * The model inputs at a deployment's limits. `limits` is what the runtime reports
+ * (`runtimeLimits`, which fills `maxRequestBytes` and `maxJsonValues` since ADR 0027 pull
+ * request 3): `maxJsonValues` is the request-side value count and, until pull request 6 enforces
+ * it on results, the model's result-side count too.
  */
 export const inputsAtLimits = (limits) => ({
-  rMiB: (limits.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES) / MIB,
+  rMiB: limits.maxRequestBytes / MIB,
   bMiB: resultBoundBytes(limits) / MIB,
-  vReq: limits.maxJsonValues ?? DEFAULT_MAX_JSON_VALUES,
-  vRes: limits.maxJsonValues ?? DEFAULT_MAX_JSON_VALUES,
+  vReq: limits.maxJsonValues,
+  vRes: limits.maxJsonValues,
 });
 
 /** Reference-machine CPU, ms, predicted for `{ rMiB, bMiB, vReq, vRes }`. */

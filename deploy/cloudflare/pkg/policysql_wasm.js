@@ -165,9 +165,8 @@ export class PolicySqlRuntime {
      * engine enforces and advertises exactly these values; it holds no copy of its own
      * (ADR 0024, "One place for limits").
      *
-     * Adding this method and the optional constructor fields does not change
-     * `ABI_VERSION`: every existing `limits_json` is accepted and enforced as before, no
-     * existing method or value changes, and the engine and this module ship in one bundle.
+     * Every limit of ADR 0027 is a field here, including the per-value limit that used to
+     * be a getter; the engine reads them all from this one report.
      * @returns {string}
      */
     limits_json() {
@@ -181,13 +180,6 @@ export class PolicySqlRuntime {
         } finally {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
-    }
-    /**
-     * @returns {number}
-     */
-    get max_bytes_per_value() {
-        const ret = wasm.policysqlruntime_max_bytes_per_value(this.__wbg_ptr);
-        return ret >>> 0;
     }
     /**
      * Activates one immutable deployment snapshot.

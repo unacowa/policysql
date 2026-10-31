@@ -39,9 +39,9 @@ pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// The latest time the machine accepts (9999-12-31T23:59:59.999Z, minus a day so every
 /// deadline it computes stays in range).
 pub const MAX_TIME_MS: u64 = 253_402_300_799_999 - 86_400_000;
-/// Event JSON beyond the raw results: the forwarded input, ids, and framing.
-pub const EVENT_FIXED_BYTES: usize = 64 * 1024;
-/// Raw results per statement in an `Executed` event.
+/// Raw results per statement in an `Executed` event. This is the result-side bound of ADR
+/// 0027, which pull request 6 replaces with the compiled raw bound; the request side of the
+/// event is derived from the configured request limit ([`crate::bounds::event_bytes`]).
 pub const EVENT_RESULT_BYTES: usize = 1_048_576;
 
 /// The runtime limits the machine enforces (`RuntimeLimits`, ADR 0024 pull request 3).
@@ -55,6 +55,8 @@ pub struct Limits {
     pub max_callback_rows: u64,
     /// Statements per atomic envelope; bounds an `Executed` event.
     pub max_statements: u64,
+    /// The configured request body limit; bounds the body text an event carries.
+    pub max_request_bytes: u64,
 }
 
 impl Limits {
@@ -66,13 +68,27 @@ impl Limits {
         MAX_VOLATILE_BYTES.saturating_add(self.max_event_bytes().saturating_mul(4))
     }
 
-    /// The largest event JSON: `max_statements` × 1 MiB of raw results plus 64 KiB.
+    /// The largest event JSON, derived from the request limit and the raw result bound
+    /// (ADR 0027 "Derived internal bounds"): the JSON-escaped body, the auth, the binding,
+    /// `max_statements` × 1 MiB of raw results, and framing.
     #[must_use]
     pub fn max_event_bytes(&self) -> usize {
-        usize::try_from(self.max_statements.max(1))
+        let results = usize::try_from(self.max_statements.max(1))
             .unwrap_or(usize::MAX)
-            .saturating_mul(EVENT_RESULT_BYTES)
-            .saturating_add(EVENT_FIXED_BYTES)
+            .saturating_mul(EVENT_RESULT_BYTES);
+        crate::bounds::event_bytes(self.max_request_bytes(), results)
+    }
+
+    /// The configured request limit as a length.
+    #[must_use]
+    pub fn max_request_bytes(&self) -> usize {
+        usize::try_from(self.max_request_bytes).unwrap_or(usize::MAX)
+    }
+
+    /// The largest `identity_json` input for this configuration.
+    #[must_use]
+    pub fn max_hash_input_bytes(&self) -> usize {
+        crate::bounds::hash_input_bytes(self.max_request_bytes())
     }
 }
 

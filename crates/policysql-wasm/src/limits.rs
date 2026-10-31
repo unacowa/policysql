@@ -7,10 +7,12 @@
 //! still enforces in TypeScript and to advertise them in Capabilities. Nothing else holds a
 //! copy, so an advertised value is always the enforced one.
 //!
-//! The constructor shape is additive: the four original fields keep their meaning and stay
-//! required, and every field added by ADR 0024 pull request 3 is optional with a default
-//! equal to the constant it replaces. An existing `limits_json` is therefore accepted and
-//! enforced exactly as before, which is why adding them does not change `ABI_VERSION`.
+//! The four original fields stay required; every other configurable field is optional with
+//! a default. ADR 0027 pull request 3 added `max_request_bytes`, `max_json_values`, and
+//! `max_sql_bytes` (with a minimum, because a request limit below 64 KiB cannot carry the
+//! envelope) and made `limits_json` report every limit the ADR adds. The fields later pull
+//! requests make configurable (`max_bytes_per_value`, the parser limits, `max_response_bytes`)
+//! are reported at today's fixed values and are not constructor fields until then.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -28,28 +30,36 @@ const MAX_TRANSACTION_RESULT_BYTES: u64 = 65_536;
 struct Field {
     name: &'static str,
     default: Option<u64>,
+    min: u64,
     max: u64,
 }
 
-const FIELDS: [Field; 10] = [
+/// The largest `max_sql_bytes`, before the cross-check with `max_request_bytes`.
+const MAX_SQL_BYTES_CEILING: u64 = 1_048_576;
+
+const FIELDS: [Field; 13] = [
     Field {
         name: "max_rows",
         default: None,
+        min: 1,
         max: MAX_SAFE_INTEGER,
     },
     Field {
         name: "max_result_bytes",
         default: None,
+        min: 1,
         max: MAX_SAFE_INTEGER,
     },
     Field {
         name: "timeout_ms",
         default: None,
+        min: 1,
         max: MAX_SAFE_INTEGER,
     },
     Field {
         name: "max_statements",
         default: None,
+        min: 1,
         // The gateway holds it as `usize`, which is 32 bits on wasm32.
         max: 4_294_967_295,
     },
@@ -57,37 +67,65 @@ const FIELDS: [Field; 10] = [
     Field {
         name: "transaction_ms",
         default: Some(4_000),
+        min: 1,
         max: 60_000,
     },
     // Statements per interactive transaction; also the callback query sequence cap per check.
     Field {
         name: "max_transaction_statements",
         default: Some(8),
+        min: 1,
         max: 256,
     },
     // Cumulative result bytes per interactive transaction and per commit check's callbacks.
     Field {
         name: "max_transaction_result_bytes",
         default: Some(64_000),
+        min: 1,
         max: MAX_TRANSACTION_RESULT_BYTES,
     },
     // Cumulative callback query rows per commit check.
     Field {
         name: "max_callback_rows",
         default: Some(100),
+        min: 1,
         max: 10_000,
     },
     // Timeout of BEGIN for an interactive transaction.
     Field {
         name: "begin_timeout_ms",
         default: Some(1_000),
+        min: 1,
         max: 60_000,
     },
     // Connection and BEGIN timeout of the after-response cost observation.
     Field {
         name: "cost_timeout_ms",
         default: Some(1_000),
+        min: 1,
         max: 10_000,
+    },
+    // UTF-8 bytes of a request body as received (BOM included). At least the envelope a
+    // minimal request needs; at most what keeps the WASM peak under half the isolate.
+    Field {
+        name: "max_request_bytes",
+        default: Some(1_048_576),
+        min: 65_536,
+        max: 2_097_152,
+    },
+    // JSON values plus object member names in one request body.
+    Field {
+        name: "max_json_values",
+        default: Some(65_536),
+        min: 1_024,
+        max: 131_072,
+    },
+    // UTF-8 bytes of one statement's SQL; also at most `max_request_bytes`.
+    Field {
+        name: "max_sql_bytes",
+        default: Some(65_536),
+        min: 1_024,
+        max: MAX_SQL_BYTES_CEILING,
     },
 ];
 
@@ -108,23 +146,37 @@ pub(crate) struct RuntimeLimits {
     pub(crate) max_callback_rows: u64,
     pub(crate) begin_timeout_ms: u64,
     pub(crate) cost_timeout_ms: u64,
-    // Fixed protocol constants, enforced by core, never configured.
     pub(crate) max_request_bytes: u64,
+    pub(crate) max_json_values: u64,
     pub(crate) max_sql_bytes: u64,
+    // Fixed today, enforced by core and the binder, reported here so `ABI_VERSION` changes
+    // once (ADR 0027 pull request 3); later pull requests make them configurable.
+    pub(crate) max_bytes_per_value: u64,
+    pub(crate) max_parameters: u64,
+    pub(crate) max_expression_depth: u64,
+    pub(crate) max_projections: u64,
     pub(crate) max_joins: u64,
+    /// Reported at its default (`max_result_bytes` + 64 KiB); enforced from pull request 6.
+    pub(crate) max_response_bytes: u64,
+    // Fixed protocol constants, enforced by core, never configured.
     pub(crate) max_commit_checks: u64,
     pub(crate) max_hook_duration_ms: u64,
 }
 
-/// Fixed protocol constants reported next to the configured limits.
+/// Fixed limits reported next to the configured ones.
 #[allow(clippy::struct_field_names)]
 pub(crate) struct FixedLimits {
-    pub(crate) max_request_bytes: usize,
-    pub(crate) max_sql_bytes: usize,
+    pub(crate) max_bytes_per_value: usize,
+    pub(crate) max_parameters: usize,
+    pub(crate) max_expression_depth: usize,
+    pub(crate) max_projections: usize,
     pub(crate) max_joins: usize,
     pub(crate) max_commit_checks: usize,
     pub(crate) max_hook_duration_ms: u64,
 }
+
+/// The default of `max_response_bytes` beyond `max_result_bytes`.
+const RESPONSE_HEADROOM_BYTES: u64 = 65_536;
 
 /// Parses and validates the constructor's limits. Every failure names the field.
 pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLimits, String> {
@@ -150,11 +202,11 @@ pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLim
                 ));
             }
             (Some(value), _) => match value.as_u64() {
-                Some(value) if (1..=field.max).contains(&value) => value,
+                Some(value) if (field.min..=field.max).contains(&value) => value,
                 _ => {
                     return Err(format!(
-                        "runtime limits are invalid: `{}` must be an integer from 1 to {}",
-                        field.name, field.max
+                        "runtime limits are invalid: `{}` must be an integer from {} to {}",
+                        field.name, field.min, field.max
                     ));
                 }
             },
@@ -171,7 +223,17 @@ pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLim
         max_callback_rows,
         begin_timeout_ms,
         cost_timeout_ms,
+        max_request_bytes,
+        max_json_values,
+        max_sql_bytes,
     ] = values;
+    // A statement cannot be longer than the body that carries it.
+    if max_sql_bytes > max_request_bytes {
+        return Err(
+            "runtime limits are invalid: `max_sql_bytes` must not exceed `max_request_bytes`"
+                .to_owned(),
+        );
+    }
     Ok(RuntimeLimits {
         max_rows,
         max_result_bytes,
@@ -183,9 +245,17 @@ pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLim
         max_callback_rows,
         begin_timeout_ms,
         cost_timeout_ms,
-        max_request_bytes: as_u64(fixed.max_request_bytes),
-        max_sql_bytes: as_u64(fixed.max_sql_bytes),
+        max_request_bytes,
+        max_json_values,
+        max_sql_bytes,
+        max_bytes_per_value: as_u64(fixed.max_bytes_per_value),
+        max_parameters: as_u64(fixed.max_parameters),
+        max_expression_depth: as_u64(fixed.max_expression_depth),
+        max_projections: as_u64(fixed.max_projections),
         max_joins: as_u64(fixed.max_joins),
+        max_response_bytes: max_result_bytes
+            .saturating_add(RESPONSE_HEADROOM_BYTES)
+            .min(MAX_SAFE_INTEGER),
         max_commit_checks: as_u64(fixed.max_commit_checks),
         max_hook_duration_ms: fixed.max_hook_duration_ms,
     })
@@ -215,8 +285,10 @@ mod tests {
     use super::{FIELDS, FixedLimits, parse};
 
     const FIXED: FixedLimits = FixedLimits {
-        max_request_bytes: 1_048_576,
-        max_sql_bytes: 65_536,
+        max_bytes_per_value: 262_144,
+        max_parameters: 128,
+        max_expression_depth: 32,
+        max_projections: 128,
         max_joins: 8,
         max_commit_checks: 4,
         max_hook_duration_ms: 1_500,
@@ -239,6 +311,14 @@ mod tests {
         assert_eq!(limits.begin_timeout_ms, 1_000);
         assert_eq!(limits.cost_timeout_ms, 1_000);
         assert_eq!(limits.max_request_bytes, 1_048_576);
+        assert_eq!(limits.max_json_values, 65_536);
+        assert_eq!(limits.max_sql_bytes, 65_536);
+        assert_eq!(limits.max_bytes_per_value, 262_144);
+        assert_eq!(limits.max_parameters, 128);
+        assert_eq!(limits.max_expression_depth, 32);
+        assert_eq!(limits.max_projections, 128);
+        assert_eq!(limits.max_joins, 8);
+        assert_eq!(limits.max_response_bytes, 64_000 + 65_536);
         assert_eq!(limits.max_hook_duration_ms, 1_500);
     }
 
@@ -256,7 +336,7 @@ mod tests {
         assert_eq!(json["beginTimeoutMs"], 600);
         assert_eq!(json["costTimeoutMs"], 700);
         assert_eq!(json["maxRows"], 100);
-        assert_eq!(json.as_object().map(serde_json::Map::len), Some(15));
+        assert_eq!(json.as_object().map(serde_json::Map::len), Some(21));
     }
 
     #[test]
@@ -274,8 +354,9 @@ mod tests {
         };
         for field in &FIELDS {
             let too_large = (field.max + 1).to_string();
+            let too_small = (field.min - 1).to_string();
             for bad in [
-                "0",
+                too_small.as_str(),
                 "-1",
                 "1.5",
                 "\"8\"",
@@ -288,7 +369,7 @@ mod tests {
                     .unwrap_or_else(|| unreachable!("{} = {bad}", field.name));
                 assert!(error.contains(&format!("`{}`", field.name)), "{error}");
             }
-            for good in ["1".to_owned(), field.max.to_string()] {
+            for good in [field.min.to_string(), field.max.to_string()] {
                 let accepted = parse(&text_with(field.name, &good), &FIXED);
                 assert!(accepted.is_ok(), "{} = {good}: {accepted:?}", field.name);
             }

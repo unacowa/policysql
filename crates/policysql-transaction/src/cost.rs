@@ -27,9 +27,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// The largest input `cost_estimate_json` reads (plan rows are small; this bounds a fault).
-pub const MAX_COST_INPUT_BYTES: usize = 4 * 1024 * 1024;
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Input {
@@ -117,8 +114,8 @@ impl CostError {
 
 /// Evaluates the cost of one envelope (see the module documentation for the contract).
 #[must_use]
-pub fn cost_estimate_json(input: &str) -> String {
-    let outcome = if input.len() > MAX_COST_INPUT_BYTES {
+pub fn cost_estimate_json(input: &str, max_input_bytes: usize) -> String {
+    let outcome = if input.len() > max_input_bytes {
         Err(CostError::Unavailable)
     } else {
         serde_json::from_str::<Input>(input)
@@ -235,11 +232,15 @@ fn evaluate(input: &Input) -> Result<Vec<Estimate>, CostError> {
 
 #[cfg(test)]
 mod tests {
-    use super::cost_estimate_json;
+    use super::cost_estimate_json as estimate;
     use serde_json::{Value, json};
 
     fn run(input: &Value) -> Value {
-        serde_json::from_str(&cost_estimate_json(&input.to_string())).unwrap_or(Value::Null)
+        serde_json::from_str(&estimate(
+            &input.to_string(),
+            crate::bounds::hash_input_bytes(1_048_576),
+        ))
+        .unwrap_or(Value::Null)
     }
 
     fn catalog() -> Value {

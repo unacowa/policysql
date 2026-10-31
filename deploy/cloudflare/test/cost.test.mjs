@@ -12,6 +12,7 @@ import { observeCost } from "../src/step-effects.ts";
 import { validateConfig } from "../src/engine-config.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
 import { testBinding } from "./helpers/database.mjs";
+import { limitsJson } from "./helpers/limits.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 
@@ -106,7 +107,7 @@ test("logs a cost observation from the catalog bound and its own connection's us
   // The runtime's cost timeout, less what connecting took (the transport counts it).
   const { costTimeoutMs } = JSON.parse(runtime.limits_json());
   assert.ok(seen.timeoutMs <= costTimeoutMs && seen.timeoutMs > costTimeoutMs - 100, `${seen.timeoutMs}`);
-  assert.deepEqual(seen.options, { maxBytesPerValue: runtime.max_bytes_per_value });
+  assert.deepEqual(seen.options, { maxBytesPerValue: JSON.parse(runtime.limits_json()).maxBytesPerValue });
   assert.deepEqual(seen.statements, [{ sql: "EXPLAIN QUERY PLAN SELECT id FROM projects WHERE tenant_id = :t", args: { t: "tenant_a" } }]);
   assert.equal(seen.committed, true);
 });
@@ -169,7 +170,7 @@ test("a malformed per-value limit fails before the cost connection is opened", a
   t.mock.method(console, "log", () => {});
   for (const limit of [undefined, 0, "1024", Infinity]) {
     let connected = 0;
-    const runtime = { max_bytes_per_value: limit, limits_json: () => assert.fail("not reached") };
+    const runtime = { limits_json: limitsJson({ maxBytesPerValue: limit }) };
     await assert.rejects(observeCost(observe(), {
       getRuntime: () => runtime, database: { check() {}, connect() { connected++; } }, costCatalog,
     }), TypeError, String(limit));

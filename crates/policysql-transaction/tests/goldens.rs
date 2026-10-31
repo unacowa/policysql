@@ -27,8 +27,11 @@ fn identity_goldens_are_unchanged() {
     for golden in goldens {
         let name = text(&golden["name"]);
         let input = golden["input"].to_string();
-        let output: Value =
-            serde_json::from_str(&identity_json(&input)).unwrap_or_else(|_| unreachable!());
+        let output: Value = serde_json::from_str(&identity_json(
+            &input,
+            policysql_transaction::bounds::hash_input_bytes(1_048_576),
+        ))
+        .unwrap_or_else(|_| unreachable!());
         assert_eq!(output, golden["output"], "{name}");
     }
 }

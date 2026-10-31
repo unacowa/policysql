@@ -30,6 +30,12 @@ export type RuntimeLimits = {
   beginTimeoutMs?: number;
   /** Connection and BEGIN timeout of the cost observation, in milliseconds (default 1,000, at most 10,000). */
   costTimeoutMs?: number;
+  /** UTF-8 bytes of a request body as received, BOM included (default 1,048,576; 65,536 to 2,097,152; ADR 0027). */
+  maxRequestBytes?: number;
+  /** JSON values plus object member names in one request body (default 65,536; 1,024 to 131,072). */
+  maxJsonValues?: number;
+  /** UTF-8 bytes of one statement's SQL (default 65,536; 1,024 to 1,048,576, and at most `maxRequestBytes`). */
+  maxSqlBytes?: number;
 };
 
 // The constructor's field for each `RuntimeLimits` key. The runtime owns the defaults and
@@ -45,6 +51,9 @@ const RUNTIME_LIMIT_FIELDS: Readonly<Record<keyof RuntimeLimits, string>> = Obje
   maxCallbackRows: "max_callback_rows",
   beginTimeoutMs: "begin_timeout_ms",
   costTimeoutMs: "cost_timeout_ms",
+  maxRequestBytes: "max_request_bytes",
+  maxJsonValues: "max_json_values",
+  maxSqlBytes: "max_sql_bytes",
 });
 
 /**
@@ -88,10 +97,22 @@ export type EnforcedLimits = Readonly<{
   beginTimeoutMs: number;
   /** Connection and BEGIN timeout of the after-response cost observation. */
   costTimeoutMs: number;
-  /** Fixed protocol constants that core enforces. */
+  /** Request body bytes as received (configured, ADR 0027). */
   maxRequestBytes: number;
+  /** JSON values plus member names in one request body (configured). Result side: pull request 6. */
+  maxJsonValues: number;
+  /** UTF-8 bytes of one statement's SQL (configured). */
   maxSqlBytes: number;
+  /** Decoded bytes of one bytes value (fixed until pull request 5). */
+  maxBytesPerValue: number;
+  /** Input-side limits of the binder (fixed until pull request 4). */
+  maxParameters: number;
+  maxExpressionDepth: number;
+  maxProjections: number;
   maxJoins: number;
+  /** Reported at its default; enforced from pull request 6, so not advertised before. */
+  maxResponseBytes: number;
+  /** Fixed protocol constants that core enforces. */
   maxCommitChecks: number;
   maxHookDurationMs: number;
 }>;
@@ -100,7 +121,9 @@ export const ENFORCED_LIMIT_KEYS = Object.freeze([
   "maxRows", "maxResultBytes", "timeoutMs", "maxStatements",
   "transactionMs", "maxTransactionStatements", "maxTransactionResultBytes", "maxCallbackRows",
   "beginTimeoutMs", "costTimeoutMs",
-  "maxRequestBytes", "maxSqlBytes", "maxJoins", "maxCommitChecks", "maxHookDurationMs",
+  "maxRequestBytes", "maxJsonValues", "maxSqlBytes", "maxBytesPerValue",
+  "maxParameters", "maxExpressionDepth", "maxProjections", "maxJoins", "maxResponseBytes",
+  "maxCommitChecks", "maxHookDurationMs",
 ] as const);
 
 const invalid = () => new TypeError("PolicySQL runtime reports invalid limits");

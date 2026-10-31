@@ -42,6 +42,7 @@ pub const LIMITS: Limits = Limits {
     begin_timeout_ms: 1_000,
     max_callback_rows: 100,
     max_statements: 8,
+    max_request_bytes: 1_048_576,
 };
 
 #[derive(Clone, Debug)]

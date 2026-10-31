@@ -25,10 +25,6 @@ use crate::canonical::{self, Json};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
-/// The largest `identity_json` input. A body is at most 1 MiB (`MAX_BODY_BYTES`); embedding it
-/// as a JSON string at most doubles it.
-pub const MAX_INPUT_BYTES: usize = 4 * 1_048_576;
-
 const INTERNAL: &str = r#"{"error":{"code":"POLICYSQL_INTERNAL","message":"The request could not be completed.","path":null}}"#;
 const KEY_INVALID: &str = r#"{"error":{"code":"POLICYSQL_IDEMPOTENCY_KEY_INVALID","message":"Idempotency-Key must be 16-128 characters from letters, digits, and . _ : - + / = when provided.","path":null}}"#;
 
@@ -84,8 +80,8 @@ pub fn valid_idempotency_key(key: &str) -> bool {
 ///
 /// Anything else, an unknown member included, is `{"error":{"code":"POLICYSQL_INTERNAL",…}}`.
 #[must_use]
-pub fn identity_json(input: &str) -> String {
-    match compute(input) {
+pub fn identity_json(input: &str, max_input_bytes: usize) -> String {
+    match compute(input, max_input_bytes) {
         Ok(output) => output,
         Err(IdentityError::KeyInvalid) => KEY_INVALID.to_owned(),
         Err(IdentityError::Internal) => INTERNAL.to_owned(),
@@ -97,8 +93,8 @@ pub fn identity_json(input: &str) -> String {
 /// # Errors
 ///
 /// Returns [`IdentityError`] as documented on [`identity_json`].
-pub fn compute(input: &str) -> Result<String, IdentityError> {
-    if input.len() > MAX_INPUT_BYTES {
+pub fn compute(input: &str, max_input_bytes: usize) -> Result<String, IdentityError> {
+    if input.len() > max_input_bytes {
         return Err(IdentityError::Internal);
     }
     let input = canonical::parse(input).map_err(|_| IdentityError::Internal)?;
@@ -388,7 +384,11 @@ fn body(value: Option<&Json>) -> Result<Json, IdentityError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{identity_json, sha256_hex, valid_idempotency_key};
+    use super::{sha256_hex, valid_idempotency_key};
+
+    fn identity_json(input: &str) -> String {
+        super::identity_json(input, crate::bounds::hash_input_bytes(1_048_576))
+    }
 
     const AUTH: &str = r#"{"principal":"https://issuer.test:user_1","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_a"}}"#;
     const BINDING: &str =

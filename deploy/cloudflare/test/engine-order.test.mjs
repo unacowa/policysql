@@ -63,11 +63,13 @@ test("a rejected session is reported before the database is checked or the body 
 test("a malformed runtime per-value limit fails an execute before the body and before any connection", async (t) => {
   t.mock.method(console, "log", () => {});
   // Control: the same proxy with the runtime's own limit reads the body and gets past it.
-  const valid = getRuntime().max_bytes_per_value;
+  const valid = JSON.parse(getRuntime().limits_json()).maxBytesPerValue;
   for (const max_bytes_per_value of [valid, undefined, 0, -1, 1.5, "262144", Infinity]) {
     const runtime = getRuntime();
     const broken = new Proxy(runtime, {
-      get: (target, key) => (key === "max_bytes_per_value" ? max_bytes_per_value : Reflect.get(target, key)),
+      get: (target, key) => (key === "limits_json"
+        ? () => JSON.stringify({ ...JSON.parse(target.limits_json()), maxBytesPerValue: max_bytes_per_value })
+        : Reflect.get(target, key)),
     });
     let reads = 0;
     let connects = 0;

@@ -10,7 +10,7 @@ import { createWorkerEntrypoints } from "../../src/worker.ts";
 import { createMemoryTransactionOwners } from "./memory-owner.mjs";
 import { createSimulatedDurableObjects } from "./durable-object-owner.mjs";
 import { TursoHttpTransport } from "../../src/turso-http.ts";
-import { runtimeLimitsJson } from "../../src/limits.ts";
+import { runtimeLimits as readRuntimeLimits, runtimeLimitsJson } from "../../src/limits.ts";
 import { createErrorResponse } from "../../src/http/responses.ts";
 import { createJwtSessionVerifier } from "../../src/adapters/jwt.ts";
 import { createDatabaseRegistry } from "../../../../examples/database-routing/provider.ts";
@@ -31,7 +31,7 @@ export const MAX_BYTES_PER_VALUE = (() => {
     runtimeLimitsJson(limits),
     example("physical-schema.json"),
   );
-  try { return runtime.max_bytes_per_value; } finally { runtime.free(); }
+  try { return readRuntimeLimits(runtime).maxBytesPerValue; } finally { runtime.free(); }
 })();
 // A Hrana integer is a 64-bit decimal string: bind it exactly (beyond 2^53 as a BigInt).
 const exactInteger = (digits) => (Number.isSafeInteger(Number(digits)) ? Number(digits) : BigInt(digits));
@@ -204,6 +204,8 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   const ctx = { waitUntil(promise) { pending.push(promise); } };
   const hooksSeen = [];
   let app;
+  // May return the Response a validator sends instead of its answer (an oversized reply).
+  let validatorResponse = null;
   let validator = async (hook) => {
     const query = await app.fetchCallback(new Request(hook.query.url, {
       method: "POST", headers: { authorization: `Bearer ${hook.query.token}`, "content-type": "application/json" },
@@ -216,7 +218,10 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   // Each new owner gets the same ports a wrapper's deployment(env) builds (ADR 0021).
   const ownerDependencies = () => ({
     getRuntime: () => ownerRuntime ?? runtime, database, config,
-    fetchImpl: async (_url, options) => Response.json({ version: "1", allowed: await validator(JSON.parse(options.body)) }),
+    fetchImpl: async (_url, options) => {
+      const allowed = await validator(JSON.parse(options.body));
+      return validatorResponse?.({ allowed, options }) ?? Response.json({ version: "1", allowed });
+    },
   });
   const owners = ownerAdapter === "memory"
     ? createMemoryTransactionOwners(ownerDependencies, { background })
@@ -318,6 +323,8 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     redeploy(versions) { extraRuntimes.push(runtime); runtime = makeRuntime(versions); return runtime; },
     binding: (tenant) => registry.binding(`db_${tenant}`, env),
     setValidator(value) { validator = value; },
+    /** `hook({ allowed, options })` may return the validator's HTTP reply (for example an oversized one). */
+    replaceValidatorResponse(hook) { validatorResponse = hook; },
     counts: () => ({ checks, connects }),
     // Port-level views of the owners, identical for both adapters.
     ownerNames: () => owners.names(),

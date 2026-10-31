@@ -436,7 +436,7 @@ impl<C: Compiler> Step<'_, C> {
         let write = !compiled.read_only();
         // Idempotency applies to write envelopes only; a read envelope ignores the key.
         let idempotency = if write {
-            match Self::request_idempotency(&request) {
+            match Self::request_idempotency(&request, self.limits.max_hash_input_bytes()) {
                 Ok(idempotency) => idempotency,
                 Err(reply) => {
                     self.abort(reply);
@@ -512,6 +512,7 @@ impl<C: Compiler> Step<'_, C> {
     /// client's `POLICYSQL_IDEMPOTENCY_KEY_INVALID`.
     fn request_idempotency(
         request: &ExecuteRequest<'_>,
+        max_input_bytes: usize,
     ) -> std::result::Result<Option<Idempotency>, Box<RawValue>> {
         let Some(binding) = to_json(request.binding_value) else {
             return Err(error_reply(Code::Internal));
@@ -527,7 +528,7 @@ impl<C: Compiler> Step<'_, C> {
             members.push(("key".to_owned(), to_json(key).unwrap_or(Json::Null)));
         }
         let input = canonical::to_canonical(&Json::Object(members));
-        match identity::compute(&input) {
+        match identity::compute(&input, max_input_bytes) {
             Ok(output) => {
                 #[derive(Deserialize)]
                 struct Output {

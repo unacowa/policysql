@@ -1,6 +1,7 @@
 // Private server-adapter codec. Public clients use the PolicySQL JSON contract.
-// The adapter owns no copy of the per-value limit: every caller injects the value
-// advertised by the loaded runtime (policysql_core::bytes::MAX_BYTES_PER_VALUE).
+// The adapter owns no copy of the per-value limit: every caller injects the value the loaded
+// runtime reports in `limits_json` (`maxBytesPerValue`, ADR 0027).
+import { runtimeLimits } from "./limits.ts";
 
 // Well-formed binary value whose decoded size exceeds the per-value limit.
 // Transports map it to 413 POLICYSQL_LIMIT_EXCEEDED; malformed values stay TypeError.
@@ -18,10 +19,10 @@ export const bytesLimit = (value: unknown): number => {
   return value as number;
 };
 
-// Runtime metadata is validated like any other host input. Package construction
-// calls this once, so a malformed runtime is rejected before it serves requests.
-export const runtimeBytesLimit = (runtime: { max_bytes_per_value?: unknown } | null | undefined): number =>
-  bytesLimit(runtime?.max_bytes_per_value);
+// Runtime metadata is validated like any other host input (`runtimeLimits` checks the whole
+// report). Package construction calls this once, so a malformed runtime is rejected before it
+// serves requests.
+export const runtimeBytesLimit = (runtime: unknown): number => bytesLimit(runtimeLimits(runtime).maxBytesPerValue);
 
 export const encodeBlob = (value: Uint8Array, maxBytes: number): string => {
   if (value.byteLength > bytesLimit(maxBytes)) throw new BinaryLimitError();

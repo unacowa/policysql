@@ -36,11 +36,16 @@ use wasm_bindgen::prelude::*;
 /// `POLICYSQL_IDEMPOTENCY_KEY_INVALID` with a new message instead of `..._KEY_REQUIRED` (#65).
 /// 11: an owner answers an `atomic` input whose snapshot is not its own `POLICYSQL_INTERNAL`
 /// (the version-skew answer) instead of `POLICYSQL_TRANSACTION_CONFLICT` (#85).
-const ABI_VERSION: u32 = 12;
+/// 12: `commitFailed` with class `not_committed` is a definite rejection (#54).
+/// 13: ADR 0027 pull request 3: `limits_json` reports every limit the ADR adds and has new
+/// constructor fields (`max_request_bytes`, `max_json_values`, `max_sql_bytes`);
+/// `max_bytes_per_value` is no longer a getter; the request-path bounds are derived from
+/// `max_request_bytes` (compile, hash, and event inputs) and the session bound is 65,536
+/// bytes, so the same input can be accepted or answered differently; SQL over its limit is
+/// 413 `POLICYSQL_REQUEST_TOO_LARGE` (was 400). No identity value changed.
+const ABI_VERSION: u32 = 13;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
-const MAX_REQUEST_BYTES: usize = 1_048_576;
-const MAX_SQL_BYTES: usize = 65_536;
 const MAX_ACTIVE_EXECUTIONS: usize = 64;
 
 mod limits;
@@ -402,8 +407,10 @@ fn build_runtime(
     let limits = limits::parse(
         limits_json,
         &limits::FixedLimits {
-            max_request_bytes: MAX_REQUEST_BYTES,
-            max_sql_bytes: MAX_SQL_BYTES,
+            max_bytes_per_value: policysql_core::bytes::MAX_BYTES_PER_VALUE,
+            max_parameters: policysql_parser::BindingLimits::default().max_parameters,
+            max_expression_depth: policysql_parser::BindingLimits::default().max_expression_depth,
+            max_projections: policysql_parser::BindingLimits::default().max_projections,
             max_joins: policysql_parser::BindingLimits::default().max_joins,
             max_commit_checks: policysql_policy::MAX_COMMIT_CHECKS,
             max_hook_duration_ms: policysql_policy::MAX_COMMIT_CHECK_TIMEOUT_MS,
@@ -511,20 +518,13 @@ impl PolicySqlRuntime {
         ABI_VERSION
     }
 
-    #[wasm_bindgen(getter)]
-    #[must_use]
-    pub fn max_bytes_per_value(&self) -> usize {
-        policysql_core::bytes::MAX_BYTES_PER_VALUE
-    }
-
     /// The effective limits of this runtime as a JSON object with camelCase keys: the
     /// configured ones (defaults filled) and the fixed protocol constants core enforces. The
     /// engine enforces and advertises exactly these values; it holds no copy of its own
     /// (ADR 0024, "One place for limits").
     ///
-    /// Adding this method and the optional constructor fields does not change
-    /// `ABI_VERSION`: every existing `limits_json` is accepted and enforced as before, no
-    /// existing method or value changes, and the engine and this module ship in one bundle.
+    /// Every limit of ADR 0027 is a field here, including the per-value limit that used to
+    /// be a getter; the engine reads them all from this one report.
     #[must_use]
     pub fn limits_json(&self) -> String {
         serialize_or_internal(&self.limits)
@@ -614,7 +614,7 @@ impl PolicySqlRuntime {
                 error: error_body(RuntimeError::Internal),
             });
         };
-        let outcome = if session_json.len() > MAX_REQUEST_BYTES {
+        let outcome = if session_json.len() > policysql_transaction::bounds::SESSION_INPUT_BYTES {
             Err(session::SessionError::Malformed(
                 session::SessionFault::Shape,
             ))
@@ -653,7 +653,10 @@ impl PolicySqlRuntime {
     #[must_use]
     #[allow(clippy::unused_self)]
     pub fn identity_json(&self, input_json: &str) -> String {
-        policysql_transaction::identity_json(input_json)
+        policysql_transaction::identity_json(
+            input_json,
+            self.machine_limits().max_hash_input_bytes(),
+        )
     }
 
     /// One step of the transaction machine (ADR 0024): the current durable and volatile state
@@ -708,9 +711,11 @@ impl PolicySqlRuntime {
     /// engine only logs the result: cost admits or rejects nothing. The contract is
     /// [`policysql_transaction::cost`].
     #[must_use]
-    #[allow(clippy::unused_self)]
     pub fn cost_estimate_json(&self, input_json: &str) -> String {
-        policysql_transaction::cost_estimate_json(input_json)
+        policysql_transaction::cost_estimate_json(
+            input_json,
+            self.machine_limits().max_hash_input_bytes(),
+        )
     }
 
     /// Returns the activated, role-visible logical Catalog.
@@ -748,8 +753,8 @@ impl PolicySqlRuntime {
         raw_result_json: &str,
     ) -> Result<ValidatedExecuteResult, RuntimeError> {
         // The raw result is database output, not a client envelope: exceeding the
-        // private ABI bound is a result-size limit (413), never an invalid request.
-        if raw_result_json.len() > MAX_REQUEST_BYTES {
+        // result-side bound is a result-size limit (413), never an invalid request.
+        if raw_result_json.len() > policysql_transaction::machine::EVENT_RESULT_BYTES {
             return Err(RuntimeError::Rejected(RejectionKind::LimitExceeded));
         }
         let raw: RawExecuteResult =
@@ -825,7 +830,7 @@ impl PolicySqlRuntime {
     }
 
     fn catalog(&self, verified_auth_json: &str) -> Result<CatalogResponse, RuntimeError> {
-        if verified_auth_json.len() > MAX_REQUEST_BYTES {
+        if verified_auth_json.len() > policysql_transaction::bounds::AUTH_BYTES {
             return Err(RuntimeError::Envelope);
         }
         let auth = activate_auth(verified_auth_json, EndpointPermission::Catalog)?;
@@ -921,8 +926,19 @@ impl PolicySqlRuntime {
         request_json: &str,
         permission: &str,
     ) -> Result<(CompileResponse, Option<policysql_gateway::CompiledEnvelope>), RuntimeError> {
-        if verified_auth_json.len().saturating_add(request_json.len()) > MAX_REQUEST_BYTES {
+        // The derived bounds of ADR 0027: the engine already enforced `max_request_bytes` on
+        // the body, so an input over them is the configured limit's error, never a 400.
+        let max_request_bytes = self.machine_limits().max_request_bytes();
+        if verified_auth_json.len() > policysql_transaction::bounds::AUTH_BYTES {
             return Err(RuntimeError::Envelope);
+        }
+        // The envelope the engine or an owner builds around a body (an interactive command is
+        // wrapped as a one-statement envelope) can be a few bytes longer than the body, so the
+        // bound is the derived compile input, not `max_request_bytes` itself.
+        if verified_auth_json.len().saturating_add(request_json.len())
+            > policysql_transaction::bounds::compile_input_bytes(max_request_bytes)
+        {
+            return Err(RuntimeError::RequestTooLarge);
         }
         let endpoint = endpoint_permission(permission)?;
         let auth = activate_auth(verified_auth_json, endpoint)?;
@@ -933,6 +949,12 @@ impl PolicySqlRuntime {
                 || expected.policy_version != self.policy_version
         }) {
             return Err(RuntimeError::Snapshot);
+        }
+        // Before any statement is parsed: a statement over `max_sql_bytes` costs nothing more.
+        if let Some(index) = raw_request.statements.iter().position(|statement| {
+            statement.sql.len() > usize::try_from(self.limits.max_sql_bytes).unwrap_or(usize::MAX)
+        }) {
+            return Err(RuntimeError::SqlTooLargeAt(index));
         }
         validate_deployment_surface(&raw_request.statements, &self.catalog)?;
         let requests = raw_request
@@ -1274,6 +1296,10 @@ enum RuntimeError {
     Snapshot,
     Envelope,
     EnvelopeAt(usize),
+    /// The body, or what is derived from it, is over `max_request_bytes` (413).
+    RequestTooLarge,
+    /// Statement `n`'s SQL is over `max_sql_bytes` (413, path `/statements/<n>/sql`).
+    SqlTooLargeAt(usize),
     Rejected(RejectionKind),
     RejectedAt(RejectionKind, usize),
     Internal,
@@ -1885,7 +1911,8 @@ fn statement_request(
     endpoint: EndpointPermission,
     catalog: &Catalog,
 ) -> Result<StatementRequest, RuntimeError> {
-    if raw.sql.is_empty() || raw.sql.len() > MAX_SQL_BYTES {
+    // The length limit is checked by `compile` before any statement is parsed.
+    if raw.sql.is_empty() {
         return Err(RuntimeError::Envelope);
     }
     let expectation = raw.expect.unwrap_or(RequestExpectation {
@@ -2341,6 +2368,16 @@ fn error_body(runtime_error: RuntimeError) -> ErrorBody {
             "Request envelope is invalid.",
             Some(index),
         ),
+        RuntimeError::RequestTooLarge => error(
+            "POLICYSQL_REQUEST_TOO_LARGE",
+            "Request body exceeds the size limit.",
+            None,
+        ),
+        RuntimeError::SqlTooLargeAt(index) => ErrorBody {
+            code: "POLICYSQL_REQUEST_TOO_LARGE",
+            message: "A statement's SQL exceeds the size limit.",
+            path: Some(format!("/statements/{index}/sql")),
+        },
         RuntimeError::Rejected(kind) => rejection_body(kind, None),
         RuntimeError::RejectedAt(kind, index) => rejection_body(kind, Some(index)),
         RuntimeError::Session | RuntimeError::Internal => error(
@@ -2525,8 +2562,17 @@ resources:
             limits["transactionMs"], 4_000,
             "default of an omitted field"
         );
-        assert_eq!(limits["maxSqlBytes"], super::MAX_SQL_BYTES);
-        assert_eq!(limits["maxRequestBytes"], super::MAX_REQUEST_BYTES);
+        assert_eq!(limits["maxSqlBytes"], 65_536);
+        assert_eq!(limits["maxRequestBytes"], 1_048_576);
+        assert_eq!(limits["maxJsonValues"], 65_536);
+        assert_eq!(
+            limits["maxBytesPerValue"],
+            policysql_core::bytes::MAX_BYTES_PER_VALUE
+        );
+        assert_eq!(limits["maxParameters"], 128);
+        assert_eq!(limits["maxExpressionDepth"], 32);
+        assert_eq!(limits["maxProjections"], 128);
+        assert_eq!(limits["maxResponseBytes"], 10_000 + 65_536);
         assert_eq!(
             limits["maxJoins"],
             policysql_parser::BindingLimits::default().max_joins
@@ -2842,7 +2888,7 @@ resources:
         let reserved = session.replace("tenant_id", "subject_id");
         let oversized = format!(
             r#"{{"principal":"p","subject":"s","roles":["member"],"defaultRole":"member","access":["execute"],"session":{{"tenant_id":"{}"}}}}"#,
-            "x".repeat(super::MAX_REQUEST_BYTES)
+            "x".repeat(policysql_transaction::bounds::SESSION_INPUT_BYTES)
         );
         for (input, fault) in [
             ("not json", "shape"),
@@ -3259,5 +3305,171 @@ resources:
         let validated = runtime.validate_result_json(handle, 0, &raw.to_string());
         assert!(!validated.contains("error"));
         assert!(runtime.release_execution(handle));
+    }
+
+    // ADR 0027 pull request 3: the request-side limits, derived bounds, and their codes.
+    const AUTH: &str = r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#;
+
+    fn runtime_with(limits: &str) -> PolicySqlRuntime {
+        PolicySqlRuntime::new(CATALOG, POLICY, "schema_test", "policy_test", limits)
+            .unwrap_or_else(|_| unreachable!("valid runtime"))
+    }
+
+    fn parse_json(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).unwrap_or_else(|error| unreachable!("JSON: {error}"))
+    }
+
+    const REQUIRED: &str =
+        r#""max_rows":100,"max_result_bytes":10000,"timeout_ms":1000,"max_statements":4"#;
+
+    #[test]
+    fn sql_over_max_sql_bytes_is_413_with_its_path_before_it_is_parsed() {
+        for max_sql in [1_024_usize, 65_536] {
+            let runtime = runtime_with(&format!(r#"{{{REQUIRED},"max_sql_bytes":{max_sql}}}"#));
+            let at_limit = format!(
+                "SELECT id FROM projects /*{}*/",
+                " ".repeat(max_sql - "SELECT id FROM projects /**/".len())
+            );
+            assert_eq!(at_limit.len(), max_sql);
+            let request = |sql: &str| {
+                serde_json::json!({"statements": [
+                    {"sql": "SELECT id FROM projects", "params": {}},
+                    {"sql": sql, "params": {}},
+                ]})
+                .to_string()
+            };
+            let accepted = parse_json(&runtime.compile_json(AUTH, &request(&at_limit), "execute"));
+            assert!(accepted.get("error").is_none(), "{accepted}");
+            // One byte over, and not valid SQL: the length is judged first, so it is 413 and
+            // never a parse error (400).
+            let over = format!("{}x", "?".repeat(max_sql));
+            let rejected = parse_json(&runtime.compile_json(AUTH, &request(&over), "execute"));
+            assert_eq!(rejected["error"]["code"], "POLICYSQL_REQUEST_TOO_LARGE");
+            assert_eq!(rejected["error"]["path"], "/statements/1/sql");
+            // The limit counts UTF-8 bytes, not characters.
+            let multibyte = format!("{}{}", "SELECT 1 /*", "é".repeat(max_sql / 2));
+            assert!(multibyte.len() > max_sql && multibyte.chars().count() <= max_sql);
+            let rejected = parse_json(&runtime.compile_json(AUTH, &request(&multibyte), "execute"));
+            assert_eq!(rejected["error"]["code"], "POLICYSQL_REQUEST_TOO_LARGE");
+        }
+    }
+
+    #[test]
+    fn a_request_past_the_derived_compile_bound_is_413_and_one_at_the_limit_is_not() {
+        let runtime = runtime_with(&format!(r#"{{{REQUIRED},"max_request_bytes":65536}}"#));
+        let body = |len: usize| {
+            let head = r#"{"statements":[{"sql":"SELECT id FROM projects WHERE name = :name","params":{"name":""#;
+            let tail = r#""}}]}"#;
+            format!("{head}{}{tail}", "x".repeat(len - head.len() - tail.len()))
+        };
+        let at_limit = body(65_536);
+        assert_eq!(at_limit.len(), 65_536);
+        let accepted = parse_json(&runtime.compile_json(AUTH, &at_limit, "execute"));
+        assert!(accepted.get("error").is_none(), "{accepted}");
+        // The bound is the auth, the body limit, and 1,024 bytes of framing: the engine has
+        // already refused a body over the limit, so core answers only for what no limit admits.
+        let bound = policysql_transaction::bounds::compile_input_bytes(65_536) - AUTH.len();
+        let rejected = parse_json(&runtime.compile_json(AUTH, &body(bound + 1), "execute"));
+        assert_eq!(rejected["error"]["code"], "POLICYSQL_REQUEST_TOO_LARGE");
+        assert!(rejected["error"]["path"].is_null());
+        let still_ok = parse_json(&runtime.compile_json(AUTH, &body(bound), "execute"));
+        assert!(still_ok.get("error").is_none(), "{still_ok}");
+    }
+
+    #[test]
+    fn the_session_input_bound_is_65536_bytes() {
+        let runtime = runtime();
+        let session = |pad: usize| {
+            format!(
+                r#"{{"principal":"p","subject":"s","roles":["member"],"defaultRole":"member","access":["execute"],"session":{{"tenant_id":"{}"}}}}"#,
+                "x".repeat(pad)
+            )
+        };
+        let base = session(0).len();
+        let at_limit = session(65_536 - base);
+        assert_eq!(at_limit.len(), 65_536);
+        let accepted = parse_json(&runtime.authorize_session_json(&at_limit, None, "execute"));
+        assert!(accepted.get("error").is_none(), "{accepted}");
+        let over =
+            parse_json(&runtime.authorize_session_json(&session(65_537 - base), None, "execute"));
+        assert_eq!(over["error"]["code"], "POLICYSQL_INTERNAL");
+        assert_eq!(over["fault"], "shape");
+    }
+
+    /// The computed bounds never reject what the configured limits accept, at the defaults
+    /// and at the hard maxima, with a body of JSON-escaped text (the worst case for the step
+    /// event and the hash input) and the largest session and auth.
+    #[test]
+    fn computed_bounds_admit_everything_the_configured_limits_accept() {
+        for max_request in [65_536_usize, 1_048_576, 2_097_152] {
+            let runtime = runtime_with(&format!(
+                r#"{{{REQUIRED},"max_request_bytes":{max_request}}}"#
+            ));
+            let limits = runtime.machine_limits();
+            // A body of `max_request` bytes made of escaped quotes: embedded as a JSON string
+            // it is twice as long (and `\` doubles the same way).
+            let head = r#"{"statements":[{"sql":"SELECT id FROM projects WHERE name = :name","params":{"name":""#;
+            let tail = r#""}}]}"#;
+            let quotes = (max_request - head.len() - tail.len()) / 2;
+            let body = format!("{head}{}{tail}", r#"\""#.repeat(quotes));
+            assert!(body.len() <= max_request && body.len() >= max_request - 1);
+            let escaped = serde_json::to_string(&body).unwrap_or_default();
+            assert!(
+                escaped.len() > body.len() * 3 / 2 && escaped.len() <= 2 * body.len() + 2,
+                "the body about doubles, and never more, in the event"
+            );
+            // A session of the largest size the wrapper may pass, in the auth core emits.
+            let session = format!(
+                r#"{{"principal":"p","subject":"s","roles":["member"],"defaultRole":"member","access":["execute"],"session":{{"tenant_id":"t","pad":"{}"}}}}"#,
+                "x".repeat(65_536 - 150)
+            );
+            let authorized = parse_json(&runtime.authorize_session_json(&session, None, "execute"));
+            let auth = authorized["auth"].to_string();
+            assert!(
+                auth.len() <= policysql_transaction::bounds::AUTH_BYTES,
+                "{}",
+                auth.len()
+            );
+            // Compile: the auth and the body fit the derived compile bound.
+            assert!(
+                auth.len() + body.len()
+                    <= policysql_transaction::bounds::compile_input_bytes(max_request)
+            );
+            // Identity (hash input): auth, binding, key, and the body embedded as a string.
+            let binding = serde_json::json!({"version": 1, "scope": "tenant", "databaseId": "db_1", "generation": "1", "snapshot": "s"});
+            let input = serde_json::json!({
+                "op": "request", "endpoint": "execute", "auth": authorized["auth"],
+                "binding": binding, "body": body, "key": "k".repeat(128),
+            })
+            .to_string();
+            assert!(
+                input.len() <= limits.max_hash_input_bytes(),
+                "{max_request}"
+            );
+            let identity = parse_json(&runtime.identity_json(&input));
+            assert!(identity["idempotency"]["keyHash"].is_string(), "{identity}");
+            // The step event: the body text (escaped), the auth, the binding, and the raw
+            // results of every statement.
+            let event_floor = escaped.len()
+                + auth.len()
+                + binding.to_string().len()
+                + usize::try_from(limits.max_statements).unwrap_or(usize::MAX)
+                    * policysql_transaction::machine::EVENT_RESULT_BYTES;
+            assert!(event_floor <= limits.max_event_bytes(), "{max_request}");
+        }
+    }
+
+    #[test]
+    fn hash_input_over_its_bound_is_a_wrapper_fault_not_a_limit() {
+        let runtime = runtime_with(&format!(r#"{{{REQUIRED},"max_request_bytes":65536}}"#));
+        let bound = runtime.machine_limits().max_hash_input_bytes();
+        let over = format!(r#"{{"op":"callback","command":"{}"}}"#, "x".repeat(bound));
+        assert!(over.len() > bound);
+        assert!(runtime.identity_json(&over).contains("POLICYSQL_INTERNAL"));
+        assert!(
+            runtime
+                .cost_estimate_json(&over)
+                .contains("POLICYSQL_COST_ADMISSION_UNAVAILABLE")
+        );
     }
 }

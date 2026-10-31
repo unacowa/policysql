@@ -24,8 +24,8 @@ const valid = () => ({
 });
 
 const runtime = {
-  abi_version: 5, profile: "sqlite-turso-v1", snapshot: "test-snapshot", commit_checks_enabled: true, max_bytes_per_value: 1_024,
-  limits_json: limitsJson(),
+  abi_version: 5, profile: "sqlite-turso-v1", snapshot: "test-snapshot", commit_checks_enabled: true,
+  limits_json: limitsJson({ maxBytesPerValue: 1_024 }),
 };
 
 const leaks = (text) => text.includes(SECRET) || text.includes("sentinel-validator");
