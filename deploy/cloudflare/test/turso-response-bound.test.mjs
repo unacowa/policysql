@@ -125,7 +125,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       assert.equal(h.rows("a").filter((row) => row.id === "oversized_commit").length, 1);
     });
 
-    test(`${ownerAdapter}/${placement}: an oversized reply to an atomic statement is 413 and rolls back`, async (t) => {
+    test(`${ownerAdapter}/${placement}: an oversized reply to an atomic statement is 413 and nothing is committed`, async (t) => {
       t.mock.method(console, "log", () => {});
       const h = await setup(t, { hooks });
       const bodies = replaceOnce(h, "statement");
@@ -134,7 +134,9 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       assert.equal(reply.body.error.code, "POLICYSQL_LIMIT_EXCEEDED");
       bounded(bodies, "atomic statement");
       assert.equal(h.rows("a").filter((row) => row.id === "oversized_statement").length, 0);
-      assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
+      // The reply was not read, so its baton is unknown: no ROLLBACK is sent with the stale one (#96),
+      // and no COMMIT either; the server expires the stream and rolls the transaction back.
+      assert.equal(h.events.some(({ sql }) => sql === "ROLLBACK" || sql === "COMMIT"), false);
     });
   }
 
