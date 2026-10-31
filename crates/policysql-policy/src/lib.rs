@@ -294,7 +294,9 @@ impl PolicyBundle {
             })
     }
 
-    /// Parses and activates one immutable policy bundle against a Catalog snapshot.
+    /// Parses and activates one immutable policy bundle against a Catalog snapshot, checking
+    /// bytes presets against the default per-value limit. A deployment with a configured limit
+    /// must use [`Self::activate_with_value_limit`] (the runtime does).
     ///
     /// # Errors
     ///
@@ -1190,7 +1192,10 @@ fn parse_preset(
         .ok_or(PolicyError::IncompatibleOperand)?;
     policysql_core::bytes::decode(literal, max_bytes_per_value)
         .map(|value| PolicyOperand::Literal(LogicalValue::Bytes(value)))
-        .map_err(|_| PolicyError::IncompatibleOperand)
+        .map_err(|error| match error {
+            policysql_core::bytes::DecodeError::TooLarge => PolicyError::BytesPresetTooLarge,
+            policysql_core::bytes::DecodeError::InvalidEncoding => PolicyError::IncompatibleOperand,
+        })
 }
 
 fn parse_operand(
@@ -1931,6 +1936,8 @@ pub enum PolicyError {
     UnknownOperator,
     InvalidPredicate,
     IncompatibleOperand,
+    /// A bytes preset is longer than the deployment's per-value limit (`max_bytes_per_value`).
+    BytesPresetTooLarge,
     NullComparison,
     UnsupportedCapability,
     UnsupportedRedaction,
@@ -1958,6 +1965,9 @@ impl fmt::Display for PolicyError {
             Self::UnknownOperator => formatter.write_str("policy operator is unsupported"),
             Self::InvalidPredicate => formatter.write_str("policy predicate is invalid"),
             Self::IncompatibleOperand => formatter.write_str("policy operands are incompatible"),
+            Self::BytesPresetTooLarge => {
+                formatter.write_str("a bytes preset exceeds the per-value limit")
+            }
             Self::NullComparison => formatter.write_str("policy NULL requires is_null"),
             Self::UnsupportedCapability => formatter.write_str("policy capability is unsupported"),
             Self::UnsupportedRedaction => {

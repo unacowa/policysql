@@ -292,7 +292,13 @@ fn a_bytes_preset_over_the_configured_limit_fails_activation() {
             )
         };
         assert!(activate(limit).is_ok(), "{limit}");
-        assert!(activate(limit - 1).is_err(), "{limit}");
+        assert!(
+            matches!(
+                activate(limit - 1),
+                Err(policysql_policy::PolicyError::BytesPresetTooLarge)
+            ),
+            "{limit}"
+        );
         assert!(activate(HARD_MAX_BYTES_PER_VALUE).is_ok(), "{limit}");
     }
     // The update preset ("/wA=", two bytes) is bounded the same way.

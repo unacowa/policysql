@@ -429,7 +429,12 @@ fn build_runtime(
         snapshot.clone(),
         value_limit(&limits),
     )
-    .map_err(|_| js_error("policy activation failed"))?;
+    .map_err(|error| match error {
+        policysql_policy::PolicyError::BytesPresetTooLarge => js_error(
+            "runtime limits are invalid: `max_bytes_per_value` is smaller than a bytes preset in the policy",
+        ),
+        _ => js_error("policy activation failed"),
+    })?;
     let max_statements = usize::try_from(limits.max_statements)
         .map_err(|_| js_error("runtime limits are invalid: `max_statements` is too large"))?;
     // ADR 0024 "Bounds": a transaction record holds the last statement's reply and one

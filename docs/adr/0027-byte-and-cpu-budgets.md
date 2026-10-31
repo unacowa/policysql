@@ -513,6 +513,13 @@ parameter check and the adapter's result check; `PolicyBundle::activate_with_val
 presets at activation (the runtime parses its limits first). No literal 262,144 remains in the
 TypeScript source, so the engine-boundary rule needed no allow-list entry.
 
+*Construction order.* The runtime now parses its limits before it activates the policy (a bytes preset is
+checked against the configured limit), so an input with both a bad policy and bad limits is answered
+with the limits error where it used to get the policy error, and a preset over the limit is answered
+"runtime limits are invalid: `max_bytes_per_value` is smaller than a bytes preset in the policy". That is
+a host-side construction error, never sent to a client and not an output the ABI versions, so it is
+not a reason to bump.
+
 *No ABI bump.* `limits_json` has the same shape and, for every constructor input that existed, the same
 values (an omitted field reports the former fixed 262,144); every request and result is answered as
 before for those inputs; the only input whose treatment changes is one carrying the new field, which

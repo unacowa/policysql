@@ -396,6 +396,7 @@ const fn policy_rejection(error: &PolicyError) -> RejectionKind {
         | PolicyError::UnknownResource
         | PolicyError::UnknownOperator
         | PolicyError::InvalidPredicate
+        | PolicyError::BytesPresetTooLarge
         | PolicyError::IncompatibleOperand
         | PolicyError::NullComparison
         | PolicyError::UnsupportedRedaction

@@ -7,7 +7,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { runtimeLimits } from "../src/limits.ts";
+import { runtimeLimits, runtimeLimitsJson } from "../src/limits.ts";
+import { PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 import { harness, OWNER_ADAPTERS, RawJson } from "./helpers/routing.mjs";
 
@@ -265,6 +266,17 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(stored(h, id), DEFAULT);
   });
 }
+
+// `build_runtime` passes the configured limit to policy activation: the bytes fixture's insert
+// preset is 4 bytes ("AAEC/w=="), so a limit of 4 starts and a limit of 3 names the field.
+test("a bytes preset over the configured limit stops construction and names max_bytes_per_value", () => {
+  const construct = (maxBytesPerValue) => PolicySqlRuntime.newWithPhysicalSchema(
+    fixture.catalog, fixture.policy, "schema_preset_1", "policy_preset_1",
+    runtimeLimitsJson({ ...REQUIRED, maxBytesPerValue }), fixture.physicalSchema,
+  );
+  construct(4).free();
+  assert.throws(() => construct(3), (error) => String(error).includes("`max_bytes_per_value`") && String(error).includes("preset"));
+});
 
 test("the reference wrapper sets the per-value limit explicitly, and the runtime enforces that value", async (t) => {
   assert.equal(RUNTIME_LIMITS.maxBytesPerValue, DEFAULT);
