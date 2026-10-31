@@ -226,12 +226,16 @@ class TursoHttpTransaction {
 
   async execute(statements) {
     if (!this.open) throw databaseFailure();
+    // Nothing is sent yet: an expired deadline or an unencodable value fails here, and the stream
+    // stays usable (the baton is still the server's current one).
+    const timeoutMs = Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs));
+    const requests = statements.map((statement) => executeRequest(statement, this.maxBytes));
     let body;
     try {
       body = await this.transport.pipeline(
-        statements.map((statement) => executeRequest(statement, this.maxBytes)),
+        requests,
         this.baton,
-        Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
+        timeoutMs,
         binaryLimitExceeded,
         STATEMENT_RESPONSE_BYTES,
       );
