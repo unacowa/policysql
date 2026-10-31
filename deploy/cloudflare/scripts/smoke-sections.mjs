@@ -6,9 +6,9 @@ import { randomBytes } from "node:crypto";
 
 const json = { "content-type": "application/json" };
 let sequence = 0;
-const unique = (prefix) => `${prefix}_${String(Date.now()).padStart(15, "0")}_${String(sequence += 1).padStart(4, "0")}`;
+export const unique = (prefix) => `${prefix}_${String(Date.now()).padStart(15, "0")}_${String(sequence += 1).padStart(4, "0")}`;
 
-const client = ({ call, baseUrl, headers, expected }) => {
+export const client = ({ call, baseUrl, headers, expected }) => {
   const post = async (path, body, key) => {
     const started = Date.now();
     const response = await call(`${baseUrl}${path}`, {
@@ -30,8 +30,8 @@ const client = ({ call, baseUrl, headers, expected }) => {
   };
 };
 
-const errorCode = (outcome) => outcome.body?.error?.code ?? null;
-const summary = (outcome) => ({ status: outcome.status, code: errorCode(outcome), elapsedMs: outcome.elapsedMs });
+export const errorCode = (outcome) => outcome.body?.error?.code ?? null;
+export const summary = (outcome) => ({ status: outcome.status, code: errorCode(outcome), elapsedMs: outcome.elapsedMs });
 
 const INSERT_PROBE = "INSERT INTO smoke_checks (id, verdict) VALUES (:id, :verdict) RETURNING id, verdict";
 

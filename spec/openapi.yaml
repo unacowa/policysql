@@ -668,19 +668,26 @@ components:
             maxParameters:
               type: integer
               minimum: 1
-              description: Input-side limit on the distinct client parameter names of one statement. A request within it can still be refused if the policy makes its emitted statement too complex.
+              description: >-
+                Input-side limit on the distinct client parameter names of one statement (default 1024,
+                at most 16384). Over it is 413 POLICYSQL_LIMIT_EXCEEDED. The limits maxParameters,
+                maxExpressionDepth, maxProjections, and maxJoins bound only PolicySQL's own work on the
+                client's SQL: a request within them is parsed and bound, but they do not promise that it
+                compiles. Whether the emitted statement (the client's SQL composed with policy
+                predicates and companion columns) fits downstream limits is decided by measuring it, and a
+                statement that does not fit is 400 POLICYSQL_SQL_TOO_COMPLEX.
             maxExpressionDepth:
               type: integer
               minimum: 1
-              description: Input-side limit on the binder expression depth of the client's SQL.
+              description: Input-side limit on the binder expression depth of the client's SQL (default 32, at most 64). Over it is 413 POLICYSQL_LIMIT_EXCEEDED. See maxParameters.
             maxProjections:
               type: integer
               minimum: 1
-              description: Input-side limit on the result columns of one SELECT or RETURNING in the client's SQL.
+              description: Input-side limit on the result columns of one SELECT or RETURNING in the client's SQL (default 128, at most 2000). Over it is 413 POLICYSQL_LIMIT_EXCEEDED. See maxParameters.
             maxJoins:
               type: integer
               minimum: 1
-              description: Input-side limit on the joins in one FROM of the client's SQL.
+              description: Input-side limit on the joins in one FROM of the client's SQL (default 8, at most 63). Over it is 413 POLICYSQL_LIMIT_EXCEEDED. See maxParameters.
         transactions: { type: object }
         idempotency: { type: object }
     ErrorResponse:
@@ -693,7 +700,17 @@ components:
           additionalProperties: false
           required: [code, message, path, requestId]
           properties:
-            code: { type: string, pattern: '^POLICYSQL_[A-Z0-9_]+$' }
+            code:
+              type: string
+              pattern: '^POLICYSQL_[A-Z0-9_]+$'
+              description: >-
+                POLICYSQL_SQL_TOO_COMPLEX (400, path /statements/<i>, a fixed message) means the
+                statement PolicySQL emitted under the active policy reached a downstream complexity
+                limit (the parser's expression height or recursion depth, 2000 result columns, 32766
+                host parameters, a 50000-byte LIKE or GLOB pattern, the 1 MiB column-metadata guard of
+                the envelope, or a complexity refusal by the database). It is detected before COMMIT,
+                so nothing was committed and the request is a rejection; an interactive transaction
+                closes as failed. Retrying the same request does not help.
             message: { type: string }
             path: { type: [string, 'null'] }
             requestId: { type: string }

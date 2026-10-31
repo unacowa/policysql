@@ -385,6 +385,64 @@ impl<C: Compiler> Step<'_, C> {
         });
     }
 
+    /// The reply of a failed statement execution. A complexity refusal points at the failed
+    /// statement; a failure with a database code that no class names is logged as
+    /// `database_error_unclassified` with that code only (ADR 0027), never the message.
+    fn execute_failed_reply(
+        &mut self,
+        code: Code,
+        class: Class,
+        detail: FailureDetail<'_>,
+    ) -> Box<RawValue> {
+        if matches!(class, Class::Unavailable | Class::Unknown) {
+            if let Some(database_code) = detail.database_code {
+                let safe = database_code.len() <= 64
+                    && !database_code.is_empty()
+                    && database_code.bytes().all(|byte| {
+                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                    });
+                self.log(&json!({
+                    "event": "database_error_unclassified",
+                    "requestId": self.request,
+                    "code": if safe { database_code } else { "UNKNOWN" },
+                }));
+            }
+        }
+        if code == Code::SqlTooComplex {
+            let index = detail
+                .statement
+                .filter(|index| *index < self.limits.max_statements)
+                .unwrap_or(0);
+            let cause = detail
+                .cause
+                .filter(|cause| io::COMPLEXITY_CAUSES.contains(cause))
+                .unwrap_or("database");
+            let (schema, policy) = detail.versions.map_or((None, None), |versions| {
+                (Some(versions.schema), Some(versions.policy))
+            });
+            self.log(&json!({
+                "event": "sql_too_complex",
+                "requestId": self.request,
+                "statementIndex": index,
+                "schemaVersion": schema,
+                "policyVersion": policy,
+                "cause": cause,
+            }));
+            return io::error_reply_at(code, index);
+        }
+        error_reply(code)
+    }
+
+    /// Writes the log record a compile error carries (ADR 0027: `sql_too_complex`,
+    /// `emitted_sql_reparse_failed`) with this request's id. The record holds fixed fields only.
+    fn log_core_error(&mut self, error: &CoreError) {
+        if let Some(Value::Object(fields)) = &error.log {
+            let mut record = fields.clone();
+            record.insert("requestId".to_owned(), json!(self.request));
+            self.log(&Value::Object(record));
+        }
+    }
+
     /// The Worker forwarded an input compiled for a snapshot other than this owner's: the
     /// Worker and the owner are different deployments (a rollout, ADR 0024 "Snapshot skew").
     /// Nothing ran, and the Worker may be retrying a keyed write that already committed, so
@@ -954,18 +1012,37 @@ impl<C: Compiler> Step<'_, C> {
             (task @ Task::StatementExecute { .. }, Event::Executed { results, .. }) => {
                 self.executed(lane, request_id, task, results)
             }
-            (Task::StatementExecute { handle, .. }, Event::ExecuteFailed { class, .. }) => {
+            (
+                Task::StatementExecute {
+                    handle, versions, ..
+                },
+                Event::ExecuteFailed {
+                    class,
+                    statement,
+                    database_code,
+                    cause,
+                    ..
+                },
+            ) => {
                 self.set_connection(Connection::Open);
                 self.release(handle);
                 if self.rollback_requested() {
                     // The expiry that arrived meanwhile decides, not the failure it caused.
                     return self.expire_client(lane);
                 }
-                self.close(
-                    lane,
-                    Phase::Failed,
-                    Some(error_reply(Code::for_class(*class))),
-                )
+                // The transaction closes as failed and is rolled back, whatever the class
+                // (ADR 0027: a complexity refusal by the database is like any execute failure).
+                let reply = self.execute_failed_reply(
+                    Code::for_class(*class),
+                    *class,
+                    FailureDetail {
+                        statement: *statement,
+                        database_code: database_code.as_deref(),
+                        cause: cause.as_deref(),
+                        versions: Some(versions),
+                    },
+                );
+                self.close(lane, Phase::Failed, Some(reply))
             }
 
             // -- commit --
@@ -1323,6 +1400,7 @@ impl<C: Compiler> Step<'_, C> {
             Ok(validated) => validated,
             Err(error) => {
                 self.release(handle);
+                self.log_core_error(&error);
                 return self.close(lane, Phase::Failed, Some(io::core_error_reply(&error)));
             }
         };
@@ -1984,6 +2062,7 @@ impl<C: Compiler> Step<'_, C> {
         let compiled = match self.compile(command) {
             Ok(compiled) => compiled,
             Err(error) => {
+                self.log_core_error(&error);
                 return self.close(
                     WorkLane::Client,
                     Phase::Failed,
@@ -2295,6 +2374,14 @@ fn statement_response(
 struct Row<'a> {
     columns: &'a [String],
     values: &'a [Value],
+}
+
+/// What an `executeFailed` event says about its failure besides the class.
+pub(super) struct FailureDetail<'a> {
+    pub(super) statement: Option<u64>,
+    pub(super) database_code: Option<&'a str>,
+    pub(super) cause: Option<&'a str>,
+    pub(super) versions: Option<Versions>,
 }
 
 impl Serialize for Row<'_> {

@@ -91,7 +91,23 @@ pub enum Class {
     /// the `POLICYSQL_LIMIT_EXCEEDED` the TypeScript paths answered; only `executeFailed`
     /// carries it.
     Limit,
+    /// The database refused the statement for complexity (ADR 0027): `code == SQLITE_ERROR` and
+    /// a message on the allowlist of the `SQLITE_LIMIT_*` family, recognised by the adapter on
+    /// a statement request and never on COMMIT. Only `executeFailed` carries it, with the index
+    /// of the failed statement.
+    Complex,
 }
+
+/// The causes an adapter may name for a database complexity refusal (ADR 0027).
+pub const COMPLEXITY_CAUSES: [&str; 7] = [
+    "columns",
+    "parameters",
+    "like_pattern",
+    "database_expression_depth",
+    "function_arguments",
+    "compound_terms",
+    "join_tables",
+];
 
 /// Usage a driver reported for one statement.
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -152,6 +168,17 @@ pub enum Event {
     ExecuteFailed {
         id: u64,
         class: Class,
+        /// The failed statement's index within the `execute` effect (class `complex`).
+        #[serde(default)]
+        statement: Option<u64>,
+        /// The database's error code of a failure that no class names (the Hrana `code`),
+        /// logged as `database_error_unclassified`. Never the message.
+        #[serde(default, rename = "databaseCode")]
+        database_code: Option<String>,
+        /// Which complexity limit the database reached (class `complex`): one of the fixed
+        /// names of [`COMPLEXITY_CAUSES`]; anything else is logged as `database`.
+        #[serde(default)]
+        cause: Option<String>,
     },
     Committed {
         id: u64,
@@ -433,6 +460,7 @@ pub enum Code {
     IdempotencyConflict,
     KeyInvalid,
     Timeout,
+    SqlTooComplex,
 }
 
 impl Code {
@@ -498,6 +526,10 @@ impl Code {
                 "Idempotency-Key must be 16-128 characters from letters, digits, and . _ : - + / = when provided.",
             ),
             Self::Timeout => ("POLICYSQL_TIMEOUT", "The database operation timed out."),
+            Self::SqlTooComplex => (
+                "POLICYSQL_SQL_TOO_COMPLEX",
+                "The statement is too complex to run under the active policy.",
+            ),
         }
     }
 
@@ -511,6 +543,7 @@ impl Code {
             Class::Rejected => Self::BindingRejected,
             Class::NotCommitted | Class::Unknown => Self::Internal,
             Class::Limit => Self::LimitExceeded,
+            Class::Complex => Self::SqlTooComplex,
         }
     }
 }
@@ -557,6 +590,22 @@ pub fn error_reply(code: Code) -> Box<RawValue> {
             code,
             message,
             path: None,
+        },
+    })
+}
+
+/// `{"ok":false,"error":{…}}` for one of the machine's own codes, pointing at statement
+/// `index` of the request.
+#[must_use]
+pub fn error_reply_at(code: Code, index: u64) -> Box<RawValue> {
+    let (code, message) = code.parts();
+    let path = format!("/statements/{index}");
+    to_raw(&ErrorReply {
+        ok: false,
+        error: ErrorBody {
+            code,
+            message,
+            path: Some(&path),
         },
     })
 }

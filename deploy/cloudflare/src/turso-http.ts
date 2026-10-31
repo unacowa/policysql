@@ -5,6 +5,7 @@ import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.t
 import { discardBody, fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { BodyTooLargeError, readBoundedText } from "./bounded-body.ts";
+import { statementFailure } from "./database-complexity.ts";
 
 // Statement replies carry result rows: the result-side bound, replaced by the compiled raw
 // bound in ADR 0027 pull request 6. Control replies (BEGIN, COMMIT, ROLLBACK, close) carry no
@@ -230,6 +231,11 @@ class TursoHttpTransaction {
       binaryLimitExceeded,
       STATEMENT_RESPONSE_BYTES,
     );
+    // The Hrana error object of a refused statement is read here, and only for statement
+    // requests (never BEGIN, COMMIT, or ROLLBACK): the first refused statement decides, and its
+    // message is read only to classify it (src/database-complexity.ts).
+    const refused = body.results.findIndex((entry) => entry?.type === "error");
+    if (refused >= 0) throw statementFailure(body.results[refused].error, refused);
     if (!body.baton) throw databaseFailure();
     this.baton = body.baton;
     const results = body.results.map((entry) => decodeResult(entry, this.maxBytes));

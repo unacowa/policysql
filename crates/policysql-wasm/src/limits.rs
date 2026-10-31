@@ -11,8 +11,11 @@
 //! a default. ADR 0027 pull request 3 added `max_request_bytes`, `max_json_values`, and
 //! `max_sql_bytes` (with a minimum, because a request limit below 64 KiB cannot carry the
 //! envelope) and made `limits_json` report every limit the ADR adds. The fields later pull
-//! requests make configurable (`max_bytes_per_value`, the parser limits, `max_response_bytes`)
-//! are reported at today's fixed values and are not constructor fields until then.
+//! requests make configurable (`max_bytes_per_value`, `max_response_bytes`) are reported at
+//! today's fixed values and are not constructor fields until then. Pull request 4 made the
+//! four input-side parser limits (`max_parameters`, `max_expression_depth`, `max_projections`,
+//! `max_joins`) constructor fields: they bound only `PolicySQL`'s own work on the client's SQL
+//! and promise nothing about the emitted statement.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -37,7 +40,7 @@ struct Field {
 /// The largest `max_sql_bytes`, before the cross-check with `max_request_bytes`.
 const MAX_SQL_BYTES_CEILING: u64 = 1_048_576;
 
-const FIELDS: [Field; 13] = [
+const FIELDS: [Field; 17] = [
     Field {
         name: "max_rows",
         default: None,
@@ -127,6 +130,34 @@ const FIELDS: [Field; 13] = [
         min: 1_024,
         max: MAX_SQL_BYTES_CEILING,
     },
+    // Distinct client parameter names in one statement (input-side).
+    Field {
+        name: "max_parameters",
+        default: Some(1_024),
+        min: 1,
+        max: 16_384,
+    },
+    // Binder expression depth of the client's SQL (input-side).
+    Field {
+        name: "max_expression_depth",
+        default: Some(32),
+        min: 1,
+        max: 64,
+    },
+    // Result columns per SELECT/RETURNING in the client's SQL (input-side).
+    Field {
+        name: "max_projections",
+        default: Some(128),
+        min: 1,
+        max: 2_000,
+    },
+    // Joins per FROM in the client's SQL (input-side; SQLite allows 64 tables in a join).
+    Field {
+        name: "max_joins",
+        default: Some(8),
+        min: 1,
+        max: 63,
+    },
 ];
 
 /// The effective limits of one runtime, as the engine reads them.
@@ -149,13 +180,13 @@ pub(crate) struct RuntimeLimits {
     pub(crate) max_request_bytes: u64,
     pub(crate) max_json_values: u64,
     pub(crate) max_sql_bytes: u64,
-    // Fixed today, enforced by core and the binder, reported here so `ABI_VERSION` changes
-    // once (ADR 0027 pull request 3); later pull requests make them configurable.
-    pub(crate) max_bytes_per_value: u64,
     pub(crate) max_parameters: u64,
     pub(crate) max_expression_depth: u64,
     pub(crate) max_projections: u64,
     pub(crate) max_joins: u64,
+    // Fixed today, enforced by core, reported here so `ABI_VERSION` changed once for all of
+    // them (ADR 0027 pull request 3); a later pull request makes it configurable.
+    pub(crate) max_bytes_per_value: u64,
     /// Reported at its default (`max_result_bytes` + 64 KiB); enforced from pull request 6.
     pub(crate) max_response_bytes: u64,
     // Fixed protocol constants, enforced by core, never configured.
@@ -167,10 +198,6 @@ pub(crate) struct RuntimeLimits {
 #[allow(clippy::struct_field_names)]
 pub(crate) struct FixedLimits {
     pub(crate) max_bytes_per_value: usize,
-    pub(crate) max_parameters: usize,
-    pub(crate) max_expression_depth: usize,
-    pub(crate) max_projections: usize,
-    pub(crate) max_joins: usize,
     pub(crate) max_commit_checks: usize,
     pub(crate) max_hook_duration_ms: u64,
 }
@@ -226,6 +253,10 @@ pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLim
         max_request_bytes,
         max_json_values,
         max_sql_bytes,
+        max_parameters,
+        max_expression_depth,
+        max_projections,
+        max_joins,
     ] = values;
     // A statement cannot be longer than the body that carries it.
     if max_sql_bytes > max_request_bytes {
@@ -248,11 +279,11 @@ pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLim
         max_request_bytes,
         max_json_values,
         max_sql_bytes,
+        max_parameters,
+        max_expression_depth,
+        max_projections,
+        max_joins,
         max_bytes_per_value: as_u64(fixed.max_bytes_per_value),
-        max_parameters: as_u64(fixed.max_parameters),
-        max_expression_depth: as_u64(fixed.max_expression_depth),
-        max_projections: as_u64(fixed.max_projections),
-        max_joins: as_u64(fixed.max_joins),
         max_response_bytes: max_result_bytes
             .saturating_add(RESPONSE_HEADROOM_BYTES)
             .min(MAX_SAFE_INTEGER),
@@ -286,10 +317,6 @@ mod tests {
 
     const FIXED: FixedLimits = FixedLimits {
         max_bytes_per_value: 262_144,
-        max_parameters: 128,
-        max_expression_depth: 32,
-        max_projections: 128,
-        max_joins: 8,
         max_commit_checks: 4,
         max_hook_duration_ms: 1_500,
     };
@@ -314,7 +341,7 @@ mod tests {
         assert_eq!(limits.max_json_values, 65_536);
         assert_eq!(limits.max_sql_bytes, 65_536);
         assert_eq!(limits.max_bytes_per_value, 262_144);
-        assert_eq!(limits.max_parameters, 128);
+        assert_eq!(limits.max_parameters, 1_024);
         assert_eq!(limits.max_expression_depth, 32);
         assert_eq!(limits.max_projections, 128);
         assert_eq!(limits.max_joins, 8);
@@ -336,6 +363,15 @@ mod tests {
         assert_eq!(json["beginTimeoutMs"], 600);
         assert_eq!(json["costTimeoutMs"], 700);
         assert_eq!(json["maxRows"], 100);
+        let limits = with(
+            r#""max_parameters":16384,"max_expression_depth":64,"max_projections":2000,"max_joins":63"#,
+        )
+        .unwrap_or_else(|error| unreachable!("{error}"));
+        let json = serde_json::to_value(limits).unwrap_or_else(|error| unreachable!("{error}"));
+        assert_eq!(json["maxParameters"], 16_384);
+        assert_eq!(json["maxExpressionDepth"], 64);
+        assert_eq!(json["maxProjections"], 2_000);
+        assert_eq!(json["maxJoins"], 63);
         assert_eq!(json.as_object().map(serde_json::Map::len), Some(21));
     }
 

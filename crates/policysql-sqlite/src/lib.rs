@@ -6,6 +6,7 @@ use policysql_core::{
     LogicalValue, OperationKind, ResultName, ServerParameterName, SnapshotId, ValueDescriptor,
     ValueRepresentation,
 };
+pub mod complexity;
 mod parameter_contracts;
 
 use parameter_contracts::validate_client_parameters;
@@ -15,7 +16,7 @@ pub use parameter_contracts::{
 };
 
 use policysql_execution::{
-    CandidateExecutionPlan, ExecutionLimits, PlanVerifier, ResultColumnDescriptor,
+    CandidateExecutionPlan, ComplexityCause, ExecutionLimits, PlanVerifier, ResultColumnDescriptor,
     VerificationError, VerifiedExecutionPlan,
 };
 use policysql_ir::{
@@ -48,6 +49,18 @@ pub struct SqliteProfile;
 pub struct EmittedSql {
     pub sql: String,
     pub server_parameters: BTreeMap<ServerParameterName, LogicalValue>,
+    /// Exact `Σ (2·|alias| + 2·|declared type| + 32)` over the emitted result columns, the
+    /// per-statement term of the envelope's column-metadata guard (ADR 0027).
+    pub column_metadata_bytes: u64,
+    /// The names (with the leading `:`) of the variables used as `LIKE`/`GLOB` patterns.
+    pub pattern_variables: Vec<String>,
+}
+
+/// One emitted result column, as the column-metadata guard sizes it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EmittedColumn {
+    alias_bytes: usize,
+    declared_type_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -68,6 +81,7 @@ impl TypedSqliteEmitter {
             next_literal: 0,
             parameter_indices: BTreeMap::new(),
             next_parameter: 0,
+            columns: Vec::new(),
         };
         let statement = match &plan.statement {
             BoundStatement::Select(select) => {
@@ -86,9 +100,37 @@ impl TypedSqliteEmitter {
             }
             BoundStatement::Delete(delete) => state.delete(delete)?,
         };
+        // The exact counts of the statement about to be printed (ADR 0027): the parser's
+        // height and recursion caps, and the database's column and host-parameter limits.
+        let measure = complexity::measure(&statement).map_err(|complexity::Uncountable| {
+            EmitError::InvariantViolation("uncountable emitted node".to_owned())
+        })?;
+        if measure.columns > complexity::MAX_RESULT_COLUMNS {
+            return Err(EmitError::TooComplex(ComplexityCause::Columns));
+        }
+        if usize::try_from(state.next_parameter).unwrap_or(usize::MAX)
+            > complexity::MAX_HOST_PARAMETERS
+        {
+            return Err(EmitError::TooComplex(ComplexityCause::Parameters));
+        }
+        if measure.height_exceeded() {
+            return Err(EmitError::TooComplex(ComplexityCause::Height));
+        }
+        if measure.recursion_exceeded() {
+            return Err(EmitError::TooComplex(ComplexityCause::Recursion));
+        }
+        let column_metadata_bytes = state
+            .columns
+            .iter()
+            .map(|column| {
+                2 * column.alias_bytes as u64 + 2 * column.declared_type_bytes as u64 + 32
+            })
+            .sum();
         Ok(EmittedSql {
             sql: statement.to_string(),
             server_parameters: state.server_parameters,
+            column_metadata_bytes,
+            pattern_variables: measure.pattern_variables,
         })
     }
 }
@@ -102,6 +144,9 @@ struct AstEmitState<'a> {
     next_literal: u64,
     parameter_indices: BTreeMap<String, NonZeroU32>,
     next_parameter: u32,
+    /// The result columns of the statement's own select list or `RETURNING` (a subquery's
+    /// are set aside while it is emitted).
+    columns: Vec<EmittedColumn>,
 }
 
 impl AstEmitState<'_> {
@@ -144,7 +189,27 @@ impl AstEmitState<'_> {
             self.expression(&projection.expression)?.into_boxed(),
             Some(Self::alias(projection.output_name.as_str())),
         )];
+        let direct = match &projection.expression {
+            BoundExpr::ConditionalOutput { value, .. } => value.direct_column(),
+            other => other.direct_column(),
+        };
+        let declared_type_bytes = direct
+            .and_then(|column| {
+                self.catalog
+                    .resource_by_id(column.id.resource())
+                    .and_then(|resource| resource.column_by_id(column.id))
+            })
+            .map_or(0, |column| column.declared_type_bytes);
+        self.columns.push(EmittedColumn {
+            alias_bytes: projection.output_name.as_str().len(),
+            declared_type_bytes,
+        });
         if let BoundExpr::ConditionalOutput { visible_if, .. } = &projection.expression {
+            let visibility = format!("{VISIBILITY_COLUMN_PREFIX}{index}");
+            self.columns.push(EmittedColumn {
+                alias_bytes: visibility.len(),
+                declared_type_bytes: 0,
+            });
             columns.push(ResultColumn::Expr(
                 Expr::Case {
                     base: None,
@@ -155,7 +220,7 @@ impl AstEmitState<'_> {
                     else_expr: Some(Expr::Literal(Literal::False).into_boxed()),
                 }
                 .into_boxed(),
-                Some(Self::alias(&format!("{VISIBILITY_COLUMN_PREFIX}{index}"))),
+                Some(Self::alias(&visibility)),
             ));
         }
         Ok(columns)
@@ -173,6 +238,10 @@ impl AstEmitState<'_> {
     }
 
     fn check_column(&mut self, check: &BoundExpr) -> Result<ResultColumn, EmitError> {
+        self.columns.push(EmittedColumn {
+            alias_bytes: CHECK_COLUMN.len(),
+            declared_type_bytes: 0,
+        });
         Ok(ResultColumn::Expr(
             Expr::Case {
                 base: None,
@@ -471,6 +540,10 @@ impl AstEmitState<'_> {
             Self::quoted_name("__policysql_json"),
             Self::quoted_name("value"),
         );
+        self.columns.push(EmittedColumn {
+            alias_bytes: select.output_name.as_str().len(),
+            declared_type_bytes: 0,
+        });
         let aggregate = Expr::FunctionCall {
             name: Name::exact("JSON_GROUP_ARRAY".to_owned()),
             distinctness: None,
@@ -686,7 +759,11 @@ impl AstEmitState<'_> {
                     .catalog
                     .resource_by_id(select.resource)
                     .ok_or(EmitError::UnknownResource)?;
-                Expr::Exists(self.select_node(select, resource)?)
+                // A subquery's select list is not a result column of the statement.
+                let outer = std::mem::take(&mut self.columns);
+                let nested = self.select_node(select, resource);
+                self.columns = outer;
+                Expr::Exists(nested?)
             }
             BoundExpr::CountAll(_) => Expr::FunctionCallStar {
                 name: Name::exact("COUNT".to_owned()),
@@ -936,9 +1013,8 @@ impl SqliteInvariantVerifier {
         expected_result: Vec<ResultColumnDescriptor>,
         expected_snapshot: SnapshotId,
     ) -> Result<Self, EmitError> {
-        let expected_statement = parse_single_statement(expected_sql).map_err(|()| {
-            EmitError::InvariantViolation("expected protected SQL does not parse".to_owned())
-        })?;
+        let expected_statement =
+            parse_single_statement(expected_sql).map_err(|()| EmitError::ReparseFailed)?;
         Ok(Self {
             profile_id: BackendProfileId::new(PROFILE_ID)
                 .map_err(|_| EmitError::InvariantViolation("invalid profile ID".to_owned()))?,
@@ -1111,6 +1187,39 @@ impl PlanVerifier<SqliteProfile> for SqliteInvariantVerifier {
     }
 }
 
+/// A `LIKE`/`GLOB` pattern that is a bound value (a client parameter, a server parameter, or a
+/// literal the emitter turned into one) is measured here, when the parameters are bound: its
+/// exact byte length against the database's pattern limit (ADR 0027). A pattern computed by an
+/// expression is the database's to refuse.
+fn check_pattern_lengths(
+    emitted: &EmittedSql,
+    client_parameters: &BTreeMap<ClientParameterName, LogicalValue>,
+) -> Result<(), CompileError> {
+    for variable in &emitted.pattern_variables {
+        let name = variable.strip_prefix(':').unwrap_or(variable);
+        let value = client_parameters
+            .iter()
+            .find(|(candidate, _)| candidate.as_str() == name)
+            .map(|(_, value)| value)
+            .or_else(|| {
+                emitted
+                    .server_parameters
+                    .iter()
+                    .find(|(candidate, _)| candidate.as_str() == name)
+                    .map(|(_, value)| value)
+            });
+        let length = match value {
+            Some(LogicalValue::String(text)) => text.len(),
+            Some(LogicalValue::Bytes(bytes)) => bytes.len(),
+            _ => 0,
+        };
+        if length > complexity::MAX_LIKE_PATTERN_BYTES {
+            return Err(EmitError::TooComplex(ComplexityCause::LikePattern).into());
+        }
+    }
+    Ok(())
+}
+
 fn parse_single_statement(sql: &str) -> Result<Stmt, ()> {
     let mut parsed = Parser::new(sql.as_bytes())
         .collect::<Result<Vec<_>, _>>()
@@ -1160,6 +1269,7 @@ pub fn compile_verified_select(
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
     let analysis = analyze_client_parameters(&plan.statement, catalog);
     validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    check_pattern_lengths(&emitted, &client_parameters)?;
     let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
     let expected_result = result_descriptors(&plan.statement, catalog, &client_parameters)?;
@@ -1183,6 +1293,7 @@ pub fn compile_verified_select(
         snapshot,
         profile_id,
     )
+    .with_column_metadata_bytes(emitted.column_metadata_bytes)
     .with_bindings(
         client_parameters,
         emitted.server_parameters,
@@ -1215,6 +1326,7 @@ pub fn compile_verified_insert(
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
     let analysis = analyze_client_parameters(&plan.statement, catalog);
     validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    check_pattern_lengths(&emitted, &client_parameters)?;
     let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
     let expected_result = result_descriptors(&plan.statement, catalog, &client_parameters)?;
@@ -1243,6 +1355,7 @@ pub fn compile_verified_insert(
         snapshot,
         profile_id,
     )
+    .with_column_metadata_bytes(emitted.column_metadata_bytes)
     .with_bindings(
         client_parameters,
         emitted.server_parameters,
@@ -1273,6 +1386,7 @@ pub fn compile_verified_update(
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
     let analysis = analyze_client_parameters(&plan.statement, catalog);
     validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    check_pattern_lengths(&emitted, &client_parameters)?;
     let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
     let expected_result = result_descriptors(&plan.statement, catalog, &client_parameters)?;
@@ -1303,6 +1417,7 @@ pub fn compile_verified_update(
         snapshot,
         profile_id,
     )
+    .with_column_metadata_bytes(emitted.column_metadata_bytes)
     .with_bindings(
         client_parameters,
         emitted.server_parameters,
@@ -1336,6 +1451,7 @@ pub fn compile_verified_delete(
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
     let analysis = analyze_client_parameters(&plan.statement, catalog);
     validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    check_pattern_lengths(&emitted, &client_parameters)?;
     let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
     let expected_result = result_descriptors(&plan.statement, catalog, &client_parameters)?;
@@ -1363,6 +1479,7 @@ pub fn compile_verified_delete(
         snapshot,
         profile_id,
     )
+    .with_column_metadata_bytes(emitted.column_metadata_bytes)
     .with_bindings(
         client_parameters,
         emitted.server_parameters,
@@ -1976,6 +2093,10 @@ pub enum EmitError {
     TooManyLiterals,
     Formatting,
     InvariantViolation(String),
+    /// The emitted statement reached a downstream complexity limit (ADR 0027).
+    TooComplex(ComplexityCause),
+    /// The emitted SQL text does not parse again: an emitter bug, never client input.
+    ReparseFailed,
 }
 
 impl fmt::Display for EmitError {
@@ -1998,6 +2119,14 @@ impl fmt::Display for EmitError {
             Self::InvariantViolation(message) => {
                 write!(formatter, "emission invariant failed: {message}")
             }
+            Self::TooComplex(cause) => {
+                write!(
+                    formatter,
+                    "emitted statement is too complex: {}",
+                    cause.name()
+                )
+            }
+            Self::ReparseFailed => formatter.write_str("emitted SQL does not parse again"),
         }
     }
 }

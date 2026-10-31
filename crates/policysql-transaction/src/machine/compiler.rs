@@ -37,6 +37,10 @@ pub struct CoreError {
     pub code: String,
     pub message: String,
     pub path: Option<String>,
+    /// A log record the machine writes (with the request id added) when it answers with this
+    /// error: fixed fields only, never SQL text, parameters, or names (ADR 0027).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<serde_json::Value>,
 }
 
 impl CoreError {
@@ -46,6 +50,7 @@ impl CoreError {
             code: code.to_owned(),
             message: message.to_owned(),
             path: None,
+            log: None,
         }
     }
 }

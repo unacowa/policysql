@@ -2,12 +2,14 @@
 
 use policysql_catalog::Catalog;
 use policysql_core::{ClientParameterName, LogicalValue, SnapshotId, TrustedSession};
-use policysql_execution::{DatabaseExecutor, ExecutionLimits, VerifiedExecutionPlan};
+use policysql_execution::{
+    ComplexityCause, DatabaseExecutor, ExecutionLimits, VerifiedExecutionPlan,
+};
 use policysql_ir::BoundStatement;
-use policysql_parser::{BindError, SqliteFrontend};
+use policysql_parser::{BindError, BindingLimits, SqliteFrontend};
 use policysql_policy::{Explain, PolicyBundle, PolicyError};
 use policysql_sqlite::{
-    ClientParameterContract, CompileError, SqliteProfile, analyze_client_parameters,
+    ClientParameterContract, CompileError, EmitError, SqliteProfile, analyze_client_parameters,
     compile_verified_delete, compile_verified_insert, compile_verified_select,
     compile_verified_update,
 };
@@ -76,11 +78,17 @@ pub struct Gateway {
     snapshot: SnapshotId,
     limits: ExecutionLimits,
     max_statements: usize,
+    binding_limits: BindingLimits,
 }
+
+/// The column metadata of one envelope's emitted statements may use this many bytes of the raw
+/// response (ADR 0027, "Fixed protocol constants"): a memory guard measured on the compiled
+/// statements, `Σ (2·|alias| + 2·|declared type| + 32)` over every emitted result column.
+pub const MAX_COLUMN_METADATA_BYTES: u64 = 1_048_576;
 
 impl Gateway {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         catalog: Catalog,
         policies: PolicyBundle,
         snapshot: SnapshotId,
@@ -93,7 +101,15 @@ impl Gateway {
             snapshot,
             limits,
             max_statements,
+            binding_limits: BindingLimits::default(),
         }
+    }
+
+    /// Sets the input-side limits the binder enforces on the client's SQL.
+    #[must_use]
+    pub const fn with_binding_limits(mut self, binding_limits: BindingLimits) -> Self {
+        self.binding_limits = binding_limits;
+        self
     }
 
     #[must_use]
@@ -123,8 +139,9 @@ impl Gateway {
         if requests.is_empty() || requests.len() > self.max_statements {
             return Err(GatewayError::EnvelopeLimit);
         }
-        let frontend = SqliteFrontend::default();
+        let frontend = SqliteFrontend::new(self.binding_limits);
         let mut statements = Vec::with_capacity(requests.len());
+        let mut metadata_bytes = 0_u64;
         for (index, request) in requests.iter().enumerate() {
             let document = frontend
                 .bind_document(&request.sql, &self.catalog)
@@ -217,10 +234,14 @@ impl Gateway {
                     self.snapshot.clone(),
                 ),
             }
-            .map_err(|error| GatewayError::Rejected {
-                kind: compile_rejection(&error),
-                index,
-            })?;
+            .map_err(|error| compile_failure(&error, index))?;
+            metadata_bytes = metadata_bytes.saturating_add(plan.column_metadata_bytes());
+            if metadata_bytes > MAX_COLUMN_METADATA_BYTES {
+                return Err(GatewayError::TooComplex {
+                    cause: ComplexityCause::ColumnMetadata,
+                    index,
+                });
+            }
             // Same pass and statement that `compile_verified_*` validated against.
             let client_parameters =
                 analyze_client_parameters(&output.plan.statement, &self.catalog)
@@ -296,7 +317,20 @@ pub enum GatewayError {
     AccessDenied,
     SnapshotMismatch,
     EnvelopeLimit,
-    Rejected { kind: RejectionKind, index: usize },
+    Rejected {
+        kind: RejectionKind,
+        index: usize,
+    },
+    /// The emitted statement `index` reached a downstream complexity limit (ADR 0027).
+    TooComplex {
+        cause: ComplexityCause,
+        index: usize,
+    },
+    /// The emitted SQL of statement `index` does not parse again: an emitter bug, answered as an
+    /// internal failure and never as the client's error.
+    EmittedSqlInvalid {
+        index: usize,
+    },
     ExecutionFailed,
     TransactionRequired,
 }
@@ -308,6 +342,8 @@ impl fmt::Display for GatewayError {
             Self::SnapshotMismatch => "snapshot precondition failed",
             Self::EnvelopeLimit => "request envelope is invalid",
             Self::Rejected { .. } => "statement was rejected",
+            Self::TooComplex { .. } => "statement is too complex",
+            Self::EmittedSqlInvalid { .. } => "emitted statement is invalid",
             Self::ExecutionFailed => "database execution failed",
             Self::TransactionRequired => "mutation requires an owned transaction",
         })
@@ -371,12 +407,23 @@ const fn policy_rejection(error: &PolicyError) -> RejectionKind {
     }
 }
 
-const fn compile_rejection(error: &CompileError) -> RejectionKind {
+const fn compile_failure(error: &CompileError, index: usize) -> GatewayError {
     match error {
         CompileError::ClientParameterMismatch | CompileError::ClientParameterTypeMismatch => {
-            RejectionKind::InvalidParameter
+            GatewayError::Rejected {
+                kind: RejectionKind::InvalidParameter,
+                index,
+            }
         }
-        CompileError::Emit(_) | CompileError::Verification(_) => RejectionKind::UnsupportedSql,
+        CompileError::Emit(EmitError::TooComplex(cause)) => GatewayError::TooComplex {
+            cause: *cause,
+            index,
+        },
+        CompileError::Emit(EmitError::ReparseFailed) => GatewayError::EmittedSqlInvalid { index },
+        CompileError::Emit(_) | CompileError::Verification(_) => GatewayError::Rejected {
+            kind: RejectionKind::UnsupportedSql,
+            index,
+        },
     }
 }
 

@@ -12,6 +12,9 @@ import { runtimeLimits, runtimeLimitsJson } from "../src/limits.ts";
 import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 import { DEPLOYMENT_VERSION_HEADER, versionTracker, waitForRelease } from "./release-readiness.mjs";
 import { bytesNullSmoke, commitCheckSmoke } from "./smoke-sections.mjs";
+import { sqlComplexitySmoke } from "./smoke-complexity.mjs";
+import { COMPLEXITY_ALLOWLIST, SqlComplexityError } from "../src/database-complexity.ts";
+import { TursoHttpTransport } from "../src/turso-http.ts";
 import { SHAPE_TARGET_BYTES, cpuSmoke, referenceScenarioId } from "./smoke-cpu.mjs";
 import { SMOKE_SHAPES } from "./lib/cpu-shapes.mjs";
 import { measureNodeReference } from "./lib/node-reference.mjs";
@@ -176,7 +179,7 @@ const commitCheckTables = () => {
   return Object.values(policy.commit_checks ?? {}).flatMap((check) => check.triggered_by ?? []);
 };
 
-const smoke = async (baseUrl, token, tracker) => {
+const smoke = async (baseUrl, token, tracker, database) => {
   const headers = { authorization: `Bearer ${token}` };
   const call = tracker.call;
   const health = await call(`${baseUrl}/healthz`).then((response) => response.json());
@@ -415,6 +418,14 @@ const smoke = async (baseUrl, token, tracker) => {
     hookTimeoutMs: capabilities.transactions?.maxHookDurationMs ?? null, atomicTimeoutMs: capabilities.limits?.timeoutMs ?? null,
   });
   const bytesNull = await bytesNullSmoke(sectionContext, { maxBytesPerValue: capabilities.limits?.maxBytesPerValue });
+  // SQL complexity (ADR 0027): every allowlist entry real Turso can produce, sent to it directly
+  // and classified by the transport (fatal when one stops matching), and the refusals through the
+  // deployed Worker.
+  const sqlComplexity = await sqlComplexitySmoke(sectionContext, {
+    transport: new TursoHttpTransport({ url: database.url, authToken: database.token }, "release-smoke-complexity"),
+    allowlist: COMPLEXITY_ALLOWLIST,
+    classify: (error) => (error instanceof SqlComplexityError ? error.complexityCause : null),
+  });
   // Real CPU time of the worst request shapes (#56, ADR 0027): fatal when a request exceeds
   // `cpu_ms`; an unreadable observability result is reported, not fatal.
   const cpu = await cpuSmoke(sectionContext, {
@@ -428,6 +439,7 @@ const smoke = async (baseUrl, token, tracker) => {
     tracker.unversioned.length > 0 ||
     commitChecks.failures.length > 0 ||
     bytesNull.failures.length > 0 ||
+    sqlComplexity.failures.length > 0 ||
     cpu.failures.length > 0 ||
     capabilities.transactions?.commitChecksConfigured !== true ||
     !health.ready ||
@@ -475,6 +487,7 @@ const smoke = async (baseUrl, token, tracker) => {
       rateLimited: tracker.rateLimited,
       commitChecks,
       bytesNull,
+      sqlComplexity,
       cpu,
       health,
       capabilities,
@@ -560,6 +573,7 @@ const smoke = async (baseUrl, token, tracker) => {
     },
     commitChecks: commitChecks.report,
     bytesNull: bytesNull.report,
+    sqlComplexity: sqlComplexity.report,
     cpu: cpu.report,
   };
 };
@@ -747,7 +761,7 @@ async function main() {
     }));
     const tracker = versionTracker(deployed.version);
     try {
-      acceptance = await smoke(baseUrl, jwt, tracker);
+      acceptance = await smoke(baseUrl, jwt, tracker, { url: databaseUrl, token: databaseToken });
       break;
     } catch (error) {
       if (!error.retryable || attempt >= 3) throw error;

@@ -150,6 +150,8 @@ code generatorやquery builderは、固定された想定ではなくCapabilitie
 
 Capabilitiesに掲載する上限は、deploymentが実際に強制している値そのものです。値はdeploymentのruntime設定 (`RuntimeLimits`) と、coreが固定で強制するprotocol上の定数から得ます。掲載用に別の値を設定する方法はありません。`transactions.maxStatements`と`transactions.maxResultBytes`は1つの対話型transactionの文の数と累積結果bytes、`maxInteractiveDurationMs`は開始からの期限、`maxCallbackQueriesPerCheck`、`maxCallbackRowsPerCheck`、`maxCallbackBytesPerCheck`は1つのcommit checkのcallback queryの数、累積行数、累積bytesです。
 
+`maxParameters`、`maxExpressionDepth`、`maxProjections`、`maxJoins`は、client SQLに対してPolicySQL自身が行うparseとbindの仕事を守る入力側の上限です（既定は1,024、32、128、8、上限は16,384、64、2,000、63）。上限内のrequestがcompileできることは約束しません。実際に生成した文（client SQLにpolicyのrow filterやcompanion columnを合成したもの）が下流の上限に達した場合は、予測ではなく生成した文を計測して、`POLICYSQL_SQL_TOO_COMPLEX`（400）を返します。
+
 `maxAstDepth`、`maxExpressionNodes`、`maxJoins`などはcompile前後に検査する構造上限です。`executionTimeoutMs`、`maxRows`、`maxResultBytes`はruntimeにも強制します。SQLite/Tursoが正確なscan row数やcostを事前提供しない場合、その値を保証するfieldは掲載せず、timeoutと結果上限でfail closedにします。
 
 PolicySQLへ接続するdriverがCatalogとresult metadataを処理する規則は[Client開発ガイド](../clients/driver-development)を参照してください。

@@ -42,6 +42,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_INVALID_SQL` | 400 | SQLをparseできない |
 | `POLICYSQL_MULTIPLE_STATEMENTS` | 400 | statementが複数含まれる |
 | `POLICYSQL_UNSUPPORTED_SQL` | 400 | 対応範囲外の構文 |
+| `POLICYSQL_SQL_TOO_COMPLEX` | 400 | 入力は上限内だが、policyを合成して生成した文が下流の複雑さの上限（parserの式の高さ・再帰の深さ、結果列2,000、host parameter 32,766、LIKE/GLOBのpattern 50,000 bytes、envelopeのcolumn metadata 1 MiB、またはDBが複雑さを理由に拒否）に達した。pathは`/statements/<i>`で、messageは固定。COMMITより前に検知するため何もcommitされず、clientは拒否（`PolicySqlRejectedError`）として扱う。対話型transactionでは`failed`として閉じ、後続のcommandは409 `POLICYSQL_TRANSACTION_UNAVAILABLE`になる。同じrequestを再送しても成功しない |
 | `POLICYSQL_DUPLICATE_RESULT_COLUMN` | 400 | alias適用後のresult column名が重複した |
 | `POLICYSQL_INVALID_PARAMETER` | 400 | parameterの不足、型、値が不正 |
 | `POLICYSQL_AMBIGUOUS_PARAMETER_TYPE` | 400 | Explainでparameter型を一意に証明できない |

@@ -474,6 +474,28 @@ that the parser refuses remains 400 `POLICYSQL_INVALID_SQL`.
 The input-side limits stay in place because they protect PolicySQL's own work, and they are
 checked first, so a request over an input-side limit is still 413 `POLICYSQL_LIMIT_EXCEEDED`.
 
+**Pull request 4 results (2026-10-31).** Implemented as decided, with one correction that the smoke
+run against the real Turso database forced. Turso does not send `code` `SQLITE_ERROR`. It sends
+`SQLITE_UNKNOWN` (SQLite's general error) with the message `SQLite error: <SQLite's text>`, and
+`SQL_INPUT_ERROR` with `SQLite input error: <SQLite's text> (at offset <n>)` for the two refusals
+found while the statement is parsed (`too many arguments on function`, `too many SQL variables`);
+every other allowlist entry arrives as `SQLITE_UNKNOWN`. The rule is unchanged in kind: a match
+needs the general-error code (which still excludes `SQLITE_BUSY`, `SQLITE_CONSTRAINT`,
+`SQLITE_FULL`, and the rest) and a message that starts, after that code's one wrapper, with an
+allowlist entry. The accepted pairs are `SQLITE_ERROR` with the bare text (SQLite itself, and a
+Hrana server that forwards the primary code), `SQLITE_UNKNOWN` with `SQLite error: `, and
+`SQL_INPUT_ERROR` with `SQLite input error: `; a code never matches another code's wrapper
+(`deploy/cloudflare/src/database-complexity.ts`). All seven allowlist entries are smoke-verified
+against real Turso; the message of the expression-depth entry there says `maximum depth 100`
+(SQLite's own limit is 1,000), which the prefix match does not depend on. The database-detected
+causes added to the fixed cause names are `function_arguments`, `compound_terms`, and
+`join_tables`, next to `columns`, `parameters`, `like_pattern`, and `database_expression_depth`.
+The declared-type term of the column-metadata guard is the byte length of the physical schema's
+declared type for a column projected directly (zero for an expression, which has none), taken from
+the physical schema at construction. Left to later pull requests, as decided: the configurable
+per-value limit (5), the result side of `maxJsonValues`, `maxResponseBytes` and the compiled raw
+bound (6), and the CPU and memory work (7).
+
 ### CPU and memory budgets
 
 The CPU of a single Worker or Durable Object invocation is modelled as
