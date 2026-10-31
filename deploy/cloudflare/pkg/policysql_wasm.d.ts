@@ -51,9 +51,8 @@ export class PolicySqlRuntime {
      * engine enforces and advertises exactly these values; it holds no copy of its own
      * (ADR 0024, "One place for limits").
      *
-     * Adding this method and the optional constructor fields does not change
-     * `ABI_VERSION`: every existing `limits_json` is accepted and enforced as before, no
-     * existing method or value changes, and the engine and this module ship in one bundle.
+     * Every limit of ADR 0027 is a field here, including the per-value limit that used to
+     * be a getter; the engine reads them all from this one report.
      */
     limits_json(): string;
     /**
@@ -115,7 +114,6 @@ export class PolicySqlRuntime {
     validate_result_json(handle: bigint, index: number, raw_result_json: string): string;
     readonly abi_version: number;
     readonly commit_checks_enabled: boolean;
-    readonly max_bytes_per_value: number;
     readonly profile: string;
     readonly snapshot: string;
 }
@@ -133,7 +131,6 @@ export interface InitOutput {
     readonly policysqlruntime_cost_estimate_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_identity_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_limits_json: (a: number) => [number, number];
-    readonly policysqlruntime_max_bytes_per_value: (a: number) => number;
     readonly policysqlruntime_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
     readonly policysqlruntime_newWithPhysicalSchema: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number];
     readonly policysqlruntime_profile: (a: number) => [number, number];

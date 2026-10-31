@@ -97,10 +97,10 @@ test("a missing or malformed injected limit fails closed instead of disabling th
     assert.throws(() => encodeWithLimit(new Uint8Array(1), limit), TypeError, String(limit));
     assert.throws(() => driverArgsWithLimit({}, limit), TypeError, String(limit));
     assert.throws(() => rawWithLimit("text", limit), TypeError, String(limit));
-    assert.throws(() => runtimeBytesLimit({ max_bytes_per_value: limit }), TypeError, String(limit));
+    assert.throws(() => runtimeBytesLimit({ limits_json: limitsJson({ maxBytesPerValue: limit }) }), TypeError, String(limit));
     assert.throws(() => bytesLimit(limit), TypeError, String(limit));
   }
-  for (const runtime of [undefined, null, {}, { max_bytes_per_value: Infinity }]) {
+  for (const runtime of [undefined, null, {}, { limits_json: limitsJson({ maxBytesPerValue: Infinity }) }]) {
     assert.throws(() => runtimeBytesLimit(runtime), TypeError);
   }
   // An unbounded limit must not let an oversized value through any path.
@@ -110,14 +110,14 @@ test("a missing or malformed injected limit fails closed instead of disabling th
   assert.throws(() => decodeWithLimit(hugeBase64, Infinity), TypeError);
   assert.throws(() => rawWithLimit(huge, Infinity), TypeError);
   assert.throws(() => driverArgsWithLimit({ v: { type: "blob", base64: hugeBase64 } }, Infinity), TypeError);
-  assert.equal(runtimeBytesLimit({ max_bytes_per_value: 512 * 1024 }), 512 * 1024);
+  assert.equal(runtimeBytesLimit({ limits_json: limitsJson({ maxBytesPerValue: 512 * 1024 }) }), 512 * 1024);
 });
 
 test("Capabilities and the adapter take maxBytesPerValue from the same runtime value", () => {
   for (const advertised of [16, MAX_BYTES_PER_VALUE, MAX_BYTES_PER_VALUE * 2]) {
     const runtime = {
-      snapshot: "s", profile: "p", abi_version: 2, commit_checks_enabled: false, max_bytes_per_value: advertised,
-      limits_json: limitsJson(),
+      snapshot: "s", profile: "p", abi_version: 2, commit_checks_enabled: false,
+      limits_json: limitsJson({ maxBytesPerValue: advertised }),
     };
     assert.equal(capabilities(runtime, { limits: { maxBytesPerValue: 1 } }).limits.maxBytesPerValue, advertised);
     assert.equal(runtimeBytesLimit(runtime), advertised);
@@ -323,7 +323,7 @@ test("bytes containing SQL text stay bound data and NULL bytes parameters follow
 
 test("decoded maximum is accepted independently of hosting defaults and advertised in Capabilities", async t => {
   const h = await harness(t, { hooks: false, fixture, runtimeLimits: { maxRows: 100, maxResultBytes: 800_000, timeoutMs: 1_000, maxStatements: 8 } });
-  assert.equal(h.runtime.max_bytes_per_value, MAX_BYTES_PER_VALUE);
+  assert.equal(h.runtime.max_bytes_per_value, undefined, "the per-value limit is read from limits_json");
   const capabilities = await h.request("a", "/v1/capabilities", undefined, null);
   assert.equal(capabilities.body.limits.maxBytesPerValue, MAX_BYTES_PER_VALUE);
   const value = Buffer.alloc(MAX_BYTES_PER_VALUE, 255).toString("base64");

@@ -7,7 +7,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { capabilities } from "../src/presenters.ts";
-import { MAX_BODY_BYTES } from "../src/request-body.ts";
 import { ENFORCED_LIMIT_KEYS, runtimeLimits, runtimeLimitsJson } from "../src/limits.ts";
 import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 import { createEngine } from "../src/engine.ts";
@@ -28,18 +27,22 @@ const read = { sql: "SELECT id, name FROM projects ORDER BY id", params: {} };
 const insert = (id) => ({ sql: "INSERT INTO projects (id, name) VALUES (:id, :name) RETURNING id, name", params: { id, name: id } });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Where each advertised number comes from: a key of the runtime's `limits_json`, or its
-// `max_bytes_per_value` getter. A number Capabilities advertises without an entry here, or
+// Where each advertised number comes from: a key of the runtime's `limits_json` (the per-value
+// limit included since ADR 0027). A number Capabilities advertises without an entry here, or
 // with a value other than its source's, fails the test below.
 const ADVERTISED_SOURCES = {
   "limits.maxRows": "maxRows",
   "limits.maxResultBytes": "maxResultBytes",
   "limits.timeoutMs": "timeoutMs",
   "limits.maxStatements": "maxStatements",
-  "limits.maxSqlBytes": "maxSqlBytes",
   "limits.maxRequestBytes": "maxRequestBytes",
+  "limits.maxJsonValues": "maxJsonValues",
+  "limits.maxSqlBytes": "maxSqlBytes",
+  "limits.maxBytesPerValue": "maxBytesPerValue",
+  "limits.maxParameters": "maxParameters",
+  "limits.maxExpressionDepth": "maxExpressionDepth",
+  "limits.maxProjections": "maxProjections",
   "limits.maxJoins": "maxJoins",
-  "limits.maxBytesPerValue": "max_bytes_per_value",
   "transactions.maxStatements": "maxTransactionStatements",
   "transactions.maxResultBytes": "maxTransactionResultBytes",
   "transactions.maxCommitChecks": "maxCommitChecks",
@@ -61,12 +64,11 @@ const at = (value, path) => path.split(".").reduce((node, key) => node[key], val
 
 const assertAdvertisesExactly = (advertised, runtime) => {
   const enforced = runtimeLimits(runtime);
-  const source = (key) => (key === "max_bytes_per_value" ? runtime.max_bytes_per_value : enforced[key]);
   assert.deepEqual(numericLeaves(advertised).sort(), Object.keys(ADVERTISED_SOURCES).sort(),
     "every advertised number has an enforcement source, and every source is advertised");
   for (const [path, key] of Object.entries(ADVERTISED_SOURCES)) {
-    assert.ok(key === "max_bytes_per_value" || ENFORCED_LIMIT_KEYS.includes(key), key);
-    assert.equal(at(advertised, path), source(key), path);
+    assert.ok(ENFORCED_LIMIT_KEYS.includes(key), key);
+    assert.equal(at(advertised, path), enforced[key], path);
   }
 };
 
@@ -74,7 +76,7 @@ test("Capabilities advertises exactly the runtime's limits, each from its own so
   // Distinct values, so an advertised number taken from the wrong source cannot match.
   const distinct = Object.fromEntries(ENFORCED_LIMIT_KEYS.map((key, index) => [key, 1_000 + index]));
   const runtime = {
-    snapshot: "s", profile: "p", abi_version: 5, commit_checks_enabled: true, max_bytes_per_value: 999,
+    snapshot: "s", profile: "p", abi_version: 5, commit_checks_enabled: true,
     limits_json: limitsJson(distinct),
   };
   assertAdvertisesExactly(capabilities(runtime, { limits: { maxRows: 1 } }), runtime);
@@ -94,10 +96,8 @@ test("the real runtime reports configured limits, fills defaults, and Capabiliti
     try {
       assert.deepEqual({ ...runtimeLimits(defaults) }, { ...RUNTIME_DEFAULT_LIMITS },
         "omitted fields take the constants they replace; fixed constants match the test doubles");
-      assert.equal(defaults.snapshot, runtime.snapshot, "limits are not part of the snapshot (no ABI bump)");
-      // The HTTP body bound is read before any runtime exists (routes that compile nothing
-      // never initialize WASM), so it is a constant of its own; it must equal what is advertised.
-      assert.equal(MAX_BODY_BYTES, runtimeLimits(defaults).maxRequestBytes);
+      assert.equal(defaults.snapshot, runtime.snapshot, "limits are not part of the snapshot");
+      assert.equal("max_bytes_per_value" in defaults, false, "the per-value limit is a limits_json field, not a getter (ADR 0027)");
     } finally { defaults.free(); }
   } finally { runtime.free(); }
 });
@@ -117,6 +117,8 @@ test("construction rejects every invalid limit and names the field", () => {
     timeoutMs: [1, 9_007_199_254_740_991], maxStatements: [1, 4_294_967_295],
     transactionMs: [1, 60_000], maxTransactionStatements: [1, 256], maxTransactionResultBytes: [1, 65_536],
     maxCallbackRows: [1, 10_000], beginTimeoutMs: [1, 60_000], costTimeoutMs: [1, 10_000],
+    // ADR 0027: the request-side limits have a minimum (the envelope must fit) and a hard maximum.
+    maxRequestBytes: [65_536, 2_097_152], maxJsonValues: [1_024, 131_072], maxSqlBytes: [1_024, 1_048_576],
   };
   const snake = (key) => key.replace(/[A-Z]/gu, (letter) => `_${letter.toLowerCase()}`);
   for (const [key, [min, max]] of Object.entries(ranges)) {
@@ -128,7 +130,11 @@ test("construction rejects every invalid limit and names the field", () => {
     // Range: rejected by the runtime, naming the field.
     if (max < Number.MAX_SAFE_INTEGER) {
       assert.throws(() => construct({ ...REQUIRED, [key]: max + 1 }),
-        (error) => String(error).includes(`\`${snake(key)}\` must be an integer from 1 to ${max}`), `${key}=${max + 1}`);
+        (error) => String(error).includes(`\`${snake(key)}\` must be an integer from ${min} to ${max}`), `${key}=${max + 1}`);
+    }
+    if (min > 1) {
+      assert.throws(() => construct({ ...REQUIRED, [key]: min - 1 }),
+        (error) => String(error).includes(`\`${snake(key)}\` must be an integer from ${min} to ${max}`), `${key}=${min - 1}`);
     }
     for (const good of [min, max]) construct({ ...REQUIRED, [key]: good }).free();
   }
@@ -136,7 +142,14 @@ test("construction rejects every invalid limit and names the field", () => {
     const { [key]: _omitted, ...missing } = REQUIRED;
     assert.throws(() => construct(missing), (error) => String(error).includes(`\`${snake(key)}\` is required`), key);
   }
-  for (const key of ["transactionMS", "maxInteractiveDurationMs", "maxSqlBytes", "max_rows"]) {
+  // A statement cannot be longer than the body that carries it (explicit, ADR 0021).
+  assert.throws(() => construct({ ...REQUIRED, maxRequestBytes: 65_536, maxSqlBytes: 65_537 }),
+    (error) => String(error).includes("`max_sql_bytes` must not exceed `max_request_bytes`"));
+  construct({ ...REQUIRED, maxRequestBytes: 65_536, maxSqlBytes: 65_536 }).free();
+  construct({ ...REQUIRED, maxRequestBytes: 2_097_152, maxSqlBytes: 1_048_576 }).free();
+  // The limits later pull requests make configurable are not constructor fields yet.
+  for (const key of ["transactionMS", "maxInteractiveDurationMs", "maxBytesPerValue", "maxParameters", "maxExpressionDepth",
+    "maxProjections", "maxJoins", "maxResponseBytes", "max_rows"]) {
     assert.throws(() => runtimeLimitsJson({ ...REQUIRED, [key]: 1 }),
       (error) => error instanceof TypeError && error.message === `limits.${key} is not a runtime limit`, key);
   }
@@ -159,13 +172,17 @@ test("createEngine rejects publicConfig.limits and any other unknown public sett
 });
 
 test("the engine reads limits only from a well-formed runtime report", () => {
-  const base = { snapshot: "s", max_bytes_per_value: 1 };
+  const base = { snapshot: "s" };
   const reports = [
     undefined,
     () => "not json",
     () => "[]",
     () => JSON.stringify({ ...RUNTIME_DEFAULT_LIMITS, extra: 1 }),
     () => { const { maxCallbackRows: _omitted, ...rest } = RUNTIME_DEFAULT_LIMITS; return JSON.stringify(rest); },
+    () => { const { maxBytesPerValue: _omitted, ...rest } = RUNTIME_DEFAULT_LIMITS; return JSON.stringify(rest); },
+    () => { const { maxJsonValues: _omitted, ...rest } = RUNTIME_DEFAULT_LIMITS; return JSON.stringify(rest); },
+    () => JSON.stringify({ ...RUNTIME_DEFAULT_LIMITS, maxBytesPerValue: 0 }),
+    () => JSON.stringify({ ...RUNTIME_DEFAULT_LIMITS, maxRequestBytes: 1.5 }),
     () => JSON.stringify({ ...RUNTIME_DEFAULT_LIMITS, transactionMs: 0 }),
     () => JSON.stringify({ ...RUNTIME_DEFAULT_LIMITS, maxTransactionStatements: "8" }),
     () => JSON.stringify({ ...RUNTIME_DEFAULT_LIMITS, maxCallbackRows: 1.5 }),

@@ -19,7 +19,12 @@ const fixtureFile = (name) => readFileSync(new URL(`../../../../tests/fixtures/b
 // The runtime limits of every scenario: wide enough that the scenario's own bound never bites
 // first (the ADR's measurement harness used the same). The model's `B`/`V` are computed from
 // what the scenario actually moved, not from these.
-const MEASURE_LIMITS = { maxRows: 2_000, maxResultBytes: 4_000_000, timeoutMs: 10_000, maxStatements: 8 };
+// The request limits are the hard maxima (ADR 0027), so the request shapes (sized by
+// REQUEST_VALUE_BUDGET, the reference wrapper's value limit) are never refused for size.
+const MEASURE_LIMITS = {
+  maxRows: 2_000, maxResultBytes: 4_000_000, timeoutMs: 10_000, maxStatements: 8,
+  maxRequestBytes: 2_097_152, maxJsonValues: 131_072,
+};
 
 /** The WASM linear memory (never shrinks, so its size is the process's high-water mark), MiB. */
 const wasmMemoryMiB = () => {

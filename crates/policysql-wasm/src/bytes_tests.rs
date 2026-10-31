@@ -328,7 +328,7 @@ fn oversized_raw_result_of_in_limit_blobs_is_a_limit_error() {
         "affectedRows": 0
     })
     .to_string();
-    assert!(raw.len() > super::MAX_REQUEST_BYTES);
+    assert!(raw.len() > policysql_transaction::machine::EVENT_RESULT_BYTES);
     let output: Value = serde_json::from_str(&runtime.validate_result_json(handle, 0, &raw))
         .unwrap_or_else(|_| unreachable!());
     assert_eq!(

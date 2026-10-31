@@ -1,7 +1,6 @@
 import { wasmError } from "./errors.ts";
 import { POLICY_VERSION, SCHEMA_VERSION } from "./config.ts";
 import { runtimeLimits } from "./limits.ts";
-import { runtimeBytesLimit } from "./binary.ts";
 import type { AuthContext } from "./types.ts";
 
 export const parsedRuntimeCall = (text: string) => {
@@ -87,10 +86,14 @@ export const capabilities = (runtime: any, publicConfig: any = {}) => {
     maxResultBytes: enforced.maxResultBytes,
     timeoutMs: enforced.timeoutMs,
     maxStatements: enforced.maxStatements,
-    maxSqlBytes: enforced.maxSqlBytes,
     maxRequestBytes: enforced.maxRequestBytes,
+    maxJsonValues: enforced.maxJsonValues,
+    maxSqlBytes: enforced.maxSqlBytes,
+    maxBytesPerValue: enforced.maxBytesPerValue,
+    maxParameters: enforced.maxParameters,
+    maxExpressionDepth: enforced.maxExpressionDepth,
+    maxProjections: enforced.maxProjections,
     maxJoins: enforced.maxJoins,
-    maxBytesPerValue: runtimeBytesLimit(runtime),
   };
   return ({
   id: runtime.snapshot,

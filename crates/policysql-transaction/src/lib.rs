@@ -10,6 +10,7 @@
 //! ([`cost`]). Production owners run interactive transactions on the machine since pull request
 //! 7, and the engine and owners atomic execution since pull request 8.
 
+pub mod bounds;
 pub mod canonical;
 pub mod cost;
 pub mod identity;

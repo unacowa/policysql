@@ -269,7 +269,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         if (typeof fields.transactionId !== "string" || !TRANSACTION_ID.test(fields.transactionId)) throw invalidRequest();
         const snapshot = dependencies.getRuntime().snapshot;
         const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, snapshot);
-        const body = await parseBodyText(fields.bodyText);
+        const body = await readBody(fields.bodyText);
         // The owner's step machine compiles and hashes the verified text itself (ADR 0024 pull
         // request 7, #70), and derives the auth fingerprint from `auth` and the binding.
         const reply = await owner(fields.transactionId).command(kind, {
@@ -277,6 +277,10 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         }, checked.requestId);
         return fromOwner(reply, checked.requestId);
       });
+
+  // The body, read and checked against the runtime's request limits (ADR 0027): the transport
+  // streams at most `maxRequestBytes`, and the scan stops at `maxJsonValues`.
+  const readBody = (bodyText: BodyText) => parseBodyText(bodyText, runtimeLimits(dependencies.getRuntime()));
 
   const health = async (context?: CallbackContext): Promise<OperationResult> => {
     let requestId: string;
@@ -310,7 +314,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       const auth = authorize(checked, fields.role, "explain");
       const runtime = dependencies.getRuntime();
       await checkDatabaseBinding(dependencies.database, checked.databaseBinding, runtime.snapshot);
-      const body = await parseBodyText(fields.bodyText);
+      const body = await readBody(fields.bodyText);
       const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body.text, "explain"));
       return { ok: true as const, value: explainResponse(compiled, auth, checked.requestId) };
     }),
@@ -327,7 +331,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       // A misconfigured runtime fails here, before the body is read and before BEGIN.
       const maxBytes = runtimeBytesLimit(runtime);
       runtimeLimits(runtime);
-      const body = await parseBodyText(fields.bodyText);
+      const body = await readBody(fields.bodyText);
       // Everything else is the step machine's `request` kind (ADR 0024 pull request 8): the
       // binding check, compile of the verified text (#70), idempotency, placement (direct, or
       // the owner of an envelope that could trigger a commit check), and the response.
@@ -359,7 +363,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       const auth = authorize(checked, fields.role, "execute");
       const snapshot = dependencies.getRuntime().snapshot;
       const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, snapshot);
-      const body = await parseBodyText(fields.bodyText);
+      const body = await readBody(fields.bodyText);
       const keys = body.value && typeof body.value === "object" && !Array.isArray(body.value)
         ? Object.keys(body.value) : [];
       if (!keys.every((key) => ["mode", "expected"].includes(key)) || !keys.includes("mode") ||
@@ -413,7 +417,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       try {
         const fields = operationInput<CallbackQueryInput>(input, ["validationId", "capability", "bodyText"]);
         if (typeof fields.validationId !== "string" || !VALIDATION_ID.test(fields.validationId)) throw invalidRequest();
-        const body = await parseBodyText(fields.bodyText);
+        const body = await readBody(fields.bodyText);
         const reply = await owner(`tx_${fields.validationId.slice("cval_".length)}`).callbackQuery({
           validationId: fields.validationId,
           capability: typeof fields.capability === "string" ? fields.capability : "",

@@ -6,7 +6,11 @@ import { discardBody, fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { BodyTooLargeError, readBoundedText } from "./bounded-body.ts";
 
-const MAX_RESPONSE_BYTES = 2_097_152;
+// Statement replies carry result rows: the result-side bound, replaced by the compiled raw
+// bound in ADR 0027 pull request 6. Control replies (BEGIN, COMMIT, ROLLBACK, close) carry no
+// result data, so their bound is a fixed protocol constant (ADR 0027 "Fixed protocol constants").
+const STATEMENT_RESPONSE_BYTES = 2_097_152;
+const CONTROL_RESPONSE_BYTES = 65_536;
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 const databaseFailure = () =>
@@ -131,18 +135,19 @@ export class TursoHttpTransport {
     this.fetchImpl = fetchImpl;
   }
 
-  // `oversized` classifies a successful response over MAX_RESPONSE_BYTES. Statement
+  // `oversized` classifies a successful response over `maxResponseBytes`. Statement
   // execution passes a 413 limit error: only result rows (for example stored BLOBs)
   // make it that large, and retrying cannot shrink stored data. BEGIN and
-  // COMMIT/ROLLBACK keep the 503 default, because an oversized control response is
-  // a transport anomaly and a COMMIT outcome must not be reported as a limit error.
+  // COMMIT/ROLLBACK keep the 503 default and the 65,536-byte control bound, because an
+  // oversized control response is a transport anomaly (a limit never applies to it) and a
+  // COMMIT outcome must not be reported as a limit error or as not committed.
   //
   // The body is streamed and counted in bytes as it arrives (#53, src/bounded-body.ts):
   // a declared or received size over the bound cancels the stream instead of buffering
   // the rest. A read failure or malformed UTF-8 is a transport failure (503), and the
   // request's timeout also bounds the body read (504). None of these is a rejection, so a
   // COMMIT whose reply fails here is never reported as not committed (ADR 0007).
-  async pipeline(requests, baton = undefined, timeoutMs = 1_000, oversized = databaseFailure) {
+  async pipeline(requests, baton = undefined, timeoutMs = 1_000, oversized = databaseFailure, maxResponseBytes = CONTROL_RESPONSE_BYTES) {
     const signal = AbortSignal.timeout(timeoutMs);
     const timedOut = () => new EngineError("POLICYSQL_DATABASE_TIMEOUT", "The database operation timed out.");
     const isAbort = (error) => error?.name === "TimeoutError" || error?.name === "AbortError";
@@ -165,7 +170,7 @@ export class TursoHttpTransport {
       await discardBody(response);
       throw databaseFailure();
     }
-    const text = await readBoundedText(response, MAX_RESPONSE_BYTES, signal).catch((error) => {
+    const text = await readBoundedText(response, maxResponseBytes, signal).catch((error) => {
       if (error instanceof BodyTooLargeError) throw oversized();
       if (isAbort(error)) throw timedOut();
       throw databaseFailure();
@@ -223,6 +228,7 @@ class TursoHttpTransaction {
       this.baton,
       Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
       binaryLimitExceeded,
+      STATEMENT_RESPONSE_BYTES,
     );
     if (!body.baton) throw databaseFailure();
     this.baton = body.baton;

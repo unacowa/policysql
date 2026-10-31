@@ -26,7 +26,7 @@ export interface DatabaseTransaction {
 }
 /** Limits PolicySQL supplies from its loaded runtime; transports must not hard-code them. */
 export type DatabaseTransportOptions = Readonly<{
-  /** The runtime's decoded per-value BLOB limit (`runtime.max_bytes_per_value`). */
+  /** The runtime's decoded per-value BLOB limit (`limits_json` `maxBytesPerValue`). */
   maxBytesPerValue: number;
 }>;
 export interface DatabaseTransport {

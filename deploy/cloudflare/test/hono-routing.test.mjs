@@ -10,7 +10,6 @@ const runtime = {
   profile: "sqlite-turso-v1",
   snapshot: "sqlite-turso-v1:schema_dev_2:policy_dev_2:abi-1",
   commit_checks_enabled: false,
-  max_bytes_per_value: 1_024,
   limits_json: limitsJson(),
 };
 
@@ -58,7 +57,7 @@ test("packaged deployments advertise their injected snapshot versions and the ru
   assert.equal(result.policyVersion, "policy_demo_1");
   assert.equal(result.limits.maxRows, 17);
   assert.equal(result.limits.maxStatements, 8);
-  assert.equal(result.limits.maxBytesPerValue, runtime.max_bytes_per_value);
+  assert.equal(result.limits.maxBytesPerValue, JSON.parse(runtime.limits_json()).maxBytesPerValue);
   assert.equal(result.idempotency.mutationsRequired, false);
   assert.equal(result.idempotency.interactiveStartRequired, false);
   assert.equal(result.idempotency.persistent, true);

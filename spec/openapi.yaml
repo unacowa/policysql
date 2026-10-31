@@ -653,6 +653,34 @@ components:
               type: integer
               minimum: 1
               description: Maximum decoded bytes per value; request and encoded result limits also apply. The initial profile uses 262144 bytes.
+            maxRequestBytes:
+              type: integer
+              minimum: 1
+              description: Maximum UTF-8 bytes of a request body as received, a byte order mark included. A larger body is 413 POLICYSQL_REQUEST_TOO_LARGE.
+            maxJsonValues:
+              type: integer
+              minimum: 1
+              description: Maximum JSON values plus object member names in one request body, counted before the body is parsed. A body with more is 413 POLICYSQL_REQUEST_TOO_LARGE.
+            maxSqlBytes:
+              type: integer
+              minimum: 1
+              description: Maximum UTF-8 bytes of one statement's sql. A longer statement is 413 POLICYSQL_REQUEST_TOO_LARGE with path /statements/<i>/sql, before it is parsed.
+            maxParameters:
+              type: integer
+              minimum: 1
+              description: Input-side limit on the distinct client parameter names of one statement. A request within it can still be refused if the policy makes its emitted statement too complex.
+            maxExpressionDepth:
+              type: integer
+              minimum: 1
+              description: Input-side limit on the binder expression depth of the client's SQL.
+            maxProjections:
+              type: integer
+              minimum: 1
+              description: Input-side limit on the result columns of one SELECT or RETURNING in the client's SQL.
+            maxJoins:
+              type: integer
+              minimum: 1
+              description: Input-side limit on the joins in one FROM of the client's SQL.
         transactions: { type: object }
         idempotency: { type: object }
     ErrorResponse:

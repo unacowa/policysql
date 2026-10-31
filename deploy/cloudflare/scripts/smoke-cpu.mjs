@@ -22,7 +22,7 @@ import { randomBytes } from "node:crypto";
 import {
   FACTOR_REFERENCE_FLOOR_MS, HARDWARE_FACTOR, SAFETY_MARGIN, inputsAtLimits, observedFactor, predictedReferenceMs, requiredCpuMs, summarizeFactor,
 } from "./lib/cpu-model.mjs";
-import { REQUEST_SHAPES, SMOKE_SHAPES, countJsonValues } from "./lib/cpu-shapes.mjs";
+import { REQUEST_SHAPES, SMOKE_SHAPES, countJsonValues, valueBudget } from "./lib/cpu-shapes.mjs";
 import { pollProbeCpu, rayIdOf } from "./lib/workers-cpu.mjs";
 
 const INSERT_SQL = "INSERT INTO smoke_values (id, label, doc) VALUES (:id, :label, :doc) RETURNING id";
@@ -68,7 +68,7 @@ export const cpuSmoke = async ({ call, baseUrl, headers, expected }, { cpuLimitM
 
   const requests = [
     { name: "small insert", doc: { label: "small" }, shape: null },
-    ...SMOKE_SHAPES.map((shape) => ({ name: shape, doc: REQUEST_SHAPES[shape](SHAPE_TARGET_BYTES), shape })),
+    ...SMOKE_SHAPES.map((shape) => ({ name: shape, doc: REQUEST_SHAPES[shape](Math.min(SHAPE_TARGET_BYTES, limits.maxRequestBytes - 4_096), valueBudget(limits.maxJsonValues)), shape })),
   ];
   const sentAt = Date.now();
   const sent = [];

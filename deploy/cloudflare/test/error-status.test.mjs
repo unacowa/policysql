@@ -120,6 +120,22 @@ test("the client's definite-rejection table agrees with the specification", asyn
   }
 });
 
+// ADR 0027: both 413 codes the engine answers for a request or its result are definite
+// rejections, so the client lists them under 413, and the status table, the HTTP adapter's
+// table, and the client's agree on the pair. (Before, an oversized body was reported to
+// applications as an unknown outcome.)
+test("POLICYSQL_REQUEST_TOO_LARGE is a definite rejection under 413 in the client, the adapter's table, and the specification", async () => {
+  const { REJECTIONS } = await import("../../../packages/client/protocol.js");
+  const all = { ...specTable("library"), ...specTable("wrapper") };
+  assert.equal(all.POLICYSQL_REQUEST_TOO_LARGE, 413);
+  assert.equal(all.POLICYSQL_LIMIT_EXCEEDED, 413);
+  assert.equal(statusFor("POLICYSQL_REQUEST_TOO_LARGE"), 413);
+  assert.deepEqual([...REJECTIONS.get(413)].sort(), ["LIMIT_EXCEEDED", "REQUEST_TOO_LARGE", "TRANSACTION_LIMIT_EXCEEDED"]);
+  // Every code the specification answers with 413 is a client rejection, none left out.
+  const specified = Object.entries(all).filter(([, status]) => status === 413).map(([code]) => code.slice("POLICYSQL_".length)).sort();
+  assert.deepEqual(specified, [...REJECTIONS.get(413)].sort());
+});
+
 // Rust source without its test code: `*_tests.rs`, `tests/` directories, and everything from
 // a file's first inline `#[cfg(test)] mod name {` on.
 const rustSource = () => files("crates", ".rs")

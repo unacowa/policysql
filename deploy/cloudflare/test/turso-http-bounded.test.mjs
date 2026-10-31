@@ -1,16 +1,22 @@
 // Streamed, byte-counted Turso response bound (#53, ADR 0027 "Streamed enforcement"). The
 // Turso reply is read as a byte stream with a running byte count and cancelled at the first
-// chunk over the 2 MiB bound; UTF-8 is decoded strictly. Classification is unchanged: a
-// statement reply over the bound is 413 POLICYSQL_LIMIT_EXCEEDED, a BEGIN or COMMIT/ROLLBACK
-// reply over it 503 POLICYSQL_DATABASE_UNAVAILABLE (never a limit, and never a rejection of
-// a COMMIT: ADR 0016, ADR 0007).
+// chunk over its bound; UTF-8 is decoded strictly. A statement reply is bounded at 2 MiB (the
+// result-side bound, replaced in ADR 0027 pull request 6), a control reply (BEGIN, COMMIT,
+// ROLLBACK, close) at the fixed 65,536 bytes (ADR 0027 pull request 3). A statement reply over
+// its bound is 413 POLICYSQL_LIMIT_EXCEEDED, a control reply over its bound 503
+// POLICYSQL_DATABASE_UNAVAILABLE (never a limit, and never a rejection of a COMMIT: ADR 0016,
+// ADR 0007).
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TursoHttpTransport } from "../src/turso-http.ts";
+import { CommitNotSentError } from "../src/errors.ts";
 import { BodyReadError, BodyTooLargeError, readBoundedText } from "../src/bounded-body.ts";
 import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
+const CONTROL_BYTES = 65_536;
+// The bound of each kind of reply.
+const BOUND = { statement: MAX_RESPONSE_BYTES, begin: CONTROL_BYTES, commit: CONTROL_BYTES };
 const runtimeLimit = { maxBytesPerValue: MAX_BYTES_PER_VALUE };
 const encoder = new TextEncoder();
 const VALUE = "日本語テキスト🙂";
@@ -108,14 +114,14 @@ const safe = (code) => (error) => {
   return true;
 };
 
-test("#53: a reply of exactly 2 MiB of UTF-8 is accepted, whatever the chunking", async () => {
+test("#53: a reply of exactly its bound of UTF-8 is accepted, whatever the chunking", async () => {
   for (const target of ["statement", "begin", "commit"]) {
     for (const size of [1 << 20, 65_536, 4_099]) {
-      const { state, stream } = tracked(chunked(replyFor[target](MAX_RESPONSE_BYTES), size));
+      const { state, stream } = tracked(chunked(replyFor[target](BOUND[target]), size));
       const output = await runners[target](transportFor(target, () => new Response(stream)));
       if (target === "statement") assert.deepEqual(output.rows, [[VALUE]], `size=${size}`);
       if (target === "commit") assert.equal(output.open, false);
-      assert.equal(state.bytes, MAX_RESPONSE_BYTES, `${target} size=${size}`);
+      assert.equal(state.bytes, BOUND[target], `${target} size=${size}`);
       assert.equal(state.cancelled, false);
     }
   }
@@ -133,11 +139,15 @@ test("#53: multi-byte UTF-8 split across chunks at every byte is decoded exactly
   assert.equal(state.bytes, MAX_RESPONSE_BYTES);
 });
 
-test("#53: one byte over 2 MiB is rejected with today's codes and the stream is cancelled", async () => {
+test("#53: one byte over the bound is rejected with its code and the stream is cancelled", async () => {
   for (const target of ["statement", "begin", "commit"]) {
-    for (const size of [65_536, 4_099, MAX_RESPONSE_BYTES + 1]) {
-      const over = tracked(chunked(replyFor[target](MAX_RESPONSE_BYTES + 1), size));
-      await assert.rejects(runners[target](transportFor(target, () => new Response(over.stream))), safe(OVERSIZED[target]), `${target} size=${size}`);
+    for (const size of [65_536, 4_099, BOUND[target] + 1]) {
+      const over = tracked(chunked(replyFor[target](BOUND[target] + 1), size));
+      await assert.rejects(runners[target](transportFor(target, () => new Response(over.stream))), (error) => {
+        // A COMMIT whose reply is over its bound is never a rejection: it may have committed.
+        assert.equal(error instanceof CommitNotSentError, false);
+        return safe(OVERSIZED[target])(error);
+      }, `${target} size=${size}`);
       assert.equal(over.state.cancelled, true, `${target} size=${size}: the stream is cancelled`);
     }
   }
@@ -153,7 +163,7 @@ test("#53: a large body with a missing or lying Content-Length is cut at the bou
       const body = tracked(spaces(step, total));
       await assert.rejects(runners[target](transportFor(target, () => new Response(body.stream, { headers }))), safe(OVERSIZED[target]), `${target} ${JSON.stringify(headers)}`);
       assert.equal(body.state.cancelled, true, `${target}: cancelled`);
-      assert.ok(body.state.bytes > MAX_RESPONSE_BYTES && body.state.bytes <= MAX_RESPONSE_BYTES + step,
+      assert.ok(body.state.bytes > BOUND[target] && body.state.bytes <= BOUND[target] + step,
         `${target}: pulled ${body.state.bytes} of ${total} bytes`);
     }
   }
@@ -184,7 +194,7 @@ test("#53: a declared Content-Length over the bound is rejected unread; a smalle
   for (const target of ["statement", "begin", "commit"]) {
     const small = tracked(chunked(replyFor[target](1_024), 100));
     await assert.rejects(runners[target](transportFor(target, () => new Response(small.stream, {
-      headers: { "content-length": String(MAX_RESPONSE_BYTES + 1) },
+      headers: { "content-length": String(BOUND[target] + 1) },
     }))), safe(OVERSIZED[target]), target);
     assert.equal(small.state.bytes, 0, `${target}: nothing read`);
     assert.equal(small.state.cancelled, true, `${target}: released`);

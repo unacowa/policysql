@@ -39,7 +39,7 @@ test("the suite fails a mapping that reads the body before the engine checks the
     async (input, ...rest) => {
       if (typeof input?.bodyText !== "function") return operation(input, ...rest);
       let bodyText;
-      try { bodyText = await input.bodyText(); } catch (error) { bodyText = async () => { throw error; }; }
+      try { bodyText = await input.bodyText(Number.MAX_SAFE_INTEGER); } catch (error) { bodyText = async () => { throw error; }; }
       return operation({ ...input, bodyText }, ...rest);
     }])));
   const results = await runHttpConformance(eager);

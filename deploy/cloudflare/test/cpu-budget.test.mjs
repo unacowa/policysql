@@ -83,16 +83,26 @@ test("the library accepts limits whatever they cost in CPU", () => {
   try { assert.equal(runtimeLimits(runtime).maxResultBytes, 500_000_000); } finally { runtime.free(); }
 });
 
-test("the formula's V is maxJsonValues' default, which the runtime does not enforce yet", () => {
-  // ADR 0027 sets maxJsonValues = 65,536, but the runtime neither enforces nor reports it until
-  // the request-budget pull request (ADR 0027 pull request 3). So the checks above use that default
-  // for V, and a body of about 1 MB of nested arrays is accepted today with about 500,000 values:
-  // the formula prices it at 731 ms of reference time (1,828 ms of cpu_ms at F = 2.0), although it
-  // measures about 200 ms (scripts/measure-cpu.mjs). When this test fails because the runtime
-  // reports maxJsonValues, re-measure (npm run measure:cpu and the release smoke) and let the
-  // test read the reported value.
-  assert.equal(effectiveLimits(RUNTIME_LIMITS).maxJsonValues, undefined, "the runtime reports no maxJsonValues yet");
-  assert.equal(inputsAtLimits(effectiveLimits(RUNTIME_LIMITS)).vReq, 65_536);
+test("the formula's V is the maxJsonValues the runtime reports, and the body side enforces it", () => {
+  // ADR 0027 pull request 3: the runtime reports maxJsonValues and the engine stops a body at it,
+  // so the formula's request-side V is no longer a number a client can exceed (a body of 1 MB of
+  // nested arrays has about 500,000 values and is now 413). The result side is still counted by
+  // the formula only; pull request 6 enforces it.
+  const enforced = effectiveLimits(RUNTIME_LIMITS);
+  assert.equal(enforced.maxJsonValues, 65_536);
+  assert.equal(inputsAtLimits(enforced).vReq, 65_536);
   const nestedArrays = { rMiB: 0.954, vReq: 499_928 };
-  assert.ok(requiredCpuMs(nestedArrays) > config.limits.cpu_ms, "the unbounded value count is not covered by the formula yet");
+  assert.ok(requiredCpuMs(nestedArrays) > config.limits.cpu_ms, "a body past maxJsonValues would not be covered, which is why it is refused");
+  // The configured request-side limits are the ones the runtime enforces.
+  assert.equal(enforced.maxRequestBytes, RUNTIME_LIMITS.maxRequestBytes);
+  assert.equal(enforced.maxSqlBytes, RUNTIME_LIMITS.maxSqlBytes);
+});
+
+test("the formula at the hard maxima needs more than the reference wrapper's cpu_ms", () => {
+  // R = 2 (maxRequestBytes 2,097,152), V = 131,072 each side (maxJsonValues 131,072).
+  const hard = effectiveLimits({ ...RUNTIME_LIMITS, maxRequestBytes: 2_097_152, maxJsonValues: 131_072 });
+  const inputs = inputsAtLimits(hard);
+  assert.equal(inputs.rMiB, 2);
+  assert.equal(inputs.vReq, 131_072);
+  assert.ok(requiredCpuMs(inputs) > config.limits.cpu_ms, "a wrapper that raises the limits raises cpu_ms by the formula");
 });

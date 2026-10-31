@@ -142,7 +142,7 @@ security denials and string literals:
 | Commit checks (`smoke_check`) | Atomic Execute allow and deny, interactive commit allow, and an interactive commit whose validator answers after the hook deadline (409 `POLICYSQL_COMMIT_CHECK_REJECTED`); every allow needs the validator's callback query to see the uncommitted probe row; a final read proves the denied and timed-out probes left no row |
 | Bytes (ADR 0016) | Padded 4-byte, empty and 3,001-byte BLOB round trips through `RETURNING` and `SELECT`; a read value resubmitted unchanged; `maxBytesPerValue + 1` bytes is 413 `POLICYSQL_LIMIT_EXCEEDED` and writes nothing; unpadded input is 400. The report records whether Turso's Hrana response pads BLOB base64 (`hranaBlobs`) |
 | NULL assignment (ADR 0017) | JSON `null` into nullable `note` (text) and `payload` (bytes) stores SQL NULL; `null` for non-nullable `label` and in a comparison is 400 `POLICYSQL_INVALID_PARAMETER`; Explain reports `nullable` per parameter |
-| CPU (ADR 0027, #56) | A small request and three about-1 MB Atomic Execute INSERTs into `smoke_values.doc` (nested arrays, short decimals, one long string) with their real CPU time read from Workers observability; see "Measuring CPU" below |
+| CPU (ADR 0027, #56) | A small request and three Atomic Execute INSERTs of up to 1 MB and `maxJsonValues` values into `smoke_values.doc` (nested arrays, short decimals, one long string) with their real CPU time read from Workers observability; see "Measuring CPU" below |
 
 The development-only resources are `smoke_checks` (`id`, `verdict` of `allow`/`deny`/`timeout`) and
 `smoke_values` (`id`, `label`, nullable `note`, nullable bytes `payload`, nullable JSON `doc`
@@ -210,7 +210,7 @@ own process, so the WASM linear memory printed with it is that scenario's high-w
 
 | Group | Scenarios |
 | --- | --- |
-| `request` | About 1 MB request bodies carrying a JSON `metadata` value: nested arrays (depth 56), one object with unique keys, short strings, short decimals, small integers, 17-digit decimals, one long ASCII string, one long CJK string; each as a keyed Atomic Execute and as a request rejected at compile (no database) |
+| `request` | Request bodies of up to about 1 MB and at most `maxJsonValues` JSON values (dense shapes stop at the value limit, so nested arrays are about 130 KB) carrying a JSON `metadata` value: nested arrays (depth 56), one object with unique keys, short strings, short decimals, small integers, 17-digit decimals, one long ASCII string, one long CJK string; each as a keyed Atomic Execute and as a request rejected at compile (no database) |
 | `result-json` | The same rows read back with `SELECT` (about 1 MB responses; the shapes whose raw result is over 1 MiB are 413 and listed under "Skipped") |
 | `result-cells` | Cell-heavy results of one-digit integers: 100 x 64, 1,000 x 10, 2,000 x 4 and 1,000 x 25 with every column `visible_if`; 100 x 64 plain; and `UPDATE ... RETURNING` with the check column and one-character aliases |
 | `sql-dense` | Statements through `:explain` (no database): expression depth 31, a 32-term `OR` chain, 128 projections, 128 projections of nested `lower()` 30 deep, 8 joins with a row filter per table, one statement at `maxSqlBytes`, 8 statements at `maxSqlBytes`, 8 statements of 8 joins |

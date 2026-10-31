@@ -60,6 +60,7 @@ impl PolicySqlRuntime {
             begin_timeout_ms: self.limits.begin_timeout_ms,
             max_callback_rows: self.limits.max_callback_rows,
             max_statements: self.limits.max_statements,
+            max_request_bytes: self.limits.max_request_bytes,
         }
     }
 

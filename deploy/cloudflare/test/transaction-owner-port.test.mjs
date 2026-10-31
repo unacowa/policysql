@@ -615,7 +615,7 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
 test("durable-objects: a non-JSON object reply is a safe 500, never forwarded", async (t) => {
   t.mock.method(console, "log", () => {});
   const namespace = { idFromName: (name) => name, get: () => ({ fetch: async () => new Response("<html>internal detail</html>", { status: 500 }) }) };
-  const runtime = { snapshot: "test-snapshot", max_bytes_per_value: 1_024, limits_json: limitsJson(), authorize_session_json: () => JSON.stringify({ ok: true }) };
+  const runtime = { snapshot: "test-snapshot", limits_json: limitsJson({ maxBytesPerValue: 1_024 }), authorize_session_json: () => JSON.stringify({ ok: true }) };
   const app = createApp({ getRuntime: () => runtime, database: testProvider(), config: testConfig(), transactionOwners: durableObjectTransactionOwners(namespace) });
   const response = await app.fetchCallback(new Request(`https://worker.test/v1/commit-checks/cval_${"0".repeat(32)}/query`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sequence: 1, ...read }),
@@ -686,7 +686,7 @@ test("durable-objects: ExecutionContext.waitUntil backs per-request BackgroundTa
 
 test("createApp requires a TransactionOwner port, and app.fetch rejects malformed BackgroundTasks before any work", async (t) => {
   t.mock.method(console, "log", () => {});
-  const runtime = { snapshot: "test-snapshot", max_bytes_per_value: 1_024, limits_json: limitsJson() };
+  const runtime = { snapshot: "test-snapshot", limits_json: limitsJson({ maxBytesPerValue: 1_024 }) };
   for (const transactionOwners of [undefined, null, {}, { route: 1 }]) {
     assert.throws(() => createApp({ getRuntime: () => runtime, database: testProvider(), config: testConfig(), transactionOwners }), TypeError);
   }

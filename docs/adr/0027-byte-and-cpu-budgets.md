@@ -521,6 +521,25 @@ allows 346 ms at the reference wrapper's limits, and a SQL request spends `R` on
 request would cost about 400 ms against the formula's 668 ms, and a later pull request that
 raises `maxSqlBytes` re-runs the script.
 
+**Pull request 3 notes (2026-10-31).** What the pull request did beyond the text above, and why.
+`maxJsonValues` makes the densest shapes of the measurements unreachable: a body past 65,536
+values is 413 before it is parsed, so the measurement script and the release smoke size their
+request shapes by values (`REQUEST_VALUE_BUDGET`, the limit less 64 for the envelope), and the
+1 MB nested-array body of the tables above is now about 130 KB. The compile bound is the derived
+`(A + 1,024) + R + 1,024`, not `R` itself: an interactive command is wrapped by the owner as a
+one-statement envelope a few bytes longer than the body, which a check against `R` would refuse.
+`maxSqlBytes` is checked in a pass before any statement is parsed (the deployment-surface pass
+parses every statement first). The step event keeps `max_statements` × 1 MiB as its result term
+until pull request 6 replaces it. `maxResponseBytes` is reported in `limits_json` at its default
+(`maxResultBytes` + 65,536) but neither enforced nor advertised before pull request 6, so
+Capabilities still advertises only enforced values; the same holds for the result side of
+`maxJsonValues`. The verified auth is bounded by `2 A + 1,024`, not `A + 1,024`: it carries the selected
+role, one of the session's `roles`, a second time, and role names have no length limit; the three
+derived request bounds above use it (compile 1,181,696, hash 2,232,448, event 10,624,000 at the
+defaults). An auth over that bound is our own inconsistency, answered 500 `POLICYSQL_INTERNAL`.
+The control reply (65,536) and validator reply (65,536) bounds are read with the
+streamed reader of pull request 2.
+
 The release smoke read the real CPU of 1 MB requests from Workers observability (an Atomic
 Execute without a commit check runs no Durable Object, so the Worker invocation is the whole
 request). Over seven runs on the dev deployment, `F` (Workers CPU over the warm Node time of the
@@ -651,9 +670,8 @@ that compares the client table with the status table (`website/api/errors.md`) c
 10. The session JSON bound becomes 65,536 bytes (was 1 MiB).
 11. A response over `maxResponseBytes` is now 413 and rolls back.
 12. `PolicySqlRuntime.max_bytes_per_value` is removed and the `limits_json` shape grows: WASM
-    the next ABI (11, unless another bump lands first; 9 was used by #80 and 10 by #65). The
-    snapshot changes, so open transactions from the previous ABI do not match (as for every ABI
-    change).
+    ABI 13 (pull request 3; 9 was used by #80, 10 by #65, 11 by #85, 12 by #54). The snapshot
+    changes, so open transactions from the previous ABI do not match (as for every ABI change).
 13. `DatabaseProvider` gains the `streamedReadCap` capability.
 14. Reference wrapper: `cpu_ms` 50 → 1,000 (provisional), runbook alert threshold relative to
     `cpu_ms`.

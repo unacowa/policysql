@@ -126,7 +126,7 @@ budget after expiry so an expired transaction can still be released. Cost observ
 has its own budget; it does not reuse an expired execution deadline.
 
 PolicySQL always passes `options.maxBytesPerValue`, taken from the loaded runtime
-(`runtime.max_bytes_per_value`, the same value Capabilities advertises). A transport
+(`limits_json` `maxBytesPerValue`, the same value Capabilities advertises). A transport
 may use it to reject an oversized BLOB before decoding it, as the Turso HTTP adapter
 does; it must not hard-code its own copy. PolicySQL re-checks every driver BLOB
 against the same runtime value before WASM result validation.
@@ -134,7 +134,7 @@ against the same runtime value before WASM result validation.
 `TursoHttpTransport.begin` requires `options`. When called directly, an omitted or
 malformed `maxBytesPerValue` (missing, non-integer, zero, negative or `Infinity`) is a
 `TypeError` raised before any HTTP request; the transport never runs without a
-per-value BLOB bound. Pass `{ maxBytesPerValue: runtime.max_bytes_per_value }`.
+per-value BLOB bound. Pass `{ maxBytesPerValue }` from the runtime's `limits_json`.
 
 ## Immutable binding and DO integration
 

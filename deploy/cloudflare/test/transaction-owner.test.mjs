@@ -55,8 +55,7 @@ const ownerProvider = (database) => {
 
 const runtime = () => ({
   snapshot: "test-snapshot",
-  max_bytes_per_value: 1_024,
-  limits_json: limitsJson(),
+  limits_json: limitsJson({ maxBytesPerValue: 1_024 }),
   identity_json,
   released: 0,
   compile_json() {

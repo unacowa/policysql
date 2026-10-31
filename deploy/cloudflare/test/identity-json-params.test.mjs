@@ -2,13 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { harness } from "./helpers/routing.mjs";
-import { MAX_BODY_BYTES } from "../src/request-body.ts";
+// The default `maxRequestBytes` (ADR 0027), which these fixtures stay under.
+const MAX_BODY_BYTES = 1_048_576;
 
 // Regression fixture (#55 re-review, AGENTS.md): a statement that COMPILES and carries ~1 MB
 // of numbers in a JSON-typed parameter (`projects.metadata`, as in the deployed catalog). The
 // owner hashes it with core after compile, so core's number canonicalization must stay fast.
-// PolicySQL sets no size limit on JSON parameters beyond the body limit, and this test adds
-// none. The responses are those of main before ADR 0024 pull request 2.
+// PolicySQL limits JSON parameters only by the body limits (`maxRequestBytes`, `maxJsonValues`). The responses are those of main before ADR 0024 pull request 2.
 const read = (name) => readFileSync(new URL(`../../../tests/fixtures/${name}`, import.meta.url), "utf8");
 const fixture = {
   catalog: read("bytes/catalog.yaml"), policy: read("bytes/policy.yaml"),
@@ -39,7 +39,8 @@ const statementBody = (sequence, make) => {
   const metadata = [];
   const command = { sequence, sql: SQL, params: { id: "wide", name: "AAEC/w==", state: "AA==", metadata } };
   let length = JSON.stringify(command).length;
-  for (let index = 0; length < 1_000_000; index++) {
+  // At most 60,000 values: the engine refuses a body past `maxJsonValues` (65,536, ADR 0027).
+  for (let index = 0; length < 1_000_000 && index < 60_000; index++) {
     const value = make(index);
     metadata.push(value);
     length += JSON.stringify(value).length + 1;
@@ -48,12 +49,12 @@ const statementBody = (sequence, make) => {
 };
 
 for (const [name, make] of Object.entries(SHAPES)) {
-  test(`regression: a compiling ~1 MB JSON parameter of ${name} is hashed fast and answered as before`, async (t) => {
+  test(`regression: a compiling JSON parameter of up to 60,000 ${name} is hashed fast and answered as before`, async (t) => {
     t.mock.method(console, "log", () => {});
     const h = await harness(t, { fixture, hooks: false });
     const command = statementBody(1, make);
     const text = JSON.stringify(command);
-    assert.ok(text.length > 990_000 && text.length < MAX_BODY_BYTES, `${text.length}`);
+    assert.ok(text.length > 200_000 && text.length < MAX_BODY_BYTES, `${text.length}`);
 
     // A deterministic digest and the time bound, on the runtime the owner uses.
     const input = JSON.stringify({ op: "command", kind: "statement", command });
