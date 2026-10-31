@@ -22,6 +22,20 @@ export class EngineError extends Error {
   }
 }
 
+/**
+ * A failure that happened before any byte of COMMIT was sent (#54): the transport re-checked
+ * the binding or the deadline immediately before the send and the transaction was rolled back,
+ * or the deadline had passed when the send was about to start. Thrown only from there, so an
+ * executor may report it as `not_committed` (a definite rejection). A failure of the COMMIT
+ * request itself, or of anything after its send began, never uses it (ADR 0007). `cause` is the
+ * underlying failure; it is never shown to a client.
+ */
+export class CommitNotSentError extends Error {
+  constructor(cause: unknown) {
+    super("COMMIT was not sent.", { cause });
+  }
+}
+
 export const internalError = () => new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
 
 // A well-formed BLOB over the per-value limit is a permanent limit condition, not a

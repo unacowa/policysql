@@ -36,7 +36,7 @@ use wasm_bindgen::prelude::*;
 /// `POLICYSQL_IDEMPOTENCY_KEY_INVALID` with a new message instead of `..._KEY_REQUIRED` (#65).
 /// 11: an owner answers an `atomic` input whose snapshot is not its own `POLICYSQL_INTERNAL`
 /// (the version-skew answer) instead of `POLICYSQL_TRANSACTION_CONFLICT` (#85).
-const ABI_VERSION: u32 = 11;
+const ABI_VERSION: u32 = 12;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -679,7 +679,11 @@ impl PolicySqlRuntime {
     /// when the Worker's snapshot is not its own for an `atomic` input
     /// (`POLICYSQL_INTERNAL`, the version-skew answer, instead of
     /// `POLICYSQL_TRANSACTION_CONFLICT`, which a client takes as a rejection), and bumped
-    /// `ABI_VERSION` to 11; no identity value changed.
+    /// `ABI_VERSION` to 11; no identity value changed. #54 changed what a commit whose adapter
+    /// proved that no COMMIT was sent (`commitFailed` with class `not_committed`) answers:
+    /// `POLICYSQL_TRANSACTION_UNAVAILABLE` (a definite rejection) for an atomic execution (was
+    /// `POLICYSQL_INTERNAL`) and for an interactive commit (was a 200 with status `failed`), and
+    /// bumped `ABI_VERSION` to 12; no identity value changed.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn step_json(

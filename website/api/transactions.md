@@ -142,7 +142,7 @@ Content-Type: application/json
 
 terminal status の再確認は、直前と同じ command（commit または rollback）、同じ sequence、同じ payload の再送で行います。反対の terminal command は再送として扱わず拒否します。HTTP 200 だけで commit 成功を判断せず、`status: committed` を確認してください。`failed` は rollback 完了の保証ではありません。期限までに commit されなかった transaction は自動 rollback されます。
 
-COMMIT を送った後に結果を確定できない場合、commit とその再送は HTTP 503 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` になります。COMMIT を送る前の失敗（ownerの喪失、期限切れ、commit checkの拒否など）は、従来どおり確定的な拒否（409）です。ownerはCOMMITを送る前に`committing`状態を保存し、commit後の状態（`committed`、次のsequence、保存済みresponse）を1回の書き込みで保存します。そのため、COMMITの送信後にownerを失った場合や記録の保存に失敗した場合でも、commitの再送が409で拒否されることはありません。deployで snapshot が変わった後の commit の再送も同様です（同じ principal・subject・role・session・database（scope、ID、generation）で、違いが snapshot だけの場合。commit 以外の command は現在の snapshot が必要で、別の principal や database からの再送は従来どおり拒否します）。`POLICYSQL_COMMIT_OUTCOME_UNKNOWN` は commit 済みの可能性があるため、別 transaction でやり直す前に、アプリケーションのデータで結果を確認してください。
+COMMIT を送った後に結果を確定できない場合、commit とその再送は HTTP 503 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` になります。COMMIT を送る前の失敗（ownerの喪失、期限切れ、commit checkの拒否、COMMIT直前のbindingまたは期限の確認の失敗など）は、従来どおり確定的な拒否（409）です。ownerはCOMMITを送る前に`committing`状態を保存し、commit後の状態（`committed`、次のsequence、保存済みresponse）を1回の書き込みで保存します。そのため、COMMITの送信後にownerを失った場合や記録の保存に失敗した場合でも、commitの再送が409で拒否されることはありません。deployで snapshot が変わった後の commit の再送も同様です（同じ principal・subject・role・session・database（scope、ID、generation）で、違いが snapshot だけの場合。commit 以外の command は現在の snapshot が必要で、別の principal や database からの再送は従来どおり拒否します）。`POLICYSQL_COMMIT_OUTCOME_UNKNOWN` は commit 済みの可能性があるため、別 transaction でやり直す前に、アプリケーションのデータで結果を確認してください。
 
 ## Failure
 

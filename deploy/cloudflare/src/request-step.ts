@@ -28,7 +28,7 @@ import { EngineError, internalError, operationError } from "./errors.ts";
 import { checkDatabaseBinding, databaseTransportFactory, sameDatabaseBinding } from "./database.ts";
 import type { DatabaseBinding, DatabaseProvider } from "./database.ts";
 import { parseExact, stringifyExact } from "./exact-json.ts";
-import { checkBatch, decodeArgs, directFailureClass, encodeResults, entropyHex, observeCost } from "./step-effects.ts";
+import { checkBatch, decodeArgs, directCommitFailureClass, directFailureClass, encodeResults, entropyHex, observeCost } from "./step-effects.ts";
 import type { CostCatalog } from "./engine-config.ts";
 import { runInBackground } from "./transaction-owner-port.ts";
 import type { BackgroundTasks, OwnerReply, TransactionOwnerHandle } from "./transaction-owner-port.ts";
@@ -155,7 +155,7 @@ export const runRequestStep = async (
         } catch (error) {
           // The machine rolls the connection back next (harmless if COMMIT applied).
           connection = open;
-          return { type: "commitFailed", id, class: directFailureClass(error) };
+          return { type: "commitFailed", id, class: directCommitFailureClass(error) };
         }
         const usage: any[] = Array.isArray(open.usage) ? open.usage : [];
         console.log(JSON.stringify({

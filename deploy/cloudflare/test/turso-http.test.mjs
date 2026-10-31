@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { TursoHttpTransport } from "../src/turso-http.ts";
+import { CommitNotSentError } from "../src/errors.ts";
 import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
 import { redirectResponses } from "./helpers/redirects.mjs";
 
@@ -214,7 +215,8 @@ test("HTTP operations share an absolute deadline while rollback retains its clea
   now = 10_200;
   const count = requests.length;
   await assert.rejects(second.execute([{ sql: "SELECT id FROM projects" }]), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
-  await assert.rejects(second.commit(), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
+  // A COMMIT whose deadline passed is refused before any byte is sent: a typed pre-send failure (#54).
+  await assert.rejects(second.commit(), (error) => error instanceof CommitNotSentError && error.cause.code === "POLICYSQL_DATABASE_TIMEOUT");
   assert.equal(requests.length, count, "no SQL or COMMIT after expiry");
   await second.rollback();
   assert.equal(requests.at(-1), "ROLLBACK");
