@@ -10,15 +10,20 @@
 //! The four original fields stay required; every other configurable field is optional with
 //! a default. ADR 0027 pull request 3 added `max_request_bytes`, `max_json_values`, and
 //! `max_sql_bytes` (with a minimum, because a request limit below 64 KiB cannot carry the
-//! envelope) and made `limits_json` report every limit the ADR adds. The fields later pull
-//! requests make configurable (`max_bytes_per_value`, `max_response_bytes`) are reported at
-//! today's fixed values and are not constructor fields until then. Pull request 4 made the
-//! four input-side parser limits (`max_parameters`, `max_expression_depth`, `max_projections`,
-//! `max_joins`) constructor fields: they bound only `PolicySQL`'s own work on the client's SQL
-//! and promise nothing about the emitted statement.
+//! envelope) and made `limits_json` report every limit the ADR adds. The field a later pull
+//! request makes configurable (`max_response_bytes`) is reported at today's fixed value and
+//! is not a constructor field until then. Pull request 4 made the four input-side parser
+//! limits (`max_parameters`, `max_expression_depth`, `max_projections`, `max_joins`)
+//! constructor fields: they bound only `PolicySQL`'s own work on the client's SQL and promise
+//! nothing about the emitted statement. Pull request 5 made `max_bytes_per_value` (decoded
+//! bytes of one bytes value) a constructor field; every path it bounds takes it from here.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
+
+/// The default and the hard maximum of `max_bytes_per_value`, in decoded bytes; core owns both.
+const DEFAULT_MAX_BYTES_PER_VALUE: u64 = policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE as u64;
+const HARD_MAX_BYTES_PER_VALUE: u64 = policysql_core::bytes::HARD_MAX_BYTES_PER_VALUE as u64;
 
 /// The largest value JavaScript reads exactly; every limit crosses into the engine as a
 /// JSON number.
@@ -40,7 +45,7 @@ struct Field {
 /// The largest `max_sql_bytes`, before the cross-check with `max_request_bytes`.
 const MAX_SQL_BYTES_CEILING: u64 = 1_048_576;
 
-const FIELDS: [Field; 17] = [
+const FIELDS: [Field; 18] = [
     Field {
         name: "max_rows",
         default: None,
@@ -130,6 +135,15 @@ const FIELDS: [Field; 17] = [
         min: 1_024,
         max: MAX_SQL_BYTES_CEILING,
     },
+    // Decoded bytes of one bytes value: a client parameter, a policy preset, a result cell.
+    // The hard maximum keeps its base64 form (1,398,104 bytes) inside the largest request. On
+    // every path the smallest applicable limit governs (ADR 0027).
+    Field {
+        name: "max_bytes_per_value",
+        default: Some(DEFAULT_MAX_BYTES_PER_VALUE),
+        min: 1,
+        max: HARD_MAX_BYTES_PER_VALUE,
+    },
     // Distinct client parameter names in one statement (input-side).
     Field {
         name: "max_parameters",
@@ -184,8 +198,7 @@ pub(crate) struct RuntimeLimits {
     pub(crate) max_expression_depth: u64,
     pub(crate) max_projections: u64,
     pub(crate) max_joins: u64,
-    // Fixed today, enforced by core, reported here so `ABI_VERSION` changed once for all of
-    // them (ADR 0027 pull request 3); a later pull request makes it configurable.
+    /// Decoded bytes of one bytes value (ADR 0027 pull request 5).
     pub(crate) max_bytes_per_value: u64,
     /// Reported at its default (`max_result_bytes` + 64 KiB); enforced from pull request 6.
     pub(crate) max_response_bytes: u64,
@@ -197,7 +210,6 @@ pub(crate) struct RuntimeLimits {
 /// Fixed limits reported next to the configured ones.
 #[allow(clippy::struct_field_names)]
 pub(crate) struct FixedLimits {
-    pub(crate) max_bytes_per_value: usize,
     pub(crate) max_commit_checks: usize,
     pub(crate) max_hook_duration_ms: u64,
 }
@@ -253,6 +265,7 @@ pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLim
         max_request_bytes,
         max_json_values,
         max_sql_bytes,
+        max_bytes_per_value,
         max_parameters,
         max_expression_depth,
         max_projections,
@@ -283,7 +296,7 @@ pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLim
         max_expression_depth,
         max_projections,
         max_joins,
-        max_bytes_per_value: as_u64(fixed.max_bytes_per_value),
+        max_bytes_per_value,
         max_response_bytes: max_result_bytes
             .saturating_add(RESPONSE_HEADROOM_BYTES)
             .min(MAX_SAFE_INTEGER),
@@ -316,7 +329,6 @@ mod tests {
     use super::{FIELDS, FixedLimits, parse};
 
     const FIXED: FixedLimits = FixedLimits {
-        max_bytes_per_value: 262_144,
         max_commit_checks: 4,
         max_hook_duration_ms: 1_500,
     };
@@ -364,10 +376,11 @@ mod tests {
         assert_eq!(json["costTimeoutMs"], 700);
         assert_eq!(json["maxRows"], 100);
         let limits = with(
-            r#""max_parameters":16384,"max_expression_depth":64,"max_projections":2000,"max_joins":63"#,
+            r#""max_parameters":16384,"max_expression_depth":64,"max_projections":2000,"max_joins":63,"max_bytes_per_value":1048576"#,
         )
         .unwrap_or_else(|error| unreachable!("{error}"));
         let json = serde_json::to_value(limits).unwrap_or_else(|error| unreachable!("{error}"));
+        assert_eq!(json["maxBytesPerValue"], 1_048_576);
         assert_eq!(json["maxParameters"], 16_384);
         assert_eq!(json["maxExpressionDepth"], 64);
         assert_eq!(json["maxProjections"], 2_000);

@@ -294,7 +294,9 @@ impl PolicyBundle {
             })
     }
 
-    /// Parses and activates one immutable policy bundle against a Catalog snapshot.
+    /// Parses and activates one immutable policy bundle against a Catalog snapshot, checking
+    /// bytes presets against the default per-value limit. A deployment with a configured limit
+    /// must use [`Self::activate_with_value_limit`] (the runtime does).
     ///
     /// # Errors
     ///
@@ -303,6 +305,26 @@ impl PolicyBundle {
         yaml: &str,
         catalog: &Catalog,
         snapshot: SnapshotId,
+    ) -> Result<Self, PolicyError> {
+        Self::activate_with_value_limit(
+            yaml,
+            catalog,
+            snapshot,
+            policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
+        )
+    }
+
+    /// As [`Self::activate`], with the deployment's per-value bytes limit
+    /// (`maxBytesPerValue`, ADR 0027): a bytes preset over it is rejected.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::activate`], and a bytes preset longer than `max_bytes_per_value`.
+    pub fn activate_with_value_limit(
+        yaml: &str,
+        catalog: &Catalog,
+        snapshot: SnapshotId,
+        max_bytes_per_value: usize,
     ) -> Result<Self, PolicyError> {
         let raw: RawBundle = serde_yaml::from_str(yaml).map_err(|_| PolicyError::InvalidBundle)?;
         if raw.version != 1 || raw.resources.is_empty() {
@@ -340,7 +362,8 @@ impl PolicyBundle {
                     }
                 }
                 if let Some(raw_insert) = insert {
-                    let policy = activate_insert(raw_insert, resource, next_policy_id)?;
+                    let policy =
+                        activate_insert(raw_insert, resource, next_policy_id, max_bytes_per_value)?;
                     next_policy_id = next_policy_id
                         .checked_add(1)
                         .ok_or(PolicyError::TooManyPolicies)?;
@@ -349,7 +372,8 @@ impl PolicyBundle {
                     }
                 }
                 if let Some(raw_update) = update {
-                    let policy = activate_update(raw_update, resource, next_policy_id)?;
+                    let policy =
+                        activate_update(raw_update, resource, next_policy_id, max_bytes_per_value)?;
                     next_policy_id = next_policy_id
                         .checked_add(1)
                         .ok_or(PolicyError::TooManyPolicies)?;
@@ -932,6 +956,7 @@ fn activate_insert(
     raw: RawInsert,
     resource: &ResourceDescriptor,
     policy_id: u64,
+    max_bytes_per_value: usize,
 ) -> Result<InsertPolicy, PolicyError> {
     if raw.columns.is_empty() {
         return Err(PolicyError::UnsupportedCapability);
@@ -949,7 +974,12 @@ fn activate_insert(
         if columns.contains(&column.id) {
             return Err(PolicyError::PresetColumnOverlap);
         }
-        let operand = parse_preset(&value, resource, column.value.logical_type)?;
+        let operand = parse_preset(
+            &value,
+            resource,
+            column.value.logical_type,
+            max_bytes_per_value,
+        )?;
         if matches!(operand, PolicyOperand::Column(_)) {
             return Err(PolicyError::InvalidPredicate);
         }
@@ -968,6 +998,7 @@ fn activate_update(
     raw: RawUpdate,
     resource: &ResourceDescriptor,
     policy_id: u64,
+    max_bytes_per_value: usize,
 ) -> Result<UpdatePolicy, PolicyError> {
     if raw.columns.is_empty() {
         return Err(PolicyError::UnsupportedCapability);
@@ -985,7 +1016,12 @@ fn activate_update(
         if columns.contains(&column.id) {
             return Err(PolicyError::PresetColumnOverlap);
         }
-        let operand = parse_preset(&value, resource, column.value.logical_type)?;
+        let operand = parse_preset(
+            &value,
+            resource,
+            column.value.logical_type,
+            max_bytes_per_value,
+        )?;
         if matches!(operand, PolicyOperand::Column(_)) {
             return Err(PolicyError::InvalidPredicate);
         }
@@ -1140,6 +1176,7 @@ fn parse_preset(
     value: &Value,
     resource: &ResourceDescriptor,
     expected: LogicalType,
+    max_bytes_per_value: usize,
 ) -> Result<PolicyOperand, PolicyError> {
     if expected != LogicalType::Bytes {
         return parse_operand(value, resource, expected);
@@ -1153,9 +1190,12 @@ fn parse_preset(
     let literal = mapping_value(mapping, "literal")
         .and_then(Value::as_str)
         .ok_or(PolicyError::IncompatibleOperand)?;
-    policysql_core::bytes::decode(literal)
+    policysql_core::bytes::decode(literal, max_bytes_per_value)
         .map(|value| PolicyOperand::Literal(LogicalValue::Bytes(value)))
-        .map_err(|_| PolicyError::IncompatibleOperand)
+        .map_err(|error| match error {
+            policysql_core::bytes::DecodeError::TooLarge => PolicyError::BytesPresetTooLarge,
+            policysql_core::bytes::DecodeError::InvalidEncoding => PolicyError::IncompatibleOperand,
+        })
 }
 
 fn parse_operand(
@@ -1896,6 +1936,8 @@ pub enum PolicyError {
     UnknownOperator,
     InvalidPredicate,
     IncompatibleOperand,
+    /// A bytes preset is longer than the deployment's per-value limit (`max_bytes_per_value`).
+    BytesPresetTooLarge,
     NullComparison,
     UnsupportedCapability,
     UnsupportedRedaction,
@@ -1923,6 +1965,9 @@ impl fmt::Display for PolicyError {
             Self::UnknownOperator => formatter.write_str("policy operator is unsupported"),
             Self::InvalidPredicate => formatter.write_str("policy predicate is invalid"),
             Self::IncompatibleOperand => formatter.write_str("policy operands are incompatible"),
+            Self::BytesPresetTooLarge => {
+                formatter.write_str("a bytes preset exceeds the per-value limit")
+            }
             Self::NullComparison => formatter.write_str("policy NULL requires is_null"),
             Self::UnsupportedCapability => formatter.write_str("policy capability is unsupported"),
             Self::UnsupportedRedaction => {

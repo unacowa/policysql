@@ -115,7 +115,12 @@ fn validate_public_result(
             return Err(AdapterError::InvalidResult);
         }
         for (value, descriptor) in row.iter().zip(plan.result()) {
-            validate_value(value, &descriptor.value, &descriptor.possible_types)?;
+            validate_value(
+                value,
+                &descriptor.value,
+                &descriptor.possible_types,
+                plan.limits().max_bytes_per_value,
+            )?;
             bytes = bytes
                 .checked_add(value_size(value))
                 .ok_or(AdapterError::LimitExceeded)?;
@@ -260,9 +265,9 @@ fn validate_value(
     value: &LogicalValue,
     descriptor: &ValueDescriptor,
     possible_types: &[LogicalType],
+    max_bytes_per_value: usize,
 ) -> Result<(), AdapterError> {
-    if matches!(value, LogicalValue::Bytes(value) if value.len() > policysql_core::bytes::MAX_BYTES_PER_VALUE)
-    {
+    if matches!(value, LogicalValue::Bytes(value) if value.len() > max_bytes_per_value) {
         return Err(AdapterError::LimitExceeded);
     }
     if matches!(value, LogicalValue::Null) {
@@ -647,6 +652,7 @@ mod tests {
                 max_rows: 2,
                 max_result_bytes: 32,
                 timeout_ms: 1_000,
+                max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
             },
             snapshot,
         )
@@ -718,6 +724,7 @@ mod tests {
                 max_rows: 2,
                 max_result_bytes: 32,
                 timeout_ms: 1_000,
+                max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
             },
             snapshot,
         )
@@ -794,6 +801,7 @@ mod tests {
                 max_rows: 2,
                 max_result_bytes: 32,
                 timeout_ms: 1_000,
+                max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
             },
             snapshot,
         )
@@ -963,6 +971,7 @@ mod tests {
                 &LogicalValue::String("123e4567-e89b-12d3-a456-426614174000".to_owned()),
                 &descriptor,
                 &[LogicalType::String],
+                policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
             ),
             Ok(())
         );
@@ -971,6 +980,7 @@ mod tests {
                 &LogicalValue::String("123e4567-e89b-12d3-a456-426614174001".to_owned()),
                 &descriptor,
                 &[LogicalType::String],
+                policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
             ),
             Err(AdapterError::InvalidResult)
         );
@@ -989,24 +999,32 @@ mod tests {
             constraints: None,
             json_schema: None,
         };
-        let limit = policysql_core::bytes::MAX_BYTES_PER_VALUE;
-        for (value, expected) in [
-            (LogicalValue::Bytes(vec![255; limit]), Ok(())),
-            (LogicalValue::Bytes(Vec::new()), Ok(())),
-            (LogicalValue::Null, Ok(())),
-            (
-                LogicalValue::Bytes(vec![0; limit + 1]),
-                Err(AdapterError::LimitExceeded),
-            ),
-            (
-                LogicalValue::String("AA==".to_owned()),
-                Err(AdapterError::InvalidResult),
-            ),
+        // The limit is the plan's (`ExecutionLimits`): exact at the limit and one over, at the
+        // default and at the hard maximum.
+        for limit in [
+            3,
+            policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
+            policysql_core::bytes::HARD_MAX_BYTES_PER_VALUE,
         ] {
-            assert_eq!(
-                validate_value(&value, &descriptor, &[LogicalType::Bytes]),
-                expected
-            );
+            for (value, expected) in [
+                (LogicalValue::Bytes(vec![255; limit]), Ok(())),
+                (LogicalValue::Bytes(Vec::new()), Ok(())),
+                (LogicalValue::Null, Ok(())),
+                (
+                    LogicalValue::Bytes(vec![0; limit + 1]),
+                    Err(AdapterError::LimitExceeded),
+                ),
+                (
+                    LogicalValue::String("AA==".to_owned()),
+                    Err(AdapterError::InvalidResult),
+                ),
+            ] {
+                assert_eq!(
+                    validate_value(&value, &descriptor, &[LogicalType::Bytes], limit),
+                    expected,
+                    "limit {limit}"
+                );
+            }
         }
     }
 }

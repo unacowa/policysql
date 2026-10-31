@@ -54,10 +54,13 @@ values and database protocol objects are not public parameter or result formats.
 Base64 uses the standard `+/` alphabet, required padding, zero unused bits and no
 whitespace. Invalid encodings or non-string bytes inputs return
 `POLICYSQL_INVALID_PARAMETER` (400), however long the input is. `limits.maxBytesPerValue`
-in Capabilities bounds decoded values (262,144 bytes in the initial profile); exceeding
-it with well-formed input returns `POLICYSQL_LIMIT_EXCEEDED` (413) before execution. A
-stored physical BLOB over this limit also returns 413 with either database transport
-and rolls back the transaction. Request and encoded result limits also apply. See [ADR 0016](adr/0016-bytes-wire-contract.md) and the
+in Capabilities bounds decoded values (configured per deployment; 262,144 bytes by default, at most
+1,048,576); exceeding it with well-formed input returns `POLICYSQL_LIMIT_EXCEEDED` (413) before
+execution. A stored physical BLOB over this limit also returns 413 with either database transport
+and rolls back the transaction. The limit applies to bytes values only. It is an upper bound: the
+smallest applicable limit governs, so a value within it can still be refused by `maxRequestBytes`
+(`POLICYSQL_REQUEST_TOO_LARGE`) or, when read, by `maxResultBytes` or the interactive result limit
+(`docs/configuration.md`, "Per-value bytes"). See [ADR 0016](adr/0016-bytes-wire-contract.md) and the
 [conformance ledger](user-document-conformance.md) for scope and evidence.
 
 A named parameter of any logical type may be JSON `null`, which binds SQL NULL, only

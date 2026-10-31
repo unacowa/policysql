@@ -13,6 +13,8 @@ pub struct ExecutionLimits {
     pub max_rows: u64,
     pub max_result_bytes: u64,
     pub timeout_ms: u64,
+    /// Decoded bytes of one bytes value (parameter, preset, result cell); ADR 0027.
+    pub max_bytes_per_value: usize,
 }
 
 /// Which downstream complexity limit an emitted statement reached (ADR 0027, "Emitted
@@ -393,6 +395,7 @@ mod tests {
                 max_rows: 100,
                 max_result_bytes: 10_000,
                 timeout_ms: 1_000,
+                max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
             },
             SnapshotId::new("snapshot_1")
                 .unwrap_or_else(|error| unreachable!("test snapshot is valid: {error}")),

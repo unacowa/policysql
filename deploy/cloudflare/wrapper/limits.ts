@@ -19,4 +19,8 @@ export const RUNTIME_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
   maxRequestBytes: 1_048_576,
   maxJsonValues: 65_536,
   maxSqlBytes: 65_536,
+  // Decoded bytes of one bytes value (ADR 0027), set explicitly like the others. The smallest
+  // applicable limit governs: with maxResultBytes 64,000 a value is readable only up to about
+  // 47 KB, whatever this says (docs/configuration.md, "Per-value bytes").
+  maxBytesPerValue: 262_144,
 });

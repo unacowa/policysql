@@ -303,8 +303,12 @@ pub enum LogicalValue {
 /// used at both ingress and result boundaries; callers must still validate the
 /// expression's logical type separately.
 #[must_use]
-pub fn value_satisfies_contract(value: &LogicalValue, descriptor: &ValueDescriptor) -> bool {
-    if matches!(value, LogicalValue::Bytes(value) if value.len() > bytes::MAX_BYTES_PER_VALUE) {
+pub fn value_satisfies_contract(
+    value: &LogicalValue,
+    descriptor: &ValueDescriptor,
+    max_bytes_per_value: usize,
+) -> bool {
+    if matches!(value, LogicalValue::Bytes(value) if value.len() > max_bytes_per_value) {
         return false;
     }
     if matches!(value, LogicalValue::Null) {

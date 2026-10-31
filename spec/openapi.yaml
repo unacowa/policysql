@@ -652,7 +652,7 @@ components:
             maxBytesPerValue:
               type: integer
               minimum: 1
-              description: Maximum decoded bytes per value; request and encoded result limits also apply. The initial profile uses 262144 bytes.
+              description: Maximum decoded bytes of one bytes value (a bytes parameter, a policy preset, a result cell); text and JSON values are not bounded by it. The default is 262144 and the deployment may configure up to 1048576. An upper bound only, not a promise; the smallest applicable limit governs, so a value within it can still be refused by maxRequestBytes (413 POLICYSQL_REQUEST_TOO_LARGE) or, when read, by the result limits (413 POLICYSQL_LIMIT_EXCEEDED). A bytes value over it is 413 POLICYSQL_LIMIT_EXCEEDED.
             maxRequestBytes:
               type: integer
               minimum: 1
