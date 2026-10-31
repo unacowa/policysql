@@ -77,7 +77,7 @@ export const countingOwners = (port) => {
 // Exercise real SQL, rollback, and transaction visibility through the real HTTP transport.
 // Only the remote HTTP server and the owner platform (Durable Object routing and state, or
 // the in-memory owner adapter) are simulated.
-export const harness = async (t, { hooks = true, idempotencyTable = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding, customizePolicy = (policy) => policy, customizeConfig = (config) => config, fixture, runtimeLimits = limits, ownerAdapter = process.env.POLICYSQL_TEST_OWNER_ADAPTER ?? "durable-objects" } = {}) => {
+export const harness = async (t, { hooks = true, idempotencyTable = true, customizeProvider = (provider) => provider, customizeBinding = (binding) => binding, customizePolicy = (policy) => policy, customizeConfig = (config) => config, fixture, runtimeLimits = limits, excludeTime = (work) => work(), ownerAdapter = process.env.POLICYSQL_TEST_OWNER_ADAPTER ?? "durable-objects" } = {}) => {
   assert.ok(OWNER_ADAPTERS.includes(ownerAdapter), "known owner adapter");
   const directory = mkdtempSync(join(tmpdir(), "policysql-routing-"));
   const makeRuntime = (versions = {}) => PolicySqlRuntime.newWithPhysicalSchema(
@@ -115,7 +115,10 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   let replaceResponse = null;
   const connections = new Map();
   const acceptedTokens = new Map(["a", "b"].map((tenant) => [tenant, new Set([`token_${tenant}`])]));
-  const remote = async (url, options) => {
+  // `excludeTime(work)` runs work whose time a CPU measurement must not count (scripts/measure-cpu.mjs):
+  // the simulated Turso server and the harness client's own response parsing. Tests leave it as is.
+  const remote = (url, options) => excludeTime(() => remoteDatabase(url, options));
+  const remoteDatabase = async (url, options) => {
     const tenant = new URL(url).hostname.split(".")[0];
     assert.ok(databases.has(tenant), "no fallback or unregistered network destination");
     if (!acceptedTokens.get(tenant).has(options.headers.authorization.replace(/^Bearer /, ""))) {
@@ -278,7 +281,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
       }
       response = await app.fetch(input, { database: customizeBinding(registry.binding(`db_${tenant}`, env)), session: trusted }, background);
     }
-    return { status: response.status, body: await response.json() };
+    return { status: response.status, body: await excludeTime(() => response.json()) };
   };
   const flush = async () => {
     while (pending.length) await Promise.all(pending.splice(0));

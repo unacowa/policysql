@@ -11,7 +11,13 @@
     "logs": { "enabled": true, "head_sampling_rate": 1, "invocation_logs": true }
   },
   "limits": {
-    "cpu_ms": 50,
+    // Per invocation (the Worker and each Durable Object call). ADR 0027: at least
+    // 1.25 x F x (5 ms + 80 ms/MiB x (R + B) + 1.3 us x (V_req + V_res)) for this file's limits
+    // (wrapper/limits.ts), F = 2.0 (the maintainers' value): about 864 ms, rounded up to 1,000,
+    // provisional (test/cpu-budget.test.mjs fails when the formula is violated; scripts/measure-cpu.mjs
+    // re-measures the coefficients, the release smoke records the observed F, which was higher: see
+    // ADR 0027 "Pull request 1 results").
+    "cpu_ms": 1000,
     "subrequests": 10
   },
   "ratelimits": [

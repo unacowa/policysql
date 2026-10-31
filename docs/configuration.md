@@ -106,6 +106,37 @@ Failures, all at construction and before any request is served:
 - Changing a limit does not change the deployment snapshot, as before: limits are not part
   of it.
 
+## CPU model
+
+The library does not refuse a limit for CPU reasons: the CPU limit, the platform and its speed are
+deployment knowledge ([ADR 0027](adr/0027-byte-and-cpu-budgets.md), "The library does not refuse a
+combination"). A wrapper sets its CPU limit from the limits it configures with
+
+```
+cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res))
+```
+
+| Symbol | Meaning | Value |
+| --- | --- | --- |
+| `R` | request bytes the limits allow, MiB (`maxRequestBytes`) | 1 |
+| `B` | raw result bytes not attributable to values, MiB: the larger of `2 x maxResultBytes + 512 x maxStatements + 1,048,576` and the idempotency lookup bound 1,183,744 | 1.13 at the reference wrapper's limits |
+| `V_req`, `V_res` | JSON values in the request body (values plus object member names) and in the raw result (cells including companions, column descriptors, values inside JSON cells). `maxJsonValues` is 65,536 by ADR 0027 but the runtime neither enforces nor reports it before the request-budget pull request (ADR 0027 pull request 3), so the wrapper test uses that default | 65,536 each |
+| `C0` | fixed cost of a request | 5 ms |
+| `a_b` | cost per MiB of request bytes (SQL text included) and of result text | 80 ms per MiB |
+| `a_v` | cost per JSON value | 1.3 microseconds |
+| `F` | Workers CPU time over reference-machine time | 2.0 (the maintainers' value; the first measurement on the dev deployment found 1.2 to 7.7, see ADR 0027 "Pull request 1 results") |
+| `S` | safety margin: isolates tolerate occasional overruns, not sustained ones | 1.25 |
+
+Until then the formula does not bound a request's value count: a body of about 1 MB of nested arrays is accepted today with about 500,000 values, which the formula prices at 731 ms of reference time (1,828 ms of `cpu_ms` at F = 2.0), although it measures about 200 ms. Re-measure after pull request 3.
+
+The coefficients are for the reference machine (i7-7700K 4.2 GHz, Node, the release WASM): the worst
+measured shape per term. At the reference wrapper's limits the formula gives about 346 ms on the
+reference machine and 864 ms for `cpu_ms` (`wrangler.jsonc` rounds up to 1,000). The code is
+`deploy/cloudflare/scripts/lib/cpu-model.mjs`; `test/cpu-budget.test.mjs` checks the reference
+wrapper's `limits.cpu_ms` against it. A wrapper that raises a limit raises `cpu_ms` by the formula
+or lowers the limit; re-measure on its own shapes with `npm run measure:cpu` and read the real
+Workers CPU from the release smoke (`deploy/cloudflare/README.md`, "Measuring CPU").
+
 ## Validation and failures
 
 - Validated once, at construction (`createEngine`, `createApp`, `TransactionOwnerCore`), or with

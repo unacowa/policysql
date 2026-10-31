@@ -169,6 +169,10 @@
         "payload": {
           "declaredType": "BLOB",
           "nullable": true
+        },
+        "doc": {
+          "declaredType": "TEXT",
+          "nullable": true
         }
       }
     }

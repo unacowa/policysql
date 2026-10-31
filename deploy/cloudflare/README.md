@@ -142,9 +142,11 @@ security denials and string literals:
 | Commit checks (`smoke_check`) | Atomic Execute allow and deny, interactive commit allow, and an interactive commit whose validator answers after the hook deadline (409 `POLICYSQL_COMMIT_CHECK_REJECTED`); every allow needs the validator's callback query to see the uncommitted probe row; a final read proves the denied and timed-out probes left no row |
 | Bytes (ADR 0016) | Padded 4-byte, empty and 3,001-byte BLOB round trips through `RETURNING` and `SELECT`; a read value resubmitted unchanged; `maxBytesPerValue + 1` bytes is 413 `POLICYSQL_LIMIT_EXCEEDED` and writes nothing; unpadded input is 400. The report records whether Turso's Hrana response pads BLOB base64 (`hranaBlobs`) |
 | NULL assignment (ADR 0017) | JSON `null` into nullable `note` (text) and `payload` (bytes) stores SQL NULL; `null` for non-nullable `label` and in a comparison is 400 `POLICYSQL_INVALID_PARAMETER`; Explain reports `nullable` per parameter |
+| CPU (ADR 0027, #56) | A small request and three about-1 MB Atomic Execute INSERTs into `smoke_values.doc` (nested arrays, short decimals, one long string) with their real CPU time read from Workers observability; see "Measuring CPU" below |
 
 The development-only resources are `smoke_checks` (`id`, `verdict` of `allow`/`deny`/`timeout`) and
-`smoke_values` (`id`, `label`, nullable `note`, nullable bytes `payload`), with tenant-filtered
+`smoke_values` (`id`, `label`, nullable `note`, nullable bytes `payload`, nullable JSON `doc`
+written only by the CPU probes and never selected), with tenant-filtered
 member policies in `config/resources/`. Provisioning empties both tables before each release.
 The validator answers from the newest `smoke_checks` row its callback query returns (probe ids
 grow with time). It verifies the hook version, timestamp and signature, sends the capability only
@@ -181,6 +183,98 @@ would be the expiry, not the loss. Owner loss stays covered by the local owner t
 (`test/transaction-owner-port.test.mjs`, `test/interactive-switch.test.mjs`,
 `test/atomic-switch.test.mjs`) and the step machine's tests
 (`crates/policysql-transaction/tests/machine.rs`, `commit_checks.rs`).
+
+### Measuring CPU
+
+[ADR 0027](../../docs/adr/0027-byte-and-cpu-budgets.md) relates the byte and value limits to the
+CPU limit with one formula, in `scripts/lib/cpu-model.mjs`:
+
+```
+cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res))
+```
+
+(`C0` 5 ms, `a_b` 80 ms per MiB, `a_v` 1.3 microseconds per value, `S` 1.25, `F` 2.0, the
+maintainers' value, while this smoke records the observed one; `R`, `B` in MiB, `V` in JSON values; see `docs/configuration.md`, "CPU model".) The
+reference wrapper's `limits.cpu_ms` in `wrangler.jsonc` is 1,000, and `test/cpu-budget.test.mjs`
+fails when it falls below the formula's result at `wrapper/limits.ts`. Two tools keep the
+numbers honest.
+
+**Node measurement (`npm run measure:cpu`).** Runs the request path (engine, HTTP adapter,
+Durable Objects adapter over the simulated platform, Turso HTTP transport) with the real WASM
+build in `pkg/` (`npm run build:wasm` first) and prints, per scenario, the measured time, the
+formula's prediction for that scenario's own `R`, `B` and `V`, their ratio, and whether the
+measurement is above 1.25 times the prediction (`EXCEEDS 1.25x`: the model under-predicts that
+shape). Each figure is the best of five runs after a warm-up, in ms of wall time; the simulated
+Turso server and the harness client's response parsing are excluded. Each scenario runs in its
+own process, so the WASM linear memory printed with it is that scenario's high-water mark.
+
+| Group | Scenarios |
+| --- | --- |
+| `request` | About 1 MB request bodies carrying a JSON `metadata` value: nested arrays (depth 56), one object with unique keys, short strings, short decimals, small integers, 17-digit decimals, one long ASCII string, one long CJK string; each as a keyed Atomic Execute and as a request rejected at compile (no database) |
+| `result-json` | The same rows read back with `SELECT` (about 1 MB responses; the shapes whose raw result is over 1 MiB are 413 and listed under "Skipped") |
+| `result-cells` | Cell-heavy results of one-digit integers: 100 x 64, 1,000 x 10, 2,000 x 4 and 1,000 x 25 with every column `visible_if`; 100 x 64 plain; and `UPDATE ... RETURNING` with the check column and one-character aliases |
+| `sql-dense` | Statements through `:explain` (no database): expression depth 31, a 32-term `OR` chain, 128 projections, 128 projections of nested `lower()` 30 deep, 8 joins with a row filter per table, one statement at `maxSqlBytes`, 8 statements at `maxSqlBytes`, 8 statements of 8 joins |
+
+```sh
+npm run build:wasm
+npm run measure:cpu                          # table on stdout, report in .deployment/cpu-measurement.json
+npm run measure:cpu -- --only "request:"     # scenarios whose id contains the text
+npm run measure:cpu -- --runs 7 --out report.json
+npm run measure:cpu -- --scale 0.8           # multiply measured times (to normalize a machine
+                                             # that is 1.25x as fast as the i7-7700K reference)
+npm run measure:cpu -- --cold                # time only the first request of each fresh process
+npm run measure:cpu -- --json                # the report on stdout, nothing else
+```
+
+The report (`kind: policysql-cpu-measurement`) holds the machine, method, the model and its
+coefficients, the fit per scenario (`fit.predictedMs`, `fit.measuredOverPredicted`,
+`fit.exceedsModel`), a `summary` (which scenarios exceed the model, the worst ratio), and
+`sqlTerm`: whether the densest SQL request is covered by the formula at the wrapper's limits or a
+separate term for SQL bytes is needed. The script exits 0 either way: the report is evidence for
+a maintainer decision (a coefficient, `F`, or `cpu_ms`), not a gate. Scenarios and generators are in
+`scripts/lib/cpu-bench.mjs` and `scripts/lib/cpu-shapes.mjs`; a wrapper with its own shapes adds
+scenarios there.
+
+**Workers CPU in the release smoke.** After the other sections, `provision:dev` runs
+`scripts/smoke-cpu.mjs` against the deployed Worker: a small request and the ADR's three
+worst request shapes of about 1 MB (`nested arrays (depth 56)`, `short decimals 37.4`, `one long
+ASCII string`), each an Atomic Execute INSERT into `smoke_values.doc` sent three times (the CPU
+time of the same request varies between runs and within one, so a single sample is not an `F`),
+then deletes the rows.
+It then reads each request's CPU time from Workers observability
+(`POST /accounts/{id}/workers/observability/telemetry/query`, which the deploy token can read),
+matching the Worker invocation by the response's `cf-ray` and the Durable Object invocation by
+the PolicySQL request id (the `x-policysql-request-id` the Worker forwards). Workers Logs arrive
+late, so it polls every five seconds for at most 120 seconds. `cpuTimeMs` is a whole number of
+milliseconds per invocation; a request's CPU is the Worker's plus the Durable Object's when it
+used one (an Atomic Execute that triggers no commit check, as these probes, runs in the Worker
+invocation alone; the smoke reads from the deployed policy's `commit_checks` whether the probe
+table triggers one), and the Node reference is the same shape through the harness in a fresh
+process. The first request of a shape after a deploy runs on a cold isolate (JIT and WASM tier-up
+not warm), so it is compared with Node's own first request in a fresh process (`coldMs`, no
+warm-up); later requests are compared with Node's warmed time (`warmMs`, best of five after a
+warm-up): `F` = Workers CPU / Node time, cold to cold and warm to warm. A shape whose warm
+reference is under 50 ms (the long string) is left out of `observedF` and listed under
+`belowFloor`: the Workers figure also carries per-request platform work the harness does not run
+(JWT verification, routing), which dominates a short request. The report records the Node
+reference's CPU model, Node version and method (`nodeReference`).
+
+- Fatal: any probe answered with anything but 200 (a platform CPU or memory termination answers
+  1102 without the version header), an invocation with outcome `exceededCpu`, or an invocation
+  above `limits.cpu_ms` divided by the safety margin S = 1.25 (800 ms at 1,000: the formula's
+  margin; the platform itself ends the invocation at `cpu_ms`).
+- Not fatal: observability that is not ingested before the deadline, or not readable (missing
+  permission, API error). The report then says `unavailable` with the reason (a status, never a
+  secret) and `observedF` is `null`; rerun `provision:dev` for a reading.
+- Recorded in `release.json` under `acceptance.cpu`: `cpuLimitMs`, the formula's reference time
+  and required `cpu_ms` at the deployed limits, `observability` (`read`, `partial` or
+  `unavailable`, polls, elapsed), `requests[]` (one entry per sample: HTTP status, body bytes, JSON values, `workerCpuMs`,
+  `ownerCpuMs`, `cpuMs`, `wallMs`, outcomes, `nodeReferenceMs`, `referenceKind`, `factor`), `nodeReference`, `belowFloor`, and `observedF`
+  (`max`, `median`, `min`, `samples`, over the counted samples; `observedFByOrder` splits the first sample of each
+  shape, cold to cold, from the later ones, warm to warm). The maximum is what the formula must cover; changing the
+  `HARDWARE_FACTOR` constant (and so `cpu_ms`) from it is a maintainer decision (ADR 0027).
+
+### Calling the deployed Worker
 
 To call the deployed Worker:
 

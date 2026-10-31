@@ -510,6 +510,37 @@ at the default value limit, 118 ms for the densest body shape (about 59 ms measu
 hard maxima (`R` = 2, `B` = 2.03, `V` = 131,072 each) it is about 668 ms on the reference
 machine.
 
+**Pull request 1 results (2026-10-31).** `scripts/measure-cpu.mjs` reproduces the Context tables
+on the reference machine (i7-7700K, Node 26.4, ABI 12) within a few percent (atomic keyed 1 MB:
+nested arrays 200 ms, short decimals 121, string 25), and 36 scenarios fit the formula except two
+SQL-dense ones: 128 projections of 30-deep `lower()` nesting (11 ms measured, 7 predicted) and
+8 statements of 64 KiB dense SQL (94 ms measured, 45 predicted from `R` = 0.5 MiB), i.e. about
+190 to 220 ms per MiB of SQL text against `a_b` = 80. The formula as used still covers them: it
+allows 346 ms at the reference wrapper's limits, and a SQL request spends `R` on SQL, not `B` or
+`V` as well. So `a_b` stands and no separate SQL term is added; at the hard maxima a 2 MiB SQL
+request would cost about 400 ms against the formula's 668 ms, and a later pull request that
+raises `maxSqlBytes` re-runs the script.
+
+The release smoke read the real CPU of 1 MB requests from Workers observability (an Atomic
+Execute without a commit check runs no Durable Object, so the Worker invocation is the whole
+request). Over seven runs on the dev deployment, `F` (Workers CPU over the warm Node time of the
+same shape) was **1.2 to 3.2 for the heavy shapes** (nested arrays 1.2 to 3.0, short decimals 1.3
+to 3.2) and 1.9 to 7.7 for the long string (with isolated threefold spikes), whose 22 ms of reference time is dominated by
+per-request platform work such as JWT verification. There is no single `F`: the same request cost
+248 to 631 ms (nested arrays), and the expensive one is the first request of a shape after a
+deploy (401 to 631 ms in seven runs; later requests of the same run 248 to 489 ms),
+before the isolate's JIT and the WASM tier-up have warmed, while the Node reference is measured
+after a warm-up. A limit must cover the first request, so the measured worst case is about
+`F` = 3.2, which the formula turns into 1,383 ms at the reference wrapper's limits against 1,000
+configured. No probe came near `cpu_ms` (the highest single invocation was 631 ms), and the
+formula's bound is a sum of every term at its maximum that no single request reaches, but the
+decision between `F` = 3.2 with `cpu_ms` 1,500, and keeping 1,000 on the evidence of the highest
+real invocation, is the maintainers'. This pull request therefore leaves `F` = 2.0 in
+`scripts/lib/cpu-model.mjs` and `cpu_ms` at 1,000, and records the distribution (each run's
+`acceptance.cpu` in `release.json`, `observedF` and `observedFByOrder`). The worst case of 3.2
+above compared a cold Workers request with a warm Node time; the smoke now compares cold to cold
+and warm to warm (decision 10 below), and the ratio of the cold requests alone is about 1.6 to 1.9.
+
 The WASM memory peak is modelled as the larger of two phases, with the same inputs:
 
 ```
@@ -779,5 +810,13 @@ The questions raised during review were decided as follows.
    `maxJsonValues` counts raw values.
 9. **Today's main** (emitted height exactly 100 at 32 / 8) gets no separate fix; pull request 4
    maps that case to `POLICYSQL_SQL_TOO_COMPLEX`.
+
+10. **Pull request 1 did not replace `F`** (2026-10-31, after its review). The release smoke's
+    evidence yields no single value (see "Pull request 1 results"; a cold Workers request is not
+    comparable with a warm Node time, and cold to cold the ratio is about 1.6 to 1.9). `F` stays
+    2.0 and the reference wrapper's `cpu_ms` stays 1,000; the smoke compares cold to cold and warm
+    to warm from now on. `F` is re-measured after pull request 3 (the request budget makes the
+    value count a limit, so the formula's `V` becomes true) and again after pull request 7 (lower
+    coefficients).
 
 No questions remain open.

@@ -12,6 +12,11 @@ import { runtimeLimits, runtimeLimitsJson } from "../src/limits.ts";
 import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 import { DEPLOYMENT_VERSION_HEADER, versionTracker, waitForRelease } from "./release-readiness.mjs";
 import { bytesNullSmoke, commitCheckSmoke } from "./smoke-sections.mjs";
+import { SHAPE_TARGET_BYTES, cpuSmoke, referenceScenarioId } from "./smoke-cpu.mjs";
+import { SMOKE_SHAPES } from "./lib/cpu-shapes.mjs";
+import { measureNodeReference } from "./lib/node-reference.mjs";
+import { parse } from "yaml";
+import { parseJsonc } from "./lib/jsonc.mjs";
 
 const directory = fileURLToPath(new URL("..", import.meta.url));
 const deploymentDirectory = new URL("../.deployment/", import.meta.url);
@@ -130,6 +135,29 @@ const configuredLimits = () => {
     "transactions.maxCallbackRowsPerCheck": limits.maxCallbackRows,
     "transactions.maxCallbackBytesPerCheck": limits.maxTransactionResultBytes,
   };
+};
+
+// The configured per-invocation CPU limit of the reference wrapper (wrangler.jsonc, ADR 0027).
+const configuredCpuMs = () => {
+  const limit = parseJsonc(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8")).limits?.cpu_ms;
+  if (!Number.isInteger(limit) || limit <= 0) throw new Error("wrangler.jsonc limits.cpu_ms must be a positive integer");
+  return limit;
+};
+
+// The reference-machine times of the smoke's request shapes, warm and cold (the same shapes
+// through the Node harness in fresh processes, scripts/lib/node-reference.mjs), measured once per
+// run, before any request is sent.
+let nodeReference;
+const nodeReferenceTimes = () => {
+  nodeReference ??= measureNodeReference({ shapes: SMOKE_SHAPES, scenarioId: referenceScenarioId, target: SHAPE_TARGET_BYTES });
+  return nodeReference;
+};
+
+// The tables the deployed policy's commit checks trigger on (they decide whether an Atomic Execute
+// uses the Durable Object owner).
+const commitCheckTables = () => {
+  const policy = parse(readFileSync(new URL("../config/policy.compiled.yaml", import.meta.url), "utf8"));
+  return Object.values(policy.commit_checks ?? {}).flatMap((check) => check.triggered_by ?? []);
 };
 
 const smoke = async (baseUrl, token, tracker) => {
@@ -371,6 +399,12 @@ const smoke = async (baseUrl, token, tracker) => {
     hookTimeoutMs: capabilities.transactions?.maxHookDurationMs ?? null, atomicTimeoutMs: capabilities.limits?.timeoutMs ?? null,
   });
   const bytesNull = await bytesNullSmoke(sectionContext, { maxBytesPerValue: capabilities.limits?.maxBytesPerValue });
+  // Real CPU time of the worst request shapes (#56, ADR 0027): fatal when a request exceeds
+  // `cpu_ms`; an unreadable observability result is reported, not fatal.
+  const cpu = await cpuSmoke(sectionContext, {
+    cpuLimitMs: configuredCpuMs(), limits: localRelease().limits, nodeReferenceMs: nodeReferenceTimes().shapes, nodeReferenceInfo: nodeReferenceTimes().info, commitCheckTables: commitCheckTables(),
+    observability: { accountId: required("CLOUDFLARE_ACCOUNT_ID"), token: required("CLOUDFLARE_API_TOKEN"), service: workerName },
+  });
   const visibleRows = execute.results?.[0]?.rows ?? [];
   const expected = localRelease();
   if (
@@ -378,6 +412,7 @@ const smoke = async (baseUrl, token, tracker) => {
     tracker.unversioned.length > 0 ||
     commitChecks.failures.length > 0 ||
     bytesNull.failures.length > 0 ||
+    cpu.failures.length > 0 ||
     capabilities.transactions?.commitChecksConfigured !== true ||
     !health.ready ||
     // Every answer came from this release, not from the previous version still serving.
@@ -424,6 +459,7 @@ const smoke = async (baseUrl, token, tracker) => {
       rateLimited: tracker.rateLimited,
       commitChecks,
       bytesNull,
+      cpu,
       health,
       capabilities,
       roleCatalog,
@@ -508,6 +544,7 @@ const smoke = async (baseUrl, token, tracker) => {
     },
     commitChecks: commitChecks.report,
     bytesNull: bytesNull.report,
+    cpu: cpu.report,
   };
 };
 
@@ -611,11 +648,17 @@ async function main() {
     "INSERT OR REPLACE INTO archived_posts (id, tenant_id, title) VALUES ('archived_1', 'tenant_a', 'Archived Visible'), ('archived_hidden', 'tenant_b', 'Archived Hidden')",
     // Development-only release-smoke tables (#42). Emptied on every release.
     "CREATE TABLE IF NOT EXISTS smoke_checks (id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, verdict TEXT NOT NULL) STRICT",
-    "CREATE TABLE IF NOT EXISTS smoke_values (id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, label TEXT NOT NULL, note TEXT, payload BLOB) STRICT",
+    "CREATE TABLE IF NOT EXISTS smoke_values (id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, label TEXT NOT NULL, note TEXT, payload BLOB, doc TEXT) STRICT",
     "DELETE FROM smoke_checks",
     "DELETE FROM smoke_values",
     "CREATE TABLE IF NOT EXISTS policysql_idempotency (key_hash TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
   ], "write", { queryTimeout: 5_000 });
+  // A smoke_values table created before the CPU probes (#56) has no `doc`; SQLite has no
+  // ADD COLUMN IF NOT EXISTS.
+  const smokeValueColumns = await connection.all('PRAGMA table_xinfo("smoke_values")');
+  if (!smokeValueColumns.some((column) => column.name === "doc")) {
+    await connection.batch(["ALTER TABLE smoke_values ADD COLUMN doc TEXT"], "write", { queryTimeout: 5_000 });
+  }
   const catalogYaml = await readFile(new URL("../config/catalog.yaml", import.meta.url), "utf8");
   const physicalSchema = await buildPhysicalSchema(connection, catalogYaml);
   await writeFile(
@@ -711,7 +754,7 @@ async function main() {
       uploadKiB: upload ? Number(upload[1]) : null,
       gzipKiB: upload ? Number(upload[2]) : null,
       startupMs: startup ? Number(startup[1]) : null,
-      cpuLimitMs: 50,
+      cpuLimitMs: configuredCpuMs(),
       cloudflarePlanRequirement: "paid",
       reason: "Measured Execute CPU exceeds the Workers Free 10 ms request CPU limit.",
     },
