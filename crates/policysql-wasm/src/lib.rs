@@ -34,7 +34,9 @@ use wasm_bindgen::prelude::*;
 /// 10: the `Idempotency-Key` syntax of `identity_json` and `step_json` accepts `+`, `/`, and `=`
 /// (so such keys now hash instead of being rejected), and a malformed key is answered
 /// `POLICYSQL_IDEMPOTENCY_KEY_INVALID` with a new message instead of `..._KEY_REQUIRED` (#65).
-const ABI_VERSION: u32 = 10;
+/// 11: an owner answers an `atomic` input whose snapshot is not its own `POLICYSQL_INTERNAL`
+/// (the version-skew answer) instead of `POLICYSQL_TRANSACTION_CONFLICT` (#85).
+const ABI_VERSION: u32 = 11;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -673,7 +675,11 @@ impl PolicySqlRuntime {
     /// rejected as unreadable is now read, and keeping the snapshot is what keeps keyed atomic
     /// retries replaying across that deployment. #65 changed what an atomic `request` with a
     /// malformed key is answered (`POLICYSQL_IDEMPOTENCY_KEY_INVALID`, a new message) and which keys
-    /// it accepts (`+ / =`), and bumped `ABI_VERSION` to 10.
+    /// it accepts (`+ / =`), and bumped `ABI_VERSION` to 10. #85 changed what an owner answers
+    /// when the Worker's snapshot is not its own for an `atomic` input
+    /// (`POLICYSQL_INTERNAL`, the version-skew answer, instead of
+    /// `POLICYSQL_TRANSACTION_CONFLICT`, which a client takes as a rejection), and bumped
+    /// `ABI_VERSION` to 11; no identity value changed.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn step_json(

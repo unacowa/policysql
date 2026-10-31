@@ -586,6 +586,15 @@ impl<C: Compiler> Step<'_, C> {
     /// `{"kind":"atomic",...}` on its owner. Whatever the owner's record says, the request
     /// starts a fresh execution (ADR 0024 "Atomic on the owner").
     pub(super) fn atomic_input(&mut self, input: &Value) -> Result<()> {
+        // The snapshot is compared before anything else is read: whatever else differs between
+        // a Worker and an owner of another deployment (#85), the answer must be the skew one,
+        // never a rejection of an input the Worker built.
+        if let Some(snapshot) = input.get("snapshot").and_then(Value::as_str)
+            && snapshot != self.compiler.snapshot()
+        {
+            self.snapshot_skew("atomic");
+            return Ok(());
+        }
         let parsed = match AtomicInput::read(input, self.owner) {
             Ok(parsed) => parsed,
             Err(code) => {
@@ -593,10 +602,6 @@ impl<C: Compiler> Step<'_, C> {
                 return Ok(());
             }
         };
-        if parsed.snapshot != self.compiler.snapshot() {
-            self.respond(error_reply(Code::Conflict));
-            return Ok(());
-        }
         if parsed.binding.snapshot != parsed.snapshot {
             self.respond(error_reply(Code::Stale));
             return Ok(());

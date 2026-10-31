@@ -725,11 +725,11 @@ test(`allowlist request-fingerprint-without-snapshot: ${ALLOWLIST["request-finge
   assert.equal(step.keyHash, ts.keyHash, "the key hash is unchanged");
   assert.deepEqual(step.record.results, ts.record.results);
   const binding = bindingOf(env.runtime);
-  assert.match(binding.snapshot, /:abi-10$/u);
+  assert.match(binding.snapshot, /:abi-11$/u);
   const { snapshot: _snapshot, ...withoutSnapshot } = binding;
   // The recorded side hashed the binding with its release's snapshot (ABI 8); core hashes it
   // without any snapshot.
-  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-10$/u, ":abi-8") }));
+  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-11$/u, ":abi-8") }));
   assert.equal(step.fingerprint, requestFingerprint(body, withoutSnapshot));
   assert.notEqual(step.fingerprint, requestFingerprint(body, binding), "nor the current snapshot");
   // The relabeling maps both to the same name: it hides the value and nothing else.

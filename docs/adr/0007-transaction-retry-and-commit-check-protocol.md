@@ -186,6 +186,9 @@ capability; a failed read while a validator is awaited is a failure of that vali
 rolls back), so a store fault cannot leave a capability live (the machine keeps the record in
 memory and has no such read).
 
+Amendment (#85): an owner that does not share the Worker's snapshot answers an atomic input with the version-skew answer `POLICYSQL_INTERNAL` (500), never `POLICYSQL_TRANSACTION_CONFLICT`, because the retry may be of a commit that already applied; the client takes it as an unknown outcome and the retry replays once the snapshots agree (ADR 0024, ABI 11). The limit: a committed keyed write that carried `expected` is checked against it before the idempotency lookup, so after a rollout that changed the policy its retry is `POLICYSQL_STALE_OPERATION`, a definite rejection; that remains open as #85 path 1.
+
+
 ## Consequences
 
 - Clients using keys can resolve ambiguous network outcomes without duplicating writes while the records remain available. Unkeyed requests can execute again when resent.

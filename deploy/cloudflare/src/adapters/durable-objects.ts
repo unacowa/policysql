@@ -39,6 +39,15 @@
 // execution: nothing on either side executes a message it cannot read), and replays from its
 // `policysql_idempotency` row once the versions agree.
 //
+// A snapshot skew is the same class (#85). The Worker puts the snapshot it compiled for in the
+// `/atomic` body (same wire version, other ABI or policy: another snapshot). An object whose
+// own snapshot differs runs nothing and answers POLICYSQL_INTERNAL (500), never
+// POLICYSQL_TRANSACTION_CONFLICT, which the client takes as a definite rejection of an execute
+// that may be the retry of a commit. No atomic path returns TRANSACTION_CONFLICT any more (an
+// interactive command's sequence conflict still does, unchanged), and the Worker's
+// STALE_OPERATION (409) for a request pinned to an earlier snapshot is unchanged (ADR 0024
+// "Owner snapshot mismatch"). A begin with another snapshot logs the skew but keeps its 409.
+//
 // A reply is a 2xx response whose body is the value, or a non-2xx response whose body is
 // `{ error: { code, message, path, requestId } }`. A Worker of this version reads only that distinction. The object still
 // sends exactly the statuses and bodies of earlier versions (201 for a started transaction,

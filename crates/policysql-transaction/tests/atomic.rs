@@ -766,7 +766,7 @@ fn a_parameter_namespace_collision_executes_no_envelope_on_either_placement() {
 
 // ---- #80: a keyed retry across a snapshot change ----------------------------------------------
 
-const NEXT_SNAPSHOT: &str = "sqlite-turso-v1:schema_2:policy_2:abi-10";
+const NEXT_SNAPSHOT: &str = "sqlite-turso-v1:schema_2:policy_2:abi-11";
 
 /// `request` with its binding and snapshot set to `snapshot` and its binding's generation to
 /// `generation`, as a request after a deployment (or a database move) carries them.
@@ -927,4 +927,43 @@ fn the_forwarded_fingerprint_has_no_snapshot_and_the_owner_replays_across_a_snap
     assert_eq!(code(&conflict), Some("POLICYSQL_IDEMPOTENCY_CONFLICT"));
     assert_eq!(owner_engine.observed.commits_emitted, 1);
     assert_eq!(owner_engine.compiler.live_handles(), 0);
+}
+
+// ---- #85: an owner that does not share the Worker's snapshot ------------------------------------
+
+#[test]
+fn an_owner_answers_another_snapshot_as_version_skew_never_as_a_conflict() {
+    let owner = format!("tx_{}", "ab".repeat(16));
+    let mut owner_engine = owner_engine();
+    owner_engine.owner = Some(owner);
+    let mut skewed = atomic_input(&audit("a1"), Some([&"ab".repeat(32), &"cd".repeat(32)]));
+    skewed["input"]["validationId"] = json!(format!("cval_{}", "ab".repeat(16)));
+    skewed["input"]["snapshot"] = json!(NEXT_SNAPSHOT);
+    skewed["input"]["databaseBinding"]["snapshot"] = json!(NEXT_SNAPSHOT);
+    let answer = owner_engine.run(&skewed);
+    assert_eq!(code(&answer), Some("POLICYSQL_INTERNAL"), "{answer}");
+    assert_eq!(owner_engine.observed.commits_emitted, 0, "nothing ran");
+    assert_eq!(owner_engine.observed.envelope_executes, 0);
+    assert_eq!(owner_engine.compiler.live_handles(), 0);
+}
+
+#[test]
+fn an_owner_compares_the_snapshot_before_reading_the_rest_of_the_input() {
+    let owner = format!("tx_{}", "ab".repeat(16));
+    let mut owner_engine = owner_engine();
+    owner_engine.owner = Some(owner);
+    // An input of another deployment whose other members this owner cannot read.
+    for member in ["databaseBinding", "request", "auth"] {
+        let mut skewed = atomic_input(&audit("a1"), None);
+        skewed["input"]["validationId"] = json!(format!("cval_{}", "ab".repeat(16)));
+        skewed["input"]["snapshot"] = json!(NEXT_SNAPSHOT);
+        skewed["input"][member] = json!(7);
+        let answer = owner_engine.run(&skewed);
+        assert_eq!(
+            code(&answer),
+            Some("POLICYSQL_INTERNAL"),
+            "{member}: {answer}"
+        );
+    }
+    assert_eq!(owner_engine.observed.commits_emitted, 0);
 }

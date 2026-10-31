@@ -385,6 +385,18 @@ impl<C: Compiler> Step<'_, C> {
         });
     }
 
+    /// The Worker forwarded an input compiled for a snapshot other than this owner's: the
+    /// Worker and the owner are different deployments (a rollout, ADR 0024 "Snapshot skew").
+    /// Nothing ran, and the Worker may be retrying a keyed write that already committed, so
+    /// the answer is the version-skew one (`POLICYSQL_INTERNAL`, 500), which no client takes as
+    /// a rejection (ADR 0007), never `POLICYSQL_TRANSACTION_CONFLICT`, which it does.
+    fn snapshot_skew(&mut self, input: &str) {
+        let record =
+            json!({"event": "owner_snapshot_skew", "input": input, "requestId": self.request});
+        self.log(&record);
+        self.respond(error_reply(Code::Internal));
+    }
+
     fn release_all(&mut self) {
         if let Some(volatile) = &mut self.volatile {
             for handle in volatile.handles.drain(..) {
@@ -1568,6 +1580,9 @@ impl<C: Compiler> Step<'_, C> {
             return Ok(());
         };
         if snapshot != self.compiler.snapshot() {
+            // Logged as skew; the answer stays a conflict (ADR 0024 "Owner snapshot mismatch").
+            let record = json!({"event": "owner_snapshot_skew", "input": "begin", "requestId": self.request});
+            self.log(&record);
             self.respond(error_reply(Code::Conflict));
             return Ok(());
         }
