@@ -72,21 +72,15 @@ is logged and never turns a completed operation into an error.
 
 The handle is typed rather than a `fetch`-shaped interface: routes, tests, and a future
 non-HTTP entry point (#34) call operations, not URLs, and the in-memory adapter needs no HTTP.
-The Durable Objects adapter still sends each call as the same internal message as before
-(`POST https://owner/<command>`, JSON body, `x-policysql-request-id`, and `authorization` for
-callbacks). That wire form is an adapter detail. It lets a Worker and an object of adjacent
-versions talk during a rollout, and it needs no `cloudflare:workers` RPC base class, so the
+The Durable Objects adapter sends each call as an internal message
+(`POST https://owner/<command>`, JSON body, `x-policysql-request-id`). That wire form is an adapter detail. It needs no `cloudflare:workers` RPC base class, so the
 production adapter runs in the Node test harness. Moving to Durable Object RPC later changes
 only the adapter.
 
-Since [ADR 0024](0024-transaction-step-machine.md) pull request 7 the body of an interactive
-command or callback query is the step machine's owner input (the callback capability travels
-in it, not in `authorization`), every message names the owner it was routed to in
-`x-policysql-owner`, and both sides mark the wire version (`x-policysql-owner-wire`) so that a
-Worker and an object of different versions answer each other's interactive messages with
-`POLICYSQL_INTERNAL` (or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for a commit), never a rejection.
-An atomic execute whose commit-check validator calls back crosses the changed callback path too,
-so during such a skew it is answered 409 `POLICYSQL_COMMIT_CHECK_REJECTED` before COMMIT (ADR 0024).
+The body of an interactive command or callback query is the step machine's owner input (the
+callback capability travels in it, not in `authorization`), and every message names the owner it
+was routed to in `x-policysql-owner`. A message routed to another name is answered
+`POLICYSQL_INTERNAL`, never a rejection.
 
 A failure before COMMIT is sent (the transport's last binding or deadline check) is the same on every owner adapter: the executor reports `not_committed`, and the answer is the definite 409 `POLICYSQL_TRANSACTION_UNAVAILABLE` (#54; ADR 0024). Any other commit exception is an unknown outcome.
 

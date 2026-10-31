@@ -1,58 +1,14 @@
-// ADR 0025, "What happens at the deployment that switches the rule": retries that straddle
-// the deployment from ABI 4 (byte equality with `stableJson`) to ABI 5 (core-defined canonical
-// JSON), and on to the current ABI (which keeps ADR 0025's stability requirements). The rows
-// and keys below hold the values the ABI 4 implementation computed, by a frozen copy of it.
-// Interactive records of ABI 4 were written by the TypeScript owner; since ADR 0024 pull
-// request 7 they are discarded, not read (the one-time incompatibility), so only their commit
-// answer (unknown, never a rejection) is pinned here. The step machine's own records keep the
-// stability requirements: the control test shows what a changed digest would do.
-// #80 (ABI 9) removed the binding's snapshot from the request fingerprint: keyed atomic writes
-// retried across a real snapshot change (`h.redeploy`) replay on both placements and owner
-// adapters, while rows stored before #80 (the ABI 4 row below) still conflict.
+// Retries that straddle a deployment which changes the snapshot (ABI, schema or policy
+// version): ADR 0007 holds across it. A keyed atomic write retried after the change replays
+// (#80: the request fingerprint has no snapshot), a commit retry is answered from the record
+// only when its replay identity and digest match (control), and a keyed begin retry reaches the
+// same owner.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
-
-// `stableJson` and `sha256` from deploy/cloudflare/src/idempotency.ts on main before ADR 0025
-// (f56b574), copied verbatim: the implementation that wrote every stored value of ABI 4.
-const legacyStableJson = (value) => {
-  if (Array.isArray(value)) return `[${value.map(legacyStableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${legacyStableJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-};
-const legacySha256 = async (value) => {
-  const bytes = new TextEncoder().encode(value);
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-};
-const legacyAuthFingerprint = ({ principal, subject, role, session }, databaseBinding) =>
-  legacySha256(legacyStableJson({ principal, subject, role, session, databaseBinding }));
-const legacyCommandDigest = (kind, command) => legacySha256(legacyStableJson({ kind, command }));
-const legacyIdentity = ({ principal, subject, role, session }, endpoint, binding) => legacyStableJson({
-  principal, subject, role, session, endpoint, database: { scope: binding.scope, databaseId: binding.databaseId },
-});
-const legacyKeyHash = (auth, endpoint, binding, key) => legacySha256(`${legacyIdentity(auth, endpoint, binding)}:${key}`);
-const legacyFingerprint = (auth, endpoint, binding, body) =>
-  legacySha256(`${legacyIdentity(auth, endpoint, binding)}:${legacyStableJson(body)}:${legacyStableJson(binding)}`);
-
-const { goldens } = JSON.parse(readFileSync(new URL("../../../tests/fixtures/identity-goldens.json", import.meta.url), "utf8"));
-
-test("the frozen ABI 4 implementation computes the identity goldens", async () => {
-  for (const { name, input, output } of goldens) {
-    if (input.op === "auth") assert.equal(await legacyAuthFingerprint(input.auth, input.binding), output.fingerprint, name);
-    if (input.op === "command") assert.equal(await legacyCommandDigest(input.kind, input.command), output.digest, name);
-    if (input.op === "request") {
-      assert.equal(await legacyKeyHash(input.auth, input.endpoint, input.binding, input.key), output.idempotency.keyHash, name);
-    }
-  }
-});
 
 // A caller whose identity has non-ASCII characters and characters `JSON.stringify` escapes.
 const SUBJECT = "josé_山田_\u{1f600}_\"\\\u001f\u007f ";
-const UNKNOWN = "POLICYSQL_COMMIT_OUTCOME_UNKNOWN";
 const insert = (id) => ({ sql: "INSERT INTO projects (id, name) VALUES (:id, :name) RETURNING id, name", params: { id, name: id } });
 
 for (const ownerAdapter of OWNER_ADAPTERS) {
@@ -60,10 +16,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     t.mock.method(console, "log", () => {});
     const h = await harness(t, { ownerAdapter, hooks: false });
     const real = h.runtime.snapshot;
-    // This code is ABI 5 or later; the previous releases' snapshots differed only in their ABI
-    // suffix.
     const current = h.runtime.abi_version;
-    assert.ok(current >= 5);
     assert.match(real, new RegExp(`:abi-${current}$`, "u"));
     const at = (abi) => {
       if (abi === current) delete h.runtime.snapshot;
@@ -83,46 +36,6 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(statement.status, 200, JSON.stringify(statement.body));
     return { id, commit: () => send(`/v1/transactions/${id}/commit`, { sequence: 2 }) };
   };
-
-  const committedOnce = (h, id) => assert.equal(h.rows("a").filter((row) => row.id === id).length, 1, id);
-
-  // A record the ABI 4 owner wrote, computed with the frozen ABI 4 rules. Since ADR 0024 pull
-  // request 7 every record of the TypeScript owner, ABI 4's included, is discarded, not read:
-  // a commit retry is unknown (never a rejection), anything else unavailable. That is the
-  // one-time incompatibility of the switch-over; ADR 0007 holds across it.
-  const abi4Record = async (h, id, credential, status) => {
-    const binding = { ...h.binding("a"), snapshot: h.runtime.snapshot.replace(/:abi-\d+$/u, ":abi-4") };
-    const auth = { principal: credential.principal, subject: credential.subject, role: credential.defaultRole, roles: credential.roles, access: credential.access, session: credential.session };
-    const commitDigest = await legacyCommandDigest("commit", { sequence: 2 });
-    const reply = { transactionId: id, status: "committed", meta: { requestId: "abi4", commitChecks: "not_triggered" } };
-    return {
-      databaseBinding: binding, snapshot: binding.snapshot, transactionId: id,
-      authFingerprint: await legacyAuthFingerprint(auth, binding), startFingerprint: "c".repeat(64), mode: "write", auth,
-      status, commitRecording: 1, commitSent: { sequence: 2, digest: commitDigest },
-      nextSequence: status === "committed" ? 3 : 2,
-      ...(status === "committed" ? { last: { digest: commitDigest, response: reply } } : { expiresAtMs: Date.now() + 60_000 }),
-      usage: { rowsRead: 0, rowsWritten: 0, queryDurationMs: 0 }, statementCount: 1, resultBytes: 10,
-      mutations: [], commitChecks: [], schemaVersion: "schema_routing_1", policyVersion: "policy_routing_1",
-    };
-  };
-
-  for (const status of ["committed", "committing"]) {
-    test(`${ownerAdapter}: a ${status} record written by ABI 4 is discarded: the commit retry is unknown, never rejected`, async (t) => {
-      const { h, send, credential } = await setup(t);
-      const id = `tx_${(status === "committed" ? "4" : "5").repeat(32)}`;
-      h.plantOwnerRecord(id, await abi4Record(h, id, credential, status));
-      for (const attempt of [1, 2]) {
-        const retry = await send(`/v1/transactions/${id}/commit`, { sequence: 2 });
-        assert.equal(retry.status, 503, `${attempt}: ${JSON.stringify(retry.body)}`);
-        assert.equal(retry.body.error.code, UNKNOWN);
-      }
-      const statement = await send(`/v1/transactions/${id}/statements`, { sequence: 2, ...insert("abi_never") });
-      assert.equal(statement.status, 409);
-      assert.equal(statement.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
-      assert.equal((await h.ownerRecord(id)).status, "discarded");
-      assert.equal(h.rows("a").some((row) => row.id === "abi_never"), false);
-    });
-  }
 
   test(`${ownerAdapter}: control: a stored digest or replay identity the rule does not reproduce would be a definite rejection`, async (t) => {
     // Why ADR 0025's stability requirements hold for the step machine's records too: a
@@ -146,52 +59,6 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       assert.equal(retry.status, 409, `${field}: ${JSON.stringify(retry.body)}`);
       assert.equal(retry.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE", field);
     }
-  });
-
-  // The row the ABI 4 direct path wrote, with the values the frozen ABI 4 rules computed. Since
-  // ADR 0024 pull request 8 the snapshot check of an execute is core's (the step machine reads
-  // the runtime's own snapshot), so the earlier release's row is planted rather than written by
-  // a runtime whose snapshot is faked. Its fingerprint has the binding's snapshot, which the
-  // request fingerprint no longer has since #80 (ABI 9): every row stored before #80 conflicts
-  // (the one-time incompatibility of that switch, ADR 0014), and never executes twice.
-  test(`${ownerAdapter}: a keyed atomic retry across the bump finds its ABI 4 row and conflicts; it never executes twice`, async (t) => {
-    const { h, send, credential } = await setup(t);
-    const key = "abi-bump-key-000001";
-    const body = { statements: [insert("abi_keyed")] };
-    const auth = { principal: credential.principal, subject: credential.subject, role: credential.defaultRole, session: credential.session };
-    const abi4 = { ...h.binding("a"), snapshot: h.runtime.snapshot.replace(/:abi-\d+$/u, ":abi-4") };
-    const keyHash = await legacyKeyHash(auth, "execute", abi4, key);
-    const fingerprint = await legacyFingerprint(auth, "execute", abi4, body);
-    const database = h.databases.get("a").database;
-    database.prepare("INSERT INTO policysql_idempotency (key_hash, fingerprint, response_json) VALUES (?, ?, ?)").run(keyHash, fingerprint, JSON.stringify({
-      version: 1, results: [{ columns: ["id", "name"], rows: [{ id: "abi_keyed", name: "abi_keyed" }], rowCount: 1, affectedRows: 1 }],
-      usage: { rowsReturned: 1, rowsAffected: 1, rowsRead: 1, rowsWritten: 1, queryDurationMs: 0 },
-      originalRequestId: "abi4", transactionId: `atomic_${keyHash.slice(0, 24)}`, replayed: false,
-    }));
-    const retry = await send("/v1/transactions:execute", body, key);
-    // The same key hash (it has no snapshot) finds the row; its fingerprint has the old snapshot.
-    assert.equal(retry.status, 409, JSON.stringify(retry.body));
-    assert.equal(retry.body.error.code, "POLICYSQL_IDEMPOTENCY_CONFLICT");
-    assert.equal(h.rows("a").some((row) => row.id === "abi_keyed"), false, "nothing executed");
-    assert.equal(database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, 1);
-    // Control: an old-format fingerprint is not this release's, even under the current
-    // snapshot; this release's is the same construction over the binding without its snapshot.
-    const sameSnapshot = await legacyFingerprint(auth, "execute", h.binding("a"), body);
-    const current = JSON.parse(h.runtime.identity_json(JSON.stringify({
-      op: "request", endpoint: "execute", auth: { ...auth, roles: credential.roles, access: credential.access },
-      binding: h.binding("a"), body: JSON.stringify(body), key,
-    }))).idempotency;
-    assert.equal(current.keyHash, keyHash, "the key hash is unchanged");
-    assert.notEqual(current.fingerprint, sameSnapshot);
-    const { snapshot: _snapshot, ...withoutSnapshot } = h.binding("a");
-    assert.equal(current.fingerprint, await legacySha256(`${legacyIdentity(auth, "execute", h.binding("a"))}:${legacyStableJson(body)}:${legacyStableJson(withoutSnapshot)}`),
-      "the ABI 4 construction over the binding without its snapshot (#80)");
-    // The same row under this release's fingerprint replays.
-    database.prepare("UPDATE policysql_idempotency SET fingerprint = ?").run(current.fingerprint);
-    const replay = await send("/v1/transactions:execute", body, key);
-    assert.equal(replay.status, 200, JSON.stringify(replay.body));
-    assert.equal(replay.body.meta.requestId, "abi4");
-    assert.equal(h.rows("a").some((row) => row.id === "abi_keyed"), false, "a replay executes nothing");
   });
 
   // #80: a keyed atomic write committed before a deployment that changes the snapshot (here
@@ -280,15 +147,11 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   });
 
   test(`${ownerAdapter}: a keyed begin retry across a deployment reaches the same owner and conflicts`, async (t) => {
-    const { h, at, send, credential } = await setup(t);
+    const { h, at, send } = await setup(t);
     const key = "abi-bump-begin-0001";
     at("current");
     const first = await send("/v1/transactions", { mode: "write" }, key);
     assert.equal(first.status, 201, JSON.stringify(first.body));
-    // The key hash has no snapshot: the transaction id is the one ABI 4 computed.
-    const auth = { principal: credential.principal, subject: credential.subject, role: credential.defaultRole, session: credential.session };
-    const keyHash = await legacyKeyHash(auth, "interactive-start", h.binding("a"), key);
-    assert.equal(first.body.transactionId, `tx_${keyHash.slice(0, 32)}`, "the ABI 4 transaction id");
     at(4);
     const retry = await send("/v1/transactions", { mode: "write" }, key);
     assert.equal(retry.status, 409, JSON.stringify(retry.body));

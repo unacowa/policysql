@@ -130,7 +130,7 @@ fn issue_70() -> Engine {
     engine
 }
 
-/// A record written before the switch-over (no `v`) is discarded and answered alike.
+/// A record of another format version (no `v`) is unreadable: it is discarded and answered alike.
 fn old_format_record() -> Engine {
     let mut engine = Engine::new();
     let old = json!({"transactionId": OWNER, "status": "committing", "commitSent": {"sequence": 1, "digest": "d"}})

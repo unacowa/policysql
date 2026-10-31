@@ -14,9 +14,8 @@
 //! where `identity = canonical({principal, subject, role, session, endpoint, database:
 //! {scope, databaseId}})`. This construction is fixed by ADR 0025 (a): together with the
 //! canonical form's rules (b)-(d), it keeps `keyHash`, the auth and start fingerprints, and
-//! the `{sequence}` digests byte-identical to the values stored before ADR 0025
-//! (`tests/fixtures/identity-goldens.json`). The request fingerprint is not among them: since
-//! #80 (ABI 9) its binding has no `snapshot`, so a keyed retry is recognized across a
+//! the `{sequence}` digests stable (`tests/fixtures/identity-goldens.json`). The request
+//! fingerprint's binding has no `snapshot` (#80), so a keyed retry is recognized across a
 //! deployment that changed the snapshot. Every identity field that reaches a hash is
 //! checked to be a string (the session a map of strings, the binding of the ADR 0014 shape).
 //!
