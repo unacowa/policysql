@@ -82,6 +82,14 @@ callback capability travels in it, not in `authorization`), and every message na
 was routed to in `x-policysql-owner`. A message routed to another name is answered
 `POLICYSQL_INTERNAL`, never a rejection.
 
+Both sides stamp every message and reply with one wire version (`x-policysql-owner-wire`). A
+change of any owner wire message must change it. A version mismatch is never a rejection: an
+object answers a message of another version `POLICYSQL_INTERNAL` and runs nothing, so a body of
+another shape never reaches the machine (which would answer it 400
+`POLICYSQL_INVALID_REQUEST`); a Worker does not read a reply of another version and answers a
+commit `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, anything else `POLICYSQL_INTERNAL` (ADR 0007). A keyed
+execute replays from its row once the versions agree.
+
 A failure before COMMIT is sent (the transport's last binding or deadline check) is the same on every owner adapter: the executor reports `not_committed`, and the answer is the definite 409 `POLICYSQL_TRANSACTION_UNAVAILABLE` (#54; ADR 0024). Any other commit exception is an unknown outcome.
 
 ### The Durable Objects adapter (`src/adapters/durable-objects.ts`)

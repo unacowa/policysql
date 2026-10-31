@@ -1172,7 +1172,10 @@ production to the machine (`deploy/cloudflare/src/transaction-owner.ts`).
   stay in `engine.ts`; the owner validates the forwarded input again.
 - **Wire.** The Durable Objects paths are unchanged; the body of an interactive command or a
   callback query is the owner input above (the callback capability travels in the body). The
-  object answers with the statuses and bodies of ADR 0023.
+  object answers with the statuses and bodies of ADR 0023. An owner wire message change must
+  change the wire version (`x-policysql-owner-wire`, ADR 0022): a version mismatch is never a
+  rejection (a commit is `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, anything else `POLICYSQL_INTERNAL`,
+  and nothing runs).
 - **BigInt in the transport.** `TursoHttpTransport` encodes a `BigInt` argument within the
   signed 64-bit range as a Hrana `integer` with its digits; anything else stays
   `POLICYSQL_INTERNAL`. With that, #70 holds through the HTTP path: `1e400` gets the compile
@@ -1237,7 +1240,8 @@ to the machine (`deploy/cloudflare/src/request-step.ts`, `src/engine.ts`,
   machine's own atomic record answers interactive commands and callback queries
   `POLICYSQL_TRANSACTION_UNAVAILABLE`, and its timer changes nothing.
 - **Wire.** The `/atomic` message is the machine's forwarded input (`kind: "atomic"`
-  included), and the reply is the public `execute` response, which the Worker relays.
+  included), and the reply is the public `execute` response, which the Worker relays. The
+  wire version rule above applies (`owner-wire-version.test.mjs`).
 - **Cost observation** is core's (pull request 6): after COMMIT, and for a direct replay, on
   both placements. On an owner, `LegacyTransactionOwnerCore` observed after the envelope,
   before its checks, so it also observed an execution that a check rejected or that failed

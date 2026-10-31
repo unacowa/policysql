@@ -19,6 +19,15 @@
 // object's reply is the public `execute` response the owner's step decided, which the Worker
 // relays.
 //
+// The wire version guards the message shape. Both sides stamp every message and reply with the
+// one constant `OWNER_WIRE_VERSION` (`x-policysql-owner-wire`); a change of any owner wire
+// message must change it. A message whose version differs is answered POLICYSQL_INTERNAL (500)
+// and runs nothing, so a body of another shape never reaches the machine, which would answer
+// 400 POLICYSQL_INVALID_REQUEST, a definite rejection. A reply whose version differs is not
+// read: a commit becomes POLICYSQL_COMMIT_OUTCOME_UNKNOWN (its COMMIT may have applied, and a
+// retry must never be a rejection, ADR 0007), anything else POLICYSQL_INTERNAL. Neither is a
+// rejection in the client, and a keyed execute replays from its row once the versions agree.
+//
 // A snapshot skew (a Worker and an object of different deployments, #85) is not a rejection.
 // The Worker puts the snapshot it compiled for in the `/atomic` body. An object whose own
 // snapshot differs runs nothing and answers POLICYSQL_INTERNAL (500), never
@@ -34,7 +43,7 @@
 // transaction, 200 for any other value, and an error's public status from the one table in
 // src/http/status.ts. The wire needs no `cloudflare:workers` import (RPC
 // stubs), so the adapter also runs in the Node test harness.
-import { internalError, operationError } from "../errors.ts";
+import { EngineError, internalError, operationError } from "../errors.ts";
 import { stringifyExact } from "../exact-json.ts";
 import { statusFor } from "../http/status.ts";
 import { TransactionOwnerCore } from "../transaction-owner.ts";
@@ -47,6 +56,9 @@ import { OWNER_NAME } from "../transaction-owner-port.ts";
 const OWNER_ORIGIN = "https://owner";
 const REQUEST_ID_HEADER = "x-policysql-request-id";
 const OWNER_HEADER = "x-policysql-owner";
+const WIRE_HEADER = "x-policysql-owner-wire";
+// Changes whenever any owner wire message changes shape.
+const OWNER_WIRE_VERSION = "1";
 const COMMAND_PATHS: Readonly<Record<OwnerCommandKind, string>> = Object.freeze({
   statement: "/statement", commit: "/commit", rollback: "/rollback",
 });
@@ -58,6 +70,15 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
     headers: { "content-type": "application/json", ...headers },
     body: stringifyExact(body),
   });
+  if (response.headers.get(WIRE_HEADER) !== OWNER_WIRE_VERSION) {
+    // An object of another wire version: its answer is not an answer to this message.
+    await response.body?.cancel().catch(() => undefined);
+    console.log(JSON.stringify({ event: "owner_wire_skew", path, requestId: headers[REQUEST_ID_HEADER] ?? null }));
+    const error = path === "/commit"
+      ? new EngineError("POLICYSQL_COMMIT_OUTCOME_UNKNOWN", "The commit outcome is unknown.")
+      : internalError();
+    return { ok: false, error: operationError(error) };
+  }
   let parsed: any;
   try { parsed = await response.json(); } catch { throw internalError(); }
   if (response.ok) return { ok: true, value: parsed };
@@ -72,7 +93,7 @@ const replyResponse = (reply: OwnerReply, path: string, requestId: string) => {
     stringifyExact(reply.ok ? reply.value : { error: { ...failure.error, requestId } }),
     {
       status: reply.ok ? (path === "/begin" ? 201 : 200) : statusFor(failure.error.code),
-      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8" },
+      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8", [WIRE_HEADER]: OWNER_WIRE_VERSION },
     },
   );
 };
@@ -86,7 +107,7 @@ export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace
     route(name: string): TransactionOwnerHandle {
       const stub = namespace.get(namespace.idFromName(name));
       const message = (path: string, input: unknown, requestId: string) => send(stub, path, input, {
-        [REQUEST_ID_HEADER]: requestId, [OWNER_HEADER]: name,
+        [REQUEST_ID_HEADER]: requestId, [OWNER_HEADER]: name, [WIRE_HEADER]: OWNER_WIRE_VERSION,
       });
       return {
         begin: (input, requestId) => message("/begin", input, requestId),
@@ -124,8 +145,9 @@ const serve = async (core: TransactionOwnerCore, request: Request): Promise<Resp
   const path = new URL(request.url).pathname;
   let reply: OwnerReply;
   const owner = request.headers.get(OWNER_HEADER);
-  if (owner !== null && !core.bindName(owner)) {
-    // Routed to another name: an adapter fault.
+  if ((owner !== null && !core.bindName(owner)) || request.headers.get(WIRE_HEADER) !== OWNER_WIRE_VERSION) {
+    // Routed to another name, or a message of another wire version: an adapter or rollout
+    // fault. Nothing reaches the machine.
     console.log(JSON.stringify({ event: "owner_message_rejected", requestId, path }));
     reply = { ok: false, error: operationError(internalError()) };
   } else if (path === "/begin") reply = await core.begin(body, requestId);

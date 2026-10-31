@@ -234,7 +234,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     committedOnce(h, "window_b");
   });
 
-  // ADR 0024 "Old-format records are discarded, not read": a record the TypeScript owner wrote
+  // ADR 0024 "Fail-closed rules": a record the TypeScript owner wrote
   // before the switch-over (pull request 7) is unreadable to the step machine. Whatever its
   // status, a commit gets POLICYSQL_COMMIT_OUTCOME_UNKNOWN (nothing in it proves that COMMIT was
   // not sent) and every other command POLICYSQL_TRANSACTION_UNAVAILABLE; nothing executes, and
@@ -584,10 +584,11 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
     get: (id) => ({
       async fetch(url, init) {
         sent.push({ name: id.name, url, method: init.method, headers: init.headers, body: JSON.parse(init.body) });
+        const marked = { headers: { "x-policysql-owner-wire": "1" } };
         if (new URL(url).pathname === "/rollback") {
-          return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null, requestId: "req" } }, { status: 409 });
+          return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null, requestId: "req" } }, { status: 409, ...marked });
         }
-        return Response.json({ started: true }, { status: 201 });
+        return Response.json({ started: true }, { status: 201, ...marked });
       },
     }),
   };
@@ -643,7 +644,7 @@ test("durable-objects: the object class decodes the internal messages and fails 
   const object = new OwnerObject(state, {});
   const name = `tx_${"a".repeat(32)}`;
   const send = (path, body, headers = {}) => object.fetch(new Request(`https://owner${path}`, {
-    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, ...headers }, body,
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": "1", ...headers }, body,
   }));
   for (const [path, body] of [["/begin", "{"], ["/atomic", "null"], ["/statement", "[]"], ["/unknown", "{}"]]) {
     const response = await send(path, body);

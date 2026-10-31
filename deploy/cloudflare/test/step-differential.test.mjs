@@ -61,7 +61,7 @@ export const ALLOWLIST = Object.freeze({
     "ADR 0024 failure table, TimerFired while a statement runs: core rolls back when it returns and answers " +
     "TRANSACTION_UNAVAILABLE. LegacyTransactionOwnerCore rolls back concurrently and then records the statement as done.",
   "old-format-record":
-    "ADR 0024 \"Old-format records are discarded, not read\": the one-time incompatibility at the switch-over " +
+    "ADR 0024 \"Fail-closed rules\": the unreadable record of the TypeScript owner at the switch-over " +
     "(pull request 7). Core discards a LegacyTransactionOwnerCore record: commit gets COMMIT_OUTCOME_UNKNOWN, other " +
     "commands TRANSACTION_UNAVAILABLE.",
   "rollback-failure-keeps-phase":

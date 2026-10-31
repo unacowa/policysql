@@ -51,9 +51,9 @@ before hashing.
 
 The request and auth fingerprints include the database binding, and the binding includes the
 runtime snapshot, which includes the ABI version (ADR 0014). (Since #80 the request fingerprint
-leaves out the snapshot; see the amendment at the end.) Every deployment that changes the
-snapshot therefore already makes earlier fingerprints unmatchable; a keyed retry straddling it
-gets `POLICYSQL_IDEMPOTENCY_CONFLICT`. `keyHash` and the command digests do not include
+leaves out the snapshot; see the amendment at the end.) Before #80 every deployment that changed the
+snapshot therefore made earlier fingerprints unmatchable; since #80 the request fingerprint
+leaves out the snapshot and a keyed retry replays. `keyHash` and the command digests do not include
 the snapshot. Owner records live for one transaction (seconds).
 
 ## Decision
@@ -149,22 +149,21 @@ core):
   retry straddling a snapshot-changing deployment finds its row, and a keyed begin retry
   reaches the same owner (the transaction id is derived from `keyHash`). No committed keyed
   request executes twice.
-- **Commit retries** (ADR 0007). A commit whose COMMIT may have been sent leaves a `committing`
-  or `committed` record with `commitSent` (#48). A retry after the deployment carries the new
-  snapshot, so `owned()` (`transaction-owner.ts`) takes `sameExceptSnapshot`: it recomputes the
-  auth fingerprint of the stored `auth` under the stored binding and requires it to equal the
-  stored fingerprint, then recomputes it under the caller's binding. Then `commitRetry()`
-  requires `commitSent.digest` to equal the digest of `{sequence}`. By (a)-(d) both hold, and
-  the retry gets its recorded reply or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. If either value
-  changed, the retry would get 409 `POLICYSQL_TRANSACTION_UNAVAILABLE`, a definite rejection
-  after COMMIT that ADR 0007 forbids. This is why the requirements are needed.
+- **Commit retries** (ADR 0007). A commit whose COMMIT may have been sent leaves a
+  `committing` or `committed` record with `commitSent` (#48). A retry after the deployment
+  carries the new snapshot. The machine matches it by the replay identity, which has no
+  snapshot (ADR 0024, "Replay identity"), and `last.digest` / `commitSent.digest`, the digest
+  of `{sequence}`; it answers the recorded reply or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` before
+  any snapshot, route, or expiry check. By (a)-(d) both values are stable. If either changed,
+  the retry would get 409 `POLICYSQL_TRANSACTION_UNAVAILABLE`, a definite rejection after
+  COMMIT that ADR 0007 forbids. This is why the requirements are needed.
 - **Request fingerprints** do not include the snapshot (#80, below), so a keyed retry replays
   across snapshot changes.
 - **Statement, rollback, and callback digests, and start fingerprints** are not compared across
-  a deployment: a statement or rollback retry with a changed snapshot is unavailable in
-  `owned()`, a keyed begin retry with a changed snapshot already conflicts in
-  `startTransaction`, an unkeyed begin has a fresh transaction id, and callback sessions do not
-  survive an owner restart. No commit outcome is misreported.
+  a deployment: a statement or rollback retry with a changed snapshot is unavailable, a keyed
+  begin retry with a changed snapshot conflicts (a begin is never a COMMIT outcome), an unkeyed
+  begin has a fresh transaction id, and callback sessions do not survive an owner restart. No
+  commit outcome is misreported.
 
 ### Escaped lone surrogates
 
@@ -270,3 +269,5 @@ Recorded by the follow-up pull request (ABI 5):
 - **Keep byte equality, using `ryu-js` and `serde_json` instead of a hand-written formatter.**
   Smaller than today, but still couples core to JavaScript's number printing and keeps the
   dual-hash gate and its CPU cost, for compatibility that snapshot changes already break.
+- **Hash the raw body bytes.** Changes the retry rule of ADR 0007 from "same canonical payload"
+  to "same bytes" (whitespace and key order would matter to clients).
