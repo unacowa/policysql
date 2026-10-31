@@ -5,7 +5,7 @@ import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.t
 import { discardBody, fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { BodyTooLargeError, readBoundedText } from "./bounded-body.ts";
-import { statementFailure } from "./database-complexity.ts";
+import { SqlComplexityError, statementFailure } from "./database-complexity.ts";
 
 // Statement replies carry result rows: the result-side bound, replaced by the compiled raw
 // bound in ADR 0027 pull request 6. Control replies (BEGIN, COMMIT, ROLLBACK, close) carry no
@@ -210,6 +210,8 @@ class TursoHttpTransaction {
   commitAttempted = false;
   readonly maxBytes: number;
   open: boolean;
+  /** The reply to the last request on the stream was not read, so its baton is unknown (#96). */
+  unusable = false;
   readonly usage: any[];
 
   constructor(transport, baton, timeoutMs, beginUsage, deadlineMs: number | undefined, maxBytes: number) {
@@ -224,14 +226,24 @@ class TursoHttpTransaction {
 
   async execute(statements) {
     if (!this.open) throw databaseFailure();
-    const body = await this.transport.pipeline(
-      statements.map((statement) => executeRequest(statement, this.maxBytes)),
-      this.baton,
-      Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
-      binaryLimitExceeded,
-      STATEMENT_RESPONSE_BYTES,
-    );
-    if (!body.baton) throw databaseFailure();
+    let body;
+    try {
+      body = await this.transport.pipeline(
+        statements.map((statement) => executeRequest(statement, this.maxBytes)),
+        this.baton,
+        Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
+        binaryLimitExceeded,
+        STATEMENT_RESPONSE_BYTES,
+      );
+    } catch (error) {
+      // The request may have run, but its reply, and with it the stream's next baton, was never
+      // read (reply over the bound, malformed, wrong count, timeout, transport failure). The baton
+      // held here is stale: a ROLLBACK sent with it is refused and would leave the transaction
+      // open. The stream is unusable; the server expires it (#96).
+      this.unusable = true;
+      throw error;
+    }
+    if (!body.baton) { this.unusable = true; throw databaseFailure(); }
     // The stream's next baton comes first, even when a statement was refused: the rollback that
     // follows a refusal must continue this stream with the baton of this reply, or the server
     // keeps the transaction (and its write lock) open until the stream expires.
@@ -239,8 +251,21 @@ class TursoHttpTransaction {
     // The Hrana error object of a refused statement is read here, and only for statement
     // requests (never BEGIN, COMMIT, or ROLLBACK): the first refused statement decides, and its
     // message is read only to classify it (src/database-complexity.ts).
-    const refused = body.results.findIndex((entry) => entry?.type === "error");
-    if (refused >= 0) throw statementFailure(body.results[refused].error, refused);
+    const errors = body.results.flatMap((entry, index) => (entry?.type === "error" ? [index] : []));
+    if (errors.length > 0) {
+      // Hrana runs the rest of the pipeline after an error. The refusal is a complexity refusal
+      // only when it is the one error and the last statement: then nothing ran after it, so no
+      // statement could have committed or rolled the transaction back behind the client's back.
+      // Anything else (a second error, or a statement that ran after the refused one) keeps the
+      // unclassified 503, whose outcome is not a definite rejection.
+      const [refused] = errors;
+      const alone = errors.length === 1 && refused === body.results.length - 1;
+      const failure = statementFailure(body.results[refused].error, refused);
+      // The message is dropped so that the failure cannot classify as complexity.
+      throw alone || !(failure instanceof SqlComplexityError)
+        ? failure
+        : statementFailure({ code: body.results[refused].error?.code }, refused);
+    }
     const results = body.results.map((entry) => decodeResult(entry, this.maxBytes));
     this.usage.push(...results.map((result) => result.usage));
     return results;
@@ -248,6 +273,14 @@ class TursoHttpTransaction {
 
   async finish(sql) {
     if (!this.open) return;
+    // A stream whose last reply was never read cannot be continued: nothing is sent, and the
+    // server expires the stream (and with it the transaction). COMMIT is never skipped this way:
+    // it is only reachable after a successful statement, and a failed one is rolled back instead.
+    if (this.unusable && sql === "ROLLBACK") {
+      this.open = false;
+      return;
+    }
+    if (this.unusable) throw new CommitNotSentError(databaseFailure());
     // Cleanup still gets a bounded attempt after the execution deadline expires. For COMMIT the
     // deadline is read before the request is built, so an expired deadline here is a failure
     // before any byte was sent: `CommitNotSentError` (#54), after which the caller rolls back

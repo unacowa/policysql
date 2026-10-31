@@ -490,6 +490,14 @@ against real Turso; the message of the expression-depth entry there says `maximu
 (SQLite's own limit is 1,000), which the prefix match does not depend on. The database-detected
 causes added to the fixed cause names are `function_arguments`, `compound_terms`, and
 `join_tables`, next to `columns`, `parameters`, `like_pattern`, and `database_expression_depth`.
+Review follow-ups: a database refusal is classified `complex` only when it is the one error of its
+reply and its statement is the last, because Hrana keeps running the rest of a pipeline after an
+error (a later error could roll the transaction back and a later statement commit in autocommit);
+anything else stays 503. A statement reply the transport cannot read (over 2 MiB, malformed, wrong
+count, timeout) leaves the stream unusable and no ROLLBACK is sent with the stale baton (#96). Sent
+over HTTP, `EXISTS` nests and `NOT` chains reach the binder's depth limit (413) or the parser's cap
+on the client's own SQL (400 `INVALID_SQL`) before the emitted statement reaches the recursion
+cap, so only the Rust differential test covers the recursion-cap path.
 The declared-type term of the column-metadata guard is the byte length of the physical schema's
 declared type for a column projected directly (zero for an expression, which has none), taken from
 the physical schema at construction. Left to later pull requests, as decided: the configurable

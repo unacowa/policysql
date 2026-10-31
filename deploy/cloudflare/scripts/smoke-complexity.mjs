@@ -107,6 +107,29 @@ export const sqlComplexitySmoke = async (context, { transport, allowlist, classi
   const next = begin.status === 201 ? await api.statement(transactionId, { sequence: 2, sql: "SELECT id FROM projects", params: {} }) : empty;
   expect(next.status === 409 && errorCode(next) === "POLICYSQL_TRANSACTION_UNAVAILABLE", "the transaction is closed after the refusal");
 
+  // #96: a statement reply the transport cannot read (over its 2 MiB bound) leaves the stream
+  // unusable; nothing is sent with a stale baton, so the server expires the stream and releases its
+  // write lock, and a following BEGIN on the same database succeeds. The wait is recorded.
+  const oversized = { refused: false, beginAfterMs: null };
+  {
+    const connection = await transport.begin("write", 10_000, undefined, { maxBytesPerValue: 262_144 });
+    try { await connection.execute([{ sql: "SELECT replace(hex(zeroblob(1500000)),'0','a')" }]); } catch (error) {
+      oversized.refused = error?.code === "POLICYSQL_LIMIT_EXCEEDED";
+    }
+    await connection.rollback().catch(() => {});
+    expect(oversized.refused, "a statement reply over the transport bound is refused as a limit");
+    const started = Date.now();
+    while (oversized.beginAfterMs === null && Date.now() - started < 60_000) {
+      try {
+        const next = await transport.begin("write", 2_000, undefined, { maxBytesPerValue: 262_144 });
+        oversized.beginAfterMs = Date.now() - started;
+        await next.rollback().catch(() => {});
+      } catch { await new Promise((resolve) => setTimeout(resolve, 1_000)); }
+    }
+    expect(oversized.beginAfterMs !== null, "a BEGIN on the same database succeeds after an oversized statement reply");
+  }
+  report.oversizedReply = oversized;
+
   report.worker = {
     boundPatternServed: summary(served), boundPatternOver: summary(boundOver), databaseRefusal: summary(databaseRefusal),
     atomic: summary(atomic), interactive: { statement: summary(statement), next: summary(next) },

@@ -7,7 +7,7 @@ import test from "node:test";
 import { COMPLEXITY_ALLOWLIST, COMPLEXITY_CODES, DatabaseStatementError, SqlComplexityError, complexityCause, statementFailure } from "../src/database-complexity.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 import { COMPLEXITY_PROBES, sqlComplexitySmoke } from "../scripts/smoke-complexity.mjs";
-import { CommitNotSentError } from "../src/errors.ts";
+import { CommitNotSentError, EngineError } from "../src/errors.ts";
 import { directCommitFailureClass, directFailureClass, executeFailedEvent, failureClass } from "../src/step-effects.ts";
 
 // The messages of SQLite 3.4x for each allowlist entry (the real server's text is checked by
@@ -161,7 +161,7 @@ test("the transport classifies the first refused statement of a pipeline by its 
     return index === 1 ? columns : refusal("LIKE or GLOB pattern too complex");
   });
   const transaction = await instance.begin("write", 1_000, undefined, limit);
-  await assert.rejects(transaction.execute([{ sql: "SELECT first" }, { sql: "SELECT second" }, { sql: "SELECT third" }]),
+  await assert.rejects(transaction.execute([{ sql: "SELECT first" }, { sql: "SELECT second" }]),
     (error) => error instanceof SqlComplexityError && error.statement === 1 && error.complexityCause === "columns");
   // A COMMIT whose reply is a complexity message is a transport failure, never a classification.
   await assert.rejects(transaction.commit(), (error) => !(error instanceof SqlComplexityError) && error.code === "POLICYSQL_DATABASE_UNAVAILABLE");
@@ -199,4 +199,71 @@ test("the release smoke sends a statement for exactly the allowlist entries mark
   });
   assert.ok(result.failures.includes('allowlist entry "too many SQL variables" no longer matches what real Turso sends'), JSON.stringify(result.failures));
   assert.equal(result.failures.filter((failure) => failure.startsWith("allowlist entry")).length, 1, "only the reworded entry fails");
+});
+
+const complexity = () => refusal("SQLite error: too many columns in result set", "SQLITE_UNKNOWN");
+
+test("a complexity refusal is classified only when it is the one error and the last statement of its reply", async () => {
+  const run = async (replies) => {
+    const instance = transport((request) => {
+      const sql = request.stmt?.sql ?? "";
+      if (/^BEGIN/u.test(sql)) return ok();
+      return replies[sql] ?? ok();
+    });
+    const transaction = await instance.begin("write", 1_000, undefined, limit);
+    return transaction.execute(Object.keys(replies).map((sql) => ({ sql }))).then(() => null, (error) => error);
+  };
+  // Alone and last: a definite refusal.
+  const alone = await run({ "SELECT a": ok(), "SELECT b": complexity() });
+  assert.ok(alone instanceof SqlComplexityError && alone.statement === 1);
+  // Complexity, then a second error: SQLite may have rolled back by itself in between, and a statement
+  // after that ran in autocommit. Not a definite rejection.
+  const second = await run({ "SELECT a": complexity(), "SELECT b": refusal("SQLite error: disk I/O error", "SQLITE_IOERR"), "SELECT c": ok() });
+  assert.ok(second instanceof DatabaseStatementError && !(second instanceof SqlComplexityError));
+  assert.equal(second.databaseCode, "SQLITE_UNKNOWN");
+  // Complexity, then a later statement that ran (a write may have committed).
+  const later = await run({ "SELECT a": complexity(), "INSERT later": ok() });
+  assert.ok(later instanceof DatabaseStatementError && !(later instanceof SqlComplexityError));
+  // Two complexity errors are two errors.
+  const twice = await run({ "SELECT a": complexity(), "SELECT b": complexity() });
+  assert.ok(twice instanceof DatabaseStatementError && !(twice instanceof SqlComplexityError));
+});
+
+test("a statement reply that cannot be read leaves the stream unusable and no ROLLBACK is sent with a stale baton (#96)", async () => {
+  const kinds = {
+    "reply over the bound": () => new Response("x".repeat(2_097_153)),
+    "malformed JSON": () => new Response("{not json"),
+    "wrong result count": () => Response.json({ baton: "next", results: [] }),
+    "no baton": () => Response.json({ baton: null, results: [ok()] }),
+    "HTTP failure": () => new Response("no", { status: 502 }),
+  };
+  for (const [kind, statementReply] of Object.entries(kinds)) {
+    const sent = [];
+    const instance = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "unreadable", async (_url, init) => {
+      const { baton, requests } = JSON.parse(init.body);
+      sent.push({ baton: baton ?? null, sql: requests[0]?.stmt?.sql ?? requests[0]?.type });
+      if (/^BEGIN/u.test(requests[0].stmt?.sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
+      return statementReply();
+    });
+    const transaction = await instance.begin("write", 1_000, undefined, limit);
+    await assert.rejects(transaction.execute([{ sql: "SELECT big" }]), (error) => error instanceof EngineError, kind);
+    const before = sent.length;
+    await transaction.rollback();
+    assert.equal(sent.length, before, `${kind}: nothing is sent with the stale baton`);
+    assert.equal(transaction.open, false, kind);
+    await assert.rejects(transaction.commit().then(() => { throw new Error("committed"); }), () => true, kind);
+    assert.equal(sent.length, before, `${kind}: COMMIT is not sent either`);
+  }
+  // A timeout is the same.
+  const sent = [];
+  const instance = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "timeout", async (_url, init) => {
+    const { requests } = JSON.parse(init.body);
+    sent.push(requests[0].stmt?.sql);
+    if (/^BEGIN/u.test(requests[0].stmt?.sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
+    throw Object.assign(new Error("aborted"), { name: "TimeoutError" });
+  });
+  const transaction = await instance.begin("write", 1_000, undefined, limit);
+  await assert.rejects(transaction.execute([{ sql: "SELECT slow" }]), { code: "POLICYSQL_DATABASE_TIMEOUT" });
+  await transaction.rollback();
+  assert.deepEqual(sent, ["BEGIN IMMEDIATE", "SELECT slow"]);
 });

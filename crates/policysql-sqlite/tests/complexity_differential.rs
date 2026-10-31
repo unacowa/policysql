@@ -40,9 +40,14 @@ fn not(expression: Expr) -> Expr {
     paren(Expr::unary(UnaryOperator::Not, expression))
 }
 
-/// `x IS NOT NULL` as the binder emits it: `NOT` over a parenthesized `IS NULL`.
+/// `x IS NOT NULL` as the emitter prints it: `NOT` over a parenthesized `x IS NULL`, which the
+/// emitter builds as `Binary(x, Is, NULL)` (not `Expr::IsNull`).
 fn is_not_null(expression: Expr) -> Expr {
-    not(paren(Expr::is_null(expression)))
+    not(binary(
+        expression,
+        Operator::Is,
+        Expr::Literal(Literal::Null),
+    ))
 }
 
 /// `x NOT LIKE y` as the binder emits it: `NOT` over a parenthesized `LIKE`.
@@ -169,6 +174,26 @@ fn exists_in_or(n: usize) -> Expr {
     })
 }
 
+fn scalar_subquery_chain(n: usize) -> Expr {
+    (0..n).fold(number("1"), |inner, _| {
+        binary(
+            Expr::Subquery(select_where(inner)),
+            Operator::Equals,
+            number("1"),
+        )
+    })
+}
+
+fn in_subquery_chain(n: usize) -> Expr {
+    (0..n).fold(number("1"), |inner, _| {
+        paren(Expr::InSelect {
+            lhs: column("a", "x").into_boxed(),
+            not: false,
+            rhs: select_where(inner),
+        })
+    })
+}
+
 fn in_list_chain(n: usize) -> Expr {
     (0..n).fold(column("a", "x"), |inner, _| {
         paren(Expr::InList {
@@ -241,6 +266,8 @@ const SHAPES: &[Shape] = &[
     ("or with deep leaf", or_with_deep_leaf),
     ("exists chain", exists_chain),
     ("exists in or", exists_in_or),
+    ("scalar subquery chain", scalar_subquery_chain),
+    ("in subquery chain", in_subquery_chain),
     ("in list chain", in_list_chain),
     ("between chain", between_chain),
     ("like chain", like_chain),
