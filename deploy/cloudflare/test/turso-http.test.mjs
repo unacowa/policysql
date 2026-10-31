@@ -277,3 +277,21 @@ test("encodes BigInt arguments as exact Hrana integers within the signed 64-bit 
   }
   assert.equal(sent.length, before, "nothing is sent for an out-of-range integer");
 });
+
+// A COMMIT that was handed to the pipeline is never "not sent" later: a second attempt after a
+// failed first one, even past the deadline, is an ordinary failure (unknown), not the pre-send error.
+test("a second COMMIT after a sent one failed is never CommitNotSentError", async (t) => {
+  let now = 10_000;
+  t.mock.method(Date, "now", () => now);
+  let commits = 0;
+  const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "secret" }, "twice", async (_url, init) => {
+    const { requests: commands } = JSON.parse(init.body);
+    if (commands[0].stmt?.sql === "COMMIT") { commits++; return new Response("down", { status: 503 }); }
+    return Response.json({ baton: "baton", results: commands.map(() => result([], [])) });
+  });
+  const transaction = await transport.begin("write", 1000, 10_200, runtimeLimit);
+  await assert.rejects(transaction.commit(), (error) => !(error instanceof CommitNotSentError));
+  now = 10_300;
+  await assert.rejects(transaction.commit(), (error) => !(error instanceof CommitNotSentError));
+  assert.equal(commits, 1, "no second COMMIT request");
+});

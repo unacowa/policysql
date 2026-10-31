@@ -148,6 +148,7 @@ export const databaseTransportFactory = (
           try { await transaction.rollback(); } catch { /* remote timeout is terminal */ }
           throw error;
         }
+        let commitAttempted = false;
         return {
           get open() { return transaction.open; },
           get usage() { return transaction.usage; },
@@ -159,8 +160,11 @@ export const databaseTransportFactory = (
           },
           rollback: () => transaction.rollback(),
           async commit() {
-            // Everything in this `try` runs before any byte of COMMIT is sent, so its failure is
-            // a provable "not committed" (#54); `transaction.commit()` below never throws this.
+            // A COMMIT that may already have been sent is never "not sent" again, whatever the
+            // deadline or binding say now: a second attempt is an untyped failure (unknown).
+            if (commitAttempted) throw unavailable();
+            // Everything in this `try` runs before COMMIT is handed to the transport, so its
+            // failure is a provable "not committed" (#54).
             try {
               await checkDatabaseBinding(provider, pinned, pinned.snapshot, expiresAt);
               remainingDatabaseTime(expiresAt);
@@ -169,6 +173,7 @@ export const databaseTransportFactory = (
               try { await transaction.rollback(); } catch { /* remote timeout is terminal */ }
               throw new CommitNotSentError(error);
             }
+            commitAttempted = true;
             try { await transaction.commit(); } catch (error) {
               // The transport's own failure before it sent COMMIT: roll back as above.
               if (error instanceof CommitNotSentError) {

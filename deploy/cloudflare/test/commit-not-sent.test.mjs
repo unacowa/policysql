@@ -134,6 +134,27 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       }
     });
 
+    // The deadline runs out while COMMIT is in flight (the reply body read times out): COMMIT was
+    // sent, so the answer is never a rejection, whichever placement. The transport's own pre-send
+    // deadline check cannot be driven end to end on its own: the wrapper's identical check runs
+    // first and gives the same 409; it is covered by turso-http.test.mjs and database-routing.test.mjs.
+    test(`${label}: a deadline that runs out while COMMIT is in flight stays an unknown outcome`, async (t) => {
+      const { h } = await setup(t, ownerAdapter, placement.hooks);
+      let armed = true;
+      h.replaceDatabaseResponse(({ sqls }) => {
+        if (!armed || sqls[0] !== "COMMIT") return undefined;
+        armed = false;
+        const body = new ReadableStream({ pull(controller) { controller.error(new DOMException("timed out", "TimeoutError")); } });
+        return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+      });
+      const run = await attempt(h, { checks: 0 }, placement, "inflight", { key: placement.kind === "execute" ? "not-sent-inflight-key" : undefined });
+      assert.ok(run.sent.includes("COMMIT"), "COMMIT was sent");
+      assert.notEqual(run.response.status, 409, JSON.stringify(run.response.body));
+      assert.equal(run.response.status >= 500, true, JSON.stringify(run.response.body));
+      await unknown(run.response, placement.kind);
+      assert.equal(count(h, "inflight"), 1, "the database applied it");
+    });
+
     // The retry after a not-committed answer: atomic runs again as a new attempt, interactive
     // finds a transaction that is no longer active (a definite answer again), and a new
     // transaction is unaffected.
