@@ -27,7 +27,7 @@ const run = async (batches, checked = testBinding()) => {
   const runtime = scripted(batches);
   const calls = [];
   const database = {
-    check(binding) { calls.push(binding); return true; },
+    streamedReadCap: true, check(binding) { calls.push(binding); return true; },
     connect() { throw new Error("no connection in this test"); },
   };
   const result = await runRequestStep(
@@ -71,7 +71,7 @@ test("a first checkBinding that does not match consumes the cache: no later chec
 const executeOnce = async ({ args, rows, maxBytes }) => {
   const seen = { rolledBack: false, committed: false };
   const database = {
-    check() { return true; },
+    streamedReadCap: true, check() { return true; },
     connect() {
       return {
         async begin(_mode, _timeoutMs, _deadlineMs, options) {

@@ -186,7 +186,7 @@ fn blob_result(runtime: &PolicySqlRuntime, length: usize) -> Value {
 #[test]
 fn a_result_cell_is_bounded_by_the_configured_limit_and_the_result_bounds() {
     for limit in [1_000, DEFAULT_MAX_BYTES_PER_VALUE] {
-        let runtime = runtime_with(limit, 1_048_576, 1_000_000);
+        let runtime = runtime_with(limit, 1_048_576, 524_288);
         for length in [0, 1, limit - 1, limit] {
             let output = blob_result(&runtime, length);
             assert!(output.get("error").is_none(), "{limit} {length}: {output}");
@@ -200,18 +200,13 @@ fn a_result_cell_is_bounded_by_the_configured_limit_and_the_result_bounds() {
             );
         }
     }
-    // At the hard maximum the raw database result bound that exists today (1 MiB per statement,
-    // replaced by the compiled bound in pull request 6) is smaller than the base64 form of the
-    // largest value: a value up to about three quarters of it passes, one above does not.
-    let runtime = runtime_with(HARD_MAX_BYTES_PER_VALUE, 2_097_152, 1_000_000_000);
-    let raw_bound = policysql_transaction::machine::EVENT_RESULT_BYTES;
-    let frame =
-        json!({"columns":["state"],"rows":[[{"type":"blob","base64":""}]],"affectedRows":0})
-            .to_string()
-            .len();
-    let largest = (raw_bound - frame) / 4 * 3;
-    assert!(blob_result(&runtime, largest).get("error").is_none());
-    for length in [largest + 3, HARD_MAX_BYTES_PER_VALUE] {
+    // At the hard maxima `maxResultBytes` (524,288) governs before the per-value limit and the
+    // raw bound do: this validation counts the decoded bytes, one over is the same 413. (The
+    // step machine counts the public base64 form, about three quarters of it.) The raw bound
+    // of the compiled statement is larger than any value the result limit admits.
+    let runtime = runtime_with(HARD_MAX_BYTES_PER_VALUE, 2_097_152, 524_288);
+    assert!(blob_result(&runtime, 524_288).get("error").is_none());
+    for length in [524_289, HARD_MAX_BYTES_PER_VALUE] {
         let output = blob_result(&runtime, length);
         assert_eq!(code(&output), Some("POLICYSQL_LIMIT_EXCEEDED"), "{length}");
     }
@@ -229,7 +224,7 @@ fn a_result_cell_is_bounded_by_the_configured_limit_and_the_result_bounds() {
 #[test]
 fn a_returned_bytes_value_is_bounded_by_the_configured_limit() {
     for limit in [1_000, DEFAULT_MAX_BYTES_PER_VALUE] {
-        let runtime = runtime_with(limit, 1_048_576, 1_000_000);
+        let runtime = runtime_with(limit, 1_048_576, 524_288);
         let compiled = compile(
             &runtime,
             "UPDATE projects SET state=:v WHERE id='seed' RETURNING state",

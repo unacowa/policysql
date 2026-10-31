@@ -16,7 +16,7 @@ for (const stage of ["check", "connect"]) {
     let finish;
     let begins = 0;
     const provider = {
-      check: () => true,
+      streamedReadCap: true, check: () => true,
       connect: () => ({ begin: async () => { begins++; } }),
       [stage]: () => { calls++; return new Promise((resolve) => { finish = resolve; }); },
     };
@@ -32,14 +32,14 @@ for (const stage of ["check", "connect"]) {
 }
 
 test("an expired parent deadline rejects before invoking the provider", async () => {
-  const provider = { check() { assert.fail("provider must not run"); }, connect() { assert.fail("provider must not run"); } };
+  const provider = { streamedReadCap: true, check() { assert.fail("provider must not run"); }, connect() { assert.fail("provider must not run"); } };
   const acquire = databaseTransportFactory(provider, testBinding(), 1_024, Date.now() - 1);
   await assert.rejects(acquire("expired", Date.now() + 1000), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
 });
 
 test("provider-thrown deadline errors cannot expose provider error text", async () => {
   const provider = {
-    check() { throw new EngineError("POLICYSQL_DATABASE_TIMEOUT", "private-credential-detail"); },
+    streamedReadCap: true, check() { throw new EngineError("POLICYSQL_DATABASE_TIMEOUT", "private-credential-detail"); },
     connect() { assert.fail("must not connect"); },
   };
   await assert.rejects(checkDatabaseBinding(provider, testBinding(), "test-snapshot", Date.now() + 1000), (error) => {

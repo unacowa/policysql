@@ -25,6 +25,8 @@ export const createDeploymentDatabase = (getSnapshot: () => string) => {
       return Object.keys(registered).every((key) => registered[key] === selected[key]);
     };
     return {
+      // `TursoHttpTransport` reads each reply as a byte stream and cancels it at the read cap.
+      streamedReadCap: true,
       check,
       connect(selected, requestId) {
         if (!check(selected)) throw new Error("Unregistered database");

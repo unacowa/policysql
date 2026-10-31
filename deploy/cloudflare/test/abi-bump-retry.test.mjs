@@ -75,7 +75,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         ownerAdapter, hooks,
         customizeBinding: (binding) => ({ ...binding, generation }),
         customizeProvider: (provider) => ({
-          check: (binding) => provider.check({ ...binding, generation: "1" }),
+          streamedReadCap: true, check: (binding) => provider.check({ ...binding, generation: "1" }),
           connect: (binding, ...args) => provider.connect({ ...binding, generation: "1" }, ...args),
         }),
       });

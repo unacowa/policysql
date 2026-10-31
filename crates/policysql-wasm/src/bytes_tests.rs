@@ -260,7 +260,7 @@ fn oversized_physical_blob_is_a_limit_error_at_the_result_abi() {
         POLICY,
         "bytes_schema",
         "bytes_policy",
-        r#"{"max_rows":100,"max_result_bytes":1000000,"timeout_ms":1000,"max_statements":8}"#,
+        r#"{"max_rows":100,"max_result_bytes":524288,"timeout_ms":1000,"max_statements":8}"#,
     )
     .unwrap_or_else(|_| unreachable!("valid runtime"));
     let auth = r#"{"principal":"test:user","subject":"u","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_a"}}"#;
@@ -307,7 +307,7 @@ fn oversized_raw_result_of_in_limit_blobs_is_a_limit_error() {
         POLICY,
         "bytes_schema",
         "bytes_policy",
-        r#"{"max_rows":100,"max_result_bytes":1000000,"timeout_ms":1000,"max_statements":8}"#,
+        r#"{"max_rows":100,"max_result_bytes":524288,"timeout_ms":1000,"max_statements":8}"#,
     )
     .unwrap_or_else(|_| unreachable!("valid runtime"));
     let auth = r#"{"principal":"test:user","subject":"u","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_a"}}"#;
@@ -330,7 +330,10 @@ fn oversized_raw_result_of_in_limit_blobs_is_a_limit_error() {
         "affectedRows": 0
     })
     .to_string();
-    assert!(raw.len() > policysql_transaction::machine::EVENT_RESULT_BYTES);
+    let bound = runtime
+        .raw_result_bound(handle)
+        .unwrap_or_else(|_| unreachable!("a live handle"));
+    assert!(raw.len() as u64 > bound, "{} {bound}", raw.len());
     let output: Value = serde_json::from_str(&runtime.validate_result_json(handle, 0, &raw))
         .unwrap_or_else(|_| unreachable!());
     assert_eq!(

@@ -88,7 +88,7 @@ const transportFor = (target, respond) => new TursoHttpTransport({ url: "https:/
 const runBegin = (transport, timeoutMs = 1000) => transport.begin("read", timeoutMs, undefined, runtimeLimit);
 const runStatement = async (transport, timeoutMs = 1000) => {
   const transaction = await transport.begin("read", timeoutMs, undefined, runtimeLimit);
-  return (await transaction.execute([{ sql: "SELECT name FROM projects" }]))[0];
+  return (await transaction.execute([{ sql: "SELECT name FROM projects" }], { maxResponseBytes: MAX_RESPONSE_BYTES }))[0];
 };
 const runCommit = async (transport, timeoutMs = 1000) => {
   const transaction = await transport.begin("write", timeoutMs, undefined, runtimeLimit);

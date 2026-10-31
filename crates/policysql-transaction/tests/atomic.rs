@@ -278,13 +278,14 @@ fn a_commit_failure_is_never_a_rejection_and_rolls_back() {
 
 /// ADR 0024 pull request 8: a result the adapter could not carry (`limit`) is the client's
 /// `POLICYSQL_LIMIT_EXCEEDED` on the envelope, as the TypeScript direct path answered, and
-/// `POLICYSQL_INTERNAL` on the idempotency lookup or insert, so a keyed request whose outcome
-/// could not be read is never rejected (never `IDEMPOTENCY_CONFLICT`) and never runs again.
+/// `POLICYSQL_INTERNAL` on the idempotency insert. A stored response over the lookup bound (a row
+/// written before the bounds existed) is `POLICYSQL_LIMIT_EXCEEDED` on the lookup (ADR 0027
+/// "Idempotent replay"): nothing executes, never `IDEMPOTENCY_CONFLICT`, and it never runs again.
 #[test]
-fn a_limit_failure_is_limit_exceeded_on_the_envelope_and_internal_on_the_idempotency_row() {
+fn a_limit_failure_is_limit_exceeded_on_the_envelope_and_the_lookup_and_internal_on_the_insert() {
     // Effects of a keyed write: checkBinding, open, lookup, envelope, insert, commit.
     for (successes, expected) in [
-        (2, "POLICYSQL_INTERNAL"),
+        (2, "POLICYSQL_LIMIT_EXCEEDED"),
         (3, "POLICYSQL_LIMIT_EXCEEDED"),
         (4, "POLICYSQL_INTERNAL"),
     ] {
@@ -842,7 +843,7 @@ fn a_parameter_namespace_collision_executes_no_envelope_on_either_placement() {
 
 // ---- #80: a keyed retry across a snapshot change ----------------------------------------------
 
-const NEXT_SNAPSHOT: &str = "sqlite-turso-v1:schema_2:policy_2:abi-14";
+const NEXT_SNAPSHOT: &str = "sqlite-turso-v1:schema_2:policy_2:abi-15";
 
 /// `request` with its binding and snapshot set to `snapshot` and its binding's generation to
 /// `generation`, as a request after a deployment (or a database move) carries them.
@@ -1042,4 +1043,204 @@ fn an_owner_compares_the_snapshot_before_reading_the_rest_of_the_input() {
         );
     }
     assert_eq!(owner_engine.observed.commits_emitted, 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// ADR 0027 pull request 6: the result and response budget.
+
+/// The `maxResponseBytes` of every `execute` effect the engine emitted, in order.
+fn read_caps(engine: &Engine) -> Vec<u64> {
+    engine
+        .transcript
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(&line.output).ok())
+        .flat_map(|output| output["effects"].as_array().cloned().unwrap_or_default())
+        .filter(|effect| effect["type"] == "execute")
+        .filter_map(|effect| effect["maxResponseBytes"].as_u64())
+        .collect()
+}
+
+/// The bytes of a committed reply's `value`, which is the response body.
+fn response_bytes(reply: &Value) -> u64 {
+    u64::try_from(reply["value"].to_string().len()).unwrap_or(u64::MAX)
+}
+
+#[test]
+fn every_execute_effect_carries_its_read_cap() {
+    use policysql_transaction::bounds::{LOOKUP_BYTES, NO_RESULT_BYTES};
+    let mut engine = Engine::atomic(false);
+    let reply = engine.run(&execute_request(&insert("p1"), Some(KEY)));
+    assert_eq!(reply["ok"], true, "{reply}");
+    // Lookup, envelope, idempotency insert: the lookup's cap derives from the hard maximum of
+    // `maxResponseBytes`, the envelope's is the compiled raw bound (the fake's), and the insert
+    // returns no result data.
+    assert_eq!(
+        read_caps(&engine),
+        [
+            u64::try_from(LOOKUP_BYTES).unwrap_or(0),
+            common::FAKE_RAW_BOUND,
+            u64::try_from(NO_RESULT_BYTES).unwrap_or(0),
+        ]
+    );
+    assert_eq!(read_caps(&engine)[0], 1_183_744);
+}
+
+/// A keyed request on the direct placement (`owner` false) or forwarded to the owner.
+fn keyed(owner: bool, body: &Value) -> Value {
+    if owner {
+        atomic_input(body, Some([KEY_HASH, FINGERPRINT]))
+    } else {
+        execute_request(body, Some(KEY))
+    }
+}
+
+fn placed(owner: bool) -> Engine {
+    if owner {
+        owner_engine()
+    } else {
+        Engine::atomic(false)
+    }
+}
+
+#[test]
+fn a_response_over_max_response_bytes_rolls_back_before_commit_and_leaves_no_record() {
+    let reserve = policysql_transaction::bounds::RESPONSE_RESERVE_BYTES as u64;
+    for owner in [false, true] {
+        // Measure the response of the keyed write on this placement (the owner's transaction id
+        // is longer than the direct one).
+        let mut probe = placed(owner);
+        let committed = probe.run(&keyed(owner, &insert("p1")));
+        assert_eq!(committed["ok"], true, "{committed}");
+        let length = response_bytes(&committed);
+        // At the cap: the response plus the reserve is exactly `max_response_bytes`: it commits.
+        let mut at = placed(owner);
+        at.limits.max_response_bytes = length + reserve;
+        let reply = at.run(&keyed(owner, &insert("p1")));
+        assert_eq!(reply["ok"], true, "owner={owner}: {reply}");
+        assert_eq!(at.observed.commits_emitted, 1);
+        assert_eq!(at.idempotency_rows.len(), 1);
+
+        // One byte under: 413, no COMMIT was ever sent, no idempotency row, no handle leaked.
+        let mut over = placed(owner);
+        over.limits.max_response_bytes = length + reserve - 1;
+        let reply = over.run(&keyed(owner, &insert("p1")));
+        assert_eq!(code(&reply), Some("POLICYSQL_LIMIT_EXCEEDED"), "{reply}");
+        assert_eq!(over.observed.commits_emitted, 0, "no COMMIT is ever sent");
+        assert_eq!(over.observed.rollbacks_emitted, 1);
+        assert!(over.idempotency_rows.is_empty() && over.pending_rows.is_empty());
+        assert_eq!(over.compiler.live_handles(), 0);
+        // The idempotency INSERT was never emitted: the effects are lookup and envelope only.
+        assert_eq!(read_caps(&over).len(), 2, "owner={owner}");
+        // A retry runs again as a new attempt (the first left nothing to replay).
+        let before = over.observed.awaited.len();
+        let again = over.run(&keyed(owner, &insert("p1")));
+        assert_eq!(code(&again), Some("POLICYSQL_LIMIT_EXCEEDED"), "{again}");
+        assert_eq!(
+            over.observed.awaited[before..]
+                .iter()
+                .filter(|kind| *kind == "execute")
+                .count(),
+            2,
+            "the retry looked up and executed again"
+        );
+        // Raising the limit lets the same request commit as the first attempt (the request ids
+        // of later steps are longer, so with a little room).
+        over.limits.max_response_bytes = length + reserve + 16;
+        let last = over.run(&keyed(owner, &insert("p1")));
+        assert_eq!(last["ok"], true, "{last}");
+        assert_eq!(over.idempotency_rows.len(), 1);
+        assert_eq!(over.observed.commits_emitted, 1);
+    }
+}
+
+#[test]
+fn a_committed_request_replays_after_the_response_limit_is_lowered() {
+    for owner in [false, true] {
+        let mut engine = placed(owner);
+        let first = engine.run(&keyed(owner, &insert("p1")));
+        assert_eq!(first["ok"], true, "{first}");
+        // Lower the limit below what the stored response needs: the response fitted when it was
+        // committed, so the retry returns it unchanged and executes nothing.
+        engine.limits.max_response_bytes = 1;
+        engine.limits.max_result_bytes = 1;
+        engine.observed.awaited.clear();
+        let replay = engine.run(&keyed(owner, &insert("p1")));
+        assert_eq!(
+            replay["value"]["results"], first["value"]["results"],
+            "owner={owner}: {replay}"
+        );
+        assert_eq!(
+            replay["value"]["transactionId"],
+            first["value"]["transactionId"]
+        );
+        assert_eq!(
+            types(&engine)
+                .iter()
+                .filter(|kind| *kind == "execute")
+                .count(),
+            1,
+            "only the lookup ran"
+        );
+        assert_eq!(engine.idempotency_rows.len(), 1);
+    }
+}
+
+#[test]
+fn the_result_values_of_an_envelope_are_counted_cumulatively_and_stop_at_the_limit() {
+    // `SELECT id, name FROM projects`: two descriptors and one row of two cells = 4 raw values.
+    let two = envelope(&[
+        ("SELECT id, name FROM projects", json!({})),
+        ("SELECT id, name FROM projects", json!({})),
+    ]);
+    for (limit, expected_ok) in [(8, true), (7, false)] {
+        let mut engine = Engine::atomic(false);
+        engine.limits.max_json_values = limit;
+        let reply = engine.run(&execute_request(&two, None));
+        if expected_ok {
+            assert_eq!(reply["ok"], true, "limit {limit}: {reply}");
+        } else {
+            assert_eq!(
+                code(&reply),
+                Some("POLICYSQL_LIMIT_EXCEEDED"),
+                "limit {limit}"
+            );
+            assert_eq!(engine.observed.commits_emitted, 0);
+            assert_eq!(engine.observed.rollbacks_emitted, 1);
+        }
+    }
+    // One statement: 4 values at the limit, 3 over it.
+    for (limit, expected_ok) in [(4, true), (3, false)] {
+        let mut engine = Engine::atomic(false);
+        engine.limits.max_json_values = limit;
+        let reply = engine.run(&execute_request(&select(), None));
+        assert_eq!(reply["ok"], expected_ok, "limit {limit}: {reply}");
+    }
+}
+
+#[test]
+fn the_derived_event_and_volatile_bounds_follow_the_limits() {
+    use policysql_transaction::bounds;
+    let limits = common::LIMITS;
+    // The event holds at most the larger of the envelope raw bound at the limits' maxima and the
+    // idempotency lookup, plus the escaped body, the auth, the binding, and framing.
+    let raw_max = bounds::raw_result_bound_max(64_000, 65_536, 8);
+    assert_eq!(raw_max, 128_000 + 64 * 65_536 + 512 * 8 + 1_048_576 + 1_024);
+    assert_eq!(
+        limits.max_event_bytes(),
+        bounds::event_bytes(1_048_576, raw_max)
+    );
+    // At the hard maxima the lookup is no larger than the raw bound, and the volatile state holds
+    // the lookup or twice the response, whichever is larger.
+    let maxima = policysql_transaction::machine::Limits {
+        max_statements: 64,
+        max_result_bytes: 524_288,
+        max_json_values: 131_072,
+        max_response_bytes: 589_824,
+        ..limits
+    };
+    assert!(maxima.largest_read_bytes() >= bounds::LOOKUP_BYTES);
+    assert_eq!(
+        maxima.max_volatile_bytes(),
+        262_144 + 2 * 1_048_576 + 1_183_744
+    );
 }

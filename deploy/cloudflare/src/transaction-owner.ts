@@ -26,10 +26,11 @@
 // machine (an atomic input ignores it and resolves a keyed retry through
 // `policysql_idempotency`).
 import { EngineError, operationError } from "./errors.ts";
-import { checkDatabaseBinding, databaseTransportFactory, validateDatabaseProvider } from "./database.ts";
+import { checkDatabaseBinding, databaseTransportFactory, noteReadCap, validateDatabaseProvider } from "./database.ts";
 import type { DatabaseProvider } from "./database.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { runtimeBytesLimit } from "./binary.ts";
+import { runtimeLimits } from "./limits.ts";
 import { validateConfig } from "./engine-config.ts";
 import type { PolicySqlConfig, ValidatedConfig } from "./engine-config.ts";
 import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
@@ -344,6 +345,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       case "open":
         try {
           this.closeConnection();
+          noteReadCap(this.database, runtimeLimits(runtime).maxResultBytes);
           const factory = databaseTransportFactory(this.database, effect.binding, runtimeBytesLimit(runtime), effect.deadlineMs);
           const transport = await factory(requestId);
           this.connection = await transport.begin(effect.mode, effect.timeoutMs);
@@ -358,7 +360,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
           const results = await this.connection.execute(effect.statements.map((statement) => ({
             sql: statement.sql,
             args: decodeArgs(statement.args, maxBytes),
-          })));
+          })), { maxResponseBytes: effect.maxResponseBytes });
           return { type: "executed", id, results: encodeResults(results, maxBytes) };
         } catch (error) {
           return executeFailedEvent(id, error, failureClass);

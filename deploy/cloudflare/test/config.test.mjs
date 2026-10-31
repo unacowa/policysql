@@ -96,7 +96,7 @@ test("every invalid setting is a ConfigError that names the setting and never th
 test("createApp and the transaction owner reject bad configuration before any runtime, database, or storage work", () => {
   let calls = 0;
   const getRuntime = () => { calls++; return runtime; };
-  const database = { check() { calls++; return true; }, connect() { calls++; throw new Error("no"); } };
+  const database = { streamedReadCap: true, check() { calls++; return true; }, connect() { calls++; throw new Error("no"); } };
   // Any read of the owner facilities counts: the store, timer, and background are untouched.
   const facilities = new Proxy({}, { get() { calls++; return () => undefined; } });
   const transactionOwners = { route() { calls++; } };
@@ -110,7 +110,7 @@ test("createApp and the transaction owner reject bad configuration before any ru
 
 const workerHarness = (deployment) => {
   const counts = { runtime: 0, check: 0, connect: 0, owner: 0, deployment: 0 };
-  const database = { check() { counts.check++; return true; }, connect() { counts.connect++; throw new Error("no"); } };
+  const database = { streamedReadCap: true, check() { counts.check++; return true; }, connect() { counts.connect++; throw new Error("no"); } };
   const transactionOwners = { route() { counts.owner++; throw new Error("no owner"); } };
   const entry = createWorkerEntrypoints({
     getRuntime: () => { counts.runtime++; return runtime; },

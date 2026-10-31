@@ -44,7 +44,7 @@ const owner = (config, fetchImpl) => new TransactionOwnerCore({
   timer: { async schedule() { assert.fail("no timer"); } },
   background: { run() {} },
   name: `tx_${"a".repeat(32)}`,
-}, { getRuntime: () => assert.fail("no step"), database: { check() {}, connect() {} }, config, fetchImpl });
+}, { getRuntime: () => assert.fail("no step"), database: { streamedReadCap: true, check() {}, connect() {} }, config, fetchImpl });
 
 test("signs the hook body with the check's secret, adds the callback capability, and reads the decision", async () => {
   const seen = [];

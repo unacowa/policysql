@@ -134,7 +134,6 @@ test("the scan catches each form and ignores comments and unrelated numbers", ()
 // so a second 65_536 under another name, or a third use under the same one, fails.
 const FIXED_LITERALS = new Map([
   ["turso-http.ts", new Map([
-    ["STATEMENT_RESPONSE_BYTES:2097152", [1, "the statement reply bound: result side, replaced by the compiled raw bound in ADR 0027 pull request 6"]],
     ["CONTROL_RESPONSE_BYTES:65536", [1, "the database control reply bound (BEGIN, COMMIT, ROLLBACK, close): a fixed protocol constant"]],
     ["timeoutMs:1000", [1, "default request timeout, in milliseconds (a time, not a size)"]],
     ["INT64_MIN:9223372036854776000", [1, "the signed 64-bit integer range of Hrana (2n ** 63n), not a limit"]],
@@ -148,6 +147,7 @@ const FIXED_LITERALS = new Map([
     ["now:1000", [1, "milliseconds per second, for the signature timestamp"]],
   ])],
   ["database.ts", new Map([
+    ["BUFFERED_RESULT_BYTES:64000", [1, "the reference wrapper's maxResultBytes: above it a provider that buffers replies is logged once (a notice threshold, not a limit)"]],
     ["now:1000", [1, "the provider timeout, in milliseconds (a time, not a size)"]],
     ["remaining:1000", [1, "the same timeout, compared with the time left"]],
     ["min:1000", [1, "the same timeout, as an upper bound for the timer"]],

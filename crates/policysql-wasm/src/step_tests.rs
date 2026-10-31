@@ -135,8 +135,8 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 #[test]
 fn abi_8_names_the_step_machine_with_atomic_execution() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 14);
-    assert!(owner.runtime.snapshot().ends_with(":abi-14"));
+    assert_eq!(owner.runtime.abi_version(), 15);
+    assert!(owner.runtime.snapshot().ends_with(":abi-15"));
 }
 
 /// ADR 0024 pull request 5 with the real compiler: the policy's check triggers on the

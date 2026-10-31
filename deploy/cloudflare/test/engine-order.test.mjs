@@ -16,7 +16,7 @@ test("a rejected database binding is reported before any operation reads its bod
   let checks = 0;
   const engine = createEngine({
     getRuntime,
-    database: { check: () => { checks++; return false; }, connect: () => assert.fail("never connects") },
+    database: { streamedReadCap: true, check: () => { checks++; return false; }, connect: () => assert.fail("never connects") },
     config: testConfig(),
     transactionOwners: testOwners(),
   });
@@ -40,7 +40,7 @@ test("a rejected session is reported before the database is checked or the body 
   let checks = 0;
   const engine = createEngine({
     getRuntime,
-    database: { check: () => { checks++; return true; }, connect: () => assert.fail("never connects") },
+    database: { streamedReadCap: true, check: () => { checks++; return true; }, connect: () => assert.fail("never connects") },
     config: testConfig(),
     transactionOwners: testOwners(),
   });
@@ -75,7 +75,7 @@ test("a malformed runtime per-value limit fails an execute before the body and b
     let connects = 0;
     const engine = createEngine({
       getRuntime: () => broken,
-      database: { check: () => true, connect: () => { connects++; assert.fail("never connects"); } },
+      database: { streamedReadCap: true, check: () => true, connect: () => { connects++; assert.fail("never connects"); } },
       config: testConfig(),
       transactionOwners: testOwners(),
     });

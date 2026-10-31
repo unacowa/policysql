@@ -476,9 +476,6 @@ test("the Capabilities presenter reads every limit from limits_json, and the fix
   const { limitsJson } = await import("./helpers/limits.mjs");
   const distinct = { maxRequestBytes: 111_111, maxJsonValues: 2_222, maxSqlBytes: 3_333, maxBytesPerValue: 4_444, maxParameters: 55, maxExpressionDepth: 6, maxProjections: 77, maxJoins: 8, maxResponseBytes: 99_999 };
   const advertised = capabilities({ snapshot: "s", profile: "p", abi_version: 1, commit_checks_enabled: false, limits_json: limitsJson(distinct) }).limits;
-  for (const [key, value] of Object.entries(distinct)) {
-    if (key === "maxResponseBytes") assert.equal(Object.hasOwn(advertised, key), false, "not enforced before pull request 6, so not advertised");
-    else assert.equal(advertised[key], value, key);
-  }
+  for (const [key, value] of Object.entries(distinct)) assert.equal(advertised[key], value, key);
   assert.equal(MIB, 1_048_576);
 });

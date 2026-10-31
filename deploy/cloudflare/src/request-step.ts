@@ -25,7 +25,8 @@
 // The cache is consumed by the first `checkBinding` whatever it names; that one when it does
 // not match (another binding, a deadline), and every later one, calls the provider.
 import { EngineError, internalError, operationError } from "./errors.ts";
-import { checkDatabaseBinding, databaseTransportFactory, sameDatabaseBinding } from "./database.ts";
+import { checkDatabaseBinding, databaseTransportFactory, noteReadCap, sameDatabaseBinding } from "./database.ts";
+import { runtimeLimits } from "./limits.ts";
 import type { DatabaseBinding, DatabaseProvider } from "./database.ts";
 import { parseExact, stringifyExact } from "./exact-json.ts";
 import { checkBatch, decodeArgs, directCommitFailureClass, directFailureClass, encodeResults, entropyHex, executeFailedEvent, observeCost } from "./step-effects.ts";
@@ -127,6 +128,7 @@ export const runRequestStep = async (
       case "open":
         try {
           closeConnection();
+          noteReadCap(dependencies.database, runtimeLimits(runtime).maxResultBytes);
           const factory = databaseTransportFactory(dependencies.database, effect.binding, maxBytes);
           const transport = await factory(requestId, effect.deadlineMs);
           connection = await transport.begin(effect.mode, effect.timeoutMs);
@@ -141,7 +143,7 @@ export const runRequestStep = async (
           const results = await connection.execute(effect.statements.map((statement: any) => ({
             sql: statement.sql,
             args: decodeArgs(statement.args, maxBytes),
-          })));
+          })), { maxResponseBytes: effect.maxResponseBytes });
           return { type: "executed", id, results: encodeResults(results, maxBytes) };
         } catch (error) {
           return executeFailedEvent(id, error, directFailureClass);
