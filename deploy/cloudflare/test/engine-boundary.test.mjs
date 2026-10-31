@@ -140,6 +140,9 @@ const FIXED_LITERALS = new Map([
     ["INT64_MIN:9223372036854776000", [1, "the signed 64-bit integer range of Hrana (2n ** 63n), not a limit"]],
     ["INT64_MAX:9223372036854776000", [1, "the signed 64-bit integer range of Hrana (2n ** 63n - 1n), not a limit"]],
   ])],
+  ["bounded-body.ts", new Map([
+    ["PREFIX_BYTES:1024", [1, "the leading bytes of a refused reply kept to read its Hrana baton (#96): not a limit on data"]],
+  ])],
   ["adapters/commit-check-hook.ts", new Map([
     ["VALIDATOR_RESPONSE_BYTES:65536", [1, "the validator reply bound: a fixed protocol constant"]],
     ["now:1000", [1, "milliseconds per second, for the signature timestamp"]],

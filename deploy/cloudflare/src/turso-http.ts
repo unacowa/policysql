@@ -14,6 +14,17 @@ const STATEMENT_RESPONSE_BYTES = 2_097_152;
 const CONTROL_RESPONSE_BYTES = 65_536;
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
+// A reply the transport refuses (over its bound, malformed, wrong count) still starts with the
+// stream's next baton: `{"baton":"...","base_url":...,"results":[...]}` (observed on real Turso).
+// It is read from the leading text and attached to the failure, so the rollback that follows can
+// continue the stream instead of leaving the transaction, and its write lock, open (#96). The text
+// is parsed only for that field and never kept or shown.
+const BATON_PREFIX = /^\s*\{\s*"baton"\s*:\s*"([^"\\]{1,512})"/u;
+const withBaton = <T extends Error>(error: T, leading: string): T => {
+  const baton = BATON_PREFIX.exec(leading)?.[1];
+  if (baton !== undefined) (error as { nextBaton?: string }).nextBaton = baton;
+  return error;
+};
 const databaseFailure = () =>
   new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
 
@@ -171,19 +182,19 @@ export class TursoHttpTransport {
       await discardBody(response);
       throw databaseFailure();
     }
-    const text = await readBoundedText(response, maxResponseBytes, signal).catch((error) => {
-      if (error instanceof BodyTooLargeError) throw oversized();
+    const text = await readBoundedText(response, maxResponseBytes, signal, oversized !== databaseFailure).catch((error) => {
+      if (error instanceof BodyTooLargeError) throw withBaton(oversized(), error.prefix);
       if (isAbort(error)) throw timedOut();
       throw databaseFailure();
     });
     let body;
-    try { body = JSON.parse(text); } catch { throw databaseFailure(); }
+    try { body = JSON.parse(text); } catch { throw withBaton(databaseFailure(), text); }
     if (
       !body ||
       !Array.isArray(body.results) ||
       body.results.length !== requests.length ||
       !(body.baton === null || typeof body.baton === "string")
-    ) throw databaseFailure();
+    ) throw withBaton(databaseFailure(), text);
     return body;
   }
 
@@ -240,11 +251,13 @@ class TursoHttpTransaction {
         STATEMENT_RESPONSE_BYTES,
       );
     } catch (error) {
-      // The request may have run, but its reply, and with it the stream's next baton, was never
-      // read (reply over the bound, malformed, wrong count, timeout, transport failure). The baton
-      // held here is stale: a ROLLBACK sent with it is refused and would leave the transaction
-      // open. The stream is unusable; the server expires it (#96).
-      this.unusable = true;
+      // The reply was refused or never read. The baton held here is stale (the request may have
+      // run): a ROLLBACK sent with it is refused and leaves the transaction open. When the reply
+      // began with the next baton (a reply over the bound, malformed, or of the wrong count) the
+      // stream continues from it; otherwise (timeout, transport failure, nothing readable) the
+      // stream is unusable and nothing is sent with the stale baton (#96).
+      const next = (error as { nextBaton?: unknown } | null)?.nextBaton;
+      if (typeof next === "string") this.baton = next; else this.unusable = true;
       throw error;
     }
     if (!body.baton) { this.unusable = true; throw databaseFailure(); }

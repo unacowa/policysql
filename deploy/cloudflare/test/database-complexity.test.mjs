@@ -229,30 +229,41 @@ test("a complexity refusal is classified only when it is the one error and the l
   assert.ok(twice instanceof DatabaseStatementError && !(twice instanceof SqlComplexityError));
 });
 
-test("a statement reply that cannot be read leaves the stream unusable and no ROLLBACK is sent with a stale baton (#96)", async () => {
+test("a statement reply that cannot be read: the rollback continues from the reply's leading baton, or nothing is sent with a stale one (#96)", async () => {
+  const pad = (head) => `${head}${" ".repeat(2_097_200)}`;
+  // `next`: the baton the reply started with (the rollback must use it); null: none readable.
   const kinds = {
-    "reply over the bound": () => new Response("x".repeat(2_097_153)),
-    "malformed JSON": () => new Response("{not json"),
-    "wrong result count": () => Response.json({ baton: "next", results: [] }),
-    "no baton": () => Response.json({ baton: null, results: [ok()] }),
-    "HTTP failure": () => new Response("no", { status: 502 }),
+    "reply over the bound": { reply: () => new Response(pad('{"baton":"b2","base_url":null,"results":[]}')), next: "b2" },
+    "reply over the bound by Content-Length": { reply: () => new Response('{"baton":"b3","base_url":null,', { headers: { "content-length": "9999999" } }), next: "b3" },
+    "reply over the bound with no readable baton": { reply: () => new Response(pad("")), next: null },
+    "malformed JSON": { reply: () => new Response('{"baton":"b4","results":[{'), next: "b4" },
+    "malformed JSON without a baton": { reply: () => new Response("{not json"), next: null },
+    "wrong result count": { reply: () => Response.json({ baton: "b5", results: [] }), next: "b5" },
+    "no baton": { reply: () => Response.json({ baton: null, results: [ok()] }), next: null },
+    "HTTP failure": { reply: () => new Response("no", { status: 502 }), next: null },
   };
-  for (const [kind, statementReply] of Object.entries(kinds)) {
+  for (const [kind, { reply, next }] of Object.entries(kinds)) {
     const sent = [];
     const instance = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "unreadable", async (_url, init) => {
       const { baton, requests } = JSON.parse(init.body);
-      sent.push({ baton: baton ?? null, sql: requests[0]?.stmt?.sql ?? requests[0]?.type });
-      if (/^BEGIN/u.test(requests[0].stmt?.sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
-      return statementReply();
+      const sql = requests[0]?.stmt?.sql ?? requests[0]?.type;
+      sent.push({ baton: baton ?? null, sql });
+      if (/^BEGIN/u.test(sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
+      if (sql === "ROLLBACK") return Response.json({ baton: null, results: [ok(), { type: "ok", response: { type: "close" } }] });
+      return reply();
     });
     const transaction = await instance.begin("write", 1_000, undefined, limit);
     await assert.rejects(transaction.execute([{ sql: "SELECT big" }]), (error) => error instanceof EngineError, kind);
     const before = sent.length;
     await transaction.rollback();
-    assert.equal(sent.length, before, `${kind}: nothing is sent with the stale baton`);
+    if (next === null) {
+      assert.equal(sent.length, before, `${kind}: nothing is sent with the stale baton`);
+      await assert.rejects(transaction.commit().then(() => { throw new Error("committed"); }), () => true, kind);
+      assert.equal(sent.length, before, `${kind}: COMMIT is not sent either`);
+    } else {
+      assert.deepEqual(sent.at(-1), { baton: next, sql: "ROLLBACK" }, `${kind}: the rollback continues from the reply's baton`);
+    }
     assert.equal(transaction.open, false, kind);
-    await assert.rejects(transaction.commit().then(() => { throw new Error("committed"); }), () => true, kind);
-    assert.equal(sent.length, before, `${kind}: COMMIT is not sent either`);
   }
   // A timeout is the same.
   const sent = [];

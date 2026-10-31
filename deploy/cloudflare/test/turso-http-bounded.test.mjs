@@ -196,7 +196,9 @@ test("#53: a declared Content-Length over the bound is rejected unread; a smalle
     await assert.rejects(runners[target](transportFor(target, () => new Response(small.stream, {
       headers: { "content-length": String(BOUND[target] + 1) },
     }))), safe(OVERSIZED[target]), target);
-    assert.equal(small.state.bytes, 0, `${target}: nothing read`);
+    // A statement reply's first chunk is read for its leading baton (#96); the others are unread.
+    if (target === "statement") assert.ok(small.state.bytes <= 100, `${target}: at most the first chunk read`);
+    else assert.equal(small.state.bytes, 0, `${target}: nothing read`);
     assert.equal(small.state.cancelled, true, `${target}: released`);
   }
   // A declared length at the bound, below or above the real size, or absent: the received
