@@ -7,6 +7,7 @@
 //   npm run measure:cpu -- --out report.json --runs 7 --target 1000000
 //   npm run measure:cpu -- --scale 0.8        scale measured times to the reference machine
 //                                             (this machine is x times as fast as i7-7700K: 1/x)
+//   npm run measure:cpu -- --cold             time only the first request of each fresh process (no warm-up)
 //   npm run measure:cpu -- --json             report JSON on stdout, nothing else
 //   npm run measure:cpu -- --in-process       one process for all scenarios (WASM memory is then
 //                                             cumulative; the default runs one process per scenario)
@@ -28,7 +29,7 @@ import { parseJsonc } from "./lib/jsonc.mjs";
 const here = fileURLToPath(import.meta.url);
 
 const parseArguments = (argv) => {
-  const options = { runs: 5, target: 1_000_000, only: null, out: fileURLToPath(new URL("../.deployment/cpu-measurement.json", import.meta.url)), scale: 1, json: false, inProcess: false, child: null };
+  const options = { runs: 5, target: 1_000_000, only: null, out: fileURLToPath(new URL("../.deployment/cpu-measurement.json", import.meta.url)), scale: 1, json: false, inProcess: false, child: null, cold: false };
   const value = (index) => {
     if (index + 1 >= argv.length) throw new Error(`${argv[index]} needs a value`);
     return argv[index + 1];
@@ -41,6 +42,7 @@ const parseArguments = (argv) => {
       case "--out": options.out = value(index); index += 1; break;
       case "--scale": options.scale = Number(value(index)); index += 1; break;
       case "--child": options.child = Number(value(index)); index += 1; break;
+      case "--cold": options.cold = true; break;
       case "--json": options.json = true; break;
       case "--in-process": options.inProcess = true; break;
       default: throw new Error(`unknown argument ${argv[index]}`);
@@ -59,7 +61,7 @@ const all = buildScenarios({ target: options.target });
 
 if (options.child !== null) {
   // Internal: one scenario, one process, one JSON line.
-  const result = await runScenario(all[options.child], { runs: options.runs });
+  const result = await runScenario(all[options.child], { runs: options.runs, cold: options.cold });
   process.stdout.write(`${JSON.stringify(result)}\n`);
   process.exit(0);
 }
@@ -72,10 +74,10 @@ const results = [];
 for (const { scenario, index } of selected) {
   log(`measuring ${scenario.id}`);
   if (options.inProcess) {
-    results.push(await runScenario(scenario, { runs: options.runs }));
+    results.push(await runScenario(scenario, { runs: options.runs, cold: options.cold }));
     continue;
   }
-  const child = spawnSync(process.execPath, [here, "--child", String(index), "--runs", String(options.runs), "--target", String(options.target)], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const child = spawnSync(process.execPath, [here, "--child", String(index), "--runs", String(options.runs), "--target", String(options.target), ...(options.cold ? ["--cold"] : [])], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   if (child.status !== 0) throw new Error(`scenario ${JSON.stringify(scenario.id)} failed:\n${child.stderr}`);
   results.push(JSON.parse(child.stdout.trim().split("\n").at(-1)));
 }
@@ -117,7 +119,7 @@ const report = {
   kind: "policysql-cpu-measurement",
   generatedAt: new Date().toISOString(),
   machine: { cpu: cpus()[0]?.model ?? null, node: process.version, scale: options.scale, isolatedProcesses: !options.inProcess },
-  method: { runs: options.runs, requestBodyTargetBytes: options.target, statistic: "best of runs after one warm-up, wall ms, simulated Turso and client response parsing excluded" },
+  method: { cold: options.cold, runs: options.runs, requestBodyTargetBytes: options.target, statistic: options.cold ? "first request of a fresh process, wall ms, no warm-up, simulated Turso and client response parsing excluded" : "best of runs after one warm-up, wall ms, simulated Turso and client response parsing excluded" },
   model: {
     formula: "cpu_ms >= S * F * (C0 + a_b * (R + B) + a_v * (V_req + V_res))",
     coefficients: COEFFICIENTS, safetyMargin: SAFETY_MARGIN, hardwareFactorF: HARDWARE_FACTOR,

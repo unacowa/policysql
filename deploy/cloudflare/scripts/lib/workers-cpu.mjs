@@ -46,7 +46,9 @@ export const queryInvocationEvents = async ({ accountId, token, service, from, t
     }),
   });
   const body = await response.json().catch(() => null);
-  if (!response.ok || body?.success === false) throw new Error(`Workers observability query failed (HTTP ${response.status})`);
+  if (!response.ok || body?.success === false) {
+    throw Object.assign(new Error(`Workers observability query failed (HTTP ${response.status})`), { status: response.status });
+  }
   return body?.result?.events?.events ?? [];
 };
 
@@ -112,6 +114,8 @@ export const pollProbeCpu = async ({
       reason = null;
     } catch (error) {
       reason = error?.message ?? "Workers observability query failed";
+      // A refusal (401, 403, 400) will not change by waiting; only 429 and 5xx are worth another poll.
+      if (error?.status >= 400 && error.status < 500 && error.status !== 429) break;
     }
     if (reason === null && summaries.every((summary) => summary.complete)) break;
     if (now() - started >= timeoutMs) break;

@@ -82,3 +82,17 @@ test("the library accepts limits whatever they cost in CPU", () => {
   );
   try { assert.equal(runtimeLimits(runtime).maxResultBytes, 500_000_000); } finally { runtime.free(); }
 });
+
+test("the formula's V is maxJsonValues' default, which the runtime does not enforce yet", () => {
+  // ADR 0027 sets maxJsonValues = 65,536, but the runtime neither enforces nor reports it until
+  // the request-budget pull request (ADR 0027 pull request 3). So the checks above use that default
+  // for V, and a body of about 1 MB of nested arrays is accepted today with about 500,000 values:
+  // the formula prices it at 731 ms of reference time (1,828 ms of cpu_ms at F = 2.0), although it
+  // measures about 200 ms (scripts/measure-cpu.mjs). When this test fails because the runtime
+  // reports maxJsonValues, re-measure (npm run measure:cpu and the release smoke) and let the
+  // test read the reported value.
+  assert.equal(effectiveLimits(RUNTIME_LIMITS).maxJsonValues, undefined, "the runtime reports no maxJsonValues yet");
+  assert.equal(inputsAtLimits(effectiveLimits(RUNTIME_LIMITS)).vReq, 65_536);
+  const nestedArrays = { rMiB: 0.954, vReq: 499_928 };
+  assert.ok(requiredCpuMs(nestedArrays) > config.limits.cpu_ms, "the unbounded value count is not covered by the formula yet");
+});

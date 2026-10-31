@@ -46,7 +46,9 @@ Configure alerts in the production account for:
 
 - any sustained 5xx rate above 1% for five minutes;
 - authentication or policy-deny rate above three times the seven-day baseline;
-- p95 CPU above 50% of `cpu_ms` or any CPU limit termination (outcome `exceededCpu`, error 1102);
+- p95 CPU above 50% of `cpu_ms` (500 ms at 1,000) or any CPU limit termination (outcome
+  `exceededCpu`, error 1102), and p95 CPU above 1.5 times its own seven-day baseline, which a
+  regression shows long before the absolute threshold (the real p95 is far below 500 ms);
 - actual rows read above the admission upper bound, or daily Turso usage above 80% of budget;
 - any `transaction_owner_unavailable` owner-loss event, or active/terminal count mismatch;
 - JWKS, cost-admission, or Turso availability errors for three consecutive minutes;
@@ -80,10 +82,18 @@ Before changing a coefficient, `F` or `cpu_ms`, measure from `deploy/cloudflare`
    real CPU of a small request and three about-1 MB requests on the deployed Worker, read from
    Workers observability, and `observedF` (`max`, `median`). If `observability.status` is
    `unavailable`, ingestion was late or the token cannot read observability; rerun. The release
-   fails if any probe ended `exceededCpu` or used more than `cpu_ms` in one invocation.
-3. Compare `observedF.max` with `HARDWARE_FACTOR`; a higher value means `cpu_ms` is too low for
-   the limits and a maintainer decision (ADR 0027) is needed. The smoke's CPU figures are whole
-   milliseconds per invocation, so use the 1 MB shapes (tens to hundreds of ms), not the small one.
+   fails if any probe ended `exceededCpu` or used more than `cpu_ms / 1.25` (800 ms at 1,000) in
+   one invocation.
+3. Compare `observedF.max` with `HARDWARE_FACTOR`. `F` is cold to cold for the first request of a
+   shape after a deploy (Workers' cold isolate against Node's first request in a fresh process)
+   and warm to warm for later requests (`observedFByOrder.first` / `.later`); comparing a cold
+   Workers request with a warm Node time overstates it. Shapes whose warm reference is under 50 ms
+   (the long string) are not in `observedF`; they are under `belowFloor` and mostly show per-request
+   platform overhead. `nodeReference` records the CPU model and Node version of the reference. A
+   higher `max` than `HARDWARE_FACTOR` means `cpu_ms` may be too low for the limits and a
+   maintainer decision (ADR 0027) is needed; a single run is noisy (shared hardware), so look at
+   several. CPU figures are whole milliseconds per invocation, so the 1 MB shapes count, not the
+   small one.
 
 For a live deployment, read `cpuTimeMs`, `wallTimeMs` and `outcome` per invocation in Workers
 Logs (one `cf-worker-event` per invocation of the Worker and of its Durable Object) and alert as

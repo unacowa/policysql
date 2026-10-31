@@ -33,8 +33,10 @@ export const SAFETY_MARGIN = 1.25;
  * to 7.7 times for the shortest (22 ms of reference time, where a few ms of per-request platform
  * work such as JWT verification weigh most). The first request of a shape in a fresh deployment
  * is the costly one (JIT and WASM tier-up not yet warm: nested arrays 401 to 631 ms, later
- * samples 248 to 489 ms), so a limit must cover that, about F = 3.2 for the heavy shapes:
- * 1,383 ms by the formula at the reference wrapper's limits, against 1,000 configured.
+ * samples 248 to 489 ms). That first measurement compared those cold requests with a warm Node
+ * time (up to 3.2); the smoke now compares cold to cold and warm to warm, where the ratio is
+ * about 1.6 to 1.9, and the maintainers keep 2.0 (ADR 0027, Maintainer decisions 10), to be
+ * re-measured after the request-budget (3) and coefficient (7) pull requests.
  */
 export const HARDWARE_FACTOR = 2.0;
 
@@ -135,6 +137,14 @@ export const formatFitTable = (rows) => {
  */
 export const observedFactor = ({ workersCpuMs, referenceMs }, { minReferenceMs = 20 } = {}) =>
   Number.isFinite(workersCpuMs) && Number.isFinite(referenceMs) && referenceMs >= minReferenceMs ? workersCpuMs / referenceMs : null;
+
+/**
+ * Below this reference time a shape is not used for `F`: Workers reports whole milliseconds and
+ * adds a few ms of per-request platform work (JWT verification, routing) the Node harness does not
+ * run, so the ratio of a short request measures that overhead, not `F`. Such requests are
+ * reported separately.
+ */
+export const FACTOR_REFERENCE_FLOOR_MS = 50;
 
 const median = (values) => {
   const sorted = [...values].sort((a, b) => a - b);

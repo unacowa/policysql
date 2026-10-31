@@ -27,9 +27,11 @@ const wasmMemoryMiB = () => {
   return wasm.memory.buffer.byteLength / MIB;
 };
 
-const makeClock = () => {
+const makeClock = (cold = false) => {
   let excluded = 0;
   return {
+    /** Cold: `best` times only the first call, with no warm-up (a fresh process's first request). */
+    cold,
     reset() { excluded = 0; },
     get excluded() { return excluded; },
     async excludeTime(work) {
@@ -41,6 +43,12 @@ const makeClock = () => {
 
 /** Best (minimum) of `runs` timed calls of `work(index)` after one warm-up call (index 0). */
 const best = async (clock, runs, work) => {
+  if (clock.cold) {
+    clock.reset();
+    const started = performance.now();
+    await work(0);
+    return performance.now() - started - clock.excluded;
+  }
   await work(0);
   let fastest = Infinity;
   for (let run = 1; run <= runs; run += 1) {
@@ -52,9 +60,9 @@ const best = async (clock, runs, work) => {
   return fastest;
 };
 
-const withHarness = async (fixture, scenario, work) => {
+const withHarness = async (fixture, scenario, work, { cold = false } = {}) => {
   const cleanups = [];
-  const clock = makeClock();
+  const clock = makeClock(cold);
   const log = console.log;
   console.log = () => {};
   try {
@@ -319,7 +327,7 @@ export const scenarios = ({ target = 1_000_000 } = {}) => [
  * `details`) and the WASM linear memory after it (the high-water mark when the process runs only
  * this scenario), or `{ skipped }` when the scenario cannot run against the build.
  */
-export const runScenario = async (scenario, { runs = 5 } = {}) => {
-  const result = await withHarness(scenario.fixture(), scenario, (context) => scenario.run(context, runs));
+export const runScenario = async (scenario, { runs = 5, cold = false } = {}) => {
+  const result = await withHarness(scenario.fixture(), scenario, (context) => scenario.run(context, runs), { cold });
   return { id: scenario.id, group: scenario.group, ...result, wasmMemoryMiB: wasmMemoryMiB() };
 };

@@ -10,15 +10,23 @@
 //    reported as `unavailable`: it does not fail the release.
 // 3. Fails the release when a request answered with anything but 200 (a platform CPU or memory
 //    termination answers 1102 and never reaches the wrapper), when an invocation ended
-//    `exceededCpu`, or when an invocation's CPU time is above the configured `cpu_ms`.
-// 4. Records F = Workers CPU / Node reference time, per shape, from `nodeReferenceMs` (the same
-//    shape through the Node harness, scripts/lib/cpu-bench.mjs).
+//    `exceededCpu`, or when an invocation's CPU time is above `cpu_ms / S` (S = 1.25: the margin
+//    the formula keeps; the platform limit itself is `cpu_ms`).
+// 4. Records F = Workers CPU / Node reference time per sample, cold to cold and warm to warm: the
+//    first request of a shape after a deploy runs on a cold isolate (JIT and WASM tier-up not yet
+//    warm), so it is compared with Node's first request in a fresh process (`coldMs`); later
+//    requests are compared with Node's warmed time (`warmMs`). Both come from the same shape
+//    through the Node harness (scripts/lib/cpu-bench.mjs). Shapes whose reference is under
+//    FACTOR_REFERENCE_FLOOR_MS are reported separately and left out of `observedF`.
 import { randomBytes } from "node:crypto";
-import { HARDWARE_FACTOR, inputsAtLimits, observedFactor, predictedReferenceMs, requiredCpuMs, summarizeFactor } from "./lib/cpu-model.mjs";
+import {
+  FACTOR_REFERENCE_FLOOR_MS, HARDWARE_FACTOR, SAFETY_MARGIN, inputsAtLimits, observedFactor, predictedReferenceMs, requiredCpuMs, summarizeFactor,
+} from "./lib/cpu-model.mjs";
 import { REQUEST_SHAPES, SMOKE_SHAPES, countJsonValues } from "./lib/cpu-shapes.mjs";
 import { pollProbeCpu, rayIdOf } from "./lib/workers-cpu.mjs";
 
 const INSERT_SQL = "INSERT INTO smoke_values (id, label, doc) VALUES (:id, :label, :doc) RETURNING id";
+const PROBE_TABLE = "smoke_values";
 const DELETE_SQL = "DELETE FROM smoke_values WHERE id = :id RETURNING id";
 /** The body size the Node measurement uses for its request shapes (cpu-bench.mjs `target`). */
 export const SHAPE_TARGET_BYTES = 1_000_000;
@@ -31,11 +39,16 @@ const unique = () => `cpu_${randomBytes(6).toString("hex")}`;
 /**
  * `context`: `{ call, baseUrl, headers, expected }` as for the other sections.
  * `options`: `{ cpuLimitMs, limits, observability: { accountId, token, service } | null,
- *   nodeReferenceMs: { [shape]: ms }, repeats?, poll?: { timeoutMs, intervalMs, fetchImpl, now, wait } }`.
+ *   nodeReferenceMs: { [shape]: { warmMs, coldMs } }, nodeReferenceInfo, commitCheckTables: string[],
+ *   repeats?, poll?: { timeoutMs, intervalMs, fetchImpl, now, wait } }`.
+ * `commitCheckTables` are the tables the deployed policy's commit checks trigger on: an insert into
+ * `smoke_values` uses the Durable Object owner only if it is among them.
  * Each large shape is sent `repeats` times (default 3): Workers CPU time of the same request varies
  * between runs and within one (shared hardware), so one sample is not an F.
  */
-export const cpuSmoke = async ({ call, baseUrl, headers, expected }, { cpuLimitMs, limits, observability, nodeReferenceMs, poll = {}, repeats = 3 }) => {
+export const cpuSmoke = async ({ call, baseUrl, headers, expected }, { cpuLimitMs, limits, observability, nodeReferenceMs, nodeReferenceInfo = null, commitCheckTables, poll = {}, repeats = 3 }) => {
+  if (!Array.isArray(commitCheckTables)) throw new TypeError("cpuSmoke needs commitCheckTables");
+  const usesOwner = commitCheckTables.includes(PROBE_TABLE);
   const failures = [];
   const expect = (condition, name) => { if (!condition) failures.push(name); };
   const post = async (statements, key) => {
@@ -60,19 +73,26 @@ export const cpuSmoke = async ({ call, baseUrl, headers, expected }, { cpuLimitM
   const sentAt = Date.now();
   const sent = [];
   const ids = [];
-  for (const request of requests) {
-    for (let sample = 1; sample <= (request.shape === null ? 1 : repeats); sample += 1) {
-      const id = unique();
-      ids.push(id);
-      const outcome = await post([{ sql: INSERT_SQL, params: { id, label: request.name.slice(0, 40), doc: request.doc }, expect: { affectedRows: 1 } }], `cpu-${id}`);
-      sent.push({ request, sample, outcome });
-      expect(outcome.status === 200, `cpu probe "${request.name}" answered ${outcome.status}${outcome.parsed?.error?.code ? ` ${outcome.parsed.error.code}` : ""}`);
+  try {
+    for (const request of requests) {
+      for (let sample = 1; sample <= (request.shape === null ? 1 : repeats); sample += 1) {
+        const id = unique();
+        ids.push(id);
+        const outcome = await post([{ sql: INSERT_SQL, params: { id, label: request.name.slice(0, 40), doc: request.doc }, expect: { affectedRows: 1 } }], `cpu-${id}`);
+        sent.push({ request, sample, outcome });
+        expect(outcome.status === 200, `cpu probe "${request.name}" answered ${outcome.status}${outcome.parsed?.error?.code ? ` ${outcome.parsed.error.code}` : ""}`);
+      }
     }
-  }
-  // Cleanup of the rows the probes wrote (the table is also emptied on every release).
-  for (const id of ids) {
-    const outcome = await post([{ sql: DELETE_SQL, params: { id } }], `cpu-del-${id}`);
-    expect(outcome.status === 200, "cpu probe row deleted");
+  } finally {
+    // Cleanup of the rows the probes wrote, also when a send threw (the table is emptied on every release too).
+    for (const id of ids) {
+      try {
+        const outcome = await post([{ sql: DELETE_SQL, params: { id } }], `cpu-del-${id}`);
+        expect(outcome.status === 200, "cpu probe row deleted");
+      } catch {
+        failures.push("cpu probe row deleted");
+      }
+    }
   }
 
   let observation = { status: "unavailable", reason: "Workers observability credentials missing", probes: [], polls: 0, elapsedMs: 0 };
@@ -81,20 +101,27 @@ export const cpuSmoke = async ({ call, baseUrl, headers, expected }, { cpuLimitM
       ...observability, since: sentAt, timeoutMs: 120_000, intervalMs: 5_000, ...poll,
       // An Atomic Execute that triggers no commit check runs in the Worker invocation itself (no
       // Durable Object; observed in the real environment: a 1 MB probe's whole CPU is the Worker's
-      // event). A Durable Object event with the request's id, if one exists, is added to the sum.
-      probes: sent.map(({ request, outcome }) => ({ name: request.name, rayId: outcome.rayId, requestId: outcome.requestId, usesOwner: false })),
+      // event). Whether this table triggers one comes from the deployed policy (`commitCheckTables`);
+      // a Durable Object event with the request's id, if one exists, is added to the sum either way.
+      probes: sent.map(({ request, outcome }) => ({ name: request.name, rayId: outcome.rayId, requestId: outcome.requestId, usesOwner })),
     });
   }
 
   const report = sent.map(({ request, sample, outcome }, index) => {
     const observed = observation.probes[index] ?? null;
-    const referenceMs = request.shape === null ? null : (nodeReferenceMs?.[request.shape] ?? null);
+    // Cold to cold, warm to warm (see the header).
+    const reference = request.shape === null ? null : (nodeReferenceMs?.[request.shape] ?? null);
+    const referenceMs = reference === null ? null : (sample === 1 ? reference.coldMs : reference.warmMs);
     const cpuMs = observed?.cpuMs ?? null;
+    const warmReferenceMs = reference?.warmMs ?? null;
     return {
       name: request.name, sample, httpStatus: outcome.status, bodyBytes: outcome.bodyBytes, jsonValues: countJsonValues(request.doc), elapsedMs: outcome.elapsedMs,
       workerCpuMs: observed?.workerCpuMs ?? null, ownerCpuMs: observed?.ownerCpuMs ?? null, cpuMs,
       wallMs: observed?.wallMs ?? null, outcomes: observed?.outcomes ?? [],
-      nodeReferenceMs: referenceMs, factor: cpuMs === null ? null : observedFactor({ workersCpuMs: cpuMs, referenceMs }),
+      nodeReferenceMs: referenceMs, referenceKind: referenceMs === null ? null : (sample === 1 ? "cold" : "warm"),
+      factor: cpuMs === null ? null : observedFactor({ workersCpuMs: cpuMs, referenceMs }, { minReferenceMs: 0 }),
+      // Too short a reference for the ratio to mean F: reported, not counted.
+      belowFloor: warmReferenceMs !== null && warmReferenceMs < FACTOR_REFERENCE_FLOOR_MS,
     };
   });
 
@@ -102,10 +129,12 @@ export const cpuSmoke = async ({ call, baseUrl, headers, expected }, { cpuLimitM
   for (const observed of observation.probes) {
     expect(!observed.outcomes.includes("exceededCpu"), `cpu probe "${observed.name}" ended exceededCpu`);
     for (const entry of observed.invocations) {
-      expect(!(entry.cpuTimeMs > cpuLimitMs), `cpu probe "${observed.name}" used ${entry.cpuTimeMs} ms in one invocation, above cpu_ms ${cpuLimitMs}`);
+      // The platform ends an invocation at `cpu_ms`; the formula keeps a margin S below it.
+      expect(!(entry.cpuTimeMs > cpuLimitMs / SAFETY_MARGIN), `cpu probe "${observed.name}" used ${entry.cpuTimeMs} ms in one invocation, above cpu_ms / ${SAFETY_MARGIN} = ${cpuLimitMs / SAFETY_MARGIN} ms (cpu_ms ${cpuLimitMs})`);
     }
   }
 
+  const counted = report.filter((entry) => !entry.belowFloor && entry.factor !== null);
   const wrapperInputs = inputsAtLimits(limits);
   return {
     failures,
@@ -118,15 +147,18 @@ export const cpuSmoke = async ({ call, baseUrl, headers, expected }, { cpuLimitM
       },
       observability: { status: observation.status, ...(observation.reason ? { reason: observation.reason } : {}), polls: observation.polls, elapsedMs: observation.elapsedMs },
       requests: report,
-      // F from the requests whose reference time is long enough for a whole-millisecond CPU time to mean something.
-      observedF: summarizeFactor(report.map((entry) => entry.factor)),
-      // The first sample of a shape in a fresh deployment runs before the isolate's JIT and the WASM
-      // tier-up have warmed (the Node reference is measured after a warm-up); later samples show the
-      // warm cost. A limit must cover the first.
+      // The Node side of every ratio: the machine, Node version and method of the reference times.
+      nodeReference: { ...nodeReferenceInfo, floorMs: FACTOR_REFERENCE_FLOOR_MS, shapes: nodeReferenceMs ?? null },
+      // F over the shapes whose reference is at least the floor. First samples are cold to cold
+      // (the isolate's JIT and WASM tier-up are not warm, and neither is Node's first request);
+      // later samples are warm to warm. `observedF` is both together.
+      observedF: summarizeFactor(counted.map((entry) => entry.factor)),
       observedFByOrder: {
-        first: summarizeFactor(report.filter((entry) => entry.sample === 1).map((entry) => entry.factor)),
-        later: summarizeFactor(report.filter((entry) => entry.sample > 1).map((entry) => entry.factor)),
+        first: summarizeFactor(counted.filter((entry) => entry.sample === 1).map((entry) => entry.factor)),
+        later: summarizeFactor(counted.filter((entry) => entry.sample > 1).map((entry) => entry.factor)),
       },
+      // Short shapes (reference under the floor): their ratio is mostly per-request platform overhead.
+      belowFloor: report.filter((entry) => entry.belowFloor && entry.factor !== null).map((entry) => ({ name: entry.name, sample: entry.sample, cpuMs: entry.cpuMs, factor: entry.factor })),
     },
   };
 };

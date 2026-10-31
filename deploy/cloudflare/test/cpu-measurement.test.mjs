@@ -246,6 +246,17 @@ test("pollProbeCpu gives up at its deadline and reports unavailable or partial, 
   const refused = await pollProbeCpu({ accountId: "a", token: "t", service: "s", since: clock.now(), ...clock, intervalMs: 10_000, timeoutMs: 10_000, probes, fetchImpl: async () => jsonResponse({ success: false }, 403) });
   assert.equal(refused.status, "unavailable");
   assert.equal(refused.reason, "Workers observability query failed (HTTP 403)");
+  // A refusal (401, 403) will not change by waiting: one poll, no wait.
+  let waits = 0;
+  const forbidden = await pollProbeCpu({ accountId: "a", token: "t", service: "s", since: clock.now(), now: clock.now, wait: async () => { waits += 1; }, intervalMs: 10_000, timeoutMs: 600_000, probes, fetchImpl: async () => jsonResponse({ success: false }, 401) });
+  assert.equal(forbidden.polls, 1);
+  assert.equal(waits, 0);
+  assert.equal(forbidden.status, "unavailable");
+  // A server error is worth another poll.
+  let attempts = 0;
+  const flaky = await pollProbeCpu({ accountId: "a", token: "t", service: "s", since: clock.now(), ...clock, intervalMs: 10_000, timeoutMs: 600_000, probes: [probes[0]], fetchImpl: async () => { attempts += 1; return attempts < 3 ? jsonResponse({ success: false }, 503) : jsonResponse(apiBody([workerEvent({ ray: "r1", cpu: 5 }), ownerEvent({ id: "q1", cpu: 5 })])); } });
+  assert.equal(flaky.status, "read");
+  assert.equal(flaky.polls, 3);
   const failing = await pollProbeCpu({ accountId: "a", token: "t", service: "s", since: clock.now(), ...clock, intervalMs: 10_000, timeoutMs: 10_000, probes, fetchImpl: async () => { throw new Error("network down"); } });
   assert.equal(failing.status, "unavailable");
 });
@@ -270,7 +281,12 @@ const fakeDeployment = ({ status = () => 200 } = {}) => {
   return { call, bodies, get count() { return count; } };
 };
 const context = (call) => ({ call, baseUrl: "https://w.test", headers: {}, expected: { schemaVersion: "s", policyVersion: "p" } });
-const nodeReferenceMs = { "nested arrays (depth 56)": 200, "short decimals 37.4": 100, "one long ASCII string": 20 };
+// Node reference per shape: warm (after a warm-up) and cold (the first request of a fresh process).
+const nodeReferenceMs = {
+  "nested arrays (depth 56)": { warmMs: 200, coldMs: 300 },
+  "short decimals 37.4": { warmMs: 100, coldMs: 150 },
+  "one long ASCII string": { warmMs: 20, coldMs: 40 },
+};
 /** Observability that has the Worker (ray N) and owner (request q N) event of the first four requests. */
 const ingested = (cpu) => async () => jsonResponse(apiBody([1, 2, 3, 4].flatMap((n) => [
   workerEvent({ ray: `ray${n}`, cpu: cpu[n - 1][0], outcome: cpu[n - 1][2] ?? "ok" }), ownerEvent({ id: `q${n}`, cpu: cpu[n - 1][1] }),
@@ -280,7 +296,7 @@ const quick = (fetchImpl) => ({ timeoutMs: 20_000, intervalMs: 10_000, fetchImpl
 test("the CPU step records each request's CPU and F, and reports the deployed limit and the formula", async () => {
   const deployment = fakeDeployment();
   const { failures, report } = await cpuSmoke(context(deployment.call), {
-    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs,
+    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: [],
     observability: { accountId: "a", token: "t", service: "s" },
     poll: quick(ingested([[2, 3], [30, 380], [20, 180], [3, 17]])),
   });
@@ -292,8 +308,16 @@ test("the CPU step records each request's CPU and F, and reports the deployed li
   assert.deepEqual(report.requests.map((entry) => entry.cpuMs), [5, 410, 200, 20]);
   const factors = report.requests.map((entry) => entry.factor);
   assert.equal(factors[0], null, "the small request has no reference");
-  assert.deepEqual(factors.slice(1), [2.05, 2, 1], "Workers CPU / Node time; 20 ms is long enough to divide by");
-  assert.deepEqual(report.observedF, { max: 2.05, median: 2, min: 1, samples: 3 });
+  // First requests are compared with Node's cold time: 410/300, 200/150, 20/40.
+  assert.deepEqual(factors.slice(1).map((factor) => Number(factor.toFixed(3))), [1.367, 1.333, 0.5]);
+  assert.deepEqual(report.requests.map((entry) => entry.referenceKind), [null, "cold", "cold", "cold"]);
+  // The long string's warm reference (20 ms) is under the floor: reported apart, not in F.
+  assert.deepEqual(report.requests.map((entry) => entry.belowFloor), [false, false, false, true]);
+  assert.equal(report.observedF.samples, 2);
+  assert.ok(Math.abs(report.observedF.max - 410 / 300) < 1e-9);
+  assert.deepEqual(report.belowFloor.map((entry) => entry.name), ["one long ASCII string"]);
+  assert.equal(report.nodeReference.floorMs, 50);
+  assert.equal(report.nodeReference.shapes["short decimals 37.4"].coldMs, 150);
   assert.ok(Math.abs(report.formula.requiredCpuMsAtLimits - 864.3) < 0.5);
   assert.ok(report.requests.every((entry) => entry.bodyBytes > 0 && entry.httpStatus === 200));
   // The large probes are about 1 MB of JSON in `doc`, the request the ADR is about.
@@ -308,7 +332,7 @@ test("each large shape is sampled repeatedly and F covers every sample", async (
   const cpu = [7, 400, 410, 630, 170, 180, 150, 45, 50, 55];
   const events = async () => jsonResponse(apiBody(cpu.map((value, index) => workerEvent({ ray: `ray${index + 1}`, cpu: value }))));
   const { failures, report } = await cpuSmoke(context(deployment.call), {
-    cpuLimitMs: 1_000, limits: LIMITS, nodeReferenceMs, observability: { accountId: "a", token: "t", service: "s" }, poll: quick(events),
+    cpuLimitMs: 1_000, limits: LIMITS, nodeReferenceMs, commitCheckTables: [], observability: { accountId: "a", token: "t", service: "s" }, poll: quick(events),
   });
   assert.deepEqual(failures, []);
   assert.equal(deployment.count, 20, "ten probes and ten deletes");
@@ -317,20 +341,22 @@ test("each large shape is sampled repeatedly and F covers every sample", async (
     ...["nested arrays (depth 56)", "short decimals 37.4", "one long ASCII string"].flatMap((name) => [1, 2, 3].map((sample) => [name, sample])),
   ]);
   assert.deepEqual(report.requests.map((entry) => entry.cpuMs), cpu);
-  // F per sample is Workers CPU / the shape's Node time: the maximum is the 630 ms sample (3.15).
-  assert.equal(report.observedF.samples, 9);
-  assert.ok(Math.abs(report.observedF.max - 3.15) < 1e-9);
-  assert.ok(Math.abs(report.observedF.min - 1.5) < 1e-9);
-  // First samples: 400/200, 170/100, 45/20; later samples: the other six.
-  assert.deepEqual(report.observedFByOrder.first, { max: 2.25, median: 2, min: 1.7, samples: 3 });
-  assert.equal(report.observedFByOrder.later.samples, 6);
+  // First samples are Workers CPU over Node's cold time, later ones over its warm time; the long
+  // string (warm reference under the 50 ms floor) is reported apart: 6 of the 9 samples count.
+  assert.equal(report.observedF.samples, 6);
+  assert.ok(Math.abs(report.observedF.max - 3.15) < 1e-9, "630 / 200");
+  assert.ok(Math.abs(report.observedF.min - 170 / 150) < 1e-9);
+  assert.equal(report.observedFByOrder.first.samples, 2);
+  assert.ok(Math.abs(report.observedFByOrder.first.max - 400 / 300) < 1e-9);
+  assert.equal(report.observedFByOrder.later.samples, 4);
   assert.ok(Math.abs(report.observedFByOrder.later.max - 3.15) < 1e-9);
+  assert.equal(report.belowFloor.length, 3, "the three long-string samples");
 });
 
 test("a request that ran only in the Worker is complete without a Durable Object event", async () => {
   const workerOnly = async () => jsonResponse(apiBody([1, 2, 3, 4].map((n) => workerEvent({ ray: `ray${n}`, cpu: [7, 420, 170, 47][n - 1] }))));
   const { failures, report } = await cpuSmoke(context(fakeDeployment().call), {
-    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs,
+    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: [],
     observability: { accountId: "a", token: "t", service: "s" },
     poll: quick(workerOnly),
   });
@@ -338,38 +364,88 @@ test("a request that ran only in the Worker is complete without a Durable Object
   assert.equal(report.observability.status, "read");
   assert.equal(report.observability.polls, 1, "no waiting for an owner event that does not exist");
   assert.deepEqual(report.requests.map((entry) => [entry.workerCpuMs, entry.ownerCpuMs, entry.cpuMs]), [[7, null, 7], [420, null, 420], [170, null, 170], [47, null, 47]]);
-  assert.deepEqual(report.requests.slice(1).map((entry) => Number(entry.factor.toFixed(2))), [2.1, 1.7, 2.35]);
+  assert.deepEqual(report.requests.slice(1).map((entry) => Number(entry.factor.toFixed(2))), [1.4, 1.13, 1.18]);
 });
 
 test("the CPU step fails the release when an invocation ended exceededCpu", async () => {
   const { failures } = await cpuSmoke(context(fakeDeployment().call), {
-    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs,
+    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: [],
     observability: { accountId: "a", token: "t", service: "s" },
     poll: quick(ingested([[2, 3], [30, 380], [20, 1_000, "exceededCpu"], [3, 17]])),
   });
-  assert.deepEqual(failures, ['cpu probe "short decimals 37.4" ended exceededCpu']);
+  assert.equal(failures[0], 'cpu probe "short decimals 37.4" ended exceededCpu');
+  assert.equal(failures.length, 2, "and it is above the cpu_ms / S gate too");
 });
 
 test("the CPU step fails the release when one invocation used more than cpu_ms", async () => {
   const { failures } = await cpuSmoke(context(fakeDeployment().call), {
-    cpuLimitMs: 300, limits: LIMITS, repeats: 1, nodeReferenceMs,
+    cpuLimitMs: 300, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: [],
     observability: { accountId: "a", token: "t", service: "s" },
     poll: quick(ingested([[2, 3], [30, 380], [20, 180], [3, 17]])),
   });
-  assert.deepEqual(failures, ['cpu probe "nested arrays (depth 56)" used 380 ms in one invocation, above cpu_ms 300']);
+  assert.deepEqual(failures, ['cpu probe "nested arrays (depth 56)" used 380 ms in one invocation, above cpu_ms / 1.25 = 240 ms (cpu_ms 300)']);
+});
+
+test("the gate is cpu_ms / S: 800 ms passes and 801 ms fails at cpu_ms 1,000", async () => {
+  const run = async (cpu) => (await cpuSmoke(context(fakeDeployment().call), {
+    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: [],
+    observability: { accountId: "a", token: "t", service: "s" },
+    poll: quick(ingested([[2, 3], [30, cpu], [20, 180], [3, 17]])),
+  })).failures;
+  assert.deepEqual(await run(800), []);
+  assert.equal((await run(801)).length, 1);
+});
+
+test("whether the probes use the Durable Object comes from the policy's commit checks", async () => {
+  const workerOnly = async () => jsonResponse(apiBody([1, 2, 3, 4].map((n) => workerEvent({ ray: `ray${n}`, cpu: 10 }))));
+  const options = (tables) => ({
+    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: tables,
+    observability: { accountId: "a", token: "t", service: "s" }, poll: quick(workerOnly),
+  });
+  assert.equal((await cpuSmoke(context(fakeDeployment().call), options(["smoke_checks"]))).report.observability.status, "read");
+  // A check on the probe table would run the insert in the owner: its event is waited for, and missing here.
+  assert.equal((await cpuSmoke(context(fakeDeployment().call), options(["smoke_values"]))).report.observability.status, "unavailable");
+  await assert.rejects(cpuSmoke(context(fakeDeployment().call), { cpuLimitMs: 1_000, limits: LIMITS, nodeReferenceMs }), TypeError);
+});
+
+test("the probe rows are deleted even when a send throws", async () => {
+  const sent = [];
+  let count = 0;
+  const call = async (_url, init) => {
+    count += 1;
+    sent.push(JSON.parse(init.body).statements[0].sql.split(" ")[0]);
+    if (count === 3) throw new Error("network down");
+    return new Response(JSON.stringify({ meta: { requestId: `q${count}` } }), { status: 200, headers: { "cf-ray": `ray${count}-NRT` } });
+  };
+  await assert.rejects(cpuSmoke(context(call), { cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: [], observability: null }), /network down/u);
+  assert.deepEqual(sent, ["INSERT", "INSERT", "INSERT", "DELETE", "DELETE", "DELETE"], "every id generated so far is deleted");
+});
+
+test("the Node reference is measured warm and cold per shape and carries the machine", async () => {
+  const { measureNodeReference } = await import("../scripts/lib/node-reference.mjs");
+  const calls = [];
+  const measure = (id, { cold }) => {
+    calls.push([id, cold]);
+    return { measuredMs: cold ? 300 : 200, report: { machine: { cpu: "Test CPU", node: "v1" } } };
+  };
+  const reference = measureNodeReference({ shapes: ["a", "b"], scenarioId: (shape) => `s:${shape}`, target: 1000, measure });
+  assert.deepEqual(reference.shapes, { a: { warmMs: 200, coldMs: 300 }, b: { warmMs: 200, coldMs: 300 } });
+  assert.equal(reference.info.cpu, "Test CPU");
+  assert.equal(reference.info.node, "v1");
+  assert.deepEqual(calls, [["s:a", false], ["s:a", true], ["s:b", false], ["s:b", true]]);
 });
 
 test("the CPU step fails the release when a request is answered with an error", async () => {
   const deployment = fakeDeployment({ status: (count) => (count === 3 ? 503 : 200) });
   const { failures } = await cpuSmoke(context(deployment.call), {
-    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, observability: null,
+    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: [], observability: null,
   });
   assert.deepEqual(failures, ['cpu probe "short decimals 37.4" answered 503 X']);
 });
 
 test("unreadable observability is reported as unavailable and does not fail the release", async () => {
   const unauthorized = await cpuSmoke(context(fakeDeployment().call), {
-    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs,
+    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: [],
     observability: { accountId: "a", token: "t", service: "s" },
     poll: quick(async () => jsonResponse({ success: false }, 403)),
   });
@@ -379,13 +455,13 @@ test("unreadable observability is reported as unavailable and does not fail the 
   assert.equal(unauthorized.report.observedF, null);
   assert.ok(unauthorized.report.requests.every((entry) => entry.cpuMs === null && entry.factor === null));
   const delayed = await cpuSmoke(context(fakeDeployment().call), {
-    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs,
+    cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: [],
     observability: { accountId: "a", token: "t", service: "s" },
     poll: quick(async () => jsonResponse(apiBody([]))),
   });
   assert.deepEqual(delayed.failures, []);
   assert.equal(delayed.report.observability.status, "unavailable");
-  const missing = await cpuSmoke(context(fakeDeployment().call), { cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, observability: null });
+  const missing = await cpuSmoke(context(fakeDeployment().call), { cpuLimitMs: 1_000, limits: LIMITS, repeats: 1, nodeReferenceMs, commitCheckTables: [], observability: null });
   assert.deepEqual(missing.failures, []);
   assert.equal(missing.report.observability.status, "unavailable");
 });

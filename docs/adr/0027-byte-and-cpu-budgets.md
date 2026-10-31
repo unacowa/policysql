@@ -537,7 +537,9 @@ formula's bound is a sum of every term at its maximum that no single request rea
 decision between `F` = 3.2 with `cpu_ms` 1,500, and keeping 1,000 on the evidence of the highest
 real invocation, is the maintainers'. This pull request therefore leaves `F` = 2.0 in
 `scripts/lib/cpu-model.mjs` and `cpu_ms` at 1,000, and records the distribution (each run's
-`acceptance.cpu` in `release.json`, `observedF` and `observedFByOrder`).
+`acceptance.cpu` in `release.json`, `observedF` and `observedFByOrder`). The worst case of 3.2
+above compared a cold Workers request with a warm Node time; the smoke now compares cold to cold
+and warm to warm (decision 10 below), and the ratio of the cold requests alone is about 1.6 to 1.9.
 
 The WASM memory peak is modelled as the larger of two phases, with the same inputs:
 
@@ -808,5 +810,13 @@ The questions raised during review were decided as follows.
    `maxJsonValues` counts raw values.
 9. **Today's main** (emitted height exactly 100 at 32 / 8) gets no separate fix; pull request 4
    maps that case to `POLICYSQL_SQL_TOO_COMPLEX`.
+
+10. **Pull request 1 did not replace `F`** (2026-10-31, after its review). The release smoke's
+    evidence yields no single value (see "Pull request 1 results"; a cold Workers request is not
+    comparable with a warm Node time, and cold to cold the ratio is about 1.6 to 1.9). `F` stays
+    2.0 and the reference wrapper's `cpu_ms` stays 1,000; the smoke compares cold to cold and warm
+    to warm from now on. `F` is re-measured after pull request 3 (the request budget makes the
+    value count a limit, so the formula's `V` becomes true) and again after pull request 7 (lower
+    coefficients).
 
 No questions remain open.

@@ -222,6 +222,7 @@ npm run measure:cpu -- --only "request:"     # scenarios whose id contains the t
 npm run measure:cpu -- --runs 7 --out report.json
 npm run measure:cpu -- --scale 0.8           # multiply measured times (to normalize a machine
                                              # that is 1.25x as fast as the i7-7700K reference)
+npm run measure:cpu -- --cold                # time only the first request of each fresh process
 npm run measure:cpu -- --json                # the report on stdout, nothing else
 ```
 
@@ -247,22 +248,30 @@ the PolicySQL request id (the `x-policysql-request-id` the Worker forwards). Wor
 late, so it polls every five seconds for at most 120 seconds. `cpuTimeMs` is a whole number of
 milliseconds per invocation; a request's CPU is the Worker's plus the Durable Object's when it
 used one (an Atomic Execute that triggers no commit check, as these probes, runs in the Worker
-invocation alone), and the Node reference is the same shape through the harness, so `F` =
-Workers CPU / Node time per shape (shapes under 20 ms of reference time are not used; the Workers
-figure also carries per-request platform work the harness does not run, such as JWT verification).
+invocation alone; the smoke reads from the deployed policy's `commit_checks` whether the probe
+table triggers one), and the Node reference is the same shape through the harness in a fresh
+process. The first request of a shape after a deploy runs on a cold isolate (JIT and WASM tier-up
+not warm), so it is compared with Node's own first request in a fresh process (`coldMs`, no
+warm-up); later requests are compared with Node's warmed time (`warmMs`, best of five after a
+warm-up): `F` = Workers CPU / Node time, cold to cold and warm to warm. A shape whose warm
+reference is under 50 ms (the long string) is left out of `observedF` and listed under
+`belowFloor`: the Workers figure also carries per-request platform work the harness does not run
+(JWT verification, routing), which dominates a short request. The report records the Node
+reference's CPU model, Node version and method (`nodeReference`).
 
 - Fatal: any probe answered with anything but 200 (a platform CPU or memory termination answers
   1102 without the version header), an invocation with outcome `exceededCpu`, or an invocation
-  above `limits.cpu_ms`.
+  above `limits.cpu_ms` divided by the safety margin S = 1.25 (800 ms at 1,000: the formula's
+  margin; the platform itself ends the invocation at `cpu_ms`).
 - Not fatal: observability that is not ingested before the deadline, or not readable (missing
   permission, API error). The report then says `unavailable` with the reason (a status, never a
   secret) and `observedF` is `null`; rerun `provision:dev` for a reading.
 - Recorded in `release.json` under `acceptance.cpu`: `cpuLimitMs`, the formula's reference time
   and required `cpu_ms` at the deployed limits, `observability` (`read`, `partial` or
   `unavailable`, polls, elapsed), `requests[]` (one entry per sample: HTTP status, body bytes, JSON values, `workerCpuMs`,
-  `ownerCpuMs`, `cpuMs`, `wallMs`, outcomes, `nodeReferenceMs`, `factor`), and `observedF`
-  (`max`, `median`, `min`, `samples`, over every sample; `observedFByOrder` splits the first sample of each
-  shape, which runs on a cold isolate and is the costly one, from the later ones). The maximum is what the formula must cover; changing the
+  `ownerCpuMs`, `cpuMs`, `wallMs`, outcomes, `nodeReferenceMs`, `referenceKind`, `factor`), `nodeReference`, `belowFloor`, and `observedF`
+  (`max`, `median`, `min`, `samples`, over the counted samples; `observedFByOrder` splits the first sample of each
+  shape, cold to cold, from the later ones, warm to warm). The maximum is what the formula must cover; changing the
   `HARDWARE_FACTOR` constant (and so `cpu_ms`) from it is a maintainer decision (ADR 0027).
 
 ### Calling the deployed Worker

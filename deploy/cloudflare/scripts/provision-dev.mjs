@@ -14,6 +14,8 @@ import { DEPLOYMENT_VERSION_HEADER, versionTracker, waitForRelease } from "./rel
 import { bytesNullSmoke, commitCheckSmoke } from "./smoke-sections.mjs";
 import { SHAPE_TARGET_BYTES, cpuSmoke, referenceScenarioId } from "./smoke-cpu.mjs";
 import { SMOKE_SHAPES } from "./lib/cpu-shapes.mjs";
+import { measureNodeReference } from "./lib/node-reference.mjs";
+import { parse } from "yaml";
 import { parseJsonc } from "./lib/jsonc.mjs";
 
 const directory = fileURLToPath(new URL("..", import.meta.url));
@@ -142,20 +144,20 @@ const configuredCpuMs = () => {
   return limit;
 };
 
-// The reference-machine time of the smoke's request shapes (the same shape through the Node
-// harness, scripts/lib/cpu-bench.mjs), measured once per run, before any request is sent.
+// The reference-machine times of the smoke's request shapes, warm and cold (the same shapes
+// through the Node harness in fresh processes, scripts/lib/node-reference.mjs), measured once per
+// run, before any request is sent.
 let nodeReference;
-const nodeReferenceMs = async () => {
-  if (nodeReference) return nodeReference;
-  const { scenarios, runScenario } = await import("./lib/cpu-bench.mjs");
-  const all = scenarios({ target: SHAPE_TARGET_BYTES });
-  nodeReference = {};
-  for (const shape of SMOKE_SHAPES) {
-    const scenario = all.find((candidate) => candidate.id === referenceScenarioId(shape));
-    if (!scenario) throw new Error(`no Node reference scenario for ${shape}`);
-    nodeReference[shape] = (await runScenario(scenario)).measuredMs;
-  }
+const nodeReferenceTimes = () => {
+  nodeReference ??= measureNodeReference({ shapes: SMOKE_SHAPES, scenarioId: referenceScenarioId, target: SHAPE_TARGET_BYTES });
   return nodeReference;
+};
+
+// The tables the deployed policy's commit checks trigger on (they decide whether an Atomic Execute
+// uses the Durable Object owner).
+const commitCheckTables = () => {
+  const policy = parse(readFileSync(new URL("../config/policy.compiled.yaml", import.meta.url), "utf8"));
+  return Object.values(policy.commit_checks ?? {}).flatMap((check) => check.triggered_by ?? []);
 };
 
 const smoke = async (baseUrl, token, tracker) => {
@@ -400,7 +402,7 @@ const smoke = async (baseUrl, token, tracker) => {
   // Real CPU time of the worst request shapes (#56, ADR 0027): fatal when a request exceeds
   // `cpu_ms`; an unreadable observability result is reported, not fatal.
   const cpu = await cpuSmoke(sectionContext, {
-    cpuLimitMs: configuredCpuMs(), limits: localRelease().limits, nodeReferenceMs: await nodeReferenceMs(),
+    cpuLimitMs: configuredCpuMs(), limits: localRelease().limits, nodeReferenceMs: nodeReferenceTimes().shapes, nodeReferenceInfo: nodeReferenceTimes().info, commitCheckTables: commitCheckTables(),
     observability: { accountId: required("CLOUDFLARE_ACCOUNT_ID"), token: required("CLOUDFLARE_API_TOKEN"), service: workerName },
   });
   const visibleRows = execute.results?.[0]?.rows ?? [];
