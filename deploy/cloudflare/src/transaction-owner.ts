@@ -22,10 +22,9 @@
 //
 // Atomic executions on an owner (an execute whose envelope could trigger a commit check) run
 // the same machine since ADR 0024 pull request 8: the engine's `request` step forwards the
-// owner input, and the owner's step answers it. ADR 0024 pull request 9 deleted the TypeScript
-// decision path this class replaced (`LegacyTransactionOwnerCore`). A record it wrote is an
-// old-format record: the machine discards it (an atomic input ignores it and resolves a keyed
-// retry through `policysql_idempotency`).
+// owner input, and the owner's step answers it. An unreadable record is discarded by the
+// machine (an atomic input ignores it and resolves a keyed retry through
+// `policysql_idempotency`).
 import { EngineError, operationError } from "./errors.ts";
 import { checkDatabaseBinding, databaseTransportFactory, validateDatabaseProvider } from "./database.ts";
 import type { DatabaseProvider } from "./database.ts";
@@ -246,8 +245,8 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   async load() {
     if (this.loaded) return;
     const stored = await this.facilities.store.get(KEY);
-    // A record of the TypeScript owner is an object: the machine reads it as JSON text and
-    // discards it (ADR 0024 "Old-format records are discarded, not read").
+    // A stored value that is not the machine's JSON text is passed on as text and discarded
+    // as unreadable (ADR 0024 "Fail-closed rules").
     this.durable = stored === undefined || stored === null ? null : typeof stored === "string" ? stored : JSON.stringify(stored);
     this.volatile = null;
     this.loaded = true;

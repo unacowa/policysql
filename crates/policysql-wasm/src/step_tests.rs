@@ -1,8 +1,5 @@
 //! `step_json` with the real compiler (ADR 0024 pull request 4): the statement event carries
-//! the verified body text, and compile and the digest use it (#70). Production owners run it
-//! since the switch-over (pull request 7); the legacy TypeScript owner, kept as the differential
-//! harness's reference (`deploy/cloudflare/test/step-differential.test.mjs`), still recompiles
-//! `JSON.stringify(command)`, which the harness lists.
+//! the verified body text, and compile and the digest use it (#70). Production owners run it.
 
 use serde_json::{Value, json};
 

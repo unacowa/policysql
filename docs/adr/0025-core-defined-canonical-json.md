@@ -51,11 +51,10 @@ before hashing.
 
 The request and auth fingerprints include the database binding, and the binding includes the
 runtime snapshot, which includes the ABI version (ADR 0014). (Since #80 the request fingerprint
-leaves out the snapshot; see the amendment at the end.) Every deployment that changes the
-snapshot therefore already makes earlier fingerprints unmatchable; a keyed retry straddling it
-gets `POLICYSQL_IDEMPOTENCY_CONFLICT` today. `keyHash` and the command digests do not include
-the snapshot. Owner records live for one transaction (seconds). PolicySQL is in beta, and
-backward compatibility of stored values is not a goal (ADR 0019).
+leaves out the snapshot; see the amendment at the end.) Before #80 every deployment that changed the
+snapshot therefore made earlier fingerprints unmatchable; since #80 the request fingerprint
+leaves out the snapshot and a keyed retry replays. `keyHash` and the command digests do not include
+the snapshot. Owner records live for one transaction (seconds).
 
 ## Decision
 
@@ -123,15 +122,13 @@ them. They are requirements, not examples, and the follow-up pull request must m
   U+E000–U+FFFF. Identity inputs have only ASCII keys (see Context), so their order is
   unchanged. Non-ASCII keys reach hashing only inside request bodies and statement and
   callback commands, whose values are covered by
-  [What happens at the deployment that switches the rule](#what-happens-at-the-deployment-that-switches-the-rule).
+  [Stability across deployments](#stability-across-deployments).
 
-### No version marker, no dual-hash gate
+### No version marker
 
 Stored values carry no format version. When the hashing rule changes, values written before
-the change no longer match, except where the stability requirements hold. The dual-hash gate
-(`deploy/cloudflare/src/identity.ts`) and the TypeScript identity computation in
-`deploy/cloudflare/src/idempotency.ts` are removed; the engine and the owner use core's result
-only.
+the change no longer match, except where the stability requirements hold. The engine and the
+owner use core's result only.
 
 The two helpers of `idempotency.ts` that are not identity computations stay in TypeScript (the
 follow-up may move them out of `idempotency.ts` into a module named for them, but not into
@@ -146,47 +143,27 @@ core):
   (Pull request 5 hashes and verifies the machine's capabilities in core; the TypeScript
   copy serves `TransactionOwnerCore` until ADR 0024 pull request 9.)
 
-### The switch bumps the ABI
+### Stability across deployments
 
-The follow-up pull request bumps `ABI_VERSION` (4 to 5). Reasons:
-
-- ADR 0024's rule: pull request 2 added `identity_json` without a bump because no existing
-  method, value, or limit changed. The follow-up changes values that `identity_json` returns
-  for some inputs, so by that rule it is an ABI change.
-- Uniform, observable behavior: the snapshot changes (`…:abi-5`), so every request fingerprint
-  changes at once, as on every snapshot-changing deployment. Without a bump, whether a keyed
-  atomic retry straddling the deployment conflicts would depend on how the body spells its
-  numbers (`1.5`, `1e21`) or orders non-ASCII keys, with no observable reason. With it, the
-  deployment is one more snapshot change, visible in Capabilities (`abiVersion`, `snapshot`).
-- The bump does not relax the stability requirements; see below.
-
-ADR 0024's ABI numbering shifts by one: pull request 4 (`step_json`) bumps to 6.
-
-### What happens at the deployment that switches the rule
-
-- **`keyHash`** does not include the snapshot. By (a)–(d) it stays byte-identical, so a keyed
-  atomic retry straddling the deployment finds its row (and then, because the fingerprint
-  included the new snapshot, got `POLICYSQL_IDEMPOTENCY_CONFLICT`, as on every snapshot
-  change before #80), and a keyed begin retry reaches the same owner (the transaction id is derived
-  from `keyHash`). No committed keyed request executes twice.
-- **Commit retries** (ADR 0007). A commit whose COMMIT may have been sent leaves a `committing`
-  or `committed` record with `commitSent` (#48). A retry after the deployment carries the new
-  snapshot, so `owned()` (`transaction-owner.ts`) takes `sameExceptSnapshot`: it recomputes the
-  auth fingerprint of the stored `auth` under the stored binding with the new rule and requires
-  it to equal the stored fingerprint, then recomputes it under the caller's binding. Then
-  `commitRetry()` requires `commitSent.digest` to equal the new rule's digest of `{sequence}`.
-  By (a)–(d) both hold, and the retry gets its recorded reply or
-  `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. If either value changed, the retry would get 409
-  `POLICYSQL_TRANSACTION_UNAVAILABLE` from `prepareCommand`, a definite rejection after COMMIT
-  that ADR 0007 forbids. This is why the requirements are needed with the bump as well.
-- **Request fingerprints** change with the snapshot, as on every snapshot change before #80.
-  Since #80 they no longer include the snapshot, so later snapshot changes keep them.
+- **`keyHash`** does not include the snapshot. By (a)-(d) it is stable, so a keyed atomic
+  retry straddling a snapshot-changing deployment finds its row, and a keyed begin retry
+  reaches the same owner (the transaction id is derived from `keyHash`). No committed keyed
+  request executes twice.
+- **Commit retries** (ADR 0007). A commit whose COMMIT may have been sent leaves a
+  `committing` or `committed` record with `commitSent` (#48). A retry after the deployment
+  carries the new snapshot. The machine matches it by the replay identity, which has no
+  snapshot (ADR 0024, "Replay identity"), and `last.digest` / `commitSent.digest`, the digest
+  of `{sequence}`; it answers the recorded reply or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` before
+  any snapshot, route, or expiry check. By (a)-(d) both values are stable. If either changed,
+  the retry would get 409 `POLICYSQL_TRANSACTION_UNAVAILABLE`, a definite rejection after
+  COMMIT that ADR 0007 forbids. This is why the requirements are needed.
+- **Request fingerprints** do not include the snapshot (#80, below), so a keyed retry replays
+  across snapshot changes.
 - **Statement, rollback, and callback digests, and start fingerprints** are not compared across
-  the deployment: a statement or rollback retry with a changed snapshot is unavailable in
-  `owned()`, a keyed begin retry with a changed snapshot already conflicts in
-  `startTransaction`, an unkeyed begin has a fresh transaction id, and callback sessions do not
-  survive an owner restart. No commit outcome is misreported. The start fingerprint and the
-  rollback digest are byte-identical anyway by (a)–(d).
+  a deployment: a statement or rollback retry with a changed snapshot is unavailable, a keyed
+  begin retry with a changed snapshot conflicts (a begin is never a COMMIT outcome), an unkeyed
+  begin has a fresh transaction id, and callback sessions do not survive an owner restart. No
+  commit outcome is misreported.
 
 ### Escaped lone surrogates
 
@@ -204,22 +181,15 @@ the engine answers that with `POLICYSQL_INVALID_REQUEST`. The observable differe
 
 ### Amendment: the request fingerprint has no snapshot (#80)
 
-The conflict this ADR accepted for keyed atomic retries was meant as the cost of one deployment
-(the one that switched the hashing rule). Because the request fingerprint hashed the whole
-binding, it recurred on every snapshot-changing deployment within the retention of the rows: a
-committed keyed write retried after such a deployment got `POLICYSQL_IDEMPOTENCY_CONFLICT`, a
-definite rejection in the client, against ADR 0007. Since ABI 9 the request fingerprint is
+A request fingerprint that hashed the whole binding would make a committed keyed write retried
+after a snapshot-changing deployment get `POLICYSQL_IDEMPOTENCY_CONFLICT`, a definite rejection
+in the client, against ADR 0007. The request fingerprint is therefore
 
 `sha256(identity + ":" + canonical(body) + ":" + canonical(databaseBinding without snapshot))`
 
 with `identity` and the rest of the construction unchanged, so a same-key retry that differs
-only in the snapshot replays its row, and another body or generation still conflicts. Request
-fingerprints were never stability goldens (Follow-up 1): the request goldens in
-`tests/fixtures/identity-goldens.json` were recomputed, their `keyHash` values are unchanged,
-and every other golden (auth and start fingerprints, `{sequence}` digests) is unchanged. The
-change is an ABI bump (8 to 9) by the rule above. Rows written before it keep the old
-fingerprint and conflict once on a retry after the deployment; the reasons for not matching
-them are in [ADR 0014](0014-wrapper-provided-database-bindings.md#amendment-the-request-fingerprint-has-no-snapshot-80).
+only in the snapshot replays its row, and another body or generation still conflicts. The
+request goldens in `tests/fixtures/identity-goldens.json` pin this construction.
 
 ## Consequences for ADR 0024
 
@@ -292,21 +262,12 @@ Recorded by the follow-up pull request (ABI 5):
   `commit-checks.ts`.
 - Goldens: `tests/fixtures/identity-goldens.json`, asserted by core
   (`crates/policysql-transaction/tests/goldens.rs`) and by the deployed WASM
-  (`identity-goldens.test.mjs`); `abi-bump-retry.test.mjs` retries owner records and
-  idempotency rows written with the ABI 4 implementation.
+  (`identity-goldens.test.mjs`); `abi-bump-retry.test.mjs` retries across a snapshot change.
 
 ## Rejected alternatives
 
 - **Keep byte equality, using `ryu-js` and `serde_json` instead of a hand-written formatter.**
   Smaller than today, but still couples core to JavaScript's number printing and keeps the
   dual-hash gate and its CPU cost, for compatibility that snapshot changes already break.
-- **Prefix stored values with a format version** and answer old-format mismatches with an
-  outcome-unknown error. It protects only retries that straddle one deployment, which is not a
-  goal in beta, and keyed identities and commit digests are already stable by the requirements
-  above.
-- **Switch without an ABI bump.** Fewer keyed atomic retries would conflict across the
-  deployment, but which ones would depend on the spelling of numbers in the body, with no
-  observable reason, and it breaks ADR 0024's rule that a changed value of an existing method
-  is an ABI change. The commit-retry path needs the same stability requirements either way.
 - **Hash the raw body bytes.** Changes the retry rule of ADR 0007 from "same canonical payload"
   to "same bytes" (whitespace and key order would matter to clients).

@@ -10,50 +10,38 @@
 // `idFromName` maps one name to one object, the platform runs at most one instance of an
 // object at a time, and a restarted instance keeps its storage but none of its memory.
 //
-// Between the Worker and the object, commands travel as the internal HTTP messages they
-// always used (`https://owner/<command>`, JSON body, request id header), plus the owner name
-// the Worker routed to (`x-policysql-owner`). Since ADR 0024 pull request 7 the body of an
-// interactive command or a callback query is the step machine's forwarded owner input
-// without its `kind` (the path names it); the callback capability travels in that body. Since
-// pull request 8 the body of `/atomic` is the machine's forwarded atomic input as the engine's
-// `request` step emitted it (`kind: "atomic"` included), and the object's reply is the public
-// `execute` response the owner's step decided, which the Worker relays.
+// Between the Worker and the object, commands travel as internal HTTP messages
+// (`https://owner/<command>`, JSON body, request id header), plus the owner name the Worker
+// routed to (`x-policysql-owner`). The body of an interactive command or a callback query is
+// the step machine's forwarded owner input without its `kind` (the path names it); the
+// callback capability travels in that body. The body of `/atomic` is the machine's forwarded
+// atomic input as the engine's `request` step emitted it (`kind: "atomic"` included), and the
+// object's reply is the public `execute` response the owner's step decided, which the Worker
+// relays.
 //
-// Both sides mark the wire version of the path (`x-policysql-owner-wire`): the Worker on every
-// message, the object on every reply. A path's version changes only with that path's message:
-// `1` for the paths pull request 7 changed (`/begin`, `/statement`, `/commit`, `/rollback`,
-// `/validation-query`), `2` for `/atomic`, which pull request 8 changed. The interactive paths
-// therefore keep working between this version and the previous one. During a rollout a Worker
-// and an object of different versions can meet, and each side treats a counterpart without the
-// path's version as that skew:
-// - an object answers a message without its path's version (an earlier Worker: its old body
-//   shapes, the callback capability in `authorization`, or the atomic input the TypeScript
-//   owner path read) with POLICYSQL_INTERNAL and runs nothing;
-// - a Worker does not read a reply without its path's version (an earlier object: it rejects
-//   the new interactive body shapes with POLICYSQL_INVALID_REQUEST, and the new atomic body,
-//   whose `kind` member it does not accept, likewise before any database work). A commit
-//   becomes POLICYSQL_COMMIT_OUTCOME_UNKNOWN (a retry of a COMMIT that applied must never be a
-//   rejection, ADR 0007), anything else, `/atomic` included, POLICYSQL_INTERNAL.
-// Neither code is a rejection in the client. A keyed execute that committed before the skew
-// is therefore answered 500 while it lasts (never IDEMPOTENCY_CONFLICT, never a second
-// execution: nothing on either side executes a message it cannot read), and replays from its
-// `policysql_idempotency` row once the versions agree.
+// The wire version guards the message shape. Both sides stamp every message and reply with the
+// one constant `OWNER_WIRE_VERSION` (`x-policysql-owner-wire`); a change of any owner wire
+// message must change it. A message whose version differs is answered POLICYSQL_INTERNAL (500)
+// and runs nothing, so a body of another shape never reaches the machine, which would answer
+// 400 POLICYSQL_INVALID_REQUEST, a definite rejection. A reply whose version differs is not
+// read: a commit becomes POLICYSQL_COMMIT_OUTCOME_UNKNOWN (its COMMIT may have applied, and a
+// retry must never be a rejection, ADR 0007), anything else POLICYSQL_INTERNAL. Neither is a
+// rejection in the client, and a keyed execute replays from its row once the versions agree.
 //
-// A snapshot skew is the same class (#85). The Worker puts the snapshot it compiled for in the
-// `/atomic` body (same wire version, other ABI or policy: another snapshot). An object whose
-// own snapshot differs runs nothing and answers POLICYSQL_INTERNAL (500), never
+// A snapshot skew (a Worker and an object of different deployments, #85) is not a rejection.
+// The Worker puts the snapshot it compiled for in the `/atomic` body. An object whose own
+// snapshot differs runs nothing and answers POLICYSQL_INTERNAL (500), never
 // POLICYSQL_TRANSACTION_CONFLICT, which the client takes as a definite rejection of an execute
-// that may be the retry of a commit. No atomic path returns TRANSACTION_CONFLICT any more (an
-// interactive command's sequence conflict still does, unchanged), and the Worker's
-// STALE_OPERATION (409) for a request pinned to an earlier snapshot is unchanged (ADR 0024
-// "Owner snapshot mismatch"). A begin with another snapshot logs the skew but keeps its 409.
+// that may be the retry of a commit. A keyed execute that committed before the skew is
+// answered 500 while it lasts and replays from its `policysql_idempotency` row once the
+// snapshots agree. The Worker's STALE_OPERATION (409) for a request pinned to an earlier
+// snapshot is unchanged (ADR 0024 "Owner snapshot mismatch"). A begin with another snapshot
+// logs the skew but keeps its 409.
 //
 // A reply is a 2xx response whose body is the value, or a non-2xx response whose body is
-// `{ error: { code, message, path, requestId } }`. A Worker of this version reads only that distinction. The object still
-// sends exactly the statuses and bodies of earlier versions (201 for a started transaction,
-// 200 for any other value, an error's public status from the one table in src/http/status.ts)
-// because an earlier Worker forwards them to the client unchanged during a rollout
-// (ADR 0023). The wire needs no `cloudflare:workers` import (RPC
+// `{ error: { code, message, path, requestId } }`. The Worker reads only that distinction. The object sends 201 for a started
+// transaction, 200 for any other value, and an error's public status from the one table in
+// src/http/status.ts. The wire needs no `cloudflare:workers` import (RPC
 // stubs), so the adapter also runs in the Node test harness.
 import { EngineError, internalError, operationError } from "../errors.ts";
 import { stringifyExact } from "../exact-json.ts";
@@ -69,12 +57,8 @@ const OWNER_ORIGIN = "https://owner";
 const REQUEST_ID_HEADER = "x-policysql-request-id";
 const OWNER_HEADER = "x-policysql-owner";
 const WIRE_HEADER = "x-policysql-owner-wire";
-// The wire version of each path's message: 1 since ADR 0024 pull request 7 changed it, 2 for
-// `/atomic`, which pull request 8 changed. A later change of a path's message bumps its version.
-const WIRE_VERSIONS: Readonly<Record<string, string>> = Object.freeze({
-  "/begin": "1", "/statement": "1", "/commit": "1", "/rollback": "1", "/validation-query": "1", "/atomic": "2",
-});
-const wireVersion = (path: string): string | undefined => (Object.hasOwn(WIRE_VERSIONS, path) ? WIRE_VERSIONS[path] : undefined);
+// Changes whenever any owner wire message changes shape.
+const OWNER_WIRE_VERSION = "1";
 const COMMAND_PATHS: Readonly<Record<OwnerCommandKind, string>> = Object.freeze({
   statement: "/statement", commit: "/commit", rollback: "/rollback",
 });
@@ -86,11 +70,8 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
     headers: { "content-type": "application/json", ...headers },
     body: stringifyExact(body),
   });
-  if (response.headers.get(WIRE_HEADER) !== wireVersion(path)) {
-    // An object of an earlier version: it cannot read this message, and its answer (a 400 for
-    // the new body shape) is not an answer to it. Never a rejection; a commit may have applied
-    // through the earlier wire, so its outcome is unknown. An execute is never answered
-    // outcome-unknown (ADR 0024): a keyed one resolves through its row once the skew ends.
+  if (response.headers.get(WIRE_HEADER) !== OWNER_WIRE_VERSION) {
+    // An object of another wire version: its answer is not an answer to this message.
     await response.body?.cancel().catch(() => undefined);
     console.log(JSON.stringify({ event: "owner_wire_skew", path, requestId: headers[REQUEST_ID_HEADER] ?? null }));
     const error = path === "/commit"
@@ -105,15 +86,14 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
   return { ok: false, error: { code: error?.code, message: error?.message, path: error?.path ?? null } };
 };
 
-// Object side: a reply as the wire response, byte-compatible with what earlier objects sent,
-// since an earlier Worker forwards status and body to the client as they are.
+// Object side: a reply as the wire response.
 const replyResponse = (reply: OwnerReply, path: string, requestId: string) => {
   const failure = reply as { ok: false; error: { code: string; message: string; path: string | null } };
   return new Response(
     stringifyExact(reply.ok ? reply.value : { error: { ...failure.error, requestId } }),
     {
       status: reply.ok ? (path === "/begin" ? 201 : 200) : statusFor(failure.error.code),
-      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8", [WIRE_HEADER]: wireVersion(path) ?? "1" },
+      headers: { "cache-control": "no-store", "content-type": "application/json; charset=utf-8", [WIRE_HEADER]: OWNER_WIRE_VERSION },
     },
   );
 };
@@ -127,7 +107,7 @@ export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace
     route(name: string): TransactionOwnerHandle {
       const stub = namespace.get(namespace.idFromName(name));
       const message = (path: string, input: unknown, requestId: string) => send(stub, path, input, {
-        [REQUEST_ID_HEADER]: requestId, [OWNER_HEADER]: name, [WIRE_HEADER]: wireVersion(path) as string,
+        [REQUEST_ID_HEADER]: requestId, [OWNER_HEADER]: name, [WIRE_HEADER]: OWNER_WIRE_VERSION,
       });
       return {
         begin: (input, requestId) => message("/begin", input, requestId),
@@ -165,11 +145,9 @@ const serve = async (core: TransactionOwnerCore, request: Request): Promise<Resp
   const path = new URL(request.url).pathname;
   let reply: OwnerReply;
   const owner = request.headers.get(OWNER_HEADER);
-  const version = wireVersion(path);
-  const earlierWire = version !== undefined && (request.headers.get(WIRE_HEADER) !== version ||
-    (body !== null && typeof body === "object" && Object.hasOwn(body, "authFingerprint")));
-  if ((owner !== null && !core.bindName(owner)) || earlierWire) {
-    // Routed to another name, or a message of an earlier Worker: an adapter or rollout fault.
+  if ((owner !== null && !core.bindName(owner)) || request.headers.get(WIRE_HEADER) !== OWNER_WIRE_VERSION) {
+    // Routed to another name, or a message of another wire version: an adapter or rollout
+    // fault. Nothing reaches the machine.
     console.log(JSON.stringify({ event: "owner_message_rejected", requestId, path }));
     reply = { ok: false, error: operationError(internalError()) };
   } else if (path === "/begin") reply = await core.begin(body, requestId);

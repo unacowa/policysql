@@ -134,8 +134,7 @@ differential harness.
    stage 4 by persisting `committing` before COMMIT and answering commit retries in the unsafe
    windows with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. Core keeps that rule: it persists a
    `committing` record before the `Commit` effect, and a successor that finds `committing`
-   answers with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. Records written before the switch-over,
-   #48's included, are handled under [ABI impact](#abi-impact-and-rollout).
+   answers with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`.
 4. **Commit error.** `close("committed")` turns any commit error into the value
    `{ status: "failed" }` (200). A transport error during commit does not prove that nothing
    committed. Core distinguishes a definite failure from an unknown outcome (see
@@ -366,7 +365,7 @@ the connection at a time.
 
 - **Unreadable durable state** (does not parse, no `v` or another `v`, out of bounds, `owner`
   differs from the routing name, internally inconsistent, such as `committed` with an expiry).
-  This includes every record written by `TransactionOwnerCore` before the switch-over. Core
+  Core
   emits `Log(tx_state_discarded { reason })`, rolls back a connection if volatile state says one
   is open, and replaces the record with a tombstone (`phase: discarded`, the owner name, nothing
   else). The tombstone and the record it replaces are answered alike:
@@ -547,7 +546,7 @@ What each failure leads to (all decided by core, listed here because ADR 0007 de
 | Interactive successor finds `validating` | stays `validating` until the timer expires it (ADR 0022); commands get `POLICYSQL_TRANSACTION_UNAVAILABLE` |
 | Interactive successor finds `committing` | phase `commit_unknown`; a commit gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, other commands `POLICYSQL_TRANSACTION_UNAVAILABLE` |
 | Atomic owner finds any earlier phase | ignored; the request starts from the idempotency lookup |
-| Unreadable or old-format record | discarded as under [Fail-closed rules](#fail-closed-rules) |
+| Unreadable record | discarded as under [Fail-closed rules](#fail-closed-rules) |
 | `RollbackFailed` | phase stays terminal as decided; the database deadline ends the server transaction, and no commit is sent |
 
 So: a commit outcome is reported as committed only after `Committed`, as rejected only when no
@@ -604,41 +603,16 @@ today.
   `cost_estimate_json` method alone would not have needed a bump (the rule of pull request 2).
 - **In-flight transactions** do not survive any deployment: owners restart, so their
   connections are gone, and they fail closed as today.
-- **Keyed atomic retries across a snapshot change** get `POLICYSQL_IDEMPOTENCY_CONFLICT`,
-  because the fingerprint includes the binding's snapshot (ADR 0014). This is today's behavior
-  for every snapshot change and is unchanged by this ADR. (Amended by #80, ABI 9: the request
-  fingerprint no longer includes the snapshot, so such a retry replays its stored response; see
-  [ADR 0014](0014-wrapper-provided-database-bindings.md#amendment-the-request-fingerprint-has-no-snapshot-80).)
-- **Where byte-equal hashing is load-bearing.** (Superseded by
-  [ADR 0025](0025-core-defined-canonical-json.md), which drops byte equality with TypeScript
-  and states the stability requirements for `keyHash`, the auth and start fingerprints, and
-  the `{sequence}` digests; kept as the record of pull request 2.) `keyHash` must equal what `idempotency.ts`
-  computes on every deployment that changes who computes it (pull requests 2, 7, and 8). It does
-  not include the snapshot, so a different `keyHash` finds no row and executes a committed keyed
-  request again. The fingerprints and the command digest must be equal on those deployments
-  whenever the snapshot is unchanged (always for pull request 2, and for pull requests 7 and 8
-  unless they bump the ABI): a different fingerprint turns a committed keyed retry into a false
-  `POLICYSQL_IDEMPOTENCY_CONFLICT`, which the client takes as a definite rejection. Core
-  canonicalizes from the body text with its own tokenizer, not through `serde_json` values or a
-  JavaScript string: object keys sorted by UTF-16 code units, string values decoded to UTF-16
-  code units and escaped exactly as `JSON.stringify` escapes them, and numbers parsed as IEEE
-  doubles and printed by the ECMAScript `Number::toString` algorithm. The text crosses the
-  wasm-bindgen boundary as well-formed UTF-8 (ADR 0023), so an escaped lone surrogate in it
-  (`"\ud800"` as six ASCII characters) arrives intact, whereas a decoded JavaScript string with
-  a lone surrogate would be replaced by U+FFFD. Pull request 2 states the corpus and the gate.
-- **Old-format records are discarded, not read.** From the switch-over (pull request 7), every
-  record written by `TransactionOwnerCore` is unreadable: a commit retry gets
-  `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, other interactive commands
-  `POLICYSQL_TRANSACTION_UNAVAILABLE`, and a keyed atomic retry resolves through the idempotency
-  lookup (see [Fail-closed rules](#fail-closed-rules)). This is a **one-time incompatibility**,
-  accepted while PolicySQL is in beta (ADR 0019): exact retries of commands completed before the
-  switch-over are no longer replayed (a statement or rollback retry is unavailable; a commit
-  retry is outcome-unknown, even when the transaction rolled back), and no compatibility layer
-  or migration guide is provided. ADR 0007 still holds across it, because no commit retry is
-  answered with a definite rejection.
+- **Keyed atomic retries across a snapshot change** replay their stored response: the request
+  fingerprint does not include the binding's snapshot (#80, ABI 9; see
+  [ADR 0014](0014-wrapper-provided-database-bindings.md#amendment-the-request-fingerprint-has-no-snapshot-80)).
+- **Unreadable records are discarded, not read** (see [Fail-closed rules](#fail-closed-rules)):
+  a commit retry gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, other interactive commands
+  `POLICYSQL_TRANSACTION_UNAVAILABLE`, and a keyed atomic retry resolves through the
+  idempotency lookup. ADR 0007 holds: no commit retry is answered with a definite rejection.
 - The Durable Objects class name and storage key stay; the value's shape is discriminated by `v`.
-  The internal owner wire (ADR 0022, ADR 0023) keeps its paths; the forwarded inputs become the
-  `Forwarded` event's JSON.
+  The forwarded inputs of the internal owner wire (ADR 0022, ADR 0023) are the `Forwarded`
+  event's JSON.
 
 - **Failures before COMMIT is sent (#54, ABI 12).** The transport wrapper's `commit()` checks
   the binding and the remaining deadline immediately before it sends COMMIT, rolls back and
@@ -666,7 +640,7 @@ today.
   snapshot it compiled for. An owner whose own snapshot differs (a Worker and an owner of
   different deployments, whether during a rollout or a stale object after a partial deploy)
   runs nothing and answers `POLICYSQL_INTERNAL` (500, the version-skew answer, with the fixed
-  message of that code), the answer a wire-version skew gets. It is never
+  message of that code). It is never
   `POLICYSQL_TRANSACTION_CONFLICT`: the client takes that as a definite rejection of an
   execute, but the Worker may be retrying a keyed write that already committed, and ADR 0007
   forbids a definite rejection of a request whose COMMIT may have been sent. The retry replays
@@ -698,12 +672,7 @@ Every pull request keeps `just fmt lint test coverage`, `cd deploy/cloudflare &&
 Ahead of stage 4, **#48** fixes inconsistency 3 in today's TypeScript owner: `terminal()`
 persists `status: "committing"` before COMMIT, and a commit retry in the unsafe windows gets
 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, which #48 adds to the status table, the specification, and
-the client. #48 is a separate pull request and not part of this sequence. Its records, including
-`committing`, have no `v` and are the old format at the switch-over in pull request 7, so the
-discard rule answers a commit against any of them with `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`. That
-is the answer #48 gives for its own `committing` record and for its unsafe windows, so clients
-see no regression at the switch-over. For a commit that #48 could still replay from a matching
-`last`, the answer becomes outcome-unknown (the one-time incompatibility above).
+the client. #48 is a separate pull request and not part of this sequence.
 
 1. **This ADR.** Design only.
 2. **Canonical JSON, hashing, and identities in core.** `policysql-transaction` with
@@ -755,13 +724,11 @@ see no regression at the switch-over. For a commit that #48 could still replay f
    covers `turso.test.mjs`, `execute-egress.test.mjs`, `idempotency.test.mjs`, and
    `cost.test.mjs` scenarios.
 7. **Switch interactive transactions.** `TransactionOwnerCore` becomes the effect executor for
-   `interactive`; `engine.ts` begin and commands run the `request` kind; old-format records are
-   discarded, including #48's `committing` records. The TypeScript decision path remains only as
-   the harness's reference. Smoke. (Implemented with the engine forwarding the owner inputs
+   `interactive`; `engine.ts` begin and commands run the `request` kind. Smoke. (Implemented with the engine forwarding the owner inputs
    instead of the `request` kind, which moves to pull request 8; see its notes below.)
 8. **Switch atomic execution.** `engine.ts` execute and the owner's atomic input run the
    machine. Smoke. (Implemented with the engine's binding check answering the machine's first
-   `checkBinding`, and a per-path owner wire version; see its notes below.)
+   `checkBinding`; see its notes below.)
 9. **Delete.** The TypeScript decision code: the decision parts of `transaction-owner.ts`,
    `commit-checks.ts` (except what the hook adapter needs), the decision parts
    of `turso.ts` (`executeSealedEnvelope`, `executeSealedOnTransaction`,
@@ -808,7 +775,7 @@ see no regression at the switch-over. For a commit that #48 could still replay f
     emitted;
   - a second commit with the same digest replays, with a different payload conflicts;
   - tampered durable state (byte mutations of valid states, field mutations, other owners'
-    states, old-format records) is either discarded by the fail-closed rule or behaves as some
+    states) is either discarded by the fail-closed rule or behaves as some
     valid state; it never yields a `Commit` that the untampered state would not, and a commit
     against a discarded record always gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`;
   - every reachable state is within its bounds; at most one awaited effect per lane and one on
@@ -926,7 +893,7 @@ it yet.
   (`test/helpers/step-owner.mjs`) does this; `TransactionOwnerCore`'s successor inherits it at
   the switch-over.
 - **Tests.** Property tests (`tests/properties.rs`, proptest), transcripts of inconsistencies
-  3, 4, and 6, the deadline after `committing`, #70, and old-format records
+  3, 4, and 6, the deadline after `committing`, #70, and unreadable records
   (`tests/fixtures/transactions/`, replayed byte for byte by `tests/transcripts.rs`), and the
   differential harness (`deploy/cloudflare/test/step-differential.test.mjs`) with its
   allowlist. The `cargo fuzz` targets are not part of this pull request; a property test feeds
@@ -1203,34 +1170,12 @@ production to the machine (`deploy/cloudflare/src/transaction-owner.ts`).
   same question, so both are resolved together. Until then the begin body checks (`mode`,
   `expected`) and the transaction id and start fingerprint (both from core's `identity_json`)
   stay in `engine.ts`; the owner validates the forwarded input again.
-- **Wire and version skew.** The Durable Objects paths are unchanged; the body of an
-  interactive command or a callback query is the owner input above (the callback capability
-  moved from the `authorization` header into the body). During a rollout a Worker and an
-  object of different versions can meet, in either direction, so both sides mark the wire
-  version (`x-policysql-owner-wire: 1`): the Worker on every message, the object on every
-  reply. On the changed paths (`/begin`, `/statement`, `/commit`, `/rollback`,
-  `/validation-query`; `/atomic` did not change):
-  - **earlier Worker, this object**: a message without the marker (the earlier body shapes,
-    with `authFingerprint`, or the earlier callback with the capability in `authorization`)
-    is answered `POLICYSQL_INTERNAL` and never reaches the machine (which would answer the
-    old shape `POLICYSQL_INVALID_REQUEST`, a definite rejection);
-  - **this Worker, earlier object**: the earlier object rejects the new body shape with 400
-    `POLICYSQL_INVALID_REQUEST`, and its reply carries no marker. The Worker does not read such
-    a reply: a commit becomes 503 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (its COMMIT may have
-    applied through the earlier wire, and a retry of it must never be a rejection, ADR 0007),
-    anything else 500 `POLICYSQL_INTERNAL`. Neither is a rejection in the client.
-
-  Interactive transactions are therefore unavailable while the versions are skewed (the first
-  deployment of this pull request showed one such window), but never misreported. So is an
-  atomic execute with a commit check whose validator calls back: the `/atomic` message itself
-  is unchanged, but the callback crosses `/validation-query`, which the skew answers 500, so a
-  validator that fails closed denies and the execute gets 409
-  `POLICYSQL_COMMIT_CHECK_REJECTED`. That rejection is true: COMMIT was never sent and nothing
-  is stored under its idempotency key, so the same key succeeds once the skew ends. A later
-  change of the owner wire bumps the marker. The object still answers with the statuses and
-  bodies of ADR 0023. A test freezes origin/main's object (`serve` over
-  `LegacyTransactionOwnerCore`) and drives the production port against it, and another sends
-  origin/main's Worker messages to this object.
+- **Wire.** The Durable Objects paths are unchanged; the body of an interactive command or a
+  callback query is the owner input above (the callback capability travels in the body). The
+  object answers with the statuses and bodies of ADR 0023. An owner wire message change must
+  change the wire version (`x-policysql-owner-wire`, ADR 0022): a version mismatch is never a
+  rejection (a commit is `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, anything else `POLICYSQL_INTERNAL`,
+  and nothing runs).
 - **BigInt in the transport.** `TursoHttpTransport` encodes a `BigInt` argument within the
   signed 64-bit range as a Hrana `integer` with its digits; anything else stays
   `POLICYSQL_INTERNAL`. With that, #70 holds through the HTTP path: `1e400` gets the compile
@@ -1238,44 +1183,9 @@ production to the machine (`deploy/cloudflare/src/transaction-owner.ts`).
   hashed, and matched by a callback query exactly. The TypeScript atomic path, which pull
   request 8 switches, still binds such an integer through a JavaScript number
   (`9007199254740992`); the test of #70 pins the interactive side only.
-- **The TypeScript decision path.** `TransactionOwnerCore` of before is
-  `LegacyTransactionOwnerCore` (`src/transaction-owner-legacy.ts`), kept for the atomic owner
-  path until pull request 8 (an `atomic` input, and the callback queries, timer, and client
-  inputs of an owner whose record it wrote: such an owner holds an object whose transaction id
-  starts with `atomic_`, which the executor checks before the machine's state exists) and as
-  the differential harness's reference until pull request 9, which deletes it. Its interactive
-  decisions are unreachable for every owner that holds an interactive record or none; for a
-  name holding an atomic record it answers interactive inputs as before (unavailable or
-  conflict) and writes nothing. `commit-checks.ts`, `turso.ts`, and `cost.ts` stay for that
-  path.
-- **Old-format records** are discarded by the machine's rule (logged `tx_state_discarded`,
-  replaced by a tombstone): every record of the TypeScript owner, #48's `committing`
-  included, answers a commit `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` and any other command or
-  callback query `POLICYSQL_TRANSACTION_UNAVAILABLE`, from the record and its tombstone alike;
-  a timer of such a record discards it too. The conformance suite plants each status on both
-  adapters.
-- **Differential harness.** `step-differential.test.mjs` now runs `LegacyTransactionOwnerCore`
-  against the production `TransactionOwnerCore` (not a test executor) with the same allowlist;
-  the atomic harness keeps `StepOwnerCore` (`test/helpers/step-owner.mjs`, now a thin subclass
-  of the production executor with the machine's atomic owner path) until pull request 8.
-- **Tests that changed with the switch** (each is an allowlisted difference or the discard
-  rule): the timer during a validator records `expired` and answers at once; a failed
-  terminal put after COMMIT, a COMMIT transport error, and window A record or answer
-  `commit_unknown` (never `failed`, never a replay from memory); the TypeScript owner's
-  record-format tests (`commitSent`, the previous release's records) became the old-format
-  discard tests; a store read fault during a live validation does nothing (the machine reads
-  no record for a callback); an internal begin without a binding is `POLICYSQL_INVALID_REQUEST`
-  (`POLICYSQL_DATABASE_REQUIRED` before; only an adapter fault can send one); the ~1 MB statement
-  of exponents gets `POLICYSQL_INVALID_PARAMETER` as in an atomic execute (the owner no longer
-  re-serializes it past the request limit); the engine and the owner call `identity_json` for
-  no command (core hashes inside the step). Test alarms fire at their time (the machine checks
-  the deadline against `nowMs`, where `TransactionOwnerCore.onTimer` expired whatever the
-  clock said).
-
 Recorded by pull request 8 (ABI unchanged at 8), which switches atomic execution in production
 to the machine (`deploy/cloudflare/src/request-step.ts`, `src/engine.ts`,
-`src/transaction-owner.ts`). No production path uses the TypeScript decision code any more;
-pull request 9 deletes it.
+`src/transaction-owner.ts`).
 
 - **The engine runs `execute` as the `request` kind.** `engine.ts` checks the request context,
   authorizes the session (core), asks the wrapper's provider about the binding, reads the
@@ -1321,53 +1231,24 @@ pull request 9 deletes it.
   every input `step_json` read before is answered byte for byte as before (the transcripts
   replay unchanged), only an `executeFailed` it rejected as unreadable is now read (the rule of
   pull requests 2 and 3), and the engine and the module ship in one bundle.
-- **ABI and snapshot.** `ABI_VERSION` stays 8, so the snapshot does not change on this
-  deployment, and with ADR 0025's stability of `keyHash` and the fingerprint, a keyed atomic
-  retry across it finds its row with the same fingerprint and replays (a bump would have made
-  every such retry a false `POLICYSQL_IDEMPOTENCY_CONFLICT`, which the client takes as a
-  definite rejection).
 - **Forward and request ids.** `forward` goes through the port's `atomic(input, requestId)`
   with the engine's request id, which the owner passes as `HostFacts.request_id`, so the
   owner's reply (`meta.requestId`) and its stored row (`originalRequestId`) carry the engine's
   request id, as before; a replay names the original one. The owner's reply crosses the port
   as JSON, and the machine relays it after its shape check.
-- **The owner.** `TransactionOwnerCore` runs every input on the machine; the routing to
-  `LegacyTransactionOwnerCore` is gone, and that class (with `turso.ts`, `cost.ts`, and
-  `commit-checks.ts`) is unreachable in production. It stays as the harnesses' reference and,
-  in tests, as the previous release's writer until pull request 9. A record the TypeScript
-  atomic path wrote is an old-format record: an atomic input discards it (`tx_state_discarded`)
-  and resolves a keyed retry through `policysql_idempotency`; interactive inputs, callback
-  queries, and timers answer as for any old-format record. An owner holding the machine's own
-  atomic record answers interactive commands and callback queries
+- **The owner.** `TransactionOwnerCore` runs every input on the machine. An owner holding the
+  machine's own atomic record answers interactive commands and callback queries
   `POLICYSQL_TRANSACTION_UNAVAILABLE`, and its timer changes nothing.
-- **Wire and version skew.** The `/atomic` message changed (the machine's forwarded input,
-  `kind: "atomic"` included, and the public `execute` response as the reply, which the Worker
-  relays), so the wire marker is now per path: `x-policysql-owner-wire: 1` on the paths of pull
-  request 7, which did not change and keep working across this deployment, and `2` on
-  `/atomic`, on every message and every reply. During a rollout:
-  - **this Worker, previous object**: the previous object hands `/atomic` to
-    `LegacyTransactionOwnerCore`, whose exact-key check rejects the `kind` member with 400
-    before any database work, and replies with marker 1; the Worker does not read it and
-    answers 500 `POLICYSQL_INTERNAL`;
-  - **previous Worker, this object**: its `/atomic` message carries marker 1; the object
-    answers 500 `POLICYSQL_INTERNAL` and runs nothing; the previous Worker forwards it.
-
-  Neither is a rejection of `execute` in the client, and nothing executes a message it cannot
-  read, so a keyed retry of an execute that committed before or during the skew is answered
-  500 while it lasts and replays once the versions agree (never `IDEMPOTENCY_CONFLICT`, never a
-  second execution). Atomic executes that can trigger a commit check are therefore unavailable
-  during the skew; the direct placement involves no owner and is unaffected.
-  `test/atomic-switch.test.mjs` freezes origin/main's object (`/atomic` over
-  `LegacyTransactionOwnerCore`, marker 1) and Worker (`test/helpers/legacy-engine.mjs`, the
-  `execute` of 6f97c57, and its `send` with marker 1) against the production port and object.
+- **Wire.** The `/atomic` message is the machine's forwarded input (`kind: "atomic"`
+  included), and the reply is the public `execute` response, which the Worker relays. The
+  wire version rule above applies (`owner-wire-version.test.mjs`).
 - **Cost observation** is core's (pull request 6): after COMMIT, and for a direct replay, on
   both placements. On an owner, `LegacyTransactionOwnerCore` observed after the envelope,
   before its checks, so it also observed an execution that a check rejected or that failed
   later; that no longer happens. Only the `cost_observation` and `cost_observation_failed` log
   records differ; no reply depends on them.
 - **Client-visible differences** (every other reply, database call, validator call, row, and
-  trace is asserted equal by the differential harness, which now runs
-  `test/helpers/legacy-engine.mjs` with `LegacyTransactionOwnerCore` against production):
+  trace was asserted equal by the differential harness against the previous release):
   1. a keyed retry whose row has another fingerprint is `POLICYSQL_IDEMPOTENCY_CONFLICT` on the
      owner placement too (was `POLICYSQL_TRANSACTION_CONFLICT`); both are rejections
      (inconsistency 1);
@@ -1387,16 +1268,14 @@ pull request 9 deletes it.
      and COMMIT (the transport's check before COMMIT) is 500 `POLICYSQL_INTERNAL` (was 403
      `POLICYSQL_DATABASE_BINDING_REJECTED`): COMMIT may have been sent, so core never answers
      it with a code of the request's own failure; none of these is a rejection in the client;
-  7. during a version skew, an atomic execute that can trigger a commit check is 500 (above).
 
   Log-only: `request_rejected` is now also logged for an owner placement's error reply, and the
   cost observation timing above.
 - **Tests.** `test/atomic-switch.test.mjs` (both adapters): #70 on both placements (atomic and
   interactive write and match `9007199254740993`), request ids in replies and rows, keyed
-  retries across owner loss (also when the terminal record was lost after COMMIT) and across
-  the deployment (rows the previous release's direct and owner paths wrote, and its owner
-  record), cost observation after COMMIT only, malformed delegated idempotency on the
-  production owner, and both directions of `/atomic` skew. `step-atomic-differential.test.mjs`
+  retries across owner loss (also when the terminal record was lost after COMMIT), cost
+  observation after COMMIT only, and malformed delegated idempotency on the production owner.
+  `step-atomic-differential.test.mjs`
   runs the previous release's `execute` against production (its `StepEngine` and
   `StepOwnerCore` helpers are deleted); its allowlist pins client-visible changes 5, 6, and the
   direct-path half of 6 as `owner-prior-record-of-another-binding`, `owner-commit-failure-code`,
@@ -1405,11 +1284,7 @@ pull request 9 deletes it.
   `checkBinding` of a request: the cache is consumed by that check whatever it names, so a
   later deadline-less check of the same binding always calls the provider, whatever order of
   effects core uses. `crates/policysql-transaction/tests/atomic.rs` adds the
-  `limit` class, and the property tests draw it. Tests that changed with the switch: the owner
-  wire tests (per-path marker), the atomic owner's record (now the machine's), the ABI 4 row of
-  `abi-bump-retry.test.mjs` (planted with the frozen ABI 4 values, since the machine reads the
-  runtime's own snapshot), and the atomic unit tests over a fake compiler, which now test
-  `LegacyTransactionOwnerCore` as the interactive ones do.
+  `limit` class, and the property tests draw it.
 - **For pull request 9: the cost codes.** `POLICYSQL_COST_UNKNOWN` and
   `POLICYSQL_COST_ADMISSION_UNAVAILABLE` are now thrown only by `cost.ts`, which no production
   path reaches; core's `cost_estimate_json` and the `observe` executor put them only into
@@ -1451,9 +1326,7 @@ authoritative Rust (`policysql-transaction`), and no TypeScript decides a transa
   recorded everything the TypeScript side produced in every scenario of
   `step-differential.test.mjs` and `step-atomic-differential.test.mjs` (replies, database calls,
   log events, validator calls, callback replies, trace-sink calls, records, rows, `cost.ts`'s
-  estimates), and in the version-skew tests of `atomic-switch.test.mjs` and
-  `transaction-owner-port.test.mjs` (the previous release's committed rows and owner record, its
-  objects' replies, and its Worker's `/atomic` messages), into
+  estimates), into
   `deploy/cloudflare/test/fixtures/reference/*.json` (`test/helpers/reference-transcript.mjs`).
   The tests now run production only and compare it with the recording, observation by
   observation (a label that drifts, or an unused observation, fails). Every allowlist entry
@@ -1486,15 +1359,6 @@ authoritative Rust (`policysql-transaction`), and no TypeScript decides a transa
   statement (`tests/machine.rs`), an atomic envelope on both placements, keyed and unkeyed
   (`tests/atomic.rs`), and a callback query (`tests/commit_checks.rs`); each asserts no
   `execute` of the statement, no COMMIT, and every handle released.
-- **Kept for rollout safety.** The discard of old-format records is the machine's own rule
-  (no TypeScript), and it stays: Durable Object storage outlives deployments, so a deployment
-  upgrading from a release before pull request 7 or 8 may still hold records the TypeScript
-  owner wrote, and the rule is what answers them without a false rejection. The per-path wire
-  markers (`1` on the interactive paths, `2` on `/atomic`) and the checks that never read an
-  unmarked or mismatched reply stay for the same reason: this pull request changes no wire,
-  so its own deployment has no skew, but an installation that upgrades from an earlier release
-  meets the skews of pull requests 7 and 8, and those checks keep them unavailable rather than
-  misreported. Their tests replay the recorded earlier objects and Worker.
 - **Not changed (observed while porting `turso.test.mjs`).** On the direct placement, a driver
   row whose shape does not match its columns fails the `execute` effect (`executeFailed`,
   class `unavailable`, so 503), where the TypeScript path answered 422
@@ -1519,6 +1383,5 @@ authoritative Rust (`policysql-transaction`), and no TypeScript decides a transa
 - #48 fixes the ADR 0007 violation of inconsistency 3 now, ahead of stage 4.
 - A replay identity without the snapshot.
 - The `sha2`, `proptest`, and `cargo fuzz` dependencies.
-- Old-format records are discarded instead of read.
 
 No questions remain open.

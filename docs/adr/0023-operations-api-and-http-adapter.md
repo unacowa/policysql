@@ -122,16 +122,13 @@ or passes it; `test/http-conformance.test.mjs` runs it against the shipped adapt
 ### The owner reply carries no status
 
 `OwnerReply` is `{ ok: true, value } | { ok: false, error: { code, message, path } }`, checked
-by the engine like any data crossing an adapter. The Durable Objects adapter keeps its paths
-and headers, and its replies stay exactly what earlier objects sent: 201 with the value for a
+by the engine like any data crossing an adapter. The Durable Objects adapter's replies are: 201 with the value for a
 started transaction, 200 with the value for every other command, atomic execute, and callback
 query, and an error's public status (from the one table, `src/http/status.ts`) with
-`{ error: { code, message, path, requestId } }`. A Worker of this version reads only "2xx is
-the value, otherwise the error". An earlier Worker forwarded each owner reply's status and
-body to the client unchanged, so during a mixed-version rollout clients see the same
-responses from either Worker; a test runs that earlier forwarding against this object for
-begin, statement, commit, rollback, atomic execute, and the callback query. The callback
-capability crosses the wire as `authorization: Bearer <capability>`, as before.
+`{ error: { code, message, path, requestId } }`. The Worker reads only "2xx is the value,
+otherwise the error", and a test checks that each reply is what the client sees for begin,
+statement, commit, rollback, atomic execute, and the callback query. The callback capability
+crosses the wire in the body of the owner input (ADR 0024).
 
 ## Consequences
 

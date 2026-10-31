@@ -383,7 +383,7 @@ impl Durable {
         if text.len() > MAX_DURABLE_BYTES {
             return Err(Unreadable::TooLarge);
         }
-        // `v` first, so an old-format record is reported as such.
+        // `v` first, so a record of another format version is reported as such.
         let probe: serde_json::Value =
             serde_json::from_str(text).map_err(|_| Unreadable::Malformed)?;
         if probe.get("v").and_then(serde_json::Value::as_u64) != Some(u64::from(TX_STATE_VERSION)) {

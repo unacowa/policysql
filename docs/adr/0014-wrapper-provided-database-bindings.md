@@ -74,17 +74,6 @@ keyed `interactive-start`):
 - The auth fingerprint of interactive records keeps the snapshot; commit retries already match
   by the replay identity, which has none (ADR 0007, ADR 0024).
 
-**Transition.** Rows written before ABI 9 carry the old fingerprint (with the snapshot) and
-never match the new one. A keyed retry that finds such a row gets
-`POLICYSQL_IDEMPOTENCY_CONFLICT`, exactly as it would have on any snapshot-changing deployment
-before #80; it never executes twice. This one-time incompatibility is accepted in beta (ADR
-0019, ADR 0025). Matching the old fingerprint as well was rejected: the old value hashed the
-snapshot of the deployment that wrote the row, which the row does not store, so core could
-reproduce it only by guessing earlier snapshots (for example the previous ABI suffix under the
-same schema and policy), a legacy path for a window that closes with the retention of those
-rows. Answering an unknown outcome instead of a conflict for such rows was rejected for the
-same reason: a row cannot tell a changed body from a changed snapshot.
-
 ## Consequences and evidence
 
 - This is a breaking embedding API change. Legacy wrappers and unresolved retry windows

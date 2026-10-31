@@ -73,8 +73,7 @@ A commit command is checked in this order:
    checks that the stored `auth` and binding still produce the stored fingerprint. Another
    principal, subject, role, session, or database is rejected with 409
    `POLICYSQL_TRANSACTION_UNAVAILABLE`, as before.
-3. If the command's sequence and digest equal `commitSent` (or the record is one of the
-   previous release's, described below), the commit is answered now, before any snapshot,
+3. If the command's sequence and digest equal `commitSent`, the commit is answered now, before any snapshot,
    route, or expiry check. It gets the recorded reply when the record is `committed` with this
    commit as `last`, or when the live owner has just stored the terminal record it kept in
    memory. Otherwise it gets the new public code `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (HTTP 503,
@@ -87,22 +86,6 @@ A commit command is checked in this order:
 A deployment between a commit and its retry therefore changes nothing for that commit: it
 gets its recorded reply or the unknown outcome. A commit that waits on its validator has not
 sent COMMIT, so its expiry still answers 409 `POLICYSQL_COMMIT_CHECK_REJECTED`.
-
-Records written by the previous release carry neither `commitSent` nor `commitRecording: 1`,
-which this release writes into every record it starts. The previous release wrote nothing
-before COMMIT and could leave `committed` with the preceding command's `last` (between its two
-puts), `active` (owner lost after COMMIT), `failed` (a COMMIT error, or its successor's fail
-closed), or `expired` (its timer during COMMIT) after a COMMIT that may have applied. Nothing in
-such a record proves that COMMIT was not sent (ADR 0024), so a commit at the record's next
-sequence is answered with the unknown outcome, never a rejection, when no open transaction of
-this owner belongs to it. The cost is that a commit that really was rejected or never sent by
-the previous release also gets the unknown outcome; `validating` and `rolled_back` records,
-and a commit at any other sequence, are still rejected because they prove that no COMMIT was
-sent for that command. What remains is a retry that the previous release's own owner serves
-before the deployment replaces it: that code answers as it always did, possibly with 409, and
-no change in this release can reach it. This needs a retry that overlaps the deployment
-itself, so it occurs only during the rollout: an interactive transaction lives at most a few
-seconds, and a deployment restarts every owner.
 
 ### Retry rules of the step machine (amended by ADR 0024, effective from its pull request 7)
 
@@ -140,15 +123,12 @@ in-memory re-recording above once it is in use:
   `expired` or `failed` otherwise). The phase means that the transaction will never be
   committed (no COMMIT is ever sent for it), not that the server confirmed the rollback; the
   server transaction, and any locks it holds, may persist until the database deadline ends it.
-- **Records written before the switch-over**, `commitRecording` ones included, are discarded:
-  a commit gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, every other command
-  `POLICYSQL_TRANSACTION_UNAVAILABLE` (ADR 0024, "Old-format records are discarded, not read").
+- **An unreadable record** is discarded: a commit gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`,
+  every other command `POLICYSQL_TRANSACTION_UNAVAILABLE` (ADR 0024, "Fail-closed rules").
 
 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` is never a rejection. The client library does not list it
 among definite rejections, so it raises `PolicySqlOutcomeUnknownError` and keeps the commit
 pending for `retryPending()`; the Kysely dialect then does not send a contradictory rollback.
-An earlier Worker that forwards an owner's reply unchanged passes 503 through; one that maps
-codes by its own table serves an unknown code as 500, which the client also treats as unknown.
 
 Atomic Execute on the owner does not answer from the owner record. A keyed retry runs again
 and resolves through the `policysql_idempotency` row written in the same database transaction,
