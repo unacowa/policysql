@@ -10,7 +10,7 @@ roles:
       allow_aggregations: false
       allow_windows: false
     insert:
-      columns: [id, label, note, payload]
+      columns: [id, label, note, payload, doc]
       presets:
         tenant_id: { session: tenant_id }
       check: { tenant_id: { eq: { session: tenant_id } } }

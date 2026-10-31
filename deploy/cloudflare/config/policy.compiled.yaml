@@ -239,6 +239,7 @@ resources:
             - label
             - note
             - payload
+            - doc
           presets:
             tenant_id:
               session: tenant_id

@@ -14,6 +14,7 @@
     "deploy": "wrangler deploy",
     "provision:dev": "npm run verify && node scripts/provision-dev.mjs",
     "token:dev": "node scripts/mint-dev-token.mjs",
+    "measure:cpu": "node scripts/measure-cpu.mjs",
     "rollback": "node scripts/rollback.mjs",
     "test": "node --test test/*.test.mjs",
     "test:memory-owner": "POLICYSQL_TEST_OWNER_ADAPTER=memory node --test test/*.test.mjs"

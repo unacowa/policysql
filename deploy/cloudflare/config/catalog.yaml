@@ -95,3 +95,6 @@ resources:
       label: { type: string }
       note: { type: string, nullable: true }
       payload: { type: bytes, nullable: true }
+      # Release-smoke CPU probes (ADR 0027, #56): large JSON documents of the shapes the CPU model is
+      # measured on. Insert only; never selected.
+      doc: { type: json, representation: object, storage: text, nullable: true }
