@@ -250,6 +250,40 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   }
 
   // ------------------------------------------------------------------------------------------
+  // The verified auth carries the selected role twice (role and roles): a long role name makes
+  // it about twice the session, and every bound derived from it must admit that.
+
+  // A policy cannot name a role this long (activation fails), so the request is answered by
+  // policy: what matters is that it reaches compile and the Catalog instead of being refused as
+  // an invalid request or an internal fault by an auth bound. The step event with such an auth is
+  // covered in Rust (`a_long_selected_role_passes_every_auth_derived_bound`).
+  for (const [label, limits] of [
+    ["the defaults", {}],
+    ["the hard maxima", { maxRequestBytes: 2_097_152, maxJsonValues: 131_072 }],
+  ]) {
+    for (const hooks of [false, true]) {
+      test(`${ownerAdapter}/${hooks ? "owner" : "direct"}: with ${label}, a session with a 40,000-byte selected role reaches compile and the Catalog`, async (t) => {
+        t.mock.method(console, "log", () => {});
+        const role = `r${"x".repeat(40_000)}`;
+        const h = await harness(t, { ownerAdapter, hooks, fixture, runtimeLimits: { ...REQUIRED, ...limits } });
+        const session = h.session("a", { roles: ["member", role], defaultRole: "member", access: ["execute", "explain", "catalog"] });
+        assert.ok(JSON.stringify(session).length <= 65_536);
+        const call = (path, init) => h.app.fetch(new Request(`https://worker.test${path}`, {
+          ...init, headers: { "content-type": "application/json", "policysql-role": role, ...init.headers },
+        }), { database: h.binding("a"), session }, h.background).then(async (response) => ({ status: response.status, body: await response.json() }));
+        const executed = await call(EXECUTE, { method: "POST", headers: { "idempotency-key": `long-role-${hooks}-key-0001` }, body: JSON.stringify({ statements: [insert("long_role")] }) });
+        assert.equal(executed.status, 403, JSON.stringify(executed.body).slice(0, 300));
+        assert.equal(executed.body.error.code, "POLICYSQL_MISSING_POLICY");
+        const explained = await call("/v1/transactions:explain", { method: "POST", headers: {}, body: JSON.stringify({ statements: [insert("long_role")] }) });
+        assert.equal(explained.status, 403, JSON.stringify(explained.body).slice(0, 300));
+        const catalog = await call("/v1/catalog", { method: "GET", headers: {} });
+        assert.equal(catalog.status, 200, JSON.stringify(catalog.body).slice(0, 300));
+        assert.equal(rowCount(h, "long_role"), 0);
+      });
+    }
+  }
+
+  // ------------------------------------------------------------------------------------------
   // Capabilities advertises exactly the enforced values
 
   test(`${ownerAdapter}: Capabilities advertises the configured request limits, and the engine enforces those values`, async (t) => {

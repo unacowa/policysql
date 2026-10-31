@@ -119,11 +119,15 @@ session JSON the wrapper supplies; a larger one is a wrapper fault, 500 `POLICYS
 
 | Bound | Formula | At the default `R` |
 | --- | --- | --- |
-| WASM compile input (verified auth + request) | `(A + 1,024) + R + 1,024` | 1,116,160 |
-| `identity_json` and `cost_estimate_json` input | `(A + 1,024) + 2,048 + 128 + 2 R + 1,024` | 2,166,912 |
-| Step event | `2 R + (A + 1,024) + 2,048 + max_statements x 1 MiB + 4,096` | 10,558,464 with 8 statements |
+| WASM compile input (verified auth + request) | `(2 A + 1,024) + R + 1,024` | 1,181,696 |
+| `identity_json` and `cost_estimate_json` input | `(2 A + 1,024) + 2,048 + 128 + 2 R + 1,024` | 2,232,448 |
+| Step event | `2 R + (2 A + 1,024) + 2,048 + max_statements x 1 MiB + 4,096` | 10,624,000 with 8 statements |
 
-The factor 2 is the JSON escaping of the body text embedded in a hash input or an event (every
+The auth is at most `2 A + 1,024`, not `A + 1,024`: it carries the role the client selected with
+`PolicySQL-Role`, which is one of the session's `roles`, so a long role name appears twice (as `role`
+and inside `roles`). Role names have no length limit of their own, so the bound is `2 A`; the
+auth bound is a check on our own value, and one over it is 500 `POLICYSQL_INTERNAL`, not a client
+error. The factor 2 on `R` is the JSON escaping of the body text embedded in a hash input or an event (every
 `"` and `\` doubles). The `max_statements x 1 MiB` term is the result side, which ADR 0027 pull
 request 6 replaces with the compiled raw bound. Exceeding a derived bound is reported as the limit
 it derives from (413 `POLICYSQL_REQUEST_TOO_LARGE`), never as 400. Two replies PolicySQL reads from

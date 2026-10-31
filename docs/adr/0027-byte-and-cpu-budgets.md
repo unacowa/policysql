@@ -533,7 +533,11 @@ parses every statement first). The step event keeps `max_statements` × 1 MiB as
 until pull request 6 replaces it. `maxResponseBytes` is reported in `limits_json` at its default
 (`maxResultBytes` + 65,536) but neither enforced nor advertised before pull request 6, so
 Capabilities still advertises only enforced values; the same holds for the result side of
-`maxJsonValues`. The control reply (65,536) and validator reply (65,536) bounds are read with the
+`maxJsonValues`. The verified auth is bounded by `2 A + 1,024`, not `A + 1,024`: it carries the selected
+role, one of the session's `roles`, a second time, and role names have no length limit; the three
+derived request bounds above use it (compile 1,181,696, hash 2,232,448, event 10,624,000 at the
+defaults). An auth over that bound is our own inconsistency, answered 500 `POLICYSQL_INTERNAL`.
+The control reply (65,536) and validator reply (65,536) bounds are read with the
 streamed reader of pull request 2.
 
 The release smoke read the real CPU of 1 MB requests from Workers observability (an Atomic

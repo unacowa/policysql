@@ -9,8 +9,12 @@
 
 /// `A`: the wrapper-supplied session JSON. Larger is a wrapper fault (`POLICYSQL_INTERNAL`).
 pub const SESSION_INPUT_BYTES: usize = 65_536;
-/// The verified auth JSON core emits from a session (`A` plus the fields core adds).
-pub const AUTH_BYTES: usize = SESSION_INPUT_BYTES + 1_024;
+/// The verified auth JSON core emits from a session. Its `role` is the one the client selected
+/// with `PolicySQL-Role`, which must be one of the session's `roles`, so a long role name
+/// appears twice (as `role` and inside `roles`): the auth is at most the session plus one role
+/// name, and a role name is part of the session, so at most `2 A`, plus the fields core adds.
+/// Role names have no length limit of their own; this is the sound bound without one.
+pub const AUTH_BYTES: usize = 2 * SESSION_INPUT_BYTES + 1_024;
 /// The database binding: four parts of at most 256 characters, JSON-escaped, plus framing.
 pub const BINDING_BYTES: usize = 2_048;
 /// An `Idempotency-Key` (16 to 128 characters).
@@ -59,9 +63,9 @@ mod tests {
 
     #[test]
     fn bounds_at_the_documented_defaults() {
-        assert_eq!(compile_input_bytes(1_048_576), 1_116_160);
-        assert_eq!(hash_input_bytes(1_048_576), 2_166_912);
-        assert_eq!(event_bytes(1_048_576, 0), 2_166_912 - 1_024 - 128 + 4_096);
+        assert_eq!(compile_input_bytes(1_048_576), 1_181_696);
+        assert_eq!(hash_input_bytes(1_048_576), 2_232_448);
+        assert_eq!(event_bytes(1_048_576, 0), 2_232_448 - 1_024 - 128 + 4_096);
     }
 
     #[test]

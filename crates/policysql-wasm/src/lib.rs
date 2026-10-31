@@ -830,8 +830,10 @@ impl PolicySqlRuntime {
     }
 
     fn catalog(&self, verified_auth_json: &str) -> Result<CatalogResponse, RuntimeError> {
+        // The auth comes from `authorize_session_json`, never from the client: one over its
+        // derived bound is the engine's or wrapper's inconsistency (500), not a bad request.
         if verified_auth_json.len() > policysql_transaction::bounds::AUTH_BYTES {
-            return Err(RuntimeError::Envelope);
+            return Err(RuntimeError::Internal);
         }
         let auth = activate_auth(verified_auth_json, EndpointPermission::Catalog)?;
         let role = auth.session().role();
@@ -926,11 +928,12 @@ impl PolicySqlRuntime {
         request_json: &str,
         permission: &str,
     ) -> Result<(CompileResponse, Option<policysql_gateway::CompiledEnvelope>), RuntimeError> {
-        // The derived bounds of ADR 0027: the engine already enforced `max_request_bytes` on
-        // the body, so an input over them is the configured limit's error, never a 400.
+        // The derived bounds of ADR 0027. The auth is our own value (see `catalog`): over its
+        // bound is a 500. The body is the client's: the engine already enforced
+        // `max_request_bytes`, and over the derived bound is the configured limit's 413.
         let max_request_bytes = self.machine_limits().max_request_bytes();
         if verified_auth_json.len() > policysql_transaction::bounds::AUTH_BYTES {
-            return Err(RuntimeError::Envelope);
+            return Err(RuntimeError::Internal);
         }
         // The envelope the engine or an owner builds around a body (an interactive command is
         // wrapped as a one-statement envelope) can be a few bytes longer than the body, so the
@@ -3471,5 +3474,83 @@ resources:
                 .cost_estimate_json(&over)
                 .contains("POLICYSQL_COST_ADMISSION_UNAVAILABLE")
         );
+    }
+
+    /// The verified auth carries the selected role twice (`role` and inside `roles`), so a
+    /// session of 40,146 bytes with a 40,000-byte role selected gives an auth of about 80 KB:
+    /// every bound derived from the auth must admit it, at every request limit.
+    #[test]
+    fn a_long_selected_role_passes_every_auth_derived_bound() {
+        let role = format!("r{}", "x".repeat(40_000));
+        let session = serde_json::json!({
+            "principal": "p", "subject": "s", "roles": ["member", role],
+            "defaultRole": "member", "access": ["execute", "catalog"],
+            "session": {"tenant_id": "t"},
+        })
+        .to_string();
+        assert!(session.len() <= policysql_transaction::bounds::SESSION_INPUT_BYTES);
+        for max_request in [65_536_usize, 1_048_576, 2_097_152] {
+            let runtime = runtime_with(&format!(
+                r#"{{{REQUIRED},"max_request_bytes":{max_request}}}"#
+            ));
+            let authorized = parse_json(&runtime.authorize_session_json(
+                &session,
+                Some(role.clone()),
+                "execute",
+            ));
+            let auth = authorized["auth"].to_string();
+            assert!(auth.len() > 80_000 - 200, "{}", auth.len());
+            assert!(auth.len() <= policysql_transaction::bounds::AUTH_BYTES);
+            let compiled = parse_json(&runtime.compile_json(
+                &auth,
+                r#"{"statements":[{"sql":"SELECT id FROM projects","params":{}}]}"#,
+                "execute",
+            ));
+            // No policy for the long role: a policy answer, never a size or bound answer.
+            for code in [
+                "POLICYSQL_INTERNAL",
+                "POLICYSQL_REQUEST_TOO_LARGE",
+                "POLICYSQL_INVALID_REQUEST",
+            ] {
+                assert_ne!(compiled["error"]["code"], code, "{compiled}");
+            }
+            let catalog = parse_json(&runtime.catalog_json(&auth));
+            for code in ["POLICYSQL_INTERNAL", "POLICYSQL_INVALID_REQUEST"] {
+                assert_ne!(catalog["error"]["code"], code, "{catalog}");
+            }
+            // Keyed identity: auth, binding, a 128-byte key, and a body at the limit.
+            let body = format!("\"{}\"", "\\\"".repeat(max_request / 2 - 1));
+            let binding = serde_json::json!({"version": 1, "scope": "tenant", "databaseId": "db_1", "generation": "1", "snapshot": "s"});
+            let input = serde_json::json!({
+                "op": "request", "endpoint": "execute", "auth": authorized["auth"],
+                "binding": binding, "body": body, "key": "k".repeat(128),
+            })
+            .to_string();
+            assert!(input.len() <= runtime.machine_limits().max_hash_input_bytes());
+            let identity = parse_json(&runtime.identity_json(&input));
+            assert!(identity["idempotency"]["keyHash"].is_string(), "{identity}");
+            // The step event embeds the auth and the escaped body.
+            let event = auth.len()
+                + serde_json::to_string(&body).unwrap_or_default().len()
+                + binding.to_string().len();
+            assert!(event <= runtime.machine_limits().max_event_bytes());
+        }
+    }
+
+    #[test]
+    fn an_auth_over_its_derived_bound_is_an_internal_fault_not_a_bad_request() {
+        let runtime = runtime();
+        let over = format!(
+            r#"{{"principal":"p","subject":"s","role":"member","roles":["member"],"access":["execute"],"session":{{"tenant_id":"{}"}}}}"#,
+            "x".repeat(policysql_transaction::bounds::AUTH_BYTES)
+        );
+        let compiled = parse_json(&runtime.compile_json(
+            &over,
+            r#"{"statements":[{"sql":"SELECT id FROM projects","params":{}}]}"#,
+            "execute",
+        ));
+        assert_eq!(compiled["error"]["code"], "POLICYSQL_INTERNAL");
+        let catalog = parse_json(&runtime.catalog_json(&over));
+        assert_eq!(catalog["error"]["code"], "POLICYSQL_INTERNAL");
     }
 }
