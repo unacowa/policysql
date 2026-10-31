@@ -127,6 +127,7 @@ pub(crate) fn validate_client_parameters(
     analysis: &ClientParameterAnalysis,
     catalog: &Catalog,
     values: &BTreeMap<ClientParameterName, LogicalValue>,
+    max_bytes_per_value: usize,
 ) -> Result<(), CompileError> {
     if !analysis.parameters.keys().eq(values.keys()) {
         return Err(CompileError::ClientParameterMismatch);
@@ -139,13 +140,14 @@ pub(crate) fn validate_client_parameters(
             .get(name)
             .ok_or(CompileError::ClientParameterMismatch)?;
         let proven_null = matches!(value, LogicalValue::Null) && contract.nullable;
-        if !proven_null && !logical_value_matches(value, contract.logical_type) {
+        if !proven_null && !logical_value_matches(value, contract.logical_type, max_bytes_per_value)
+        {
             return Err(CompileError::ClientParameterTypeMismatch);
         }
         for column in &contract.columns {
             let descriptor = column_descriptor(catalog, column)
                 .ok_or(CompileError::ClientParameterTypeMismatch)?;
-            if !value_satisfies_contract(value, descriptor) {
+            if !value_satisfies_contract(value, descriptor, max_bytes_per_value) {
                 return Err(CompileError::ClientParameterTypeMismatch);
             }
         }
@@ -153,7 +155,11 @@ pub(crate) fn validate_client_parameters(
     Ok(())
 }
 
-pub(crate) fn logical_value_matches(value: &LogicalValue, expected: LogicalType) -> bool {
+pub(crate) fn logical_value_matches(
+    value: &LogicalValue,
+    expected: LogicalType,
+    max_bytes_per_value: usize,
+) -> bool {
     match (value, expected) {
         (
             LogicalValue::String(_),
@@ -163,9 +169,7 @@ pub(crate) fn logical_value_matches(value: &LogicalValue, expected: LogicalType)
         | (LogicalValue::Int64(_), LogicalType::Int64)
         | (LogicalValue::Number(_), LogicalType::Number)
         | (LogicalValue::Json(_), LogicalType::Json) => true,
-        (LogicalValue::Bytes(value), LogicalType::Bytes) => {
-            value.len() <= policysql_core::bytes::MAX_BYTES_PER_VALUE
-        }
+        (LogicalValue::Bytes(value), LogicalType::Bytes) => value.len() <= max_bytes_per_value,
         (LogicalValue::Int64(value), LogicalType::Integer) => {
             *value >= -9_007_199_254_740_991 && *value <= 9_007_199_254_740_991
         }

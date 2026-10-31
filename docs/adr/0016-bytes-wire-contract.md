@@ -42,7 +42,8 @@ public BLOB literals or `CAST(... AS BLOB)`.
 ## Bounds and failures
 
 The initial profile limits each decoded bytes value to 262,144 bytes (256 KiB), for
-client parameters, presets and physical results. Capabilities exposes this as
+client parameters, presets and physical results; [ADR 0027](0027-byte-and-cpu-budgets.md)
+makes it the default of the configurable `maxBytesPerValue` (up to 1,048,576). Capabilities exposes the value as
 `limits.maxBytesPerValue`; Clients must not hard-code a hosting platform's limits.
 Codecs validate the complete alphabet, padding and unused bits before classifying
 size, then check the decoded length before allocating the decoded payload. Existing
@@ -105,8 +106,9 @@ WASM and its adapter are distributed together. The ABI version participates in t
 snapshot, so active transactions and bindings from ABI 1 must be recreated. No new
 public API version or alternate Client mode is introduced.
 
-The per-value limit has a single source, `policysql_core::bytes::MAX_BYTES_PER_VALUE`,
-exposed to the host as `PolicySqlRuntime.max_bytes_per_value` (#22). The TypeScript
+The per-value limit has a single source, the `max_bytes_per_value` field of the runtime's
+limits (`limits_json` `maxBytesPerValue`; ADR 0027 replaced the constant and the
+`PolicySqlRuntime.max_bytes_per_value` getter of #22). The TypeScript
 adapter keeps no copy: Capabilities, WASM-parameter decoding (including cost
 queries), driver-result classification and the Turso HTTP transport all take the
 limit from the loaded runtime. PolicySQL passes it to every database transport as
@@ -114,7 +116,7 @@ limit from the loaded runtime. PolicySQL passes it to every database transport a
 runtime value before WASM. The Turso HTTP transport and the private codec have no
 unbounded mode: an omitted, infinite or malformed limit fails closed with a
 `TypeError` before any database request. Runtime construction rejects a missing or
-malformed limit, so changing only the Rust constant changes every boundary together and cannot
+malformed limit, so changing only the configured limit changes every boundary together and cannot
 turn valid WASM output into `POLICYSQL_INTERNAL`.
 
 Shared byte vectors, native Rust boundary tests, Client-only Transport tests and

@@ -1311,6 +1311,7 @@ mod tests {
                 max_rows: 100,
                 max_result_bytes: 10_000,
                 timeout_ms: 1_000,
+                max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
             },
             snapshot,
         )
@@ -1575,6 +1576,7 @@ mod tests {
                 max_rows: 100,
                 max_result_bytes: 10_000,
                 timeout_ms: 1_000,
+                max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
             },
             snapshot,
         )
@@ -1732,6 +1734,7 @@ mod tests {
                 max_rows: 100,
                 max_result_bytes: 10_000,
                 timeout_ms: 1_000,
+                max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
             };
             let verified = match directory {
                 "insert-values" => {
@@ -1966,6 +1969,7 @@ mod tests {
                     max_rows: 100,
                     max_result_bytes: 10_000,
                     timeout_ms: 1_000,
+                    max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
                 },
                 snapshot.clone(),
             )

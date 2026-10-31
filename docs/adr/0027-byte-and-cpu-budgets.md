@@ -500,9 +500,52 @@ on the client's own SQL (400 `INVALID_SQL`) before the emitted statement reaches
 cap, so only the Rust differential test covers the recursion-cap path.
 The declared-type term of the column-metadata guard is the byte length of the physical schema's
 declared type for a column projected directly (zero for an expression, which has none), taken from
-the physical schema at construction. Left to later pull requests, as decided: the configurable
-per-value limit (5), the result side of `maxJsonValues`, `maxResponseBytes` and the compiled raw
-bound (6), and the CPU and memory work (7).
+the physical schema at construction. Left to later pull requests, as decided: the result side of
+`maxJsonValues`, `maxResponseBytes` and the compiled raw bound (6), and the CPU and memory work (7).
+
+**Pull request 5 results (2026-10-31).** Implemented as decided: `maxBytesPerValue` is a
+`RuntimeLimits` field (`max_bytes_per_value`, default 262,144, range 1 to 1,048,576, the error names the
+field), reported by `limits_json` and advertised as it is enforced, and the reference wrapper sets it
+explicitly. `policysql_core::bytes::MAX_BYTES_PER_VALUE` is gone: core has `DEFAULT_MAX_BYTES_PER_VALUE`
+and `HARD_MAX_BYTES_PER_VALUE`, `bytes::decode` and `value_satisfies_contract` take the limit, and it
+travels with the other execution limits (`ExecutionLimits.max_bytes_per_value`) to the compiler's
+parameter check and the adapter's result check; `PolicyBundle::activate_with_value_limit` checks bytes
+presets at activation (the runtime parses its limits first). No literal 262,144 remains in the
+TypeScript source, so the engine-boundary rule needed no allow-list entry.
+
+*No ABI bump.* `limits_json` has the same shape and, for every constructor input that existed, the same
+values (an omitted field reports the former fixed 262,144); every request and result is answered as
+before for those inputs; the only input whose treatment changes is one carrying the new field, which
+was an unknown-field error. This is the rule of ADR 0024 pull request 3 (new optional fields need no
+bump), and the ADR already said so (pull request 5: "no ABI change"). The ABI stays 14, the snapshot
+and every keyed retry across the deployment are unaffected, and the identity goldens are unchanged.
+
+*The value kinds.* The limit bounds bytes values only, as the table says ("decoded bytes of one bytes
+value"): text, JSON, and numeric values are bounded by the request and result limits, not by it, and
+a test pins that a text or JSON parameter of `maxBytesPerValue + 1` is served. A bytes preset is bounded
+at activation and also by the 1 MiB configuration input, so a preset of the hard maximum cannot be
+configured.
+
+*Smallest limit governs, at the per-value maximum* (`docs/configuration.md`, "Per-value bytes"; both
+owner adapters in `deploy/cloudflare/test/value-limit.test.mjs`, core in
+`crates/policysql-wasm/src/value_limit_tests.rs`). The computed bounds of pull request 3 never reject
+what the per-value limit accepts: the compile input, the hash input, and the step event are derived
+from `maxRequestBytes`, a value is part of a body that already fits it, and base64 contains no
+character that JSON escapes, so a BLOB does not grow inside the event beyond its base64 length. What
+refuses a value within the limit is the limit that is smaller, with its own code: a parameter whose
+base64 form does not fit `maxRequestBytes` is 413 `POLICYSQL_REQUEST_TOO_LARGE` (at the default 1 MiB
+about 786,000 bytes fit, so the hard maximum needs `maxRequestBytes` of at least 1,398,104 plus the
+envelope); a read value must fit `maxResultBytes` (public encoding, so about three quarters of it: 47,990
+bytes at the reference wrapper), the cumulative interactive result limit, and the raw result bound
+that exists today, 1 MiB per statement (about 786,000 bytes), which pull request 6 replaces. A value at
+the hard maximum can therefore be written and not returned, as ADR 0016 already accepts. Nothing is
+rejected silently or with a misleading code: every refusal is one of the two 413 codes of the limit that
+applies.
+
+*Smoke.* The reference wrapper has one configuration, so the real-Turso smoke keeps its assertions
+(`maxBytesPerValue + 1` bytes is 413 and writes nothing, with the value it reads from Capabilities and
+compared with the wrapper's configured value); a larger configured limit is covered by the tests above
+on both owner adapters and the Turso HTTP transport tests, not by a second deployment.
 
 ### CPU and memory budgets
 

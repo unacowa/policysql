@@ -1268,7 +1268,12 @@ pub fn compile_verified_select(
 ) -> Result<VerifiedExecutionPlan<SqliteProfile>, CompileError> {
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
     let analysis = analyze_client_parameters(&plan.statement, catalog);
-    validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    validate_client_parameters(
+        &analysis,
+        catalog,
+        &client_parameters,
+        limits.max_bytes_per_value,
+    )?;
     check_pattern_lengths(&emitted, &client_parameters)?;
     let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
@@ -1325,7 +1330,12 @@ pub fn compile_verified_insert(
     })?;
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
     let analysis = analyze_client_parameters(&plan.statement, catalog);
-    validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    validate_client_parameters(
+        &analysis,
+        catalog,
+        &client_parameters,
+        limits.max_bytes_per_value,
+    )?;
     check_pattern_lengths(&emitted, &client_parameters)?;
     let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
@@ -1385,7 +1395,12 @@ pub fn compile_verified_update(
     }
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
     let analysis = analyze_client_parameters(&plan.statement, catalog);
-    validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    validate_client_parameters(
+        &analysis,
+        catalog,
+        &client_parameters,
+        limits.max_bytes_per_value,
+    )?;
     check_pattern_lengths(&emitted, &client_parameters)?;
     let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
@@ -1450,7 +1465,12 @@ pub fn compile_verified_delete(
     }
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
     let analysis = analyze_client_parameters(&plan.statement, catalog);
-    validate_client_parameters(&analysis, catalog, &client_parameters)?;
+    validate_client_parameters(
+        &analysis,
+        catalog,
+        &client_parameters,
+        limits.max_bytes_per_value,
+    )?;
     check_pattern_lengths(&emitted, &client_parameters)?;
     let expected_clients = analysis.names();
     let expected_servers = emitted.server_parameters.keys().cloned().collect();
@@ -2246,6 +2266,7 @@ mod tests {
             max_rows: 100,
             max_result_bytes: 10_000,
             timeout_ms: 1_000,
+            max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
         }
     }
 
@@ -2495,16 +2516,19 @@ resources:
         ] {
             assert!(super::parameter_contracts::logical_value_matches(
                 &LogicalValue::String("2026-08-12T00:00:00Z".to_owned()),
-                logical_type
+                logical_type,
+                policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE
             ));
         }
         assert!(super::parameter_contracts::logical_value_matches(
             &LogicalValue::Int64(9_007_199_254_740_991),
-            LogicalType::Integer
+            LogicalType::Integer,
+            policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE
         ));
         assert!(!super::parameter_contracts::logical_value_matches(
             &LogicalValue::Int64(9_007_199_254_740_992),
-            LogicalType::Integer
+            LogicalType::Integer,
+            policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE
         ));
     }
 

@@ -2,6 +2,8 @@ use super::{
     LogicalType, LogicalValue, encode_parameter_value, encode_result_value, logical_result_value,
     logical_value,
 };
+
+const MAX_BYTES: usize = policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE;
 use serde_json::{Value, json};
 
 const CATALOG: &str = include_str!("../../../tests/fixtures/bytes/catalog.yaml");
@@ -13,8 +15,7 @@ fn byte_presets_are_literals_only_and_do_not_expand_policy_predicates() {
     let catalog =
         super::activate_catalog(CATALOG, snapshot.clone()).unwrap_or_else(|_| unreachable!());
     assert!(super::PolicyBundle::activate(POLICY, &catalog, snapshot.clone()).is_ok());
-    let oversized =
-        policysql_core::bytes::encode(&vec![0; policysql_core::bytes::MAX_BYTES_PER_VALUE + 1]);
+    let oversized = policysql_core::bytes::encode(&vec![0; MAX_BYTES + 1]);
     assert!(
         super::PolicyBundle::activate(
             &POLICY.replace("AAEC/w==", &oversized),
@@ -132,11 +133,11 @@ fn bytes_ingress_uses_expected_type_and_strict_public_representation() {
         let expected: Vec<u8> = serde_json::from_value(case["bytes"].clone())
             .unwrap_or_else(|error| unreachable!("bytes fixture: {error}"));
         assert_eq!(
-            logical_value(case["base64"].clone(), Some(LogicalType::Bytes)).ok(),
+            logical_value(MAX_BYTES, case["base64"].clone(), Some(LogicalType::Bytes)).ok(),
             Some(LogicalValue::Bytes(expected))
         );
         assert!(matches!(
-            logical_value(case["base64"].clone(), Some(LogicalType::String)),
+            logical_value(MAX_BYTES, case["base64"].clone(), Some(LogicalType::String)),
             Ok(LogicalValue::String(_))
         ));
     }
@@ -151,17 +152,17 @@ fn bytes_ingress_uses_expected_type_and_strict_public_representation() {
         )
     {
         assert!(
-            logical_value(case.clone(), Some(LogicalType::Bytes)).is_err(),
+            logical_value(MAX_BYTES, case.clone(), Some(LogicalType::Bytes)).is_err(),
             "{case}"
         );
     }
     // JSON null decodes to SQL NULL; the compiler decides whether it is allowed.
     assert_eq!(
-        logical_value(Value::Null, Some(LogicalType::Bytes)).ok(),
+        logical_value(MAX_BYTES, Value::Null, Some(LogicalType::Bytes)).ok(),
         Some(LogicalValue::Null)
     );
     assert!(matches!(
-        logical_value(json!([0, 255]), Some(LogicalType::Json)),
+        logical_value(MAX_BYTES, json!([0, 255]), Some(LogicalType::Json)),
         Ok(LogicalValue::Json(_))
     ));
 }
@@ -173,7 +174,7 @@ fn bytes_result_requires_physical_blob_identity_and_public_output_is_base64() {
     assert_eq!(encode_parameter_value(&bytes), internal);
     assert_eq!(encode_result_value(&bytes).ok(), Some(json!("AAEC/w==")));
     assert_eq!(
-        logical_result_value(internal.clone(), &[LogicalType::Bytes]).ok(),
+        logical_result_value(MAX_BYTES, internal.clone(), &[LogicalType::Bytes]).ok(),
         Some(bytes)
     );
     for value in [
@@ -183,12 +184,13 @@ fn bytes_result_requires_physical_blob_identity_and_public_output_is_base64() {
         json!({"type":"blob","base64":"AB=="}),
         json!({"type":"blob","base64":"AA==","extra":true}),
     ] {
-        assert!(logical_result_value(value, &[LogicalType::Bytes]).is_err());
+        assert!(logical_result_value(MAX_BYTES, value, &[LogicalType::Bytes]).is_err());
     }
-    assert!(logical_result_value(internal.clone(), &[LogicalType::String]).is_err());
-    assert!(logical_result_value(internal, &[LogicalType::Json]).is_err());
+    assert!(logical_result_value(MAX_BYTES, internal.clone(), &[LogicalType::String]).is_err());
+    assert!(logical_result_value(MAX_BYTES, internal, &[LogicalType::Json]).is_err());
     assert_eq!(
         logical_result_value(
+            MAX_BYTES,
             json!("AAEC/w=="),
             &[LogicalType::Bytes, LogicalType::String]
         )
@@ -215,8 +217,9 @@ fn malformed_large_bytes_and_valid_oversize_have_distinct_error_categories() {
                     .unwrap_or_else(|_| unreachable!()),
             )
             + case["suffix"].as_str().unwrap_or_else(|| unreachable!());
-        let input = logical_value(json!(encoded), Some(LogicalType::Bytes));
+        let input = logical_value(MAX_BYTES, json!(encoded), Some(LogicalType::Bytes));
         let result = logical_result_value(
+            MAX_BYTES,
             json!({"type":"blob","base64":encoded}),
             &[LogicalType::Bytes],
         );
@@ -261,8 +264,7 @@ fn oversized_physical_blob_is_a_limit_error_at_the_result_abi() {
     )
     .unwrap_or_else(|_| unreachable!("valid runtime"));
     let auth = r#"{"principal":"test:user","subject":"u","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_a"}}"#;
-    let oversized =
-        policysql_core::bytes::encode(&vec![0; policysql_core::bytes::MAX_BYTES_PER_VALUE + 1]);
+    let oversized = policysql_core::bytes::encode(&vec![0; MAX_BYTES + 1]);
     for (base64, code) in [
         (oversized.as_str(), Some("POLICYSQL_LIMIT_EXCEEDED")),
         ("AB==", Some("POLICYSQL_SCHEMA_MISMATCH")),
@@ -311,7 +313,7 @@ fn oversized_raw_result_of_in_limit_blobs_is_a_limit_error() {
     let auth = r#"{"principal":"test:user","subject":"u","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_a"}}"#;
     let blob = json!({
         "type": "blob",
-        "base64": policysql_core::bytes::encode(&vec![0; policysql_core::bytes::MAX_BYTES_PER_VALUE]),
+        "base64": policysql_core::bytes::encode(&vec![0; MAX_BYTES]),
     });
     let compiled: Value = serde_json::from_str(&runtime.compile_json(
         auth,

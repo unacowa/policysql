@@ -67,6 +67,8 @@ mod bytes_tests;
 mod nullable_tests;
 #[cfg(test)]
 mod step_tests;
+#[cfg(test)]
+mod value_limit_tests;
 
 /// Compiler-resolved client parameter contracts (type and NULL proof), by name.
 type ParameterTypes = BTreeMap<ClientParameterName, policysql_sqlite::ClientParameterContract>;
@@ -411,17 +413,23 @@ fn build_runtime(
         SnapshotId::new(snapshot_text).map_err(|_| js_error("deployment snapshot is invalid"))?;
     let catalog = activate_catalog_with_schema(catalog_yaml, snapshot.clone(), physical_schema)
         .map_err(|_| js_error("Catalog activation failed"))?;
-    let policies = PolicyBundle::activate(policy_yaml, &catalog, snapshot.clone())
-        .map_err(|_| js_error("policy activation failed"))?;
     let limits = limits::parse(
         limits_json,
         &limits::FixedLimits {
-            max_bytes_per_value: policysql_core::bytes::MAX_BYTES_PER_VALUE,
             max_commit_checks: policysql_policy::MAX_COMMIT_CHECKS,
             max_hook_duration_ms: policysql_policy::MAX_COMMIT_CHECK_TIMEOUT_MS,
         },
     )
     .map_err(|message| js_error(&message))?;
+    // A bytes preset over the configured per-value limit is a configuration error, like every
+    // other value the limit bounds.
+    let policies = PolicyBundle::activate_with_value_limit(
+        policy_yaml,
+        &catalog,
+        snapshot.clone(),
+        value_limit(&limits),
+    )
+    .map_err(|_| js_error("policy activation failed"))?;
     let max_statements = usize::try_from(limits.max_statements)
         .map_err(|_| js_error("runtime limits are invalid: `max_statements` is too large"))?;
     // ADR 0024 "Bounds": a transaction record holds the last statement's reply and one
@@ -450,6 +458,7 @@ fn build_runtime(
                 max_rows: limits.max_rows,
                 max_result_bytes: limits.max_result_bytes,
                 timeout_ms: limits.timeout_ms,
+                max_bytes_per_value: value_limit(&limits),
             },
             max_statements,
         )
@@ -736,6 +745,12 @@ impl PolicySqlRuntime {
     }
 }
 
+/// The per-value bytes limit as the codecs take it. Construction bounds it by the hard maximum,
+/// which fits `usize` on every target.
+fn value_limit(limits: &limits::RuntimeLimits) -> usize {
+    usize::try_from(limits.max_bytes_per_value).unwrap_or(usize::MAX)
+}
+
 fn binding_limits(limits: &limits::RuntimeLimits) -> policysql_parser::BindingLimits {
     policysql_parser::BindingLimits {
         max_expression_depth: usize::try_from(limits.max_expression_depth).unwrap_or(usize::MAX),
@@ -810,6 +825,7 @@ impl PolicySqlRuntime {
                         .enumerate()
                         .map(|(column, value)| {
                             logical_result_value(
+                                value_limit(&self.limits),
                                 value,
                                 expected_types
                                     .get(column)
@@ -989,8 +1005,14 @@ impl PolicySqlRuntime {
             .into_iter()
             .enumerate()
             .map(|(index, statement)| {
-                statement_request(statement, endpoint, &self.catalog, self.binding_limits())
-                    .map_err(|error| error.at_statement(index))
+                statement_request(
+                    statement,
+                    endpoint,
+                    &self.catalog,
+                    self.binding_limits(),
+                    value_limit(&self.limits),
+                )
+                .map_err(|error| error.at_statement(index))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let compiled = self
@@ -1955,6 +1977,7 @@ fn statement_request(
     endpoint: EndpointPermission,
     catalog: &Catalog,
     binding_limits: policysql_parser::BindingLimits,
+    max_bytes_per_value: usize,
 ) -> Result<StatementRequest, RuntimeError> {
     // The length limit is checked by `compile` before any statement is parsed.
     if raw.sql.is_empty() {
@@ -1975,6 +1998,7 @@ fn statement_request(
             let name = ClientParameterName::new(name)
                 .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidParameter))?;
             let value = logical_value(
+                max_bytes_per_value,
                 value,
                 parameter_types
                     .get(&name)
@@ -2029,6 +2053,7 @@ fn statement_parameter_types(
 }
 
 fn logical_value(
+    max_bytes: usize,
     value: serde_json::Value,
     expected: Option<LogicalType>,
 ) -> Result<LogicalValue, RuntimeError> {
@@ -2037,7 +2062,7 @@ fn logical_value(
         // compiler accepts it only for a proven nullable assignment (#20).
         return match value {
             serde_json::Value::Null => Ok(LogicalValue::Null),
-            serde_json::Value::String(value) => policysql_core::bytes::decode(&value)
+            serde_json::Value::String(value) => policysql_core::bytes::decode(&value, max_bytes)
                 .map(LogicalValue::Bytes)
                 .map_err(|error| {
                     RuntimeError::Rejected(match error {
@@ -2080,6 +2105,7 @@ fn logical_value(
 }
 
 fn logical_result_value(
+    max_bytes: usize,
     value: serde_json::Value,
     expected: &[LogicalType],
 ) -> Result<LogicalValue, RuntimeError> {
@@ -2094,7 +2120,7 @@ fn logical_result_value(
         }
         // Hosts classify oversized physical BLOBs first; the private ABI boundary
         // independently applies the same category rather than trusting the host.
-        return policysql_core::bytes::decode(&blob.base64)
+        return policysql_core::bytes::decode(&blob.base64, max_bytes)
             .map(LogicalValue::Bytes)
             .map_err(|error| match error {
                 policysql_core::bytes::DecodeError::TooLarge => {
@@ -2113,14 +2139,17 @@ fn logical_result_value(
                 Ok(LogicalValue::Boolean(true))
             }
             serde_json::Value::Null => Ok(LogicalValue::Null),
-            value if expected.len() > 1 => logical_result_value_without_boolean(value, expected),
+            value if expected.len() > 1 => {
+                logical_result_value_without_boolean(max_bytes, value, expected)
+            }
             _ => Err(RuntimeError::RemoteResult),
         };
     }
-    logical_result_value_without_boolean(value, expected)
+    logical_result_value_without_boolean(max_bytes, value, expected)
 }
 
 fn logical_result_value_without_boolean(
+    max_bytes: usize,
     value: serde_json::Value,
     expected: &[LogicalType],
 ) -> Result<LogicalValue, RuntimeError> {
@@ -2132,15 +2161,16 @@ fn logical_result_value_without_boolean(
                 Ok(LogicalValue::Json(value))
             }
             serde_json::Value::Null => Ok(LogicalValue::Null),
-            value if expected.len() > 1 => logical_result_value_scalar(value, expected),
+            value if expected.len() > 1 => logical_result_value_scalar(max_bytes, value, expected),
             _ => Err(RuntimeError::RemoteResult),
         };
     }
-    logical_result_value_scalar(value, expected)
+    logical_result_value_scalar(max_bytes, value, expected)
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn logical_result_value_scalar(
+    max_bytes: usize,
     value: serde_json::Value,
     expected: &[LogicalType],
 ) -> Result<LogicalValue, RuntimeError> {
@@ -2152,7 +2182,7 @@ fn logical_result_value_scalar(
         if *logical_type == LogicalType::Bytes {
             continue;
         }
-        if let Ok(value) = logical_value(value.clone(), Some(*logical_type)) {
+        if let Ok(value) = logical_value(max_bytes, value.clone(), Some(*logical_type)) {
             return Ok(value);
         }
     }
@@ -2558,7 +2588,7 @@ mod tests {
         ] {
             let value: serde_json::Value = serde_json::from_str(text).unwrap_or_default();
             assert!(
-                matches!(super::logical_value(value, None), Ok(LogicalValue::Number(number)) if number.to_bits() == expected.to_bits()),
+                matches!(super::logical_value(policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE, value, None), Ok(LogicalValue::Number(number)) if number.to_bits() == expected.to_bits()),
                 "{text}"
             );
         }
@@ -2621,7 +2651,7 @@ resources:
         assert_eq!(limits["maxJsonValues"], 65_536);
         assert_eq!(
             limits["maxBytesPerValue"],
-            policysql_core::bytes::MAX_BYTES_PER_VALUE
+            policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE
         );
         assert_eq!(limits["maxParameters"], 1_024);
         assert_eq!(limits["maxExpressionDepth"], 32);
@@ -3128,6 +3158,7 @@ resources:
     #[test]
     fn json_results_are_validated_and_emitted_as_json_values() {
         let encoded = logical_result_value(
+            policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
             serde_json::Value::String(r#"{"tag":"first"}"#.to_owned()),
             &[LogicalType::Json],
         )
@@ -3136,6 +3167,7 @@ resources:
         assert_eq!(encoded, serde_json::json!({"tag": "first"}));
         assert!(
             logical_result_value(
+                policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
                 serde_json::Value::String("not-json".to_owned()),
                 &[LogicalType::Json],
             )
