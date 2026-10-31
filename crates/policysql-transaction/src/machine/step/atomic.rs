@@ -26,7 +26,9 @@
 //! never read to answer a request, so a keyed retry always starts from the lookup.
 
 use super::super::MAX_TIME_MS;
-use super::super::compiler::{Compiler, Operation, RawResult, StatementLimits, Validated};
+use super::super::compiler::{
+    Compiler, Operation, RawResult, ResultBudget, StatementLimits, Validated,
+};
 use super::super::io::{
     self, Class, Code, DriverCall, DriverResult, Effect, Event, ObserveContext, ObservedStatement,
     core_error_reply, error_reply, value_reply,
@@ -40,6 +42,7 @@ use super::{
     FailureDetail, Fault, Result, Step, codec_failure, driver_call, exact_object, parse_binding,
 };
 use super::{round_ms, shape_statement, to_json};
+use crate::bounds;
 use crate::canonical::{self, Json};
 use crate::identity;
 use serde::{Deserialize, Serialize};
@@ -337,6 +340,10 @@ const fn commit_failure(class: Class) -> Code {
 /// read, which is never a rejection.
 const fn execute_failure(task: &Task, class: Class) -> Code {
     match (task, class) {
+        // A stored response over the lookup bound (a row written before the bounds existed):
+        // nothing executes, and the request is refused as over a limit (ADR 0027, "Idempotent
+        // replay").
+        (Task::AtomicLookup, Class::Limit) => Code::LimitExceeded,
         (Task::AtomicLookup | Task::AtomicInsert, Class::Limit | Class::Complex) => Code::Internal,
         _ => Code::for_class(class),
     }
@@ -1110,11 +1117,14 @@ impl<C: Compiler> Step<'_, C> {
                     Value::String(idempotency.key_hash.clone()),
                 )]),
             };
+            // The lookup's cap derives from the hard maximum of `max_response_bytes`, not from the
+            // current configuration, so a response committed under a larger limit still replays.
             return self.wait(lane, Some(request), Task::AtomicLookup, |id| {
                 Effect::Execute {
                     id,
                     statements: vec![call],
                     trace: None,
+                    max_response_bytes: bounds::LOOKUP_BYTES as u64,
                 }
             });
         }
@@ -1132,11 +1142,16 @@ impl<C: Compiler> Step<'_, C> {
         for statement in &statements {
             calls.push(driver_call(&statement.sql, statement)?);
         }
+        let max_response_bytes = self
+            .compiler
+            .raw_result_bound(atomic.handle)
+            .map_err(|_| Fault("plan"))?;
         self.wait(lane, Some(request), Task::AtomicExecute, |id| {
             Effect::Execute {
                 id,
                 statements: calls,
                 trace,
+                max_response_bytes,
             }
         })
     }
@@ -1255,6 +1270,16 @@ impl<C: Compiler> Step<'_, C> {
             return self.close(lane, Phase::Failed, Some(error_reply(Code::Internal)));
         }
         let mut validated = Vec::with_capacity(results.len());
+        // The envelope's cumulative budgets: each statement validates within what the earlier
+        // ones left, so validation stops at the first row over a limit (ADR 0027).
+        let mut left = ResultBudget {
+            raw_bytes: self
+                .compiler
+                .raw_result_bound(atomic.handle)
+                .map_err(|_| Fault("plan"))?,
+            values: self.limits.max_json_values,
+            result_bytes: strictest(&atomic.statements, |limits| limits.max_result_bytes),
+        };
         for (index, (result, statement)) in results.iter().zip(&atomic.statements).enumerate() {
             if let Some(code) = codec_failure(result) {
                 return self.close(lane, Phase::Failed, Some(error_reply(code)));
@@ -1270,8 +1295,15 @@ impl<C: Compiler> Step<'_, C> {
                     result.rows_affected
                 },
             };
-            match self.compiler.validate(atomic.handle, index, raw) {
-                Ok(result) => validated.push(result),
+            match self.compiler.validate(atomic.handle, index, raw, left) {
+                Ok(result) => {
+                    left.raw_bytes = left.raw_bytes.saturating_sub(result.raw_bytes);
+                    left.values = left.values.saturating_sub(result.values);
+                    left.result_bytes = left
+                        .result_bytes
+                        .saturating_sub(u64::try_from(rows_bytes(&result)).unwrap_or(u64::MAX));
+                    validated.push(result);
+                }
                 Err(error) => {
                     self.log_core_error(&error);
                     return self.close(lane, Phase::Failed, Some(core_error_reply(&error)));
@@ -1331,6 +1363,19 @@ impl<C: Compiler> Step<'_, C> {
         progress.results = Some(io::raw(shaped));
         progress.usage = Some(usage);
         progress.mutations = mutations;
+        // The whole response is measured here, before any validator, idempotency row, or COMMIT:
+        // over `max_response_bytes` (with the reserve for what is added after commit) the
+        // envelope rolls back, so no mutation and no idempotency record survives (ADR 0027).
+        let progress = self.atomic_run()?;
+        let results = progress.results.as_deref().ok_or(Fault("atomic_results"))?;
+        let response = atomic_response(progress, results);
+        let measured = u64::try_from(response.get().len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(bounds::RESPONSE_RESERVE_BYTES as u64);
+        if measured > self.limits.max_response_bytes {
+            return self.close(lane, Phase::Failed, Some(error_reply(Code::LimitExceeded)));
+        }
+        let progress = self.atomic_run()?;
         if progress.placement == Placement::Direct {
             return self.insert_or_commit(lane, request);
         }
@@ -1439,6 +1484,7 @@ impl<C: Compiler> Step<'_, C> {
                 id,
                 statements: vec![call],
                 trace: None,
+                max_response_bytes: bounds::NO_RESULT_BYTES as u64,
             }
         })
     }
@@ -1464,6 +1510,7 @@ impl<C: Compiler> Step<'_, C> {
             }
         }
         Ok(Effect::Observe {
+            max_response_bytes: self.compiler.raw_result_bound(atomic.handle).unwrap_or(0),
             statements: calls,
             context: ObserveContext {
                 request_id: atomic.request_id.clone(),
@@ -1496,29 +1543,7 @@ impl<C: Compiler> Step<'_, C> {
             .and_then(|volatile| volatile.atomic.take())
             .ok_or(Fault("no_atomic"))?;
         let results = atomic.results.as_deref().ok_or(Fault("atomic_results"))?;
-        let reply = value_reply(&io::to_raw(&AtomicReply {
-            transaction_id: &atomic.transaction_id,
-            status: "committed",
-            results,
-            meta: AtomicMeta {
-                request_id: &atomic.request_id,
-                policy_version: &atomic.versions.policy,
-                schema_version: &atomic.versions.schema,
-                role: &atomic.role,
-                commit_checks: if atomic.checks_passed {
-                    "passed"
-                } else {
-                    "not_triggered"
-                },
-            },
-            debug: atomic
-                .trace
-                .as_deref()
-                .filter(|_| atomic.debug)
-                .map(|trace| Debug {
-                    execution_trace: trace,
-                }),
-        }));
+        let reply = value_reply(&atomic_response(&atomic, results));
         // The cost observation of the committed envelope runs after the reply.
         self.effects.push(self.observe_effect(&atomic)?);
         self.release(atomic.handle);
@@ -1549,6 +1574,33 @@ impl<C: Compiler> Step<'_, C> {
             |id| Effect::Persist { id },
         )
     }
+}
+
+/// The public `execute` response of a committed envelope (`engine.ts`), as the client receives it.
+fn atomic_response(atomic: &AtomicRun, results: &RawValue) -> Box<RawValue> {
+    io::to_raw(&AtomicReply {
+        transaction_id: &atomic.transaction_id,
+        status: "committed",
+        results,
+        meta: AtomicMeta {
+            request_id: &atomic.request_id,
+            policy_version: &atomic.versions.policy,
+            schema_version: &atomic.versions.schema,
+            role: &atomic.role,
+            commit_checks: if atomic.checks_passed {
+                "passed"
+            } else {
+                "not_triggered"
+            },
+        },
+        debug: atomic
+            .trace
+            .as_deref()
+            .filter(|_| atomic.debug)
+            .map(|trace| Debug {
+                execution_trace: trace,
+            }),
+    })
 }
 
 /// What starts an atomic execution on either placement.

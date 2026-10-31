@@ -6,7 +6,7 @@
 //! pending, invalid volatile state) goes through [`Step::fail_closed`], which never turns
 //! `committing` into a definite rejection.
 
-use super::compiler::{Compiler, CoreError, Operation, RawResult, Validated};
+use super::compiler::{Compiler, CoreError, Operation, RawResult, ResultBudget, Validated};
 use super::io::{
     self, Class, Code, DriverCall, DriverResult, Effect, Event, HostFacts, ObserveContext,
     error_reply, value_reply,
@@ -431,6 +431,19 @@ impl<C: Compiler> Step<'_, C> {
             return io::error_reply_at(code, index);
         }
         error_reply(code)
+    }
+
+    /// The whole result budget of one interactive or callback statement (ADR 0027): its compiled
+    /// raw bound, the value limit, and the plan's own result-byte limit.
+    fn statement_budget(&self, handle: u64) -> Result<ResultBudget> {
+        Ok(ResultBudget {
+            raw_bytes: self
+                .compiler
+                .raw_result_bound(handle)
+                .map_err(|_| Fault("plan"))?,
+            values: self.limits.max_json_values,
+            result_bytes: u64::MAX,
+        })
     }
 
     /// Writes the log record a compile error carries (ADR 0027: `sql_too_complex`,
@@ -969,6 +982,10 @@ impl<C: Compiler> Step<'_, C> {
                 for statement in &statements {
                     calls.push(driver_call(&statement.sql, statement)?);
                 }
+                let max_response_bytes = self
+                    .compiler
+                    .raw_result_bound(handle)
+                    .map_err(|_| Fault("plan"))?;
                 self.wait(
                     lane,
                     request_id,
@@ -986,6 +1003,7 @@ impl<C: Compiler> Step<'_, C> {
                         id,
                         statements: calls,
                         trace: None,
+                        max_response_bytes,
                     },
                 )
             }
@@ -1396,7 +1414,8 @@ impl<C: Compiler> Step<'_, C> {
                 result.rows_affected
             },
         };
-        let validated = match self.compiler.validate(handle, 0, raw) {
+        let budget = self.statement_budget(handle)?;
+        let validated = match self.compiler.validate(handle, 0, raw, budget) {
             Ok(validated) => validated,
             Err(error) => {
                 self.release(handle);
@@ -1405,12 +1424,14 @@ impl<C: Compiler> Step<'_, C> {
             }
         };
         let observed = self.compiler.statements(handle).unwrap_or_default();
+        let observe_cap = self.compiler.raw_result_bound(handle).unwrap_or(0);
         self.release(handle);
         if operation != Operation::Insert
             && let Some(statement) = observed.first()
         {
             let call = driver_call(&statement.cost_sql, statement)?;
             self.effects.push(Effect::Observe {
+                max_response_bytes: observe_cap,
                 statements: vec![call],
                 context: ObserveContext {
                     request_id: request_id.clone().unwrap_or_else(|| self.request_id()),

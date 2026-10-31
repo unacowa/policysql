@@ -136,7 +136,7 @@ export const encodeResults = (results: any[], maxBytes: number) => results.map((
  * affects a reply.
  */
 export const observeCost = async (
-  effect: { statements: Array<{ sql: string; args: Record<string, unknown> }>; context: any },
+  effect: { statements: Array<{ sql: string; args: Record<string, unknown> }>; context: any; maxResponseBytes: number },
   { getRuntime, database, costCatalog }: { getRuntime: () => any; database: DatabaseProvider; costCatalog?: Readonly<CostCatalog> },
 ) => {
   const requestId = `${effect.context.requestId}-cost`;
@@ -153,7 +153,7 @@ export const observeCost = async (
       transaction = await transport.begin("read", costTimeoutMs);
       results = await transaction.execute(effect.statements.map((statement) => ({
         sql: statement.sql, args: decodeArgs(statement.args, maxBytes),
-      })));
+      })), { maxResponseBytes: effect.maxResponseBytes });
       await transaction.commit();
     }
   } catch (error) {

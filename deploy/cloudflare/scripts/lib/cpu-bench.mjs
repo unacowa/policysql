@@ -22,7 +22,7 @@ const fixtureFile = (name) => readFileSync(new URL(`../../../../tests/fixtures/b
 // The request limits are the hard maxima (ADR 0027), so the request shapes (sized by
 // REQUEST_VALUE_BUDGET, the reference wrapper's value limit) are never refused for size.
 const MEASURE_LIMITS = {
-  maxRows: 2_000, maxResultBytes: 4_000_000, timeoutMs: 10_000, maxStatements: 8,
+  maxRows: 2_000, maxResultBytes: 524_288, timeoutMs: 10_000, maxStatements: 8,
   maxRequestBytes: 2_097_152, maxJsonValues: 131_072,
 };
 

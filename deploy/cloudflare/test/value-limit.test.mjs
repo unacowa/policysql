@@ -23,14 +23,11 @@ const fixture = {
 };
 const DEFAULT = 262_144;
 const HARD = 1_048_576;
-// The raw database result bound that exists today (core's `EVENT_RESULT_BYTES`; pull request 6
-// replaces it with the compiled bound) and the Hrana frame of one row with one BLOB cell.
-const RAW_BOUND = 1_048_576;
-const REQUIRED = { maxRows: 100, maxResultBytes: 800_000, timeoutMs: 1_000, maxStatements: 8 };
+const REQUIRED = { maxRows: 100, maxResultBytes: 524_288, timeoutMs: 1_000, maxStatements: 8 };
 const CONFIGS = [
   ["the default", {}, DEFAULT],
   ["a small configured limit", { maxBytesPerValue: 1_000 }, 1_000],
-  ["the hard maximum", { maxBytesPerValue: HARD, maxRequestBytes: 2_097_152, maxResultBytes: 2_000_000 }, HARD],
+  ["the hard maximum", { maxBytesPerValue: HARD, maxRequestBytes: 2_097_152, maxResultBytes: 524_288 }, HARD],
 ];
 const EXECUTE = "/v1/transactions:execute";
 const INSERT = "INSERT INTO projects(id,name,state) VALUES(:id,:name,:state) RETURNING id";
@@ -180,7 +177,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   // ------------------------------------------------------------------------------------------
   // The smallest limit that applies governs: the paths a value at the hard maximum cannot pass
 
-  const hard = { maxBytesPerValue: HARD, maxRequestBytes: 2_097_152, maxResultBytes: 2_000_000 };
+  const hard = { maxBytesPerValue: HARD, maxRequestBytes: 2_097_152, maxResultBytes: 524_288 };
 
   test(`${ownerAdapter}: a value at the hard maximum is written when the request limit allows it and refused by maxRequestBytes when it does not`, async (t) => {
     const roomy = await setup(t, hard);
@@ -204,16 +201,18 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(stored(tight, fits), room);
   });
 
-  test(`${ownerAdapter}: at the hard maximum a stored value is readable up to the raw result bound and 413 above it`, async (t) => {
+  test(`${ownerAdapter}: at the hard maximum a stored value is readable up to maxResultBytes (its base64 form) and 413 above it`, async (t) => {
     const h = await setup(t, hard);
-    // Base64 of the value plus the Hrana frame of the row must fit the raw bound that exists
-    // today (1 MiB per statement; the compiled bound of pull request 6 replaces it), so the
-    // largest readable value is about three quarters of it. The code is the result limit's.
-    const readable = Math.floor((RAW_BOUND - 512) / 4) * 3;
+    // The base64 form of the value and the row object around it count against maxResultBytes
+    // (524,288 at its hard maximum), so the largest readable value is about three quarters of it:
+    // 393,204 bytes, whose row is `[{"state":"<524,272 characters>"}]`. The raw bound the compiler
+    // derives for the statement (2 x maxResultBytes and more) is never the smaller one. The code
+    // is the result limit's.
+    const readable = Math.floor((524_288 - 14) / 4) * 3;
     seedState(h, bytes(readable));
     const served = await post(h, [{ sql: "SELECT state FROM projects WHERE id=:id", params: { id: "seed" } }]);
     assert.equal(served.status, 200, JSON.stringify(served.body).slice(0, 200));
-    for (const length of [Math.floor(RAW_BOUND / 4) * 3, HARD]) {
+    for (const length of [readable + 3, HARD]) {
       seedState(h, bytes(length));
       const refused = await post(h, [{ sql: "SELECT state FROM projects WHERE id=:id", params: { id: "seed" } }]);
       assert.equal(refused.status, 413, `${length}`);
@@ -243,7 +242,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   });
 
   test(`${ownerAdapter}: the interactive result limit governs a read below the per-value limit`, async (t) => {
-    const h = await setup(t, { maxBytesPerValue: DEFAULT, maxResultBytes: 800_000 });
+    const h = await setup(t, { maxBytesPerValue: DEFAULT, maxResultBytes: 524_288 });
     seedState(h, bytes(47_000));
     h.databases.get("a").database.prepare("INSERT INTO projects(id,tenant_id,name,state,seed) VALUES('big','tenant_a','n',?,?)").run(bytes(50_000), Buffer.alloc(0));
     const begun = await h.request("a", "/v1/transactions", { mode: "read" }, null);

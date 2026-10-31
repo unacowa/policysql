@@ -3,8 +3,8 @@
 #![allow(dead_code, clippy::missing_panics_doc, clippy::too_many_lines)]
 
 use policysql_transaction::machine::{
-    Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, StatementLimits,
-    StatementSummary, TriggeredCheck, Validated, step_json,
+    Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, ResultBudget,
+    StatementLimits, StatementSummary, TriggeredCheck, Validated, step_json,
 };
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
@@ -43,7 +43,13 @@ pub const LIMITS: Limits = Limits {
     max_callback_rows: 100,
     max_statements: 8,
     max_request_bytes: 1_048_576,
+    max_result_bytes: 64_000,
+    max_json_values: 65_536,
+    max_response_bytes: 64_000 + 65_536,
 };
+
+/// The raw result bound the fake compiler reports for every handle.
+pub const FAKE_RAW_BOUND: u64 = 262_144;
 
 #[derive(Clone, Debug)]
 struct PlanStatement {
@@ -230,7 +236,25 @@ impl Compiler for FakeCompiler {
             .collect())
     }
 
-    fn validate(&self, handle: u64, index: usize, raw: RawResult) -> Result<Validated, CoreError> {
+    fn raw_result_bound(&self, handle: u64) -> Result<u64, CoreError> {
+        self.plans.borrow().get(&handle).map_or_else(
+            || {
+                Err(CoreError::new(
+                    "POLICYSQL_INTERNAL",
+                    "The request could not be completed.",
+                ))
+            },
+            |_| Ok(FAKE_RAW_BOUND),
+        )
+    }
+
+    fn validate(
+        &self,
+        handle: u64,
+        index: usize,
+        raw: RawResult,
+        budget: ResultBudget,
+    ) -> Result<Validated, CoreError> {
         let mismatch = || CoreError {
             code: "POLICYSQL_SCHEMA_MISMATCH".to_owned(),
             message: "The database result does not match the compiled logical contract.".to_owned(),
@@ -272,7 +296,17 @@ impl Compiler for FakeCompiler {
                 .map_err(|_| mismatch())
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let cells: usize = raw.rows.iter().map(Vec::len).sum();
+        let values = u64::try_from(cells + raw.columns.len()).unwrap_or(u64::MAX);
+        if values > budget.values {
+            return Err(CoreError::new(
+                "POLICYSQL_LIMIT_EXCEEDED",
+                "A configured limit was exceeded.",
+            ));
+        }
         Ok(Validated {
+            raw_bytes: 0,
+            values,
             redactions: raw.rows.iter().map(|row| vec![false; row.len()]).collect(),
             columns: raw.columns,
             rows: raw.rows,

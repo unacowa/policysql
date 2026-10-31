@@ -64,7 +64,7 @@ test("the check fails for limits the formula says need more CPU than configured"
   // The previous reference value fails: this is the check #56 asked for.
   assert.equal(checkCpuBudget(50, RUNTIME_LIMITS).ok, false);
   // A larger result bound raises B: the same cpu_ms stops being enough.
-  const larger = { ...RUNTIME_LIMITS, maxResultBytes: 400_000 };
+  const larger = { ...RUNTIME_LIMITS, maxResultBytes: 400_000, maxResponseBytes: 465_536 };
   const base = checkCpuBudget(config.limits.cpu_ms, RUNTIME_LIMITS);
   const raised = checkCpuBudget(config.limits.cpu_ms, larger);
   assert.ok(raised.needed > base.needed, "B grows with maxResultBytes");
@@ -75,19 +75,19 @@ test("the check fails for limits the formula says need more CPU than configured"
 test("the library accepts limits whatever they cost in CPU", () => {
   // ADR 0027: CPU is deployment knowledge, so construction never refuses on it. Limits far above
   // anything the reference wrapper could run in 1,000 ms still construct.
-  const heavy = { maxRows: 1_000_000, maxResultBytes: 500_000_000, timeoutMs: 60_000, maxStatements: 1_000 };
+  const heavy = { maxRows: 100_000, maxResultBytes: 524_288, timeoutMs: 60_000, maxStatements: 64, maxRequestBytes: 2_097_152, maxJsonValues: 131_072, maxResponseBytes: 589_824 };
   const runtime = PolicySqlRuntime.newWithPhysicalSchema(
     example("catalog.yaml"), example("policy.yaml"), "schema_cpu_2", "policy_cpu_2",
     runtimeLimitsJson(heavy), example("physical-schema.json"),
   );
-  try { assert.equal(runtimeLimits(runtime).maxResultBytes, 500_000_000); } finally { runtime.free(); }
+  try { assert.equal(runtimeLimits(runtime).maxResultBytes, 524_288); } finally { runtime.free(); }
 });
 
 test("the formula's V is the maxJsonValues the runtime reports, and the body side enforces it", () => {
   // ADR 0027 pull request 3: the runtime reports maxJsonValues and the engine stops a body at it,
   // so the formula's request-side V is no longer a number a client can exceed (a body of 1 MB of
-  // nested arrays has about 500,000 values and is now 413). The result side is still counted by
-  // the formula only; pull request 6 enforces it.
+  // nested arrays has about 500,000 values and is now 413). Since pull request 6 the result side
+  // is enforced too (413 POLICYSQL_LIMIT_EXCEEDED).
   const enforced = effectiveLimits(RUNTIME_LIMITS);
   assert.equal(enforced.maxJsonValues, 65_536);
   assert.equal(inputsAtLimits(enforced).vReq, 65_536);

@@ -53,8 +53,8 @@ export const resultBoundBytes = ({ maxResultBytes, maxStatements }) =>
 /**
  * The model inputs at a deployment's limits. `limits` is what the runtime reports
  * (`runtimeLimits`, which fills `maxRequestBytes` and `maxJsonValues` since ADR 0027 pull
- * request 3): `maxJsonValues` is the request-side value count and, until pull request 6 enforces
- * it on results, the model's result-side count too.
+ * request 3): `maxJsonValues` is the request-side value count and, since pull request 6
+ * enforces it on results too, the result-side count as well.
  */
 export const inputsAtLimits = (limits) => ({
   rMiB: limits.maxRequestBytes / MIB,

@@ -2,6 +2,9 @@
 // smoke-sections.mjs it returns `{ failures, report }`; neither contains a token or a secret.
 import { client, errorCode, summary, unique } from "./smoke-sections.mjs";
 
+// The read cap this smoke gives the transport, as core gives one with each execute (ADR 0027).
+const READ_CAP = 1_048_576;
+
 const columnList = (count) => Array.from({ length: count }, (_, index) => `${index} AS c${index}`).join(",");
 
 /**
@@ -55,7 +58,7 @@ export const sqlComplexitySmoke = async (context, { transport, allowlist, classi
     "the smoke has a statement for exactly the allowlist entries marked smokeVerified");
   const run = async (sql) => {
     const connection = await transport.begin("read", 10_000, undefined, { maxBytesPerValue: 262_144 });
-    try { await connection.execute([{ sql }]); return null; } catch (error) { return error; } finally { await connection.rollback().catch(() => {}); }
+    try { await connection.execute([{ sql }], { maxResponseBytes: READ_CAP }); return null; } catch (error) { return error; } finally { await connection.rollback().catch(() => {}); }
   };
   for (const entry of verified) {
     const error = await run(COMPLEXITY_PROBES[entry.prefix]);
@@ -107,13 +110,13 @@ export const sqlComplexitySmoke = async (context, { transport, allowlist, classi
   const next = begin.status === 201 ? await api.statement(transactionId, { sequence: 2, sql: "SELECT id FROM projects", params: {} }) : empty;
   expect(next.status === 409 && errorCode(next) === "POLICYSQL_TRANSACTION_UNAVAILABLE", "the transaction is closed after the refusal");
 
-  // #96: a statement reply the transport cannot read (over its 2 MiB bound) leaves the stream
+  // #96: a statement reply the transport cannot read (over its read cap, 1 MiB here, against a 3 MB reply) leaves the stream
   // unusable; nothing is sent with a stale baton, so the server expires the stream and releases its
   // write lock, and a following BEGIN on the same database succeeds. The wait is recorded.
   const oversized = { refused: false, beginAfterMs: null };
   {
     const connection = await transport.begin("write", 10_000, undefined, { maxBytesPerValue: 262_144 });
-    try { await connection.execute([{ sql: "SELECT replace(hex(zeroblob(1500000)),'0','a')" }]); } catch (error) {
+    try { await connection.execute([{ sql: "SELECT replace(hex(zeroblob(1500000)),'0','a')" }], { maxResponseBytes: READ_CAP }); } catch (error) {
       oversized.refused = error?.code === "POLICYSQL_LIMIT_EXCEEDED";
     }
     await connection.rollback().catch(() => {});

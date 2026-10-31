@@ -52,12 +52,21 @@ use wasm_bindgen::prelude::*;
 /// `POLICYSQL_INTERNAL`; the step machine reads the outcome class `complex` (with the statement
 /// index) and a `databaseCode` on `executeFailed`, and writes the log events `sql_too_complex`,
 /// `emitted_sql_reparse_failed`, and `database_error_unclassified`. No identity value changed.
-const ABI_VERSION: u32 = 14;
+/// 15: ADR 0027 pull request 6: `max_statements`, `max_rows`, and `max_result_bytes` have hard
+/// maxima (64, 100,000, 524,288) and `max_response_bytes` is a constructor field, so a limit
+/// that was accepted is refused and a response over it is 413 `POLICYSQL_LIMIT_EXCEEDED` with
+/// rollback before COMMIT; result-side `max_json_values` is enforced (413); the raw result
+/// bound is compiled per envelope and replaces the 1 MiB per statement bound; the step machine
+/// writes `maxResponseBytes` on `execute` and `observe` effects, a stored response over the
+/// lookup bound is 413 on a keyed retry, and the event and volatile bounds are derived. No
+/// identity value changed.
+const ABI_VERSION: u32 = 15;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_ACTIVE_EXECUTIONS: usize = 64;
 
 mod limits;
+mod result_budget;
 mod session;
 mod step;
 
@@ -65,6 +74,8 @@ mod step;
 mod bytes_tests;
 #[cfg(test)]
 mod nullable_tests;
+#[cfg(test)]
+mod result_budget_tests;
 #[cfg(test)]
 mod step_tests;
 #[cfg(test)]
@@ -201,6 +212,12 @@ struct RawBlob {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ValidatedExecuteResult {
+    /// Bytes of raw result text and raw values this result consumed (ADR 0027); the step
+    /// machine's cumulative budgets, not part of the public shape.
+    #[serde(skip)]
+    raw_bytes: u64,
+    #[serde(skip)]
+    values: u64,
     columns: Vec<String>,
     rows: Vec<Vec<serde_json::Value>>,
     redactions: Vec<Vec<bool>>,
@@ -786,15 +803,73 @@ impl PolicySqlRuntime {
         Ok(handle)
     }
 
+    /// The raw result bound of a sealed envelope (ADR 0027 "Derived internal bounds"), computed
+    /// from the compiled statements: `2P + 64·C + Σ 512 + M + 1,024`.
+    fn raw_result_bound(&self, handle: u64) -> Result<u64, RuntimeError> {
+        let plans = self.plans.borrow();
+        let envelope = plans.get(&handle).ok_or(RuntimeError::Internal)?;
+        let mut statements = Vec::with_capacity(envelope.statements.len());
+        let mut metadata_bytes = 0_u64;
+        for statement in &envelope.statements {
+            let plan = &statement.plan;
+            let emitted = plan.result().len()
+                + plan
+                    .result()
+                    .iter()
+                    .filter(|column| column.visibility_column.is_some())
+                    .count()
+                + usize::from(plan.operation_check_column().is_some());
+            statements.push((
+                plan.limits().max_rows,
+                u64::try_from(emitted).unwrap_or(u64::MAX),
+            ));
+            metadata_bytes = metadata_bytes.saturating_add(plan.column_metadata_bytes());
+        }
+        Ok(policysql_transaction::bounds::raw_result_bound(
+            self.limits.max_result_bytes,
+            self.limits.max_json_values,
+            &statements,
+            metadata_bytes,
+        ))
+    }
+
+    /// The whole result budget of one statement: its envelope's raw bound and the value limit.
+    fn statement_result_budget(
+        &self,
+        handle: u64,
+    ) -> Result<policysql_transaction::machine::ResultBudget, RuntimeError> {
+        Ok(policysql_transaction::machine::ResultBudget {
+            raw_bytes: self.raw_result_bound(handle)?,
+            values: self.limits.max_json_values,
+            result_bytes: u64::MAX,
+        })
+    }
+
     fn validate_result(
         &self,
         handle: u64,
         index: usize,
         raw_result_json: &str,
     ) -> Result<ValidatedExecuteResult, RuntimeError> {
+        let budget = self
+            .statement_result_budget(handle)
+            .map_err(|_| RuntimeError::RemoteResult)?;
+        self.validate_result_within(handle, index, raw_result_json, budget)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn validate_result_within(
+        &self,
+        handle: u64,
+        index: usize,
+        raw_result_json: &str,
+        budget: policysql_transaction::machine::ResultBudget,
+    ) -> Result<ValidatedExecuteResult, RuntimeError> {
         // The raw result is database output, not a client envelope: exceeding the
-        // result-side bound is a result-size limit (413), never an invalid request.
-        if raw_result_json.len() > policysql_transaction::machine::EVENT_RESULT_BYTES {
+        // result-side bound is a result-size limit (413), never an invalid request. It is
+        // checked before a byte is parsed, against what the earlier statements left.
+        let raw_bytes = u64::try_from(raw_result_json.len()).unwrap_or(u64::MAX);
+        if raw_bytes > budget.raw_bytes {
             return Err(RuntimeError::Rejected(RejectionKind::LimitExceeded));
         }
         let raw: RawExecuteResult =
@@ -820,41 +895,65 @@ impl PolicySqlRuntime {
         if statement.plan.operation_check_column().is_some() {
             expected_types.push(vec![LogicalType::Boolean]);
         }
+        // Raw values, counted from the descriptors on and stopping at the first row over the
+        // limit (ADR 0027): the column descriptors, every cell, and every value inside a
+        // JSON-typed cell.
+        let values_limit = budget.values;
+        let mut values = u64::try_from(raw.columns.len()).unwrap_or(u64::MAX);
+        let over_limit = || RuntimeError::Rejected(RejectionKind::LimitExceeded);
+        if values > values_limit {
+            return Err(over_limit());
+        }
+        let columns = raw.columns;
+        let mut rows = Vec::with_capacity(raw.rows.len());
+        for row in raw.rows {
+            values = values.saturating_add(u64::try_from(row.len()).unwrap_or(u64::MAX));
+            if values > values_limit {
+                return Err(over_limit());
+            }
+            let mut converted = Vec::with_capacity(row.len());
+            for (column, value) in row.into_iter().enumerate() {
+                let expected = expected_types
+                    .get(column)
+                    .ok_or(RuntimeError::RemoteResult)?;
+                if expected.contains(&LogicalType::Json)
+                    && let serde_json::Value::String(text) = &value
+                {
+                    let inside = result_budget::count_json_values(text, values_limit - values)
+                        .ok_or_else(over_limit)?;
+                    values += inside;
+                }
+                converted.push(logical_result_value(
+                    value_limit(&self.limits),
+                    value,
+                    expected,
+                )?);
+            }
+            rows.push(converted);
+        }
         let mut result = policysql_turso::ExecuteResult {
-            columns: raw.columns,
-            rows: raw
-                .rows
-                .into_iter()
-                .map(|row| {
-                    row.into_iter()
-                        .enumerate()
-                        .map(|(column, value)| {
-                            logical_result_value(
-                                value_limit(&self.limits),
-                                value,
-                                expected_types
-                                    .get(column)
-                                    .ok_or(RuntimeError::RemoteResult)?,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()?,
+            columns,
+            rows,
             redactions: Vec::new(),
             affected_rows: raw.affected_rows,
         };
-        policysql_turso::validate_sealed_result(&statement.plan, &mut result).map_err(|error| {
-            match error {
-                policysql_turso::AdapterError::ExpectationFailed => {
-                    RuntimeError::Rejected(RejectionKind::ExpectationFailed)
-                }
-                policysql_turso::AdapterError::LimitExceeded => {
-                    RuntimeError::Rejected(RejectionKind::LimitExceeded)
-                }
-                _ => RuntimeError::RemoteResult,
+        policysql_turso::validate_sealed_result_within(
+            &statement.plan,
+            &mut result,
+            budget.result_bytes,
+        )
+        .map_err(|error| match error {
+            policysql_turso::AdapterError::ExpectationFailed => {
+                RuntimeError::Rejected(RejectionKind::ExpectationFailed)
             }
+            policysql_turso::AdapterError::LimitExceeded => {
+                RuntimeError::Rejected(RejectionKind::LimitExceeded)
+            }
+            _ => RuntimeError::RemoteResult,
         })?;
         Ok(ValidatedExecuteResult {
+            raw_bytes,
+            values,
             columns: result.columns,
             rows: result
                 .rows
@@ -993,6 +1092,13 @@ impl PolicySqlRuntime {
                 || expected.policy_version != self.policy_version
         }) {
             return Err(RuntimeError::Snapshot);
+        }
+        // More statements than `max_statements` is the configured limit's 413, before any statement
+        // is read (an empty envelope stays an invalid request, in the gateway).
+        if u64::try_from(raw_request.statements.len()).unwrap_or(u64::MAX)
+            > self.limits.max_statements
+        {
+            return Err(RuntimeError::Rejected(RejectionKind::LimitExceeded));
         }
         // Before any statement is parsed: a statement over `max_sql_bytes` costs nothing more.
         if let Some(index) = raw_request.statements.iter().position(|statement| {
@@ -3539,13 +3645,12 @@ resources:
             );
             let identity = parse_json(&runtime.identity_json(&input));
             assert!(identity["idempotency"]["keyHash"].is_string(), "{identity}");
-            // The step event: the body text (escaped), the auth, the binding, and the raw
-            // results of every statement.
+            // The step event: the body text (escaped), the auth, the binding, and the largest
+            // raw read (the envelope raw bound at its maximum, or the idempotency lookup).
             let event_floor = escaped.len()
                 + auth.len()
                 + binding.to_string().len()
-                + usize::try_from(limits.max_statements).unwrap_or(usize::MAX)
-                    * policysql_transaction::machine::EVENT_RESULT_BYTES;
+                + policysql_transaction::bounds::LOOKUP_BYTES;
             assert!(event_floor <= limits.max_event_bytes(), "{max_request}");
         }
     }

@@ -10,9 +10,10 @@
 //! The four original fields stay required; every other configurable field is optional with
 //! a default. ADR 0027 pull request 3 added `max_request_bytes`, `max_json_values`, and
 //! `max_sql_bytes` (with a minimum, because a request limit below 64 KiB cannot carry the
-//! envelope) and made `limits_json` report every limit the ADR adds. The field a later pull
-//! request makes configurable (`max_response_bytes`) is reported at today's fixed value and
-//! is not a constructor field until then. Pull request 4 made the four input-side parser
+//! envelope) and made `limits_json` report every limit the ADR adds. Pull request 6 gave
+//! `max_statements`, `max_rows`, and `max_result_bytes` their hard maxima, made
+//! `max_response_bytes` a constructor field (its range depends on `max_result_bytes`, so it is
+//! validated after the table), and made `max_json_values` bound the result side too. Pull request 4 made the four input-side parser
 //! limits (`max_parameters`, `max_expression_depth`, `max_projections`, `max_joins`)
 //! constructor fields: they bound only `PolicySQL`'s own work on the client's SQL and promise
 //! nothing about the emitted statement. Pull request 5 made `max_bytes_per_value` (decoded
@@ -45,18 +46,29 @@ struct Field {
 /// The largest `max_sql_bytes`, before the cross-check with `max_request_bytes`.
 const MAX_SQL_BYTES_CEILING: u64 = 1_048_576;
 
+/// Hard maxima of the result-side limits (ADR 0027): they keep the raw result, the validated
+/// result, and the response inside the memory model's bounds.
+const HARD_MAX_ROWS: u64 = 100_000;
+const HARD_MAX_RESULT_BYTES: u64 = 524_288;
+const HARD_MAX_STATEMENTS: u64 = 64;
+/// The hard maximum of `max_response_bytes`; the idempotency lookup bound derives from it.
+const HARD_MAX_RESPONSE_BYTES: u64 = 589_824;
+/// The smallest room `max_response_bytes` leaves above `max_result_bytes`: the envelope of a
+/// one-statement response and the reserve for the fields added after commit.
+const MIN_RESPONSE_HEADROOM_BYTES: u64 = 3_072;
+
 const FIELDS: [Field; 18] = [
     Field {
         name: "max_rows",
         default: None,
         min: 1,
-        max: MAX_SAFE_INTEGER,
+        max: HARD_MAX_ROWS,
     },
     Field {
         name: "max_result_bytes",
         default: None,
         min: 1,
-        max: MAX_SAFE_INTEGER,
+        max: HARD_MAX_RESULT_BYTES,
     },
     Field {
         name: "timeout_ms",
@@ -68,8 +80,7 @@ const FIELDS: [Field; 18] = [
         name: "max_statements",
         default: None,
         min: 1,
-        // The gateway holds it as `usize`, which is 32 bits on wasm32.
-        max: 4_294_967_295,
+        max: HARD_MAX_STATEMENTS,
     },
     // Interactive transaction duration from begin; also the atomic owner execution deadline.
     Field {
@@ -200,7 +211,7 @@ pub(crate) struct RuntimeLimits {
     pub(crate) max_joins: u64,
     /// Decoded bytes of one bytes value (ADR 0027 pull request 5).
     pub(crate) max_bytes_per_value: u64,
-    /// Reported at its default (`max_result_bytes` + 64 KiB); enforced from pull request 6.
+    /// UTF-8 bytes of a complete success response (ADR 0027 pull request 6).
     pub(crate) max_response_bytes: u64,
     // Fixed protocol constants, enforced by core, never configured.
     pub(crate) max_commit_checks: u64,
@@ -216,15 +227,15 @@ pub(crate) struct FixedLimits {
 
 /// The default of `max_response_bytes` beyond `max_result_bytes`.
 const RESPONSE_HEADROOM_BYTES: u64 = 65_536;
+const RESPONSE_FIELD: &str = "max_response_bytes";
 
 /// Parses and validates the constructor's limits. Every failure names the field.
 pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLimits, String> {
     let object: Map<String, Value> = serde_json::from_str(limits_json)
         .map_err(|_| "runtime limits are invalid: expected a JSON object".to_owned())?;
-    if let Some(unknown) = object
-        .keys()
-        .find(|key| !FIELDS.iter().any(|field| field.name == key.as_str()))
-    {
+    if let Some(unknown) = object.keys().find(|key| {
+        key.as_str() != RESPONSE_FIELD && !FIELDS.iter().any(|field| field.name == key.as_str())
+    }) {
         return Err(format!(
             "runtime limits are invalid: unknown field `{}`",
             printable(unknown)
@@ -278,6 +289,20 @@ pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLim
                 .to_owned(),
         );
     }
+    let response_min = max_result_bytes + MIN_RESPONSE_HEADROOM_BYTES;
+    let max_response_bytes = match object.get(RESPONSE_FIELD) {
+        None => (max_result_bytes + RESPONSE_HEADROOM_BYTES).min(HARD_MAX_RESPONSE_BYTES),
+        Some(value) => match value.as_u64() {
+            Some(value) if (response_min..=HARD_MAX_RESPONSE_BYTES).contains(&value) => value,
+            _ => {
+                return Err(format!(
+                    "runtime limits are invalid: `{RESPONSE_FIELD}` must be an integer from \
+                     `max_result_bytes` + {MIN_RESPONSE_HEADROOM_BYTES} ({response_min}) to \
+                     {HARD_MAX_RESPONSE_BYTES}"
+                ));
+            }
+        },
+    };
     Ok(RuntimeLimits {
         max_rows,
         max_result_bytes,
@@ -297,9 +322,7 @@ pub(crate) fn parse(limits_json: &str, fixed: &FixedLimits) -> Result<RuntimeLim
         max_projections,
         max_joins,
         max_bytes_per_value,
-        max_response_bytes: max_result_bytes
-            .saturating_add(RESPONSE_HEADROOM_BYTES)
-            .min(MAX_SAFE_INTEGER),
+        max_response_bytes,
         max_commit_checks: as_u64(fixed.max_commit_checks),
         max_hook_duration_ms: fixed.max_hook_duration_ms,
     })
@@ -423,6 +446,63 @@ mod tests {
                 assert!(accepted.is_ok(), "{} = {good}: {accepted:?}", field.name);
             }
         }
+    }
+
+    #[test]
+    fn the_result_side_limits_have_hard_maxima_and_the_response_limit_follows_the_result_limit() {
+        // Hard maxima (ADR 0027), at the cap and one over.
+        let required_with = |name: &str, value: u64| {
+            let mut object: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&format!("{{{REQUIRED}}}"))
+                    .unwrap_or_else(|error| unreachable!("{error}"));
+            object.insert(name.to_owned(), value.into());
+            serde_json::to_string(&object).unwrap_or_else(|error| unreachable!("{error}"))
+        };
+        for (name, max) in [
+            ("max_rows", 100_000_u64),
+            ("max_result_bytes", 524_288),
+            ("max_statements", 64),
+        ] {
+            assert!(
+                parse(&required_with(name, max), &FIXED).is_ok(),
+                "{name} = {max}"
+            );
+            let error = parse(&required_with(name, max + 1), &FIXED)
+                .err()
+                .unwrap_or_default();
+            assert!(error.contains(&format!("`{name}`")), "{error}");
+        }
+        // `max_response_bytes` is at least `max_result_bytes` + 3,072 and at most 589,824; the
+        // default is `max_result_bytes` + 65,536, capped at the maximum.
+        let response = |value: &str| with(&format!(r#""max_response_bytes":{value}"#));
+        assert_eq!(response("67072").map(|l| l.max_response_bytes), Ok(67_072));
+        assert_eq!(
+            response("589824").map(|l| l.max_response_bytes),
+            Ok(589_824)
+        );
+        for bad in ["67071", "589825", "0", "-1", "1.5", "\"70000\"", "null"] {
+            let error = response(bad).err().unwrap_or_default();
+            assert!(error.contains("`max_response_bytes`"), "{bad}: {error}");
+            assert!(error.contains("67072"), "names the minimum: {error}");
+        }
+        let large = |extra: &str| {
+            parse(
+                &format!(
+                    r#"{{"max_rows":100,"max_result_bytes":524288,"timeout_ms":1000,"max_statements":8{extra}}}"#
+                ),
+                &FIXED,
+            )
+        };
+        assert_eq!(large("").map(|l| l.max_response_bytes), Ok(589_824));
+        assert_eq!(
+            large(r#","max_response_bytes":527360"#).map(|l| l.max_response_bytes),
+            Ok(527_360)
+        );
+        assert!(large(r#","max_response_bytes":527359"#).is_err());
+        assert_eq!(
+            with(r#""max_response_bytes":589824"#).map(|l| l.max_result_bytes),
+            Ok(64_000)
+        );
     }
 
     #[test]
