@@ -648,10 +648,18 @@ today.
   `POLICYSQL_TRANSACTION_CONFLICT`: the client takes that as a definite rejection of an
   execute, but the Worker may be retrying a keyed write that already committed, and ADR 0007
   forbids a definite rejection of a request whose COMMIT may have been sent. The retry replays
-  from its `policysql_idempotency` row once the snapshots agree. A legitimate
-  `POLICYSQL_TRANSACTION_CONFLICT` (a busy owner, a command sequence conflict) is unchanged,
-  and so is the Worker's `POLICYSQL_STALE_OPERATION` for a request pinned to an earlier
-  snapshot. Interactive commands were checked: a `commit` is answered
+  from its `policysql_idempotency` row once the snapshots agree. The limit: a committed keyed
+  write that carried `expected` (`schemaVersion` / `policyVersion`) and is retried after a
+  rollout that changed the policy is checked against `expected` before the idempotency lookup
+  and answered `POLICYSQL_STALE_OPERATION` (409), a definite rejection; that is #85 path 1,
+  not this change. No atomic path returns `POLICYSQL_TRANSACTION_CONFLICT` any more; the code
+  remains for interactive commands (a command sequence conflict) and is unchanged there, and
+  so is the Worker's `POLICYSQL_STALE_OPERATION` for a request pinned to an earlier snapshot.
+  The owner compares the input's `snapshot` before reading anything else, so a read failure of
+  an input of another deployment is the skew answer too. A `begin` whose snapshot is not the
+  owner's logs `owner_snapshot_skew` but keeps `POLICYSQL_TRANSACTION_CONFLICT`: the begin
+  response is never a COMMIT outcome, and the client takes `TRANSACTION_CONFLICT` on a begin
+  as an unknown outcome. Interactive commands were checked: a `commit` is answered
   `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` whenever COMMIT may have been sent (the `Committing` and
   `CommitUnknown` phases, before any snapshot check); while the transaction is `Active`, no
   COMMIT was sent, so the `POLICYSQL_TRANSACTION_UNAVAILABLE` of a snapshot change is a true

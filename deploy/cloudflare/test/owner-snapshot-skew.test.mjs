@@ -4,7 +4,7 @@
 // committed, so the answer must never be one the client takes as a definite rejection
 // (ADR 0007): it is the version-skew answer, 500 POLICYSQL_INTERNAL, the one a wire-version
 // skew gets, and the retry replays from the idempotency row once the versions agree again.
-// A legitimate TRANSACTION_CONFLICT (a busy owner, a sequence conflict) stays a rejection.
+// A legitimate TRANSACTION_CONFLICT (an interactive command's sequence conflict) stays a rejection.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";

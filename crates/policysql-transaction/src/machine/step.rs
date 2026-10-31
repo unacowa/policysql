@@ -1580,6 +1580,9 @@ impl<C: Compiler> Step<'_, C> {
             return Ok(());
         };
         if snapshot != self.compiler.snapshot() {
+            // Logged as skew; the answer stays a conflict (ADR 0024 "Owner snapshot mismatch").
+            let record = json!({"event": "owner_snapshot_skew", "input": "begin", "requestId": self.request});
+            self.log(&record);
             self.respond(error_reply(Code::Conflict));
             return Ok(());
         }

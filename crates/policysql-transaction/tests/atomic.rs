@@ -946,3 +946,24 @@ fn an_owner_answers_another_snapshot_as_version_skew_never_as_a_conflict() {
     assert_eq!(owner_engine.observed.envelope_executes, 0);
     assert_eq!(owner_engine.compiler.live_handles(), 0);
 }
+
+#[test]
+fn an_owner_compares_the_snapshot_before_reading_the_rest_of_the_input() {
+    let owner = format!("tx_{}", "ab".repeat(16));
+    let mut owner_engine = owner_engine();
+    owner_engine.owner = Some(owner);
+    // An input of another deployment whose other members this owner cannot read.
+    for member in ["databaseBinding", "request", "auth"] {
+        let mut skewed = atomic_input(&audit("a1"), None);
+        skewed["input"]["validationId"] = json!(format!("cval_{}", "ab".repeat(16)));
+        skewed["input"]["snapshot"] = json!(NEXT_SNAPSHOT);
+        skewed["input"][member] = json!(7);
+        let answer = owner_engine.run(&skewed);
+        assert_eq!(
+            code(&answer),
+            Some("POLICYSQL_INTERNAL"),
+            "{member}: {answer}"
+        );
+    }
+    assert_eq!(owner_engine.observed.commits_emitted, 0);
+}
