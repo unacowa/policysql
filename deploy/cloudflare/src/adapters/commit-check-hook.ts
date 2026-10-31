@@ -2,10 +2,16 @@
 // request per triggered check. It makes no decision. Core's step machine issues the capability,
 // builds the payload, and judges the reply; the owner (src/transaction-owner.ts) chooses the
 // endpoint by check id.
-import { fetchNoFollow } from "../redirects.ts";
+import { discardBody, fetchNoFollow } from "../redirects.ts";
+import { BodyReadError, readBoundedText } from "../bounded-body.ts";
 import type { OutboundFetch } from "../redirects.ts";
 import { callbackQueryUrl } from "../http/routes.ts";
 import { stringifyExact } from "../exact-json.ts";
+
+// A validator answers allow or deny with a small JSON object, so its reply bound is a fixed
+// protocol constant, not a configured limit (ADR 0027 "Fixed protocol constants"). A longer
+// reply is a failed validator: the commit is denied, never allowed.
+const VALIDATOR_RESPONSE_BYTES = 65_536;
 
 const hex = (bytes: ArrayBuffer) => [...new Uint8Array(bytes)]
   .map((byte) => byte.toString(16).padStart(2, "0"))
@@ -41,7 +47,9 @@ export type CommitCheckHookCall = {
 /**
  * Sends the hook request. Resolves with whether the response was 2xx and its JSON body
  * (null when it is not JSON). Rejects when no response arrived, including a redirect, which
- * fetchNoFollow discards unread because following it would forward the signed body.
+ * fetchNoFollow discards unread because following it would forward the signed body, and when
+ * the reply is longer than 65,536 bytes (read as a byte stream and cancelled at the first
+ * chunk over the bound, so a hostile validator cannot make the engine buffer it).
  */
 export const callCommitCheckHook = async (call: CommitCheckHookCall): Promise<{ ok: boolean; decision: unknown }> => {
   // An integer beyond 2^53 - 1 in the payload (a session value core kept) is written with its
@@ -55,9 +63,10 @@ export const callCommitCheckHook = async (call: CommitCheckHookCall): Promise<{ 
     },
   });
   const timestamp = Math.floor(Date.now() / 1000).toString();
+  const signal = AbortSignal.timeout(call.timeoutMs);
   const response = await fetchNoFollow(call.url, {
     method: "POST",
-    signal: AbortSignal.timeout(call.timeoutMs),
+    signal,
     headers: {
       "content-type": "application/json",
       "policysql-hook-version": "1",
@@ -66,7 +75,18 @@ export const callCommitCheckHook = async (call: CommitCheckHookCall): Promise<{ 
     },
     body,
   }, call.fetchImpl);
+  if (!response.ok) {
+    await discardBody(response);
+    return { ok: false, decision: null };
+  }
+  // BodyTooLargeError and an abort propagate: the validator failed. Malformed UTF-8 or JSON
+  // is an answer that is not a decision.
+  let text: string;
+  try { text = await readBoundedText(response, VALIDATOR_RESPONSE_BYTES, signal); } catch (error) {
+    if (error instanceof BodyReadError) return { ok: true, decision: null };
+    throw error;
+  }
   let decision: unknown;
-  try { decision = await response.json(); } catch { decision = null; }
-  return { ok: response.ok, decision };
+  try { decision = JSON.parse(text); } catch { decision = null; }
+  return { ok: true, decision };
 };
