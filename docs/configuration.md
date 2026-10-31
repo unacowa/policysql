@@ -76,6 +76,9 @@ limits").
 | `maxCallbackRows` | `max_callback_rows` | 100 | 1 to 10,000 | owner: cumulative callback rows per commit check |
 | `beginTimeoutMs` | `begin_timeout_ms` | 1,000 | 1 to 60,000 | owner: BEGIN of an interactive transaction |
 | `costTimeoutMs` | `cost_timeout_ms` | 1,000 | 1 to 10,000 | engine and owner: connection deadline and BEGIN of the after-response cost observation |
+| `maxRequestBytes` | `max_request_bytes` | 1,048,576 | 65,536 to 2,097,152 | HTTP adapter (streamed, a declared `Content-Length` over it is refused unread), engine (UTF-8 bytes of the text as received, a byte order mark counted), core (derived bounds); over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` |
+| `maxJsonValues` | `max_json_values` | 65,536 | 1,024 to 131,072 | engine: JSON values plus object member names in one request body, counted by the scan that checks duplicate keys, which stops at the first value over the limit, before `JSON.parse` and before WASM; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE`. (Its result-side meaning, cells, companion cells, and column descriptors of a raw database response, arrives with ADR 0027 pull request 6.) |
+| `maxSqlBytes` | `max_sql_bytes` | 65,536 | 1,024 to 1,048,576, and at most `maxRequestBytes` | core, UTF-8 bytes of one statement's `sql`, checked before any statement is parsed; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` with path `/statements/<i>/sql` (it was 400 `POLICYSQL_INVALID_REQUEST`) |
 
 The `maxTransactionResultBytes` ceiling keeps an owner record, which stores the last
 response, inside a Durable Object value. Ranges keep every value an exact JavaScript integer.
@@ -87,12 +90,49 @@ version strings. With the defaults every Catalog fits (resource names up to 1,02
 both maxima (256 statements, 65,536 bytes) resource names of up to about 50 bytes fit. The
 error names both fields.
 
-Fixed protocol constants are enforced by core and not configurable; the runtime reports them
-with the limits so Capabilities reads them from the same place: `maxRequestBytes` (1,048,576;
-the HTTP adapter's body bound `MAX_BODY_BYTES` must equal it), `maxSqlBytes` (65,536),
-`maxJoins` (8), `maxCommitChecks` (4), `maxHookDurationMs` (1,500), and `maxBytesPerValue`
-(262,144, from `max_bytes_per_value`). The provider timeout of 1,000 ms in `database.ts` is an
-adapter bound, not a limit, and stays there.
+The request limits are explicit in the reference wrapper (`wrapper/limits.ts`); the engine
+reads them from the runtime, so the HTTP adapter has no body limit of its own (the exported
+`MAX_BODY_BYTES` is gone: the engine hands its reader `maxRequestBytes`). A construction error
+names the field: below the minimum, above the hard maximum, or `max_sql_bytes` above
+`max_request_bytes`.
+
+The runtime reports more limits than it lets a wrapper configure yet. They are fixed today and
+become configurable in the following pull requests of
+[ADR 0027](adr/0027-byte-and-cpu-budgets.md), so `limits_json` (and the ABI) changes once:
+`maxBytesPerValue` (262,144; it was the `max_bytes_per_value` getter, which is removed, so every
+reader takes it from `limits_json`), the binder's input-side limits `maxParameters` (128),
+`maxExpressionDepth` (32), `maxProjections` (128), and `maxJoins` (8), and `maxResponseBytes`
+(`maxResultBytes` + 65,536, reported but not enforced or advertised before pull request 6). Fixed
+protocol constants stay reported too: `maxCommitChecks` (4) and `maxHookDurationMs` (1,500). Capabilities
+advertises exactly the enforced ones: `maxRows`, `maxResultBytes`, `timeoutMs`, `maxStatements`,
+`maxRequestBytes`, `maxJsonValues`, `maxSqlBytes`, `maxBytesPerValue`, `maxParameters`,
+`maxExpressionDepth`, `maxProjections`, and `maxJoins`. The provider timeout of 1,000 ms in
+`database.ts` is an adapter bound, not a limit, and stays there.
+
+### Bounds the library computes
+
+Three bounds on the request path are not limits: they are memory guards computed by core from
+`maxRequestBytes` (ADR 0027 "Derived internal bounds"), never configured and never advertised,
+and never smaller than the largest input the configured limits admit. With `A` = 65,536 (the
+session JSON the wrapper supplies; a larger one is a wrapper fault, 500 `POLICYSQL_INTERNAL`) and
+`R` = `maxRequestBytes`:
+
+| Bound | Formula | At the default `R` |
+| --- | --- | --- |
+| WASM compile input (verified auth + request) | `(A + 1,024) + R + 1,024` | 1,116,160 |
+| `identity_json` and `cost_estimate_json` input | `(A + 1,024) + 2,048 + 128 + 2 R + 1,024` | 2,166,912 |
+| Step event | `2 R + (A + 1,024) + 2,048 + max_statements x 1 MiB + 4,096` | 10,558,464 with 8 statements |
+
+The factor 2 is the JSON escaping of the body text embedded in a hash input or an event (every
+`"` and `\` doubles). The `max_statements x 1 MiB` term is the result side, which ADR 0027 pull
+request 6 replaces with the compiled raw bound. Exceeding a derived bound is reported as the limit
+it derives from (413 `POLICYSQL_REQUEST_TOO_LARGE`), never as 400. Two replies PolicySQL reads from
+outside have fixed 65,536-byte bounds, read as a byte stream and cancelled at the first chunk over
+them: a database control reply (BEGIN, COMMIT, ROLLBACK, close), where over the bound is 503
+`POLICYSQL_DATABASE_UNAVAILABLE`, or for COMMIT an unknown outcome (500 or 503, or
+`POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for an interactive COMMIT), never a rejection and never a
+limit (ADR 0007); and a validator (commit-check) reply, where over the bound denies the commit as
+a failed validator.
 
 Failures, all at construction and before any request is served:
 
@@ -120,14 +160,14 @@ cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res))
 | --- | --- | --- |
 | `R` | request bytes the limits allow, MiB (`maxRequestBytes`) | 1 |
 | `B` | raw result bytes not attributable to values, MiB: the larger of `2 x maxResultBytes + 512 x maxStatements + 1,048,576` and the idempotency lookup bound 1,183,744 | 1.13 at the reference wrapper's limits |
-| `V_req`, `V_res` | JSON values in the request body (values plus object member names) and in the raw result (cells including companions, column descriptors, values inside JSON cells). `maxJsonValues` is 65,536 by ADR 0027 but the runtime neither enforces nor reports it before the request-budget pull request (ADR 0027 pull request 3), so the wrapper test uses that default | 65,536 each |
+| `V_req`, `V_res` | JSON values in the request body (values plus object member names) and in the raw result (cells including companions, column descriptors, values inside JSON cells). `maxJsonValues` bounds the request side since ADR 0027 pull request 3; the result side is enforced from pull request 6, and the formula already counts it | 65,536 each |
 | `C0` | fixed cost of a request | 5 ms |
 | `a_b` | cost per MiB of request bytes (SQL text included) and of result text | 80 ms per MiB |
 | `a_v` | cost per JSON value | 1.3 microseconds |
 | `F` | Workers CPU time over reference-machine time | 2.0 (the maintainers' value; the first measurement on the dev deployment found 1.2 to 7.7, see ADR 0027 "Pull request 1 results") |
 | `S` | safety margin: isolates tolerate occasional overruns, not sustained ones | 1.25 |
 
-Until then the formula does not bound a request's value count: a body of about 1 MB of nested arrays is accepted today with about 500,000 values, which the formula prices at 731 ms of reference time (1,828 ms of `cpu_ms` at F = 2.0), although it measures about 200 ms. Re-measure after pull request 3.
+Since pull request 3 the formula's request side is a bound a client cannot exceed: a body past `maxJsonValues` is 413 before it is parsed. (Before it, a body of about 1 MB of nested arrays was accepted with about 500,000 values, which the formula prices at 731 ms of reference time.) The measurement script and the release smoke size their densest request shapes by that limit (`REQUEST_VALUE_BUDGET`, 65,536 minus 64 values for the envelope), so a 1 MB body of nested arrays is now about 130 KB.
 
 The coefficients are for the reference machine (i7-7700K 4.2 GHz, Node, the release WASM): the worst
 measured shape per term. At the reference wrapper's limits the formula gives about 346 ms on the

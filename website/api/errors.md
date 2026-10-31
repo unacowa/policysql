@@ -62,7 +62,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_TRANSACTION_UNAVAILABLE` | 409 | transactionが存在しない、利用者に属していない、期限切れ、または失敗状態。COMMITの送信前にbindingまたは期限の確認に失敗した場合も返します（COMMITは送られておらず、rollback済みです） |
 | `POLICYSQL_COMMIT_CHECK_REJECTED` | 409 | commit checkがtransactionを拒否した、または安全に完了できない |
 | `POLICYSQL_LIMIT_EXCEEDED` | 413 | requestまたはresult limitを超えた |
-| `POLICYSQL_REQUEST_TOO_LARGE` | 413 | HTTP bodyまたはSQL textが受付上限を超えた |
+| `POLICYSQL_REQUEST_TOO_LARGE` | 413 | HTTP body（`limits.maxRequestBytes`）、body内のJSON値の数（`limits.maxJsonValues`）、またはSQL text（`limits.maxSqlBytes`、pathは`/statements/<i>/sql`）が受付上限を超えた。再送しても成功しないため、clientは拒否（`PolicySqlRejectedError`）として扱う |
 | `POLICYSQL_UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type`が`application/json`でない |
 | `POLICYSQL_EXPECTATION_FAILED` | 422 | transaction operationの期待条件を満たさない |
 | `POLICYSQL_SCHEMA_MISMATCH` | 422 | database値がcompiled logical contractと一致しない |
