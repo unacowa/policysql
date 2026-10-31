@@ -111,13 +111,44 @@ const ok = (columns = [], rows = []) => ({
   } },
 });
 
-const transport = (reply) => new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "complexity", async (_url, init) => {
-  const { requests } = JSON.parse(init.body);
-  return Response.json({ baton: "complexity-baton", results: requests.map((request, index) => reply(request, index)) });
-});
+// Every reply carries a new baton, as a real server's does; `batons` records the one each request used.
+const transport = (reply, batons = []) => {
+  let serial = 0;
+  return new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "complexity", async (_url, init) => {
+    const { baton, requests } = JSON.parse(init.body);
+    batons.push(baton ?? null);
+    serial += 1;
+    return Response.json({ baton: `complexity-baton-${serial}`, results: requests.map((request, index) => reply(request, index)) });
+  });
+};
 
 const refusal = (message, code = "SQLITE_ERROR") => ({ type: "error", error: { message, code } });
 const limit = { maxBytesPerValue: 262_144 };
+
+test("after a refused statement the rollback continues the stream with the baton of the refusal's reply", async () => {
+  // Found by the release smoke against real Turso: a rollback sent with the previous baton leaves
+  // the transaction (and its write lock) open until the stream expires, so every later BEGIN
+  // timed out.
+  const batons = [];
+  const instance = transport((request) => {
+    const sql = request.stmt?.sql ?? "";
+    if (request.type === "close") return { type: "ok", response: { type: "close" } };
+    if (/^BEGIN/u.test(sql) || sql === "ROLLBACK") return ok();
+    return refusal("SQLite error: too many columns in result set", "SQLITE_UNKNOWN");
+  }, batons);
+  const transaction = await instance.begin("write", 1_000, undefined, limit);
+  await assert.rejects(transaction.execute([{ sql: "SELECT refused" }]), (error) => error instanceof SqlComplexityError);
+  await transaction.rollback();
+  // BEGIN has no baton; the refused statement used the BEGIN reply's; the rollback the refusal's.
+  assert.deepEqual(batons, [null, "complexity-baton-1", "complexity-baton-2"]);
+  // The same holds for a failure that is not complexity.
+  const other = [];
+  const failing = await transport((request) => (request.stmt?.sql === "SELECT other" ? refusal("SQLite error: no such table: x", "SQLITE_UNKNOWN") : /^BEGIN|^ROLLBACK/u.test(request.stmt?.sql ?? "") ? ok() : { type: "ok", response: { type: "close" } }), other)
+    .begin("write", 1_000, undefined, limit);
+  await assert.rejects(failing.execute([{ sql: "SELECT other" }]), (error) => error instanceof DatabaseStatementError);
+  await failing.rollback();
+  assert.deepEqual(other, [null, "complexity-baton-1", "complexity-baton-2"]);
+});
 
 test("the transport classifies the first refused statement of a pipeline by its index, and BEGIN, COMMIT, and ROLLBACK never", async () => {
   const columns = refusal("too many columns in result set");

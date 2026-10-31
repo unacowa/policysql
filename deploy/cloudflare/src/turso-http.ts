@@ -231,13 +231,16 @@ class TursoHttpTransaction {
       binaryLimitExceeded,
       STATEMENT_RESPONSE_BYTES,
     );
+    if (!body.baton) throw databaseFailure();
+    // The stream's next baton comes first, even when a statement was refused: the rollback that
+    // follows a refusal must continue this stream with the baton of this reply, or the server
+    // keeps the transaction (and its write lock) open until the stream expires.
+    this.baton = body.baton;
     // The Hrana error object of a refused statement is read here, and only for statement
     // requests (never BEGIN, COMMIT, or ROLLBACK): the first refused statement decides, and its
     // message is read only to classify it (src/database-complexity.ts).
     const refused = body.results.findIndex((entry) => entry?.type === "error");
     if (refused >= 0) throw statementFailure(body.results[refused].error, refused);
-    if (!body.baton) throw databaseFailure();
-    this.baton = body.baton;
     const results = body.results.map((entry) => decodeResult(entry, this.maxBytes));
     this.usage.push(...results.map((result) => result.usage));
     return results;
