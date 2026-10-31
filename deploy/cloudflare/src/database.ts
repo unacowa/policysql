@@ -1,4 +1,4 @@
-import { EngineError } from "./errors.ts";
+import { CommitNotSentError, EngineError } from "./errors.ts";
 import { bytesLimit } from "./binary.ts";
 
 /** Server-owned identity. Never put credentials or a client-selected URL here. */
@@ -148,6 +148,7 @@ export const databaseTransportFactory = (
           try { await transaction.rollback(); } catch { /* remote timeout is terminal */ }
           throw error;
         }
+        let commitAttempted = false;
         return {
           get open() { return transaction.open; },
           get usage() { return transaction.usage; },
@@ -159,15 +160,27 @@ export const databaseTransportFactory = (
           },
           rollback: () => transaction.rollback(),
           async commit() {
+            // A COMMIT that may already have been sent is never "not sent" again, whatever the
+            // deadline or binding say now: a second attempt is an untyped failure (unknown).
+            if (commitAttempted) throw unavailable();
+            // Everything in this `try` runs before COMMIT is handed to the transport, so its
+            // failure is a provable "not committed" (#54).
             try {
               await checkDatabaseBinding(provider, pinned, pinned.snapshot, expiresAt);
               remainingDatabaseTime(expiresAt);
             }
             catch (error) {
               try { await transaction.rollback(); } catch { /* remote timeout is terminal */ }
+              throw new CommitNotSentError(error);
+            }
+            commitAttempted = true;
+            try { await transaction.commit(); } catch (error) {
+              // The transport's own failure before it sent COMMIT: roll back as above.
+              if (error instanceof CommitNotSentError) {
+                try { await transaction.rollback(); } catch { /* remote timeout is terminal */ }
+              }
               throw error;
             }
-            await transaction.commit();
           },
         };
       },

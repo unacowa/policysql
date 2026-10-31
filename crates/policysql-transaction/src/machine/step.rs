@@ -1069,26 +1069,14 @@ impl<C: Compiler> Step<'_, C> {
                     |id| Effect::Persist { id },
                 )
             }
-            (Task::CommitSend { digest, passed, .. }, Event::CommitFailed { class, .. }) => {
+            (Task::CommitSend { .. }, Event::CommitFailed { class, .. }) => {
                 self.set_connection(Connection::None);
                 let request = request_id.unwrap_or_else(|| self.request_id());
                 if *class == Class::NotCommitted {
-                    // The adapter proved COMMIT did not apply.
-                    let response = terminal_response(self.owner, "failed", &request, passed);
-                    self.complete(Phase::Failed, digest, &response)?;
-                    return self.wait(
-                        lane,
-                        Some(request),
-                        Task::Reply {
-                            reply: Some(value_reply(&response)),
-                            failure: Some(error_reply(Code::Internal)),
-                            logs: Vec::new(),
-                            failure_logs: Vec::new(),
-                            expire_after: false,
-                            restore: None,
-                        },
-                        |id| Effect::Persist { id },
-                    );
+                    // The adapter proved no COMMIT was sent (#54): the definite rejection a
+                    // commit after its deadline gets, and the record is `failed`, so a retry
+                    // finds a transaction that is no longer active.
+                    return self.close(lane, Phase::Failed, Some(error_reply(Code::Unavailable)));
                 }
                 let unknown = json!({
                     "event": "transaction_commit_outcome_unknown",

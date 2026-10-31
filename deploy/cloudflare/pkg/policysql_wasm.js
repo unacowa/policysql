@@ -318,7 +318,11 @@ export class PolicySqlRuntime {
      * when the Worker's snapshot is not its own for an `atomic` input
      * (`POLICYSQL_INTERNAL`, the version-skew answer, instead of
      * `POLICYSQL_TRANSACTION_CONFLICT`, which a client takes as a rejection), and bumped
-     * `ABI_VERSION` to 11; no identity value changed.
+     * `ABI_VERSION` to 11; no identity value changed. #54 changed what a commit whose adapter
+     * proved that no COMMIT was sent (`commitFailed` with class `not_committed`) answers:
+     * `POLICYSQL_TRANSACTION_UNAVAILABLE` (a definite rejection) for an atomic execution (was
+     * `POLICYSQL_INTERNAL`) and for an interactive commit (was a 200 with status `failed`), and
+     * bumped `ABI_VERSION` to 12; no identity value changed.
      * @param {string | null | undefined} durable_json
      * @param {string | null | undefined} volatile_json
      * @param {string} event_json

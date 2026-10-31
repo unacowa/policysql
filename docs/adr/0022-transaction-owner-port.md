@@ -88,6 +88,8 @@ Worker and an object of different versions answer each other's interactive messa
 An atomic execute whose commit-check validator calls back crosses the changed callback path too,
 so during such a skew it is answered 409 `POLICYSQL_COMMIT_CHECK_REJECTED` before COMMIT (ADR 0024).
 
+A failure before COMMIT is sent (the transport's last binding or deadline check) is the same on every owner adapter: the executor reports `not_committed`, and the answer is the definite 409 `POLICYSQL_TRANSACTION_UNAVAILABLE` (#54; ADR 0024). Any other commit exception is an unknown outcome.
+
 ### The Durable Objects adapter (`src/adapters/durable-objects.ts`)
 
 The only library module that names `DurableObjectNamespace`, `DurableObjectState`,

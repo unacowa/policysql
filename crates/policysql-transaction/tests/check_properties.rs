@@ -297,7 +297,8 @@ fn check(engine: &Engine, watch: &mut Watch) -> Result<(), TestCaseError> {
                 prop_assert!(engine.observed.committed_fed, "committed before Committed");
             }
             if rejects_commit(reply)
-                && !(engine.observed.not_committed_fed && reply["value"]["status"] == "failed")
+                && !(engine.observed.not_committed_fed
+                    && code(reply) == Some("POLICYSQL_TRANSACTION_UNAVAILABLE"))
             {
                 prop_assert!(!watch.commit_emitted, "a rejection after COMMIT: {}", reply);
             }

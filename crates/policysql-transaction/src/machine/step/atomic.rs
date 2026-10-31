@@ -315,12 +315,15 @@ fn rows_bytes(validated: &Validated) -> usize {
     total
 }
 
-/// What a commit failure answers for `execute`: never a rejection, because COMMIT was sent.
+/// What a commit failure answers for `execute`. Never a rejection when COMMIT may have been
+/// sent. `NotCommitted` is the adapter's proof that no COMMIT was sent (#54): the definite
+/// `POLICYSQL_TRANSACTION_UNAVAILABLE`, after which a retry runs as a new attempt.
 const fn commit_failure(class: Class) -> Code {
     match class {
         Class::Timeout => Code::DatabaseTimeout,
         Class::Unavailable => Code::DatabaseUnavailable,
-        Class::Rejected | Class::NotCommitted | Class::Unknown | Class::Limit => Code::Internal,
+        Class::NotCommitted => Code::Unavailable,
+        Class::Rejected | Class::Unknown | Class::Limit => Code::Internal,
     }
 }
 
@@ -983,7 +986,7 @@ impl<C: Compiler> Step<'_, C> {
             }
             (Task::AtomicCommit, Event::Committed { .. }) => self.atomic_committed(lane, request),
             (Task::AtomicCommit, Event::CommitFailed { class, .. }) => {
-                // COMMIT was sent: the reply is never a rejection. The connection is rolled
+                // COMMIT may have been sent: only `not_committed` is a rejection. The connection is rolled
                 // back (harmless if COMMIT applied, as `turso.ts` does) and the owner records
                 // `failed`, which no request reads.
                 self.set_connection(Connection::Open);
@@ -1557,12 +1560,15 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_failure_is_never_a_rejection() {
+    fn a_commit_failure_is_a_rejection_only_when_no_commit_was_sent() {
+        assert!(matches!(
+            commit_failure(Class::NotCommitted),
+            Code::Unavailable
+        ));
         for class in [
             Class::Timeout,
             Class::Unavailable,
             Class::Rejected,
-            Class::NotCommitted,
             Class::Unknown,
             Class::Limit,
         ] {

@@ -404,7 +404,7 @@ fn inconsistency_4_commit_transport_error_is_outcome_unknown() {
 }
 
 #[test]
-fn not_committed_is_a_definite_failure() {
+fn not_committed_is_a_definite_rejection() {
     let mut engine = begun("write");
     engine.feed(&command("commit", &sequence_text(1)));
     engine.resolve(true, "unknown");
@@ -412,8 +412,14 @@ fn not_committed_is_a_definite_failure() {
     engine.resolve(false, "not_committed");
     engine.settle();
     let reply = engine.last_reply().cloned().unwrap_or_default();
-    assert_eq!(reply["value"]["status"], "failed", "{reply}");
+    assert_eq!(
+        code(&reply),
+        Some("POLICYSQL_TRANSACTION_UNAVAILABLE"),
+        "{reply}"
+    );
     assert_eq!(phase_of(engine.store.as_deref()).as_deref(), Some("failed"));
+    let retry = engine.run(&command("commit", &sequence_text(1)));
+    assert_eq!(code(&retry), Some("POLICYSQL_TRANSACTION_UNAVAILABLE"));
 }
 
 #[test]

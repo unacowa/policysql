@@ -35,7 +35,7 @@ import { validateConfig } from "./engine-config.ts";
 import type { PolicySqlConfig, ValidatedConfig } from "./engine-config.ts";
 import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
 import { parseExact, stringifyExact } from "./exact-json.ts";
-import { checkBatch, decodeArgs, encodeResults, entropyHex, failureClass, observeCost, validatorFailureClass } from "./step-effects.ts";
+import { checkBatch, decodeArgs, commitFailureClass, encodeResults, entropyHex, failureClass, observeCost, validatorFailureClass } from "./step-effects.ts";
 import { OWNER_NAME, runInBackground, validateOwnerFacilities } from "./transaction-owner-port.ts";
 import type {
   OwnerAtomicInput, OwnerBeginInput, OwnerCallbackInput, OwnerCommandInput, OwnerCommandKind,
@@ -369,9 +369,10 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
           if (!this.connection) throw new Error("no connection");
           await this.connection.commit();
           return { type: "committed", id };
-        } catch {
-          // A COMMIT error never proves that nothing committed (ADR 0007).
-          return { type: "commitFailed", id, class: "unknown" };
+        } catch (error) {
+          // A COMMIT error never proves that nothing committed (ADR 0007); only a failure the
+          // transport raised before sending COMMIT is `not_committed` (#54).
+          return { type: "commitFailed", id, class: commitFailureClass(error) };
         } finally {
           this.connection = null;
         }

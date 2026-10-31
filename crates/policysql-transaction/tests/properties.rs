@@ -188,7 +188,9 @@ fn check(engine: &Engine, watch: &mut Watch) -> Result<(), TestCaseError> {
             if reply["ok"] == true && reply["value"]["status"] == "committed" {
                 prop_assert!(engine.observed.committed_fed, "committed before Committed");
             }
-            if rejects_commit(reply) && !(not_committed && reply["value"]["status"] == "failed") {
+            if rejects_commit(reply)
+                && !(not_committed && code(reply) == Some("POLICYSQL_TRANSACTION_UNAVAILABLE"))
+            {
                 prop_assert!(!watch.commit_emitted, "a rejection after COMMIT: {}", reply);
                 if watch.persist_committing {
                     // Never while the store says COMMIT may have been sent: a successor, or

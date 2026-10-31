@@ -1,5 +1,5 @@
 [
   { "name": "preparation and commit authorization fit the shared budget", "connectMs": 200, "commitCheckMs": 200, "status": 200, "begins": true },
-  { "name": "preparation plus commit authorization exceeds the shared budget", "connectMs": 600, "commitCheckMs": 600, "status": 504, "begins": true },
-  { "name": "preparation exhausts the budget before BEGIN", "connectMs": 1000, "commitCheckMs": 0, "status": 504, "begins": false }
+  { "name": "preparation plus commit authorization exceeds the shared budget", "connectMs": 600, "commitCheckMs": 600, "status": 409, "code": "POLICYSQL_TRANSACTION_UNAVAILABLE", "begins": true },
+  { "name": "preparation exhausts the budget before BEGIN", "connectMs": 1000, "commitCheckMs": 0, "status": 504, "code": "POLICYSQL_DATABASE_TIMEOUT", "begins": false }
 ]

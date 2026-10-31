@@ -6,7 +6,8 @@
 //! - a keyed retry never executes twice: across executions of one key and body, at most one
 //!   envelope is committed, and every later one is answered from the row or rejected;
 //! - no definite rejection after `Commit`: once an execution emitted `Commit`, its reply is the
-//!   committed response or a code the client treats as an unknown outcome;
+//!   committed response or a code the client treats as an unknown outcome, unless the adapter
+//!   proved no COMMIT was sent (`not_committed`, #54), which is `POLICYSQL_TRANSACTION_UNAVAILABLE`;
 //! - a failed expectation rolls back: no `Commit`, and nothing is stored;
 //! - every plan handle is released; `step` is deterministic.
 
@@ -179,13 +180,14 @@ fn restore(engine: &mut Engine, outstanding: Option<Value>) {
 }
 
 /// Runs one script; returns the engine and every execution's (commits emitted, reply).
-fn run(setup: &Setup, actions: &[Action]) -> (Engine, Vec<(usize, Option<Value>)>) {
+fn run(setup: &Setup, actions: &[Action]) -> (Engine, Vec<(usize, Option<Value>, bool)>) {
     let mut engine = engine(setup);
     let mut actions = actions.iter();
     let mut executions = Vec::new();
     for _ in 0..setup.requests {
         let commits = engine.observed.commits_emitted;
         let replies = engine.observed.replies.len();
+        engine.observed.not_committed_fed = false;
         engine.feed(&request(setup));
         for action in actions.by_ref().take(12) {
             match *action {
@@ -247,6 +249,7 @@ fn run(setup: &Setup, actions: &[Action]) -> (Engine, Vec<(usize, Option<Value>)
                 .replies
                 .get(replies)
                 .map(|(_, reply)| reply.clone()),
+            engine.observed.not_committed_fed,
         ));
         assert_eq!(
             engine.compiler.live_handles(),
@@ -263,11 +266,12 @@ proptest! {
     #[test]
     fn atomic_execution_properties(setup in setup(), actions in prop::collection::vec(action(), 0..36)) {
         let (engine, executions) = run(&setup, &actions);
-        for (commits, reply) in &executions {
+        for (commits, reply, not_committed) in &executions {
             prop_assert!(*commits <= 1, "at most one COMMIT per atomic execution");
             if *commits == 1 && let Some(reply) = reply {
                 let rejected = code(reply).is_some_and(|code| REJECTIONS.contains(&code));
-                prop_assert!(!rejected, "no definite rejection after COMMIT: {reply}");
+                let proven = *not_committed && code(reply) == Some("POLICYSQL_TRANSACTION_UNAVAILABLE");
+                prop_assert!(!rejected || proven, "no definite rejection after COMMIT: {reply}");
                 if reply["ok"] == true {
                     prop_assert_eq!(&reply["value"]["status"], "committed");
                 }
@@ -287,7 +291,7 @@ proptest! {
         if setup.body == 3 {
             prop_assert_eq!(engine.observed.envelope_commits, 0, "a failed expectation never commits");
             prop_assert!(engine.idempotency_rows.iter().all(|row| row[2] == STORED), "nothing is stored");
-            for (_, reply) in &executions {
+            for (_, reply, _) in &executions {
                 if let Some(reply) = reply {
                     prop_assert!(reply["ok"] != true || setup.row == 1, "only a replay succeeds: {reply}");
                 }

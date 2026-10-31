@@ -186,6 +186,8 @@ capability; a failed read while a validator is awaited is a failure of that vali
 rolls back), so a store fault cannot leave a capability live (the machine keeps the record in
 memory and has no such read).
 
+Amendment (#54): a failure that provably happened before any byte of COMMIT was sent (the transport's last binding check and deadline check, after which it rolls back) is reported as `not_committed` and answered with the definite `POLICYSQL_TRANSACTION_UNAVAILABLE` (409), in every placement; a retry of an atomic execution then runs as a new attempt, and a retry of an interactive commit finds a failed transaction. This does not weaken the rule above: only an error raised before the send began is classified so, and any failure of the COMMIT request itself, or after it, stays an unknown outcome (ADR 0024, "Failures before COMMIT is sent", ABI 12).
+
 Amendment (#85): an owner that does not share the Worker's snapshot answers an atomic input with the version-skew answer `POLICYSQL_INTERNAL` (500), never `POLICYSQL_TRANSACTION_CONFLICT`, because the retry may be of a commit that already applied; the client takes it as an unknown outcome and the retry replays once the snapshots agree (ADR 0024, ABI 11). The limit: a committed keyed write that carried `expected` is checked against it before the idempotency lookup, so after a rollout that changed the policy its retry is `POLICYSQL_STALE_OPERATION`, a definite rejection; that remains open as #85 path 1.
 
 

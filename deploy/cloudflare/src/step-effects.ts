@@ -2,7 +2,7 @@
 // contract"): adapter classes of failures, the driver codec between effects and the database
 // port, and the background cost observation of an `observe` effect. Nothing here decides an
 // outcome; core judges every class, row, and estimate.
-import { EngineError } from "./errors.ts";
+import { CommitNotSentError, EngineError } from "./errors.ts";
 import { databaseTransportFactory } from "./database.ts";
 import type { DatabaseProvider } from "./database.ts";
 import { driverArgs, rawDriverValue, rowValues } from "./driver-values.ts";
@@ -41,6 +41,18 @@ export const directFailureClass = (error: unknown): FailureClass => {
   const errorClass = failureClass(error);
   return errorClass === "unknown" ? "unavailable" : errorClass;
 };
+
+/**
+ * The class of a failed `commit` effect on an owner: `not_committed` only for the failure the
+ * transport raises before any byte of COMMIT is sent (#54), `unknown` for everything else (a
+ * COMMIT error never proves that nothing committed, ADR 0007).
+ */
+export const commitFailureClass = (error: unknown): FailureClass =>
+  (error instanceof CommitNotSentError ? "not_committed" : "unknown");
+
+/** The same for the direct placement: any other failure is classified as `directFailureClass`. */
+export const directCommitFailureClass = (error: unknown): FailureClass =>
+  (error instanceof CommitNotSentError ? "not_committed" : directFailureClass(error));
 
 const IMMEDIATE = new Set(["respond", "log", "observe", "reset"]);
 

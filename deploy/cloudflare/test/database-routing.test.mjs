@@ -8,6 +8,7 @@ import { createMemoryTransactionOwners } from "./helpers/memory-owner.mjs";
 import { validateDatabaseBinding, databaseTransportFactory } from "../src/database.ts";
 import { authIdentity, requestIdentity } from "../src/core-identity.ts";
 import { identityRuntime } from "./helpers/identity.mjs";
+import { CommitNotSentError } from "../src/errors.ts";
 
 const schemaVersion = "schema_routing_1";
 const policyVersion = "policy_routing_1";
@@ -659,7 +660,9 @@ for (const scenario of JSON.parse(readFileSync(new URL("./fixtures/database-dead
     assert.equal(h.events.some(({ sql }) => sql === "ROLLBACK"), !succeeds && scenario.begins);
     assert.equal(h.rows("a").some(({ id }) => id === "deadline"), succeeds);
     assert.equal(h.databases.get("a").database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, succeeds ? 1 : 0);
-    if (!succeeds) assert.equal(response.body.error.code, "POLICYSQL_DATABASE_TIMEOUT");
+    // The deadline that passes during the commit authorization is a failure before COMMIT was sent
+    // (#54): the definite rejection. One that passes before BEGIN is the database timeout.
+    if (!succeeds) assert.equal(response.body.error.code, scenario.code);
   });
 }
 
@@ -677,7 +680,7 @@ test("a slow commit authorization cannot extend the transaction deadline", async
   const transport = await databaseTransportFactory(provider, binding, 1_024)("request");
   const transaction = await transport.begin("write", 100);
   slow = true;
-  await assert.rejects(transaction.commit(), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
+  await assert.rejects(transaction.commit(), (error) => error instanceof CommitNotSentError && error.cause.code === "POLICYSQL_DATABASE_TIMEOUT");
   assert.equal(committed, false);
   assert.equal(rolledBack, true);
 });
@@ -742,7 +745,24 @@ test("revocation before direct commit rolls back without opening a replacement c
   const transport = await databaseTransportFactory(provider, binding, 1_024)("request");
   const transaction = await transport.begin("write", 1000);
   allowed = false;
-  await assert.rejects(transaction.commit(), (error) => error.code === "POLICYSQL_DATABASE_BINDING_REJECTED");
+  await assert.rejects(transaction.commit(), (error) => error instanceof CommitNotSentError && error.cause.code === "POLICYSQL_DATABASE_BINDING_REJECTED");
   assert.equal(commits, 0);
   assert.equal(rollbacks, 1);
+});
+
+test("a second wrapper commit() after a sent COMMIT failed is never CommitNotSentError, even past the deadline (#54)", async (t) => {
+  const binding = { version: 1, scope: "test:a", databaseId: "a", generation: "1", snapshot: "snapshot" };
+  let now = 50_000;
+  t.mock.method(Date, "now", () => now);
+  let commits = 0;
+  const provider = { check: () => true, connect: () => ({ begin: async () => ({
+    open: true, usage: [], execute: async () => [],
+    commit: async () => { commits++; throw new Error("reply lost"); }, rollback: async () => {},
+  }) }) };
+  const transport = await databaseTransportFactory(provider, binding, 1_024)("request");
+  const transaction = await transport.begin("write", 100);
+  await assert.rejects(transaction.commit(), (error) => !(error instanceof CommitNotSentError));
+  now += 10_000;
+  await assert.rejects(transaction.commit(), (error) => !(error instanceof CommitNotSentError));
+  assert.equal(commits, 1, "the transport saw one COMMIT");
 });

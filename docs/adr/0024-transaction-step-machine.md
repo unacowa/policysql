@@ -538,7 +538,7 @@ What each failure leads to (all decided by core, listed here because ADR 0007 de
 | `PersistFailed` for `expired` after the deadline check | COMMIT was never sent and the rollback is already emitted. `Reset` and reply `POLICYSQL_INTERNAL` (not the definite `POLICYSQL_TRANSACTION_UNAVAILABLE`). The store still holds `committing`, so a retry gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` from this owner and a successor alike |
 | `Persisted` for `committing` arrives at or after `expires_at_ms` | the consuming step does not emit `Commit`: it rolls back, persists `expired`, and only then replies `POLICYSQL_TRANSACTION_UNAVAILABLE` (true: COMMIT was never sent). If the owner is lost before `expired` is persisted, a successor finds `committing` and answers a retry with outcome-unknown, which is not a misreport. Before the deadline it emits `Commit`, and from then on nothing expires the transaction |
 | `PersistFailed` of the terminal record after `Committed` | reply committed (true); a retry finds `committing` and gets `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`, never a rejection |
-| `CommitFailed { class: not_committed }` | phase `failed`, reply as today (`status: "failed"`) |
+| `CommitFailed { class: not_committed }` | phase `failed`; the reply is the definite `POLICYSQL_TRANSACTION_UNAVAILABLE` (409) for an interactive commit and for an atomic execution alike (#54, ABI 12; an interactive commit used to answer 200 `status: "failed"`, which the client could not tell from an unknown outcome, and an atomic one `POLICYSQL_INTERNAL`); a retry of an interactive commit finds `failed` and gets the same code |
 | `CommitFailed` of any other class | phase `commit_unknown`; the reply and every exact retry of that commit get `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` |
 | `ValidatorFailed`, deny, malformed decision | roll back, `POLICYSQL_COMMIT_CHECK_REJECTED` |
 | `TimerFired` while `validating` | phase `expired`, reply `POLICYSQL_COMMIT_CHECK_REJECTED` to the waiting commit now, roll back (deferred via `rollback_requested` if a callback query holds the connection); the late validator outcome is ignored |
@@ -640,6 +640,28 @@ today.
   The internal owner wire (ADR 0022, ADR 0023) keeps its paths; the forwarded inputs become the
   `Forwarded` event's JSON.
 
+- **Failures before COMMIT is sent (#54, ABI 12).** The transport wrapper's `commit()` checks
+  the binding and the remaining deadline immediately before it sends COMMIT, rolls back and
+  fails when either check fails, and the HTTP transport reads the deadline again just before it
+  builds the COMMIT request. Those failures, and only those, are thrown as `CommitNotSentError`
+  (`errors.ts`); everything after the send began (a network error, a timeout or an oversized or
+  invalid reply of the COMMIT request, any other exception) is not, and stays an unknown
+  outcome (ADR 0007). The executors map that error, and nothing else, to
+  `CommitFailed { class: not_committed }`: the owner executor (`transaction-owner.ts`, for
+  interactive commits and for atomic executions on an owner) and the direct executor
+  (`request-step.ts`). Before this, the owner reported every commit exception as `unknown`
+  and `directFailureClass` never produced `not_committed`, so a transaction that was provably
+  rolled back was answered `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (interactive) or 500/503
+  (atomic) and the retry was unknown too. Core answers `not_committed` with the definite
+  `POLICYSQL_TRANSACTION_UNAVAILABLE` (409) in both placements, the code a commit after its
+  deadline already gets and the one the client takes as a rejection for `execute` and
+  `commit`. The cause (binding or deadline) is not exposed. The interactive record becomes
+  `failed`, so a retry of that commit is `POLICYSQL_TRANSACTION_UNAVAILABLE` again; an atomic
+  retry runs as a new attempt, since the idempotency row was rolled back with the rest. The
+  alternative of moving these checks into the machine (a second pre-commit decision) was not
+  taken: the machine already decides the deadline after `Persisted(committing)` and the binding
+  before it, and the wrapper's check only narrows the remaining window; it needs no new event or
+  state, only a typed error at the effect boundary.
 - **Owner snapshot mismatch (#85, ABI 11).** The Worker forwards an `atomic` input with the
   snapshot it compiled for. An owner whose own snapshot differs (a Worker and an owner of
   different deployments, whether during a rollout or a stale object after a partial deploy)
@@ -868,7 +890,10 @@ it yet.
   exact retry (replayed from `last`), then `committing`/`commit_unknown` (a commit at the
   committing sequence is outcome-unknown, any other command unavailable), then the snapshot,
   liveness and expiry, the sequence, and only then `CheckBinding` before work. A commit has one
-  binding check, before `Persist(committing)`; `TransactionOwnerCore` checks twice.
+  binding check in the machine, before `Persist(committing)`. The transport wrapper re-checks the
+  binding and the deadline once more immediately before it sends COMMIT (`database.ts`); that
+  is the adapter's guard, not a decision of the machine, and its failure is reported as
+  `not_committed` (see "Failures before COMMIT is sent").
 - **Effect ids** of a new volatile part start from host entropy, so an outcome addressed to an
   effect of an earlier incarnation (after `Reset`) cannot match a new one.
 - **Fail closed.** A fault inside a transition, an outcome that is not pending, or invalid

@@ -67,10 +67,11 @@ export const ALLOWLIST = Object.freeze({
     "COMMIT failure as `unknown`, which core answers INTERNAL (500) for execute. LegacyTransactionOwnerCore passed " +
     "the transport's code through (DATABASE_UNAVAILABLE, 503). Neither is a rejection in the client.",
   "direct-binding-revoked-before-commit":
-    "ADR 0024 pull request 8 (client-visible change 6'): a binding the provider revokes between the envelope and " +
-    "COMMIT (the transport's check before COMMIT) is a COMMIT failure of class `rejected`, which core answers " +
-    "INTERNAL (500) for execute, because COMMIT may have been sent. The TypeScript direct path answered " +
-    "DATABASE_BINDING_REJECTED (403). Neither is a rejection in the client; no COMMIT reaches the database.",
+    "ADR 0024 pull request 8 (client-visible change 6') and #54: a binding the provider revokes between the " +
+    "envelope and COMMIT (the transport's check before COMMIT) fails before any byte of COMMIT is sent, which " +
+    "the transport reports as `not_committed`; core answers the definite TRANSACTION_UNAVAILABLE (409) for " +
+    "execute. The TypeScript direct path answered DATABASE_BINDING_REJECTED (403), which the client takes as " +
+    "an unknown outcome. No COMMIT reaches the database.",
   "request-fingerprint-without-snapshot":
     "#80 (ABI 9): the request fingerprint no longer includes the binding's snapshot, so a committed keyed write " +
     "retried after a snapshot-changing deployment replays. Every stored fingerprint therefore differs from the " +
@@ -725,11 +726,11 @@ test(`allowlist request-fingerprint-without-snapshot: ${ALLOWLIST["request-finge
   assert.equal(step.keyHash, ts.keyHash, "the key hash is unchanged");
   assert.deepEqual(step.record.results, ts.record.results);
   const binding = bindingOf(env.runtime);
-  assert.match(binding.snapshot, /:abi-11$/u);
+  assert.match(binding.snapshot, /:abi-12$/u);
   const { snapshot: _snapshot, ...withoutSnapshot } = binding;
   // The recorded side hashed the binding with its release's snapshot (ABI 8); core hashes it
   // without any snapshot.
-  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-11$/u, ":abi-8") }));
+  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-12$/u, ":abi-8") }));
   assert.equal(step.fingerprint, requestFingerprint(body, withoutSnapshot));
   assert.notEqual(step.fingerprint, requestFingerprint(body, binding), "nor the current snapshot");
   // The relabeling maps both to the same name: it hides the value and nothing else.
@@ -778,7 +779,7 @@ test(`allowlist direct-binding-revoked-before-commit: ${ALLOWLIST["direct-bindin
   const seen = await both(env, { body: insertProject("p1"), key: KEY });
   assert.equal(checks.step, 3, "three provider calls");
   assert.equal(seen.ts.result.code, "POLICYSQL_DATABASE_BINDING_REJECTED");
-  assert.equal(seen.step.result.code, "POLICYSQL_INTERNAL");
+  assert.equal(seen.step.result.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
   for (const side of ["ts", "step"]) {
     // Lookup, envelope, and row ran; no COMMIT reached the database, and the connection was
     // rolled back (the TypeScript path's catch rolled back a second time, a no-op).
@@ -787,7 +788,9 @@ test(`allowlist direct-binding-revoked-before-commit: ${ALLOWLIST["direct-bindin
     assert.equal(ops.includes("commit"), false, side);
   }
   const { REJECTIONS } = await import("../../../packages/client/protocol.js");
+  // The TypeScript answer is no rejection; the new one is, because no COMMIT was sent.
   assert.equal([...REJECTIONS.values()].flat().some((value) => ["INTERNAL", "DATABASE_BINDING_REJECTED"].includes(value)), false);
+  assert.equal(REJECTIONS.get(409).includes("TRANSACTION_UNAVAILABLE"), true);
   const rows = { ts: env.reference.take("rows"), step: env.rows("step") };
   for (const side of ["ts", "step"]) assert.equal(rows[side].projects.some((row) => row.id === "p1"), false, side);
 });

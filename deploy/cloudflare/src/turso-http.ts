@@ -1,4 +1,4 @@
-import { EngineError, binaryLimitExceeded } from "./errors.ts";
+import { CommitNotSentError, EngineError, binaryLimitExceeded } from "./errors.ts";
 import { remainingDatabaseTime } from "./database.ts";
 import type { DatabaseTransportOptions } from "./database.ts";
 import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.ts";
@@ -201,6 +201,7 @@ class TursoHttpTransaction {
   baton: string;
   readonly timeoutMs: number;
   readonly deadlineMs?: number;
+  commitAttempted = false;
   readonly maxBytes: number;
   open: boolean;
   readonly usage: any[];
@@ -232,11 +233,24 @@ class TursoHttpTransaction {
 
   async finish(sql) {
     if (!this.open) return;
+    // Cleanup still gets a bounded attempt after the execution deadline expires. For COMMIT the
+    // deadline is read before the request is built, so an expired deadline here is a failure
+    // before any byte was sent: `CommitNotSentError` (#54), after which the caller rolls back
+    // (the transport wrapper does). The pipeline call below is the send; whatever it throws is
+    // never that.
+    let timeoutMs = this.timeoutMs;
+    if (sql === "COMMIT") {
+      // A second COMMIT after one was handed to the pipeline is never "not sent" (unknown).
+      if (this.commitAttempted) throw databaseFailure();
+      try { timeoutMs = Math.min(timeoutMs, remainingDatabaseTime(this.deadlineMs)); } catch (error) {
+        throw new CommitNotSentError(error);
+      }
+    }
+    if (sql === "COMMIT") this.commitAttempted = true;
     const body = await this.transport.pipeline(
       [executeRequest({ sql }, this.maxBytes), { type: "close" }],
       this.baton,
-      // Cleanup still gets a bounded attempt after the execution deadline expires.
-      sql === "ROLLBACK" ? this.timeoutMs : Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs)),
+      timeoutMs,
     );
     const terminal = decodeResult(body.results[0], this.maxBytes);
     this.usage.push(terminal.usage);

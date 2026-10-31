@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { TursoHttpTransport } from "../src/turso-http.ts";
+import { CommitNotSentError } from "../src/errors.ts";
 import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
 import { redirectResponses } from "./helpers/redirects.mjs";
 
@@ -214,7 +215,8 @@ test("HTTP operations share an absolute deadline while rollback retains its clea
   now = 10_200;
   const count = requests.length;
   await assert.rejects(second.execute([{ sql: "SELECT id FROM projects" }]), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
-  await assert.rejects(second.commit(), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
+  // A COMMIT whose deadline passed is refused before any byte is sent: a typed pre-send failure (#54).
+  await assert.rejects(second.commit(), (error) => error instanceof CommitNotSentError && error.cause.code === "POLICYSQL_DATABASE_TIMEOUT");
   assert.equal(requests.length, count, "no SQL or COMMIT after expiry");
   await second.rollback();
   assert.equal(requests.at(-1), "ROLLBACK");
@@ -274,4 +276,22 @@ test("encodes BigInt arguments as exact Hrana integers within the signed 64-bit 
     await assert.rejects(transaction.execute([{ sql: "SELECT :v", args: { v: value } }]), { code: "POLICYSQL_INTERNAL" });
   }
   assert.equal(sent.length, before, "nothing is sent for an out-of-range integer");
+});
+
+// A COMMIT that was handed to the pipeline is never "not sent" later: a second attempt after a
+// failed first one, even past the deadline, is an ordinary failure (unknown), not the pre-send error.
+test("a second COMMIT after a sent one failed is never CommitNotSentError", async (t) => {
+  let now = 10_000;
+  t.mock.method(Date, "now", () => now);
+  let commits = 0;
+  const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "secret" }, "twice", async (_url, init) => {
+    const { requests: commands } = JSON.parse(init.body);
+    if (commands[0].stmt?.sql === "COMMIT") { commits++; return new Response("down", { status: 503 }); }
+    return Response.json({ baton: "baton", results: commands.map(() => result([], [])) });
+  });
+  const transaction = await transport.begin("write", 1000, 10_200, runtimeLimit);
+  await assert.rejects(transaction.commit(), (error) => !(error instanceof CommitNotSentError));
+  now = 10_300;
+  await assert.rejects(transaction.commit(), (error) => !(error instanceof CommitNotSentError));
+  assert.equal(commits, 1, "no second COMMIT request");
 });
