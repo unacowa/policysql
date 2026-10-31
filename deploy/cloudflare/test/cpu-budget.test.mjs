@@ -86,8 +86,8 @@ test("the library accepts limits whatever they cost in CPU", () => {
 test("the formula's V is the maxJsonValues the runtime reports, and the body side enforces it", () => {
   // ADR 0027 pull request 3: the runtime reports maxJsonValues and the engine stops a body at it,
   // so the formula's request-side V is no longer a number a client can exceed (a body of 1 MB of
-  // nested arrays has about 500,000 values and is now 413). The result side is still counted by
-  // the formula only; pull request 6 enforces it.
+  // nested arrays has about 500,000 values and is now 413). Since pull request 6 the result side
+  // is enforced too (413 POLICYSQL_LIMIT_EXCEEDED).
   const enforced = effectiveLimits(RUNTIME_LIMITS);
   assert.equal(enforced.maxJsonValues, 65_536);
   assert.equal(inputsAtLimits(enforced).vReq, 65_536);

@@ -70,6 +70,8 @@ Types and the optional Turso HTTP adapter are exported from `@unacowa/policysql/
 
 ```ts
 interface DatabaseProvider {
+  /** Whether the transports it builds enforce the read cap while the reply arrives. Required. */
+  readonly streamedReadCap: boolean;
   check(binding: DatabaseBinding): boolean | Promise<boolean>;
   connect(binding: DatabaseBinding, requestId: string):
     DatabaseTransport | Promise<DatabaseTransport>;
@@ -130,6 +132,19 @@ PolicySQL always passes `options.maxBytesPerValue`, taken from the loaded runtim
 may use it to reject an oversized BLOB before decoding it, as the Turso HTTP adapter
 does; it must not hard-code its own copy. PolicySQL re-checks every driver BLOB
 against the same runtime value before WASM result validation.
+
+`DatabaseTransaction.execute(statements, options)` receives `options.maxResponseBytes`, the read cap
+of the database's reply to those statements, computed by core: the raw result bound of the
+compiled statements (`2 x maxResultBytes` and more, see
+[configuration.md](configuration.md#bounds-the-library-computes)), the idempotency lookup bound, or
+a fixed bound for a statement with no result data. A transport that reads the reply as a byte
+stream must cancel it at the first byte over the cap and fail with `POLICYSQL_LIMIT_EXCEEDED`; the
+Turso HTTP adapter does, and fails closed before any request when the cap is missing or not a
+positive safe integer. A transport or driver that buffers the whole reply internally cannot, and
+declares it with `streamedReadCap: false` on its provider (the field is required and has no
+default). Core then checks the same bound on what the driver returned, after it returned, and the
+engine logs `database_read_cap_unenforced` once per provider when `maxResultBytes` exceeds 64,000,
+so the operator knows memory is not bounded while the reply is read.
 
 `TursoHttpTransport.begin` requires `options`. When called directly, an omitted or
 malformed `maxBytesPerValue` (missing, non-integer, zero, negative or `Infinity`) is a

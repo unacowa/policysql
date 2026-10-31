@@ -66,10 +66,11 @@ limits").
 
 | `RuntimeLimits` key | Constructor field | Default | Range | Enforced where |
 | --- | --- | --- | --- | --- |
-| `maxRows` | `max_rows` | required | 1 to 2^53 - 1 | core, per statement (policy `limit` may lower it) |
-| `maxResultBytes` | `max_result_bytes` | required | 1 to 2^53 - 1 | core, per statement; the engine, cumulatively per atomic envelope |
+| `maxRows` | `max_rows` | required | 1 to 100,000 | core, per statement (policy `limit` may lower it); over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
+| `maxResultBytes` | `max_result_bytes` | required | 1 to 524,288 | core: the public encoding of the rows (`JSON.stringify` of the row objects, canonical numbers, base64 BLOBs), per statement and cumulatively per atomic envelope, counted while the result is validated, which stops at the first row over the budget that remains; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
+| `maxResponseBytes` | `max_response_bytes` | `maxResultBytes` + 65,536 | `maxResultBytes` + 3,072 to 589,824 | core, before COMMIT: the UTF-8 bytes of the complete success response of an atomic execution plus a fixed 1,024-byte reserve for what is added after commit; over it the envelope is rolled back with 413 `POLICYSQL_LIMIT_EXCEEDED`, so no mutation and no idempotency record survives. See "Response size" |
 | `timeoutMs` | `timeout_ms` | required | 1 to 2^53 - 1 | the engine's database deadline per statement |
-| `maxStatements` | `max_statements` | required | 1 to 2^32 - 1 | core, statements per atomic envelope |
+| `maxStatements` | `max_statements` | required | 1 to 64 | core, statements per atomic envelope; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` (0 is 400 `POLICYSQL_INVALID_REQUEST`) |
 | `transactionMs` | `transaction_ms` | 4,000 | 1 to 60,000 | owner: interactive deadline from begin (and its expiry timer); atomic owner execution deadline |
 | `maxTransactionStatements` | `max_transaction_statements` | 8 | 1 to 256 | owner: statements per interactive transaction; callback query sequence per commit check |
 | `maxTransactionResultBytes` | `max_transaction_result_bytes` | 64,000 | 1 to 65,536 | owner: cumulative result bytes per interactive transaction and per commit check's callbacks |
@@ -77,7 +78,7 @@ limits").
 | `beginTimeoutMs` | `begin_timeout_ms` | 1,000 | 1 to 60,000 | owner: BEGIN of an interactive transaction |
 | `costTimeoutMs` | `cost_timeout_ms` | 1,000 | 1 to 10,000 | engine and owner: connection deadline and BEGIN of the after-response cost observation |
 | `maxRequestBytes` | `max_request_bytes` | 1,048,576 | 65,536 to 2,097,152 | HTTP adapter (streamed, a declared `Content-Length` over it is refused unread), engine (UTF-8 bytes of the text as received, a byte order mark counted), core (derived bounds); over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` |
-| `maxJsonValues` | `max_json_values` | 65,536 | 1,024 to 131,072 | engine: JSON values plus object member names in one request body, counted by the scan that checks duplicate keys, which stops at the first value over the limit, before `JSON.parse` and before WASM; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE`. (Its result-side meaning, cells, companion cells, and column descriptors of a raw database response, arrives with ADR 0027 pull request 6.) |
+| `maxJsonValues` | `max_json_values` | 65,536 | 1,024 to 131,072 | engine: JSON values plus object member names in one request body, counted by the scan that checks duplicate keys, which stops at the first value over the limit, before `JSON.parse` and before WASM; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE`. **Result side, counted separately:** the raw values of the database's response to one atomic envelope or one interactive statement, cumulatively over its statements: every cell (the visibility companion of each conditional column and the check column of a mutation included), every column descriptor in `cols`, and every value inside a JSON-typed cell (with its object member names). Core counts them while it validates, and stops at the first row over the limit; over it is 413 `POLICYSQL_LIMIT_EXCEEDED`, rolled back. Companions and descriptors count, so it is not a hidden limit: a result of `c` emitted columns and `n` rows has `c x (1 + n)` values (a JSON cell adds the values inside it) |
 | `maxSqlBytes` | `max_sql_bytes` | 65,536 | 1,024 to 1,048,576, and at most `maxRequestBytes` | core, UTF-8 bytes of one statement's `sql`, checked before any statement is parsed; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` with path `/statements/<i>/sql` (it was 400 `POLICYSQL_INVALID_REQUEST`) |
 | `maxBytesPerValue` | `max_bytes_per_value` | 262,144 | 1 to 1,048,576 | decoded bytes of one bytes value: core (client parameters, policy presets at activation, result cells of `SELECT` and `RETURNING`), the engine and the Turso transport (driver values, before decoding); over it is 413 `POLICYSQL_LIMIT_EXCEEDED` (malformed input stays 400 `POLICYSQL_INVALID_PARAMETER`); the smallest applicable limit governs, see "Per-value bytes" |
 | `maxParameters` | `max_parameters` | 1,024 (was 128) | 1 to 16,384 | binder: distinct client parameter names in one statement; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
@@ -107,14 +108,15 @@ value within `maxBytesPerValue` can still be refused by another limit, with that
 | --- | --- | --- |
 | Written as a parameter | its base64 form and the rest of the body must fit `maxRequestBytes`: at most about `3/4 x maxRequestBytes` (786,432 bytes at the default; a value of 1,048,576 bytes needs `maxRequestBytes` of at least 1,398,104 plus the envelope, for example 2,097,152) | 413 `POLICYSQL_REQUEST_TOO_LARGE` before parsing |
 | Read in a result (`SELECT`, `RETURNING`) | `maxResultBytes` counts the public encoding of the rows (base64 of a BLOB, the row object included): at most about `3/4 x maxResultBytes`, so about 47,990 bytes at the reference wrapper's 64,000 | 413 `POLICYSQL_LIMIT_EXCEEDED`, rolled back |
-| Read in a result, raw database response | the raw result bound that exists today is 1 MiB per statement (core's `EVENT_RESULT_BYTES`; pull request 6 of ADR 0027 replaces it with a bound compiled from `maxResultBytes`): the base64 form of the value and the Hrana frame of the row must fit it, so at most about 786,000 bytes whatever `maxResultBytes` is | 413 `POLICYSQL_LIMIT_EXCEEDED`, rolled back |
+| Read in a result, raw database response | the raw result bound of the statement, compiled from `maxResultBytes` (`2 x maxResultBytes` and more, see "Bounds the library computes"), is never the smaller one: the base64 form of a value is at most the public encoding that `maxResultBytes` bounds | 413 `POLICYSQL_LIMIT_EXCEEDED`, rolled back |
 | Read in an interactive transaction | the same, and `maxTransactionResultBytes` (at most 65,536) counts the result cumulatively | 413 `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` |
 | `maxSqlBytes` | does not apply: a parameter is not SQL text | |
 
 So a value can be written but not returned: ADR 0016 accepts a value that fits as a parameter but is
 too large to `RETURNING`, and a value another system wrote can be too large to read. At the hard
-maximum a value of 1,048,576 bytes can be written (with a large enough `maxRequestBytes`) and read
-only by a deployment whose result bounds admit it; at the defaults it can be neither. The reference
+maximum a value of 1,048,576 bytes can be written (with a large enough `maxRequestBytes`) but not
+read, since `maxResultBytes` is at most 524,288 and bounds its base64 form (a value of about 393,000
+bytes is the largest that can be read); at the defaults it can be neither. The reference
 wrapper sets `maxBytesPerValue` to 262,144 explicitly, and with `maxResultBytes` 64,000 it reads
 values only up to about 47,990 bytes.
 
@@ -186,40 +188,94 @@ reads them from the runtime, so the HTTP adapter has no body limit of its own (t
 names the field: below the minimum, above the hard maximum, or `max_sql_bytes` above
 `max_request_bytes`.
 
-The runtime reports one limit more than it lets a wrapper configure yet. It is fixed today and
-becomes configurable in a following pull request of
-[ADR 0027](adr/0027-byte-and-cpu-budgets.md): `maxResponseBytes` (`maxResultBytes` + 65,536,
-reported but not enforced or advertised before pull request 6). The binder's input-side limits became
-configurable in pull request 4 and `maxBytesPerValue` in pull request 5 (above; the latter was the
-`max_bytes_per_value` getter, which is removed, so every reader takes it from `limits_json`). Fixed
-protocol constants stay reported too: `maxCommitChecks` (4) and `maxHookDurationMs` (1,500). Capabilities
-advertises exactly the enforced ones: `maxRows`, `maxResultBytes`, `timeoutMs`, `maxStatements`,
-`maxRequestBytes`, `maxJsonValues`, `maxSqlBytes`, `maxBytesPerValue`, `maxParameters`,
-`maxExpressionDepth`, `maxProjections`, and `maxJoins`. The provider timeout of 1,000 ms in
-`database.ts` is an adapter bound, not a limit, and stays there.
+The binder's input-side limits became configurable in ADR 0027 pull request 4, `maxBytesPerValue`
+in pull request 5 (the `max_bytes_per_value` getter is removed, so every reader takes it from
+`limits_json`), and the result side in pull request 6: hard maxima for `maxStatements`, `maxRows`, and
+`maxResultBytes`, the result side of `maxJsonValues`, and `maxResponseBytes`. Fixed protocol
+constants stay reported too: `maxCommitChecks` (4) and `maxHookDurationMs` (1,500). Capabilities
+advertises exactly the enforced ones: `maxRows`, `maxResultBytes`, `maxResponseBytes`, `timeoutMs`,
+`maxStatements`, `maxRequestBytes`, `maxJsonValues`, `maxSqlBytes`, `maxBytesPerValue`,
+`maxParameters`, `maxExpressionDepth`, `maxProjections`, and `maxJoins`; `maxJsonValues` is
+documented there as counting companion cells and column descriptors on the result side. The provider
+timeout of 1,000 ms in `database.ts` is an adapter bound, not a limit, and stays there.
+
+#### Response size
+
+`maxResponseBytes` bounds what leaves PolicySQL, not only the rows: the envelope, the
+statements' column descriptors (names, types), and `meta` count. Core builds the whole atomic
+response before COMMIT (it is also the `response_json` stored with the idempotency key) and measures
+it, plus the 1,024-byte reserve for the request id and `meta` fields added after commit. Over the
+limit the envelope is rolled back with 413 `POLICYSQL_LIMIT_EXCEEDED`: no COMMIT is sent, no
+mutation survives, and no idempotency record is written, so a retry of the same request runs again
+as a new attempt. The check happens before the commit checks of a policy run, and ADR 0007 is
+unchanged: nothing here ever turns a COMMIT that may have been sent into a rejection. A retry of a
+request that did commit returns the stored response even after the limit was lowered (the stored
+response fitted when it was committed): the idempotency lookup's read cap derives from the hard
+maximum of `maxResponseBytes` (589,824), not from the current value. A row stored by a release
+older than these bounds that is larger than the lookup bound is 413 `POLICYSQL_LIMIT_EXCEEDED` on a
+keyed retry within the retention window, before its fingerprint is compared: nothing executes. The
+interactive statement reply and a callback query are bounded by `maxTransactionResultBytes` (at most
+65,536) as before. Explain, Catalog, and Capabilities are bounded by the configuration that
+produces them (at most 1 MiB each), not per request.
+
+The default leaves 64 KiB above `maxResultBytes`; the minimum, `maxResultBytes` + 3,072, keeps the
+configured result limit reachable (a one-statement response is at least about 2 KiB). A response of
+many statements with many columns needs more room: each emitted column of each statement is about
+150 bytes of descriptor, so eight statements of 128 columns are about 150 KB with no rows at all. A
+deployment that serves such requests raises `maxResponseBytes` (up to 589,824) or its clients send
+fewer columns.
+
+#### Database drivers that buffer
+
+The read cap (below) is enforced while a reply streams only if the transport reads it as a stream.
+`DatabaseProvider.streamedReadCap` declares which: `true` for `TursoHttpTransport` (the reference
+wrapper's provider), `false` for a driver that buffers the whole reply internally (for example
+`@tursodatabase/serverless`, or an in-process SQLite). The field is required, with no default; a
+provider without it is rejected at construction. For a buffering driver core still checks the same
+raw bound on what the driver returned, after it returned, and the engine logs
+`database_read_cap_unenforced` once per provider when `maxResultBytes` exceeds 64,000, so the
+operator sees that memory is not bounded while the reply is read.
 
 ### Bounds the library computes
 
-Three bounds on the request path are not limits: they are memory guards computed by core from
-`maxRequestBytes` (ADR 0027 "Derived internal bounds"), never configured and never advertised,
-and never smaller than the largest input the configured limits admit. With `A` = 65,536 (the
-session JSON the wrapper supplies; a larger one is a wrapper fault, 500 `POLICYSQL_INTERNAL`) and
-`R` = `maxRequestBytes`:
+Some bounds on the request path are not limits: they are memory guards computed by core from the
+configured limits (ADR 0027 "Derived internal bounds"), never configured and never advertised, and
+never smaller than the largest input the configured limits admit. With `A` = 65,536 (the session
+JSON the wrapper supplies; a larger one is a wrapper fault, 500 `POLICYSQL_INTERNAL`), `R` =
+`maxRequestBytes`, `P` = `maxResultBytes`, `V` = `maxJsonValues`, and `S` = `maxStatements`:
 
-| Bound | Formula | At the default `R` |
+| Bound | Formula | At the reference wrapper's limits |
 | --- | --- | --- |
 | WASM compile input (verified auth + request) | `(2 A + 1,024) + R + 1,024` | 1,181,696 |
 | `identity_json` and `cost_estimate_json` input | `(2 A + 1,024) + 2,048 + 128 + 2 R + 1,024` | 2,232,448 |
-| Step event | `2 R + (2 A + 1,024) + 2,048 + max_statements x 1 MiB + 4,096` | 10,624,000 with 8 statements |
+| Raw database result of one envelope or interactive statement, **compiled with the statements** | `2 P + 64 C + sum of (512 + M) + 1,024`, with `C` <= `V` - the emitted columns | 135,980 for `SELECT id` (see below) |
+| Idempotency lookup reply | `2 x 589,824 + 4,096`, from the hard maximum of `maxResponseBytes` | 1,183,744 |
+| Step event | `2 R + (2 A + 1,024) + 2,048 + max(raw bound at the limits' maxima, lookup bound) + 4,096` | 7,611,392 |
+| Volatile state | `262,144 + 2 R + max(2 x maxResponseBytes, lookup bound)` | 3,543,040 |
+
+The raw result bound is computed for each compiled envelope and handed to the transport as its read cap
+(`DatabaseExecuteOptions.maxResponseBytes`), which cancels the reply at the first byte over it; core then
+checks the bound again against what it was given, before it parses a byte. `C` is the most cells the
+statements can return, `min(sum of rows x emitted columns, V - emitted columns)`, with each statement's
+row limit; the emitted columns are the projections, a visibility companion per conditional projection,
+and the check column of a mutation; 64 bytes is the largest Hrana framing of a cell; `M` is the exact
+column metadata, the sum over every emitted column of `2 x alias bytes + 2 x declared type bytes + 32`,
+which is at most 1 MiB per envelope (over it is `POLICYSQL_SQL_TOO_COMPLEX`, cause `column_metadata`);
+`2 P` covers the JSON escaping of a JSON value inside a text cell; the final 1,024 bytes are the
+framing of the whole reply (the next baton, `base_url`). For `SELECT id FROM projects` at the reference
+limits: `128,000 + 64 x 100 + 512 + 44 + 1,024 = 135,980`. A JSON column written by another system with
+indentation or `\u00XX` escapes can be several times larger raw than its canonical public form and is
+then 413 `POLICYSQL_LIMIT_EXCEEDED` even though its public form fits, as ADR 0016 accepts for BLOBs
+written by other systems.
 
 The auth is at most `2 A + 1,024`, not `A + 1,024`: it carries the role the client selected with
 `PolicySQL-Role`, which is one of the session's `roles`, so a long role name appears twice (as `role`
 and inside `roles`). Role names have no length limit of their own, so the bound is `2 A`; the
 auth bound is a check on our own value, and one over it is 500 `POLICYSQL_INTERNAL`, not a client
 error. The factor 2 on `R` is the JSON escaping of the body text embedded in a hash input or an event (every
-`"` and `\` doubles). The `max_statements x 1 MiB` term is the result side, which ADR 0027 pull
-request 6 replaces with the compiled raw bound. Exceeding a derived bound is reported as the limit
-it derives from (413 `POLICYSQL_REQUEST_TOO_LARGE`), never as 400. Two replies PolicySQL reads from
+`"` and `\` doubles). Exceeding a request-derived bound is reported as the limit it derives from
+(413 `POLICYSQL_REQUEST_TOO_LARGE`), and a result-derived one as 413 `POLICYSQL_LIMIT_EXCEEDED` with
+rollback; never as 400. Two replies PolicySQL reads from
 outside have fixed 65,536-byte bounds, read as a byte stream and cancelled at the first chunk over
 them: a database control reply (BEGIN, COMMIT, ROLLBACK, close), where over the bound is 503
 `POLICYSQL_DATABASE_UNAVAILABLE`, or for COMMIT an unknown outcome (500 or 503, or
@@ -253,7 +309,7 @@ cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res))
 | --- | --- | --- |
 | `R` | request bytes the limits allow, MiB (`maxRequestBytes`) | 1 |
 | `B` | raw result bytes not attributable to values, MiB: the larger of `2 x maxResultBytes + 512 x maxStatements + 1,048,576` and the idempotency lookup bound 1,183,744 | 1.13 at the reference wrapper's limits |
-| `V_req`, `V_res` | JSON values in the request body (values plus object member names) and in the raw result (cells including companions, column descriptors, values inside JSON cells). `maxJsonValues` bounds the request side since ADR 0027 pull request 3; the result side is enforced from pull request 6, and the formula already counts it | 65,536 each |
+| `V_req`, `V_res` | JSON values in the request body (values plus object member names) and in the raw result (cells including companions, column descriptors, values inside JSON cells). `maxJsonValues` bounds the request side since ADR 0027 pull request 3; the result side is enforced since pull request 6, so both are numbers a request cannot exceed | 65,536 each |
 | `C0` | fixed cost of a request | 5 ms |
 | `a_b` | cost per MiB of request bytes (SQL text included) and of result text | 80 ms per MiB |
 | `a_v` | cost per JSON value | 1.3 microseconds |

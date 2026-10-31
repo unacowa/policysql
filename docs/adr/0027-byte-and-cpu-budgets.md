@@ -315,7 +315,7 @@ key ≤ 128):
 | Bound | Formula | Default value | Replaces |
 | --- | --- | --- | --- |
 | WASM compile input (verified auth + request) | `(A + 1,024) + maxRequestBytes + 1,024` | 1,116,160 | 1 MiB (finding 6) |
-| Raw database result, per atomic envelope or interactive statement, computed at compile time | `2 × maxResultBytes + 64 × C + Σᵢ (512 + eᵢ × (2·nᵢ + 2·tᵢ + 32))`, with `C + Σᵢ eᵢ ≤ maxJsonValues` | see below | 1 MiB per statement (WASM), 2 MiB per response (Turso) |
+| Raw database result, per atomic envelope or interactive statement, computed at compile time | `2 × maxResultBytes + 64 × C + Σᵢ (512 + eᵢ × (2·nᵢ + 2·tᵢ + 32)) + 1,024`, with `C + Σᵢ eᵢ ≤ maxJsonValues` | see below | 1 MiB per statement (WASM), 2 MiB per response (Turso) |
 | Idempotency lookup result | `2 × 589,824 + 4,096` = 1,183,744 (from the hard maximum of `maxResponseBytes`, not the current value) | 1,183,744 | the envelope raw bound |
 | `identity_json` / `cost_estimate_json` input | `(A + 1,024) + 2,048 + 128 + 2 × maxRequestBytes + 1,024` | 2,166,912 | 4 MiB |
 | Step event | `2 × maxRequestBytes + (A + 1,024) + 2,048 + max(raw bound, lookup bound) + 4,096` | 7,544,832 at the defaults' construction-time maximum | `max_statements` × 1 MiB + 64 KiB |
@@ -359,7 +359,8 @@ The raw result bound:
   configured limits, not by the raw bound (finding 4).
 - Its construction-time maximum is
   `2 × maxResultBytes + 64 × maxJsonValues + 512 × maxStatements + 1,048,576`. At the defaults:
-  128,000 + 4,194,304 + 4,096 + 1,048,576 = 5,374,976 bytes. Typical statements compile to far
+  128,000 + 4,194,304 + 4,096 + 1,048,576 (+ 1,024, the reply framing added by pull request 6, below)
+  = 5,376,000 bytes. Typical statements compile to far
   smaller bounds.
 - Pull request 6 adds a property test that generates results exactly at `maxResultBytes` and
   `maxJsonValues` for a Catalog with conditional projections, RETURNING with a check column,
@@ -553,6 +554,112 @@ applies.
 (`maxBytesPerValue + 1` bytes is 413 and writes nothing, with the value it reads from Capabilities and
 compared with the wrapper's configured value); a larger configured limit is covered by the tests above
 on both owner adapters and the Turso HTTP transport tests, not by a second deployment.
+
+**Pull request 6 results (2026-10-31).** Implemented as decided; ABI 15. What the pull request did,
+and where it differs from or adds to the text above.
+
+*Hard maxima and the response limit.* `max_statements` (64), `max_rows` (100,000), and
+`max_result_bytes` (524,288) have hard maxima in `limits.rs`; `max_response_bytes` is a constructor field
+with default `max_result_bytes` + 65,536 (capped at its maximum), range `max_result_bytes` + 3,072 to
+589,824, validated after the table because its range depends on `max_result_bytes` (the error names the
+field and both bounds). `limits_json` reports it as it enforces it, the reference wrapper sets it
+explicitly (129,536), and Capabilities advertises it with the result-side meaning of `maxJsonValues`.
+More statements than `max_statements` is now 413 `POLICYSQL_LIMIT_EXCEEDED`, checked before any statement
+is read (it was 400 `POLICYSQL_INVALID_REQUEST`, the same code as an empty envelope, which stays 400).
+
+*The raw bound, and one term added.* `PolicySqlRuntime::raw_result_bound(handle)` computes the bound from
+the compiled statements (`policysql_transaction::bounds::raw_result_bound`): `2·maxResultBytes + 64·C +
+512·statements + M + 1,024`. The last term is new: the Hrana reply carries a baton of up to 512
+characters (escaped by the server) and `base_url` once per reply, which the 512 bytes per statement do
+not cover for a one-statement envelope. The property test (below) failed without it for a 512-character
+baton, as the ADR said it might ("a failure changes a term, not the rule"). The construction-time
+maximum becomes 5,376,000 bytes at the reference limits and the step event 7,611,392 (it was 10,624,000).
+`M` is exactly the metadata the compile pass already measures (`column_metadata_bytes` of each plan, the
+declared type taken from the physical schema for a direct projection and zero for an expression), so the
+column-metadata guard and the bound share one number; a test asserts the two constants are equal.
+
+*Where the cap is enforced.* `Effect::Execute` and `Effect::Observe` carry `maxResponseBytes`; the engine
+passes it to `DatabaseTransaction.execute(statements, { maxResponseBytes })`, which the Turso HTTP
+transport hands to the streamed reader (it fails closed before any request when the option is missing or
+not a positive safe integer). The cap is the compiled raw bound for an atomic envelope, an interactive
+statement, a callback query, and the cost observation (so no TypeScript constant remains:
+`STATEMENT_RESPONSE_BYTES` is gone and the engine-boundary allow-list lost its entry), the lookup bound
+(1,183,744) for the idempotency lookup, and 65,536 for the idempotency INSERT, which returns no result
+data (a fixed protocol constant like the control replies). Core checks, before it parses a byte, that the
+raw text it was given fits what the earlier statements of the envelope left; the text core receives is the
+private ABI form of the results, which is never longer than the Hrana text (plain JSON values instead of
+typed cells), so the event bound derived from the Hrana bound holds, and a test asserts it for every
+generated result.
+
+*Counting.* Core counts the result's raw values while it validates, per statement within the envelope's
+remaining budget: the descriptors first, then each row's cells, then the values inside each JSON-typed
+cell (a streaming count that stops at the limit, `crates/policysql-wasm/src/result_budget.rs`: the cell
+itself counts once and the document's values and object member names count in addition), and it stops at
+the first row over `maxJsonValues` (413 `POLICYSQL_LIMIT_EXCEEDED`). The result bytes use the same
+budgets: `validate_sealed_result_within` takes the bytes the envelope has left and stops at the first row
+over it. That count is the validator's own (the length of strings and decoded bytes of BLOBs, which is
+never more than the public encoding), so the exact public encoding stays checked by the machine after
+validation, as before; the early abort can only be later than the ADR's wording, never earlier, so no
+value that passes the configured limit is refused by it. The machine hands each statement the remaining
+raw bytes, values, and result bytes (`ResultBudget`) and reads back what it consumed.
+
+*The response measurement.* After the validated results are shaped, and before any commit check, idempotency
+INSERT, or COMMIT, the machine builds the same `AtomicReply` it will send and measures its UTF-8 bytes (the
+trace of a debug request included) plus a 1,024-byte reserve (`RESPONSE_RESERVE_BYTES`) against
+`max_response_bytes`: over it the envelope closes as failed with 413 `POLICYSQL_LIMIT_EXCEEDED`, which
+rolls back; no COMMIT or INSERT was emitted, so nothing survives. ADR 0007 is untouched: the measurement
+precedes every effect that could commit, and the COMMIT outcome mapping gained no entry.
+
+*Replay.* A stored response over the lookup bound (a row of an earlier release) is the lookup's `limit`
+class, which the machine now answers as 413 `POLICYSQL_LIMIT_EXCEEDED` (it was `POLICYSQL_INTERNAL`) before
+the fingerprint is compared, as "Idempotent replay" decided. The idempotency INSERT's `limit` stays
+`POLICYSQL_INTERNAL`. Replay of a committed request after `maxResponseBytes` and `maxResultBytes` were
+lowered returns the stored response with nothing executed, on both placements (machine tests, and
+`result-budget.test.mjs` through a redeployed runtime on both owner adapters); a stored response whose
+characters are quotes, so that they escape twice (once in the public JSON and again as a Hrana string), is
+read within the lookup bound.
+
+*`streamedReadCap`.* `DatabaseProvider.streamedReadCap` is a required boolean (a provider without it is a
+construction `TypeError`). The reference provider and the database-routing example declare `true`, the
+in-process SQLite example `false`. The engine and an owner log `database_read_cap_unenforced` once per
+provider (a `WeakSet`) when the provider declares `false` and `maxResultBytes` exceeds 64,000, at the first
+database open; `deploy/cloudflare/src/database.ts` holds the 64,000 and the engine-boundary allow-list
+lists it with its reason.
+
+*Volatile and event bounds.* `Limits` gained `max_result_bytes`, `max_json_values`, and
+`max_response_bytes`; `EVENT_RESULT_BYTES` and the `max_statements` × 1 MiB term are gone. The volatile
+bound is `262,144 + 2·R + max(2·maxResponseBytes, 1,183,744)` (3,543,040 at the reference limits; it was
+256 KiB + 4 × event), and the transcript goldens changed only by the new `maxResponseBytes` field.
+
+*Tests.* Rust: limits (hard maxima and the response range, at the cap and one over), the bounds, the
+machine (every `execute` effect's cap; a response at the limit commits and one byte over is 413 with no
+COMMIT and no row, a retry runs again, on both placements; replay after lowering; values counted
+cumulatively), and in `policysql-wasm` the counting at the limit and one over (descriptors, companions,
+JSON cells, the check column), the remaining raw and result bytes, the raw bound as the documented sum,
+and a proptest of the bound against a Hrana encoder (seven statement shapes: conditional columns with
+companions, RETURNING with the check column, one-character and 120-character aliases, JSON-escaped text,
+base64 BLOBs, multi-byte text, 512-character baton, 4,000 result bytes and 1,024 values), plus the largest
+result the limits admit and eight statements of 128 projections with no row. TypeScript
+(`result-budget.test.mjs`, both owner adapters): the hard maxima at construction, each limit at the cap and
+one over, the values at 1,024 and 1,025 (including companions and a JSON cell), the exact cap the engine
+hands the transport, a reply of exactly the cap and one byte over while it streams, the response at the
+limit and one under with rollback, no idempotency row and a retry that runs again, replay after lowering,
+the doubly escaped stored response, an oversized stored row, an interactive statement over its bound, and
+the provider capability. The release smoke (`scripts/smoke-response.mjs`) sends a write plus seven wide
+SELECTs to the deployed Worker and the real Turso database: 413, no row, the key free for another body,
+the refused body a conflict afterwards (so no record was left), and a retry refused as a new attempt.
+
+*ABI 15.* `limits_json` values for existing constructor inputs are unchanged, but inputs that were valid
+(`max_rows` above 100,000, and so on) are now errors, a response over `max_response_bytes` is refused, the
+raw bound and the step output (`maxResponseBytes` on `execute` and `observe`, a 413 for a stored response
+over the lookup bound) differ, so the snapshot changes; no `keyHash` or identity value changed, so keyed
+retries across the deployment still replay (the identity goldens are unchanged).
+
+*Left to pull request 7 and #97.* The CPU and memory reductions (a single pass over the body and result in
+core, no `serde_json` tree for JSON-typed values beyond validation, no reviver, one restatement of results
+through volatile JSON), the re-measurement of the coefficients and the maxima, and `cpu_ms`; the
+duplicate raw re-serialization in `RuntimeCompiler::validate` (the machine's `RawResult` is turned back
+into JSON text for `validate_result`) is one of those. #97 (separate) is not touched.
 
 ### CPU and memory budgets
 

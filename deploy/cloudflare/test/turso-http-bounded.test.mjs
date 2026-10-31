@@ -1,7 +1,7 @@
 // Streamed, byte-counted Turso response bound (#53, ADR 0027 "Streamed enforcement"). The
 // Turso reply is read as a byte stream with a running byte count and cancelled at the first
-// chunk over its bound; UTF-8 is decoded strictly. A statement reply is bounded at 2 MiB (the
-// result-side bound, replaced in ADR 0027 pull request 6), a control reply (BEGIN, COMMIT,
+// chunk over its bound; UTF-8 is decoded strictly. A statement reply is bounded by the read cap the
+// caller passes (core's compiled raw bound, ADR 0027 pull request 6; 2 MiB in these tests), a control reply (BEGIN, COMMIT,
 // ROLLBACK, close) at the fixed 65,536 bytes (ADR 0027 pull request 3). A statement reply over
 // its bound is 413 POLICYSQL_LIMIT_EXCEEDED, a control reply over its bound 503
 // POLICYSQL_DATABASE_UNAVAILABLE (never a limit, and never a rejection of a COMMIT: ADR 0016,

@@ -345,7 +345,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       case "open":
         try {
           this.closeConnection();
-          noteReadCap(this.database, runtimeLimits(runtime).maxResultBytes);
+          try { noteReadCap(this.database, runtimeLimits(runtime).maxResultBytes); } catch { /* a log notice never fails a request */ }
           const factory = databaseTransportFactory(this.database, effect.binding, runtimeBytesLimit(runtime), effect.deadlineMs);
           const transport = await factory(requestId);
           this.connection = await transport.begin(effect.mode, effect.timeoutMs);

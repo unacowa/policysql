@@ -128,7 +128,7 @@ export const runRequestStep = async (
       case "open":
         try {
           closeConnection();
-          noteReadCap(dependencies.database, runtimeLimits(runtime).maxResultBytes);
+          try { noteReadCap(dependencies.database, runtimeLimits(runtime).maxResultBytes); } catch { /* a log notice never fails a request */ }
           const factory = databaseTransportFactory(dependencies.database, effect.binding, maxBytes);
           const transport = await factory(requestId, effect.deadlineMs);
           connection = await transport.begin(effect.mode, effect.timeoutMs);
