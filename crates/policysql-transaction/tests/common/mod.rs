@@ -160,6 +160,7 @@ impl Compiler for FakeCompiler {
                     code: "POLICYSQL_INVALID_SQL".to_owned(),
                     message: "The SQL statement cannot be parsed.".to_owned(),
                     path: Some(format!("/statements/{index}")),
+                    log: None,
                 });
             };
             if params.values().any(|value| matches!(value, Value::Number(number) if number.as_i64().is_none() && number.as_f64().is_none_or(|f| !f.is_finite()))) {
@@ -234,6 +235,7 @@ impl Compiler for FakeCompiler {
             code: "POLICYSQL_SCHEMA_MISMATCH".to_owned(),
             message: "The database result does not match the compiled logical contract.".to_owned(),
             path: Some(format!("/statements/{index}")),
+            log: None,
         };
         let expect = {
             let plans = self.plans.borrow();
@@ -250,6 +252,7 @@ impl Compiler for FakeCompiler {
                 code: "POLICYSQL_EXPECTATION_FAILED".to_owned(),
                 message: "The statement did not meet its expectation.".to_owned(),
                 path: Some(format!("/statements/{index}/expect")),
+                log: None,
             });
         }
         if raw

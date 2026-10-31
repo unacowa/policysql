@@ -15,6 +15,43 @@ pub struct ExecutionLimits {
     pub timeout_ms: u64,
 }
 
+/// Which downstream complexity limit an emitted statement reached (ADR 0027, "Emitted
+/// statement complexity"). Fixed names only: the log carries the name, never SQL text,
+/// parameters, or identifiers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComplexityCause {
+    /// Expression tree height over the parser's cap.
+    Height,
+    /// Parser recursion depth over the parser's cap.
+    Recursion,
+    /// More emitted result columns than the database allows.
+    Columns,
+    /// More host parameters than the database allows.
+    Parameters,
+    /// A bound LIKE or GLOB pattern longer than the database allows.
+    LikePattern,
+    /// The column metadata of the envelope's emitted statements exceeds its memory guard.
+    ColumnMetadata,
+    /// The database refused the expression tree as too deep.
+    DatabaseExpressionDepth,
+}
+
+impl ComplexityCause {
+    /// The fixed cause name logged as `cause`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Height => "height",
+            Self::Recursion => "recursion",
+            Self::Columns => "columns",
+            Self::Parameters => "parameters",
+            Self::LikePattern => "like_pattern",
+            Self::ColumnMetadata => "column_metadata",
+            Self::DatabaseExpressionDepth => "database_expression_depth",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResultColumnDescriptor {
     pub name: ResultName,
@@ -41,6 +78,7 @@ pub struct CandidateExecutionPlan<Profile> {
     expected_affected_rows: Option<u64>,
     expected_result_rows: Option<u64>,
     operation_check_column: Option<ResultName>,
+    column_metadata_bytes: u64,
     marker: PhantomData<Profile>,
 }
 
@@ -66,12 +104,20 @@ impl<Profile> CandidateExecutionPlan<Profile> {
             expected_affected_rows: None,
             expected_result_rows: None,
             operation_check_column: None,
+            column_metadata_bytes: 0,
         }
     }
 
     #[must_use]
     pub fn protected_sql(&self) -> &str {
         &self.protected_sql
+    }
+
+    /// Records the exact column-metadata size of the emitted statement (ADR 0027).
+    #[must_use]
+    pub const fn with_column_metadata_bytes(mut self, bytes: u64) -> Self {
+        self.column_metadata_bytes = bytes;
+        self
     }
 
     #[must_use]
@@ -258,6 +304,12 @@ impl<Profile> VerifiedExecutionPlan<Profile> {
     #[must_use]
     pub fn operation_check_column(&self) -> Option<&ResultName> {
         self.candidate.operation_check_column.as_ref()
+    }
+
+    /// The exact `Σ (2·|alias| + 2·|declared type| + 32)` over the emitted result columns.
+    #[must_use]
+    pub const fn column_metadata_bytes(&self) -> u64 {
+        self.candidate.column_metadata_bytes
     }
 }
 

@@ -34,7 +34,7 @@ import { validateConfig } from "./engine-config.ts";
 import type { PolicySqlConfig, ValidatedConfig } from "./engine-config.ts";
 import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
 import { parseExact, stringifyExact } from "./exact-json.ts";
-import { checkBatch, decodeArgs, commitFailureClass, encodeResults, entropyHex, failureClass, observeCost, validatorFailureClass } from "./step-effects.ts";
+import { checkBatch, decodeArgs, commitFailureClass, encodeResults, entropyHex, executeFailedEvent, failureClass, observeCost, validatorFailureClass } from "./step-effects.ts";
 import { OWNER_NAME, runInBackground, validateOwnerFacilities } from "./transaction-owner-port.ts";
 import type {
   OwnerAtomicInput, OwnerBeginInput, OwnerCallbackInput, OwnerCommandInput, OwnerCommandKind,
@@ -361,7 +361,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
           })));
           return { type: "executed", id, results: encodeResults(results, maxBytes) };
         } catch (error) {
-          return { type: "executeFailed", id, class: failureClass(error) };
+          return executeFailedEvent(id, error, failureClass);
         }
       case "commit":
         try {

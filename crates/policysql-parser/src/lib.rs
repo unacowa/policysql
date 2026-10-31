@@ -27,7 +27,7 @@ impl Default for BindingLimits {
     fn default() -> Self {
         Self {
             max_expression_depth: 32,
-            max_parameters: 128,
+            max_parameters: 1024,
             max_projections: 128,
             max_joins: 8,
         }

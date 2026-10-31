@@ -6,7 +6,7 @@ use policysql_core::{
     LogicalType, LogicalValue, ResourceId, ResourceName, SnapshotId, StorageClass,
     ValueConstraints, ValueDescriptor, ValueRepresentation,
 };
-use policysql_execution::ExecutionLimits;
+use policysql_execution::{ComplexityCause, ExecutionLimits};
 use policysql_gateway::{
     AuthContext, EndpointPermission, Gateway, GatewayError, RejectionKind, StatementRequest,
     classify_bind_error,
@@ -43,7 +43,16 @@ use wasm_bindgen::prelude::*;
 /// `max_request_bytes` (compile, hash, and event inputs) and the session bound is 65,536
 /// bytes, so the same input can be accepted or answered differently; SQL over its limit is
 /// 413 `POLICYSQL_REQUEST_TOO_LARGE` (was 400). No identity value changed.
-const ABI_VERSION: u32 = 13;
+/// 14: ADR 0027 pull request 4: `max_parameters`, `max_expression_depth`, `max_projections`,
+/// and `max_joins` are constructor fields (the default of `max_parameters` is 1,024, was 128);
+/// the new code `POLICYSQL_SQL_TOO_COMPLEX` (400) answers an emitted statement over the
+/// parser's height or recursion cap, over 2,000 result columns, 32,766 host parameters, a
+/// 50,000-byte bound LIKE pattern, or the 1 MiB column-metadata guard (was 400
+/// `POLICYSQL_UNSUPPORTED_SQL`); any other re-parse failure of emitted SQL is 500
+/// `POLICYSQL_INTERNAL`; the step machine reads the outcome class `complex` (with the statement
+/// index) and a `databaseCode` on `executeFailed`, and writes the log events `sql_too_complex`,
+/// `emitted_sql_reparse_failed`, and `database_error_unclassified`. No identity value changed.
+const ABI_VERSION: u32 = 14;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_ACTIVE_EXECUTIONS: usize = 64;
@@ -408,10 +417,6 @@ fn build_runtime(
         limits_json,
         &limits::FixedLimits {
             max_bytes_per_value: policysql_core::bytes::MAX_BYTES_PER_VALUE,
-            max_parameters: policysql_parser::BindingLimits::default().max_parameters,
-            max_expression_depth: policysql_parser::BindingLimits::default().max_expression_depth,
-            max_projections: policysql_parser::BindingLimits::default().max_projections,
-            max_joins: policysql_parser::BindingLimits::default().max_joins,
             max_commit_checks: policysql_policy::MAX_COMMIT_CHECKS,
             max_hook_duration_ms: policysql_policy::MAX_COMMIT_CHECK_TIMEOUT_MS,
         },
@@ -447,7 +452,8 @@ fn build_runtime(
                 timeout_ms: limits.timeout_ms,
             },
             max_statements,
-        ),
+        )
+        .with_binding_limits(binding_limits(&limits)),
         catalog,
         policies,
         schema_version: schema_version.to_owned(),
@@ -730,7 +736,21 @@ impl PolicySqlRuntime {
     }
 }
 
+fn binding_limits(limits: &limits::RuntimeLimits) -> policysql_parser::BindingLimits {
+    policysql_parser::BindingLimits {
+        max_expression_depth: usize::try_from(limits.max_expression_depth).unwrap_or(usize::MAX),
+        max_parameters: usize::try_from(limits.max_parameters).unwrap_or(usize::MAX),
+        max_projections: usize::try_from(limits.max_projections).unwrap_or(usize::MAX),
+        max_joins: usize::try_from(limits.max_joins).unwrap_or(usize::MAX),
+    }
+}
+
 impl PolicySqlRuntime {
+    /// The input-side limits of the binder, from the runtime's configured limits.
+    fn binding_limits(&self) -> policysql_parser::BindingLimits {
+        binding_limits(&self.limits)
+    }
+
     fn store_plan(
         &self,
         compiled: policysql_gateway::CompiledEnvelope,
@@ -959,13 +979,17 @@ impl PolicySqlRuntime {
         }) {
             return Err(RuntimeError::SqlTooLargeAt(index));
         }
-        validate_deployment_surface(&raw_request.statements, &self.catalog)?;
+        validate_deployment_surface(
+            &raw_request.statements,
+            &self.catalog,
+            self.binding_limits(),
+        )?;
         let requests = raw_request
             .statements
             .into_iter()
             .enumerate()
             .map(|(index, statement)| {
-                statement_request(statement, endpoint, &self.catalog)
+                statement_request(statement, endpoint, &self.catalog, self.binding_limits())
                     .map_err(|error| error.at_statement(index))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1182,8 +1206,9 @@ fn select_column_usage(
 fn validate_deployment_surface(
     requests: &[RequestStatement],
     catalog: &Catalog,
+    binding_limits: policysql_parser::BindingLimits,
 ) -> Result<(), RuntimeError> {
-    let frontend = SqliteFrontend::default();
+    let frontend = SqliteFrontend::new(binding_limits);
     for (index, request) in requests.iter().enumerate() {
         let statement = frontend
             .bind(&request.sql, catalog)
@@ -1305,6 +1330,10 @@ enum RuntimeError {
     SqlTooLargeAt(usize),
     Rejected(RejectionKind),
     RejectedAt(RejectionKind, usize),
+    /// The emitted statement `n` reached a downstream complexity limit (400, ADR 0027).
+    TooComplexAt(ComplexityCause, usize),
+    /// The emitted SQL of statement `n` did not parse again (500; an emitter bug).
+    EmittedSqlInvalidAt(usize),
     Internal,
     Busy,
     RemoteResult,
@@ -1433,9 +1462,12 @@ fn activate_catalog_with_schema(
                     {
                         return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
                     }
+                    let declared_type_bytes =
+                        physical_column.map_or(0, |column| column.declared_type.len());
                     Ok((
                         ColumnName::new(column_name)
                             .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?,
+                        declared_type_bytes,
                         ValueDescriptor {
                             logical_type,
                             representation,
@@ -1450,16 +1482,25 @@ fn activate_catalog_with_schema(
                     ))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            ResourceDescriptor::new_with_source(
+            let declared = columns
+                .iter()
+                .map(|(name, bytes, _)| (name.as_str().to_owned(), *bytes))
+                .collect::<Vec<_>>();
+            let descriptor = ResourceDescriptor::new_with_source(
                 ResourceId::new(id)
                     .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?,
                 ResourceName::new(name)
                     .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?,
                 ResourceName::new(resource.source.table)
                     .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?,
-                columns,
+                columns.into_iter().map(|(name, _, value)| (name, value)),
             )
-            .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))
+            .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?;
+            Ok(declared
+                .into_iter()
+                .fold(descriptor, |descriptor, (column, bytes)| {
+                    descriptor.with_declared_type_bytes(&column, bytes)
+                }))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Catalog::new(snapshot, resources)
@@ -1913,6 +1954,7 @@ fn statement_request(
     raw: RequestStatement,
     endpoint: EndpointPermission,
     catalog: &Catalog,
+    binding_limits: policysql_parser::BindingLimits,
 ) -> Result<StatementRequest, RuntimeError> {
     // The length limit is checked by `compile` before any statement is parsed.
     if raw.sql.is_empty() {
@@ -1922,7 +1964,7 @@ fn statement_request(
         affected_rows: None,
         row_count: None,
     });
-    let statement = SqliteFrontend::default()
+    let statement = SqliteFrontend::new(binding_limits)
         .bind(&raw.sql, catalog)
         .map_err(|error| RuntimeError::Rejected(classify_bind_error(&error)))?;
     let parameter_types = statement_parameter_types(&statement, catalog)?;
@@ -2342,6 +2384,8 @@ fn runtime_gateway_error(error: GatewayError) -> RuntimeError {
         GatewayError::SnapshotMismatch => RuntimeError::Snapshot,
         GatewayError::EnvelopeLimit => RuntimeError::Envelope,
         GatewayError::Rejected { kind, index } => RuntimeError::RejectedAt(kind, index),
+        GatewayError::TooComplex { cause, index } => RuntimeError::TooComplexAt(cause, index),
+        GatewayError::EmittedSqlInvalid { index } => RuntimeError::EmittedSqlInvalidAt(index),
         GatewayError::TransactionRequired => {
             RuntimeError::Rejected(RejectionKind::ForbiddenOperation)
         }
@@ -2383,11 +2427,18 @@ fn error_body(runtime_error: RuntimeError) -> ErrorBody {
         },
         RuntimeError::Rejected(kind) => rejection_body(kind, None),
         RuntimeError::RejectedAt(kind, index) => rejection_body(kind, Some(index)),
-        RuntimeError::Session | RuntimeError::Internal => error(
-            "POLICYSQL_INTERNAL",
-            "The request could not be completed.",
-            None,
+        RuntimeError::TooComplexAt(_, index) => error(
+            "POLICYSQL_SQL_TOO_COMPLEX",
+            "The statement is too complex to run under the active policy.",
+            Some(index),
         ),
+        RuntimeError::Session | RuntimeError::Internal | RuntimeError::EmittedSqlInvalidAt(_) => {
+            error(
+                "POLICYSQL_INTERNAL",
+                "The request could not be completed.",
+                None,
+            )
+        }
         RuntimeError::Busy => error(
             "POLICYSQL_DATABASE_UNAVAILABLE",
             "The database adapter is temporarily unavailable.",
@@ -2572,7 +2623,7 @@ resources:
             limits["maxBytesPerValue"],
             policysql_core::bytes::MAX_BYTES_PER_VALUE
         );
-        assert_eq!(limits["maxParameters"], 128);
+        assert_eq!(limits["maxParameters"], 1_024);
         assert_eq!(limits["maxExpressionDepth"], 32);
         assert_eq!(limits["maxProjections"], 128);
         assert_eq!(limits["maxResponseBytes"], 10_000 + 65_536);
@@ -3552,5 +3603,131 @@ resources:
         assert_eq!(compiled["error"]["code"], "POLICYSQL_INTERNAL");
         let catalog = parse_json(&runtime.catalog_json(&over));
         assert_eq!(catalog["error"]["code"], "POLICYSQL_INTERNAL");
+    }
+
+    // ADR 0027 pull request 4: the emitted statement is measured, and the input-side limits
+    // are the runtime's configured ones.
+
+    fn code_of(output: &str) -> String {
+        parse_json(output)["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn compile_one(runtime: &PolicySqlRuntime, sql: &str, params: &serde_json::Value) -> String {
+        runtime.compile_json(
+            AUTH,
+            &serde_json::json!({"statements": [{"sql": sql, "params": params}]}).to_string(),
+            "execute",
+        )
+    }
+
+    #[test]
+    fn the_input_side_limits_are_the_configured_ones_at_the_value_and_one_over() {
+        let runtime = runtime_with(&format!(
+            r#"{{{REQUIRED},"max_parameters":2,"max_expression_depth":3,"max_projections":2,"max_joins":1}}"#
+        ));
+        let none = serde_json::json!({});
+        assert!(!compile_one(&runtime, "SELECT id, name FROM projects", &none).contains("error"));
+        assert_eq!(
+            code_of(&compile_one(
+                &runtime,
+                "SELECT id, name, status FROM projects",
+                &none
+            )),
+            "POLICYSQL_LIMIT_EXCEEDED"
+        );
+        let two = serde_json::json!({"a": "x", "b": "y"});
+        assert!(
+            !compile_one(
+                &runtime,
+                "SELECT id FROM projects WHERE name = :a OR name = :b",
+                &two
+            )
+            .contains("error")
+        );
+        let three = serde_json::json!({"a": "x", "b": "y", "c": "z"});
+        assert_eq!(
+            code_of(&compile_one(
+                &runtime,
+                "SELECT id FROM projects WHERE name = :a OR name = :b OR name = :c",
+                &three
+            )),
+            "POLICYSQL_LIMIT_EXCEEDED"
+        );
+        let limits = parse_json(&runtime.limits_json());
+        assert_eq!(limits["maxParameters"], 2);
+        assert_eq!(limits["maxExpressionDepth"], 3);
+        assert_eq!(limits["maxProjections"], 2);
+        assert_eq!(limits["maxJoins"], 1);
+    }
+
+    #[test]
+    fn a_bound_like_pattern_over_50000_bytes_is_too_complex_with_a_fixed_message() {
+        let runtime = runtime_with(&format!("{{{REQUIRED}}}"));
+        let like = |pattern: &str| {
+            compile_one(
+                &runtime,
+                "SELECT id FROM projects WHERE name LIKE :q",
+                &serde_json::json!({"q": pattern}),
+            )
+        };
+        assert!(!like(&"a".repeat(50_000)).contains("error"));
+        let refused = parse_json(&like(&"a".repeat(50_001)));
+        assert_eq!(refused["error"]["code"], "POLICYSQL_SQL_TOO_COMPLEX");
+        assert_eq!(
+            refused["error"]["message"],
+            "The statement is too complex to run under the active policy."
+        );
+        assert_eq!(refused["error"]["path"], "/statements/0");
+        let text = refused.to_string();
+        for internal in ["LIKE", "projects", "tenant_id", "__policysql", "aaaa"] {
+            assert!(!text.contains(internal), "{internal}: {text}");
+        }
+    }
+
+    #[test]
+    fn the_projection_limit_maximum_is_2000_and_one_over_is_the_input_side_limit() {
+        let runtime = runtime_with(&format!(r#"{{{REQUIRED},"max_projections":2000}}"#));
+        let wide = |count: usize| {
+            let columns = (0..count)
+                .map(|index| format!("id AS c{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            compile_one(
+                &runtime,
+                &format!("SELECT {columns} FROM projects"),
+                &serde_json::json!({}),
+            )
+        };
+        assert!(!wide(2_000).contains("error"));
+        // The input-side limit answers first; emitted columns beyond 2,000 need companion
+        // columns (a conditional projection), which the HTTP tests exercise.
+        assert_eq!(code_of(&wide(2_001)), "POLICYSQL_LIMIT_EXCEEDED");
+    }
+
+    #[test]
+    fn the_column_metadata_of_an_envelope_is_guarded_at_one_mebibyte() {
+        // Aliases are doubled for JSON escaping: three statements of a 200,000-byte alias are
+        // 1,200,000 bytes of metadata, two are 800,000.
+        let runtime = runtime_with(
+            r#"{"max_rows":100,"max_result_bytes":10000,"timeout_ms":1000,"max_statements":8,"max_request_bytes":2097152,"max_sql_bytes":262144}"#,
+        );
+        let alias = "a".repeat(200_000);
+        let request = |count: usize| {
+            serde_json::json!({"statements": (0..count)
+                .map(|_| serde_json::json!({"sql": format!("SELECT id AS \"{alias}\" FROM projects"), "params": {}}))
+                .collect::<Vec<_>>()})
+            .to_string()
+        };
+        assert!(
+            !runtime
+                .compile_json(AUTH, &request(2), "execute")
+                .contains("error")
+        );
+        let refused = parse_json(&runtime.compile_json(AUTH, &request(3), "execute"));
+        assert_eq!(refused["error"]["code"], "POLICYSQL_SQL_TOO_COMPLEX");
+        assert_eq!(refused["error"]["path"], "/statements/2");
     }
 }

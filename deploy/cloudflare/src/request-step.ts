@@ -28,7 +28,7 @@ import { EngineError, internalError, operationError } from "./errors.ts";
 import { checkDatabaseBinding, databaseTransportFactory, sameDatabaseBinding } from "./database.ts";
 import type { DatabaseBinding, DatabaseProvider } from "./database.ts";
 import { parseExact, stringifyExact } from "./exact-json.ts";
-import { checkBatch, decodeArgs, directCommitFailureClass, directFailureClass, encodeResults, entropyHex, observeCost } from "./step-effects.ts";
+import { checkBatch, decodeArgs, directCommitFailureClass, directFailureClass, encodeResults, entropyHex, executeFailedEvent, observeCost } from "./step-effects.ts";
 import type { CostCatalog } from "./engine-config.ts";
 import { runInBackground } from "./transaction-owner-port.ts";
 import type { BackgroundTasks, OwnerReply, TransactionOwnerHandle } from "./transaction-owner-port.ts";
@@ -144,7 +144,7 @@ export const runRequestStep = async (
           })));
           return { type: "executed", id, results: encodeResults(results, maxBytes) };
         } catch (error) {
-          return { type: "executeFailed", id, class: directFailureClass(error) };
+          return executeFailedEvent(id, error, directFailureClass);
         }
       case "commit": {
         const open = connection;

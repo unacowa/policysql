@@ -15,12 +15,32 @@ use serde::Serialize;
 
 pub(crate) struct RuntimeCompiler<'a>(pub(crate) &'a PolicySqlRuntime);
 
-fn core_error(error: RuntimeError) -> CoreError {
+fn core_error(runtime: &PolicySqlRuntime, error: RuntimeError) -> CoreError {
+    // The log record of a complexity failure: the statement index, the versions, and a fixed
+    // cause name; never the parser's or the database's text, the emitted SQL, or a name.
+    let log = match &error {
+        RuntimeError::TooComplexAt(cause, index) => Some(("sql_too_complex", *index, cause.name())),
+        RuntimeError::EmittedSqlInvalidAt(index) => {
+            Some(("emitted_sql_reparse_failed", *index, "reparse"))
+        }
+        _ => None,
+    }
+    .map(|(event, index, cause)| {
+        serde_json::json!({
+            "event": event,
+            "statementIndex": index,
+            "schemaVersion": runtime.schema_version,
+            "policyVersion": runtime.policy_version,
+            "abiVersion": super::ABI_VERSION,
+            "cause": cause,
+        })
+    });
     let body = error_body(error);
     CoreError {
         code: body.code.to_owned(),
         message: body.message.to_owned(),
         path: body.path,
+        log,
     }
 }
 
@@ -87,9 +107,12 @@ impl Compiler for RuntimeCompiler<'_> {
         let (response, compiled) = self
             .0
             .compile(auth_json, envelope_json, "execute")
-            .map_err(core_error)?;
-        let compiled = compiled.ok_or_else(|| core_error(RuntimeError::Internal))?;
-        let handle = self.0.store_plan(compiled).map_err(core_error)?;
+            .map_err(|error| core_error(self.0, error))?;
+        let compiled = compiled.ok_or_else(|| core_error(self.0, RuntimeError::Internal))?;
+        let handle = self
+            .0
+            .store_plan(compiled)
+            .map_err(|error| core_error(self.0, error))?;
         Ok(Compiled {
             handle,
             statements: response
@@ -118,10 +141,13 @@ impl Compiler for RuntimeCompiler<'_> {
             .borrow()
             .get(&handle)
             .map(|envelope| envelope.statements.len())
-            .ok_or_else(|| core_error(RuntimeError::Internal))?;
+            .ok_or_else(|| core_error(self.0, RuntimeError::Internal))?;
         (0..count)
             .map(|index| {
-                let dto = self.0.statement_dto(handle, index).map_err(core_error)?;
+                let dto = self
+                    .0
+                    .statement_dto(handle, index)
+                    .map_err(|error| core_error(self.0, error))?;
                 Ok(DriverStatement {
                     sql: dto.protected_sql,
                     client_parameters: dto.client_parameters,
@@ -133,7 +159,7 @@ impl Compiler for RuntimeCompiler<'_> {
     }
 
     fn validate(&self, handle: u64, index: usize, raw: RawResult) -> Result<Validated, CoreError> {
-        let at = |error: RuntimeError| core_error(error.at_statement(index));
+        let at = |error: RuntimeError| core_error(self.0, error.at_statement(index));
         let dto = self.0.statement_dto(handle, index).map_err(at)?;
         let raw_json = serde_json::json!({
             "columns": raw.columns,
@@ -163,7 +189,7 @@ impl Compiler for RuntimeCompiler<'_> {
                     constraints: column.constraints.as_ref(),
                     json_schema: column.json_schema.as_ref(),
                 })
-                .map_err(|_| core_error(RuntimeError::Internal))
+                .map_err(|_| core_error(self.0, RuntimeError::Internal))
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Validated {

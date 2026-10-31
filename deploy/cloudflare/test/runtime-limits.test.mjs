@@ -119,6 +119,8 @@ test("construction rejects every invalid limit and names the field", () => {
     maxCallbackRows: [1, 10_000], beginTimeoutMs: [1, 60_000], costTimeoutMs: [1, 10_000],
     // ADR 0027: the request-side limits have a minimum (the envelope must fit) and a hard maximum.
     maxRequestBytes: [65_536, 2_097_152], maxJsonValues: [1_024, 131_072], maxSqlBytes: [1_024, 1_048_576],
+    // ADR 0027 pull request 4: the input-side limits of the binder, with their hard maxima.
+    maxParameters: [1, 16_384], maxExpressionDepth: [1, 64], maxProjections: [1, 2_000], maxJoins: [1, 63],
   };
   const snake = (key) => key.replace(/[A-Z]/gu, (letter) => `_${letter.toLowerCase()}`);
   for (const [key, [min, max]] of Object.entries(ranges)) {
@@ -148,8 +150,7 @@ test("construction rejects every invalid limit and names the field", () => {
   construct({ ...REQUIRED, maxRequestBytes: 65_536, maxSqlBytes: 65_536 }).free();
   construct({ ...REQUIRED, maxRequestBytes: 2_097_152, maxSqlBytes: 1_048_576 }).free();
   // The limits later pull requests make configurable are not constructor fields yet.
-  for (const key of ["transactionMS", "maxInteractiveDurationMs", "maxBytesPerValue", "maxParameters", "maxExpressionDepth",
-    "maxProjections", "maxJoins", "maxResponseBytes", "max_rows"]) {
+  for (const key of ["transactionMS", "maxInteractiveDurationMs", "maxBytesPerValue", "maxResponseBytes", "max_rows"]) {
     assert.throws(() => runtimeLimitsJson({ ...REQUIRED, [key]: 1 }),
       (error) => error instanceof TypeError && error.message === `limits.${key} is not a runtime limit`, key);
   }

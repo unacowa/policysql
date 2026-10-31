@@ -79,6 +79,55 @@ limits").
 | `maxRequestBytes` | `max_request_bytes` | 1,048,576 | 65,536 to 2,097,152 | HTTP adapter (streamed, a declared `Content-Length` over it is refused unread), engine (UTF-8 bytes of the text as received, a byte order mark counted), core (derived bounds); over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` |
 | `maxJsonValues` | `max_json_values` | 65,536 | 1,024 to 131,072 | engine: JSON values plus object member names in one request body, counted by the scan that checks duplicate keys, which stops at the first value over the limit, before `JSON.parse` and before WASM; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE`. (Its result-side meaning, cells, companion cells, and column descriptors of a raw database response, arrives with ADR 0027 pull request 6.) |
 | `maxSqlBytes` | `max_sql_bytes` | 65,536 | 1,024 to 1,048,576, and at most `maxRequestBytes` | core, UTF-8 bytes of one statement's `sql`, checked before any statement is parsed; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` with path `/statements/<i>/sql` (it was 400 `POLICYSQL_INVALID_REQUEST`) |
+| `maxParameters` | `max_parameters` | 1,024 (was 128) | 1 to 16,384 | binder: distinct client parameter names in one statement; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
+| `maxExpressionDepth` | `max_expression_depth` | 32 | 1 to 64 | binder: expression depth of the client's SQL (an n-term `OR` chain has depth n); over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
+| `maxProjections` | `max_projections` | 128 | 1 to 2,000 | binder: result columns of one `SELECT` or `RETURNING` in the client's SQL; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
+| `maxJoins` | `max_joins` | 8 | 1 to 63 | binder: joins in one `FROM` of the client's SQL; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
+
+#### Input-side limits promise nothing about the emitted statement
+
+`maxParameters`, `maxExpressionDepth`, `maxProjections`, `maxJoins` (and `maxSqlBytes`) bound what
+PolicySQL itself spends parsing and binding the client's SQL. They do not promise that a request
+within them compiles: the statement PolicySQL emits is the client's SQL composed with the policy's
+row filters, companion columns, and server parameters, and the downstream (the pinned `turso_parser`,
+SQLite) has limits of its own. No construction check relates the two. PolicySQL measures the actual
+emitted statement instead (ADR 0027, "Emitted statement complexity") and answers one fixed error,
+`POLICYSQL_SQL_TOO_COMPLEX` (400, path `/statements/<i>`), when it reaches one of:
+
+| Cause (log `cause`) | Limit | Counted |
+| --- | --- | --- |
+| `height` | the parser's expression height, 100 | exactly, on the AST about to be printed (a parenthesis adds 1, a binary node 1 plus the taller operand, the count restarts inside a subquery) |
+| `recursion` | the parser's expression recursion depth, 100 | exactly, on the same AST (it accumulates across `EXISTS` and other subqueries) |
+| `columns` | 2,000 result columns | exact count of the emitted columns, visibility companions and the check column included |
+| `parameters` | 32,766 host parameters | exact count of the emitted parameters, client and server |
+| `like_pattern` | 50,000 bytes | exact byte length of a `LIKE`/`GLOB` pattern that is a bound value, when parameters are bound |
+| `column_metadata` | 1,048,576 bytes per envelope | exact `Σ (2·|alias| + 2·|declared type| + 32)` over every emitted column of the envelope |
+| `columns`, `parameters`, `like_pattern`, `database_expression_depth`, `function_arguments`, `compound_terms`, `join_tables` | the database's own refusal | a statement request whose Hrana error has `code` `SQLITE_ERROR` and a message that starts with an entry of the allowlist in `deploy/cloudflare/src/database-complexity.ts` |
+
+The error is detected before COMMIT, so nothing is committed. In an interactive transaction the
+transaction closes as `failed` and is rolled back, and later commands answer 409
+`POLICYSQL_TRANSACTION_UNAVAILABLE`. A database error that no allowlist entry names stays 503
+`POLICYSQL_DATABASE_UNAVAILABLE` and is logged as `database_error_unclassified` with the Hrana
+`code` only. The log events `sql_too_complex` (statement index, schema and policy versions, ABI
+version, fixed cause), `emitted_sql_reparse_failed`, and `database_error_unclassified` never
+carry SQL text, parameters, policy or column names, or the parser's or the database's message. Any
+other failure to parse the emitted SQL again is an emitter fault, 500 `POLICYSQL_INTERNAL`; client
+SQL the parser itself refuses is still 400 `POLICYSQL_INVALID_SQL`.
+
+Two consequences for choosing the limits. A deployment that raises depth or joins accepts that
+more statements end in `POLICYSQL_SQL_TOO_COMPLEX`. And because each filtered inner join adds 2 to
+the emitted expression height (the row filters compose as a left-deep `AND`), the upper part of the
+`maxJoins` range (up to 63) is reachable only without row filters: with a filter per joined
+resource, a statement of more than about 45 joins is `POLICYSQL_SQL_TOO_COMPLEX` however simple its
+predicate is.
+
+The database allowlist is verified against the real Turso database by the release smoke
+(`deploy/cloudflare/scripts/provision-dev.mjs`): the entries marked `smokeVerified` in
+`database-complexity.ts` (`too many columns in`, `too many arguments on function`, `too many terms in
+compound SELECT`, `LIKE or GLOB pattern too complex`, `Expression tree is too large`) are sent as
+real statements and the smoke fails if one stops matching; `too many SQL variables` and `at most 64
+tables in a join` are derived from SQLite's source and covered by unit tests only, because a real
+statement that produces them is not reachable cheaply.
 
 The `maxTransactionResultBytes` ceiling keeps an owner record, which stores the last
 response, inside a Durable Object value. Ranges keep every value an exact JavaScript integer.
@@ -98,11 +147,10 @@ names the field: below the minimum, above the hard maximum, or `max_sql_bytes` a
 
 The runtime reports more limits than it lets a wrapper configure yet. They are fixed today and
 become configurable in the following pull requests of
-[ADR 0027](adr/0027-byte-and-cpu-budgets.md), so `limits_json` (and the ABI) changes once:
-`maxBytesPerValue` (262,144; it was the `max_bytes_per_value` getter, which is removed, so every
-reader takes it from `limits_json`), the binder's input-side limits `maxParameters` (128),
-`maxExpressionDepth` (32), `maxProjections` (128), and `maxJoins` (8), and `maxResponseBytes`
-(`maxResultBytes` + 65,536, reported but not enforced or advertised before pull request 6). Fixed
+[ADR 0027](adr/0027-byte-and-cpu-budgets.md): `maxBytesPerValue` (262,144; it was the
+`max_bytes_per_value` getter, which is removed, so every reader takes it from `limits_json`) and
+`maxResponseBytes` (`maxResultBytes` + 65,536, reported but not enforced or advertised before pull
+request 6). The binder's input-side limits became configurable in pull request 4 (above). Fixed
 protocol constants stay reported too: `maxCommitChecks` (4) and `maxHookDurationMs` (1,500). Capabilities
 advertises exactly the enforced ones: `maxRows`, `maxResultBytes`, `timeoutMs`, `maxStatements`,
 `maxRequestBytes`, `maxJsonValues`, `maxSqlBytes`, `maxBytesPerValue`, `maxParameters`,

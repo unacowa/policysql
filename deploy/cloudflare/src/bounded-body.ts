@@ -14,11 +14,22 @@
 
 /** The body exceeded the byte bound (declared or received). */
 export class BodyTooLargeError extends Error {
-  constructor() {
+  /**
+   * The first bytes received (at most `PREFIX_BYTES`, decoded leniently), so a caller can read a
+   * leading field of a reply it refuses (the Hrana baton, #96). Never shown to a client.
+   */
+  readonly prefix: string;
+
+  constructor(prefix = "") {
     super("Response body exceeds the size limit.");
     this.name = "BodyTooLargeError";
+    this.prefix = prefix;
   }
 }
+
+const PREFIX_BYTES = 1_024;
+const prefixOf = (chunk: Uint8Array | undefined) =>
+  (chunk ? new TextDecoder("utf-8").decode(chunk.subarray(0, PREFIX_BYTES)) : "");
 
 /** The body could not be read or was not valid UTF-8. */
 export class BodyReadError extends Error {
@@ -51,20 +62,38 @@ export const readBoundedText = async (
   response: Response,
   maxBytes: number,
   signal?: AbortSignal,
+  // A declared length over the bound is rejected unread, unless the caller needs the leading
+  // bytes of the refused reply (`BodyTooLargeError.prefix`): then the first chunk is read.
+  prefixOfDeclared = false,
 ): Promise<string> => {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new TypeError("maxBytes must be a non-negative safe integer");
   const body = response.body;
   const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) {
+  if (!body) {
+    if (Number.isFinite(declared) && declared > maxBytes) throw new BodyTooLargeError();
+    return "";
+  }
+  if (Number.isFinite(declared) && declared > maxBytes && !prefixOfDeclared) {
     release(body);
     throw new BodyTooLargeError();
   }
-  if (!body) return "";
   const reader = body.getReader();
   // A pending read resolves as done when the reader is cancelled, so an abort ends the loop;
   // the abort check after each read turns that into the abort error, not a short body.
   const onAbort = () => { release(reader); };
   signal?.addEventListener("abort", onAbort, { once: true });
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    // Rejected unread, except for the first chunk, which only supplies `prefix`.
+    let first: Uint8Array | undefined;
+    try {
+      const next = await reader.read();
+      if (!next.done && next.value instanceof Uint8Array) first = next.value;
+    } catch { /* the prefix is optional */ }
+    release(reader);
+    signal?.removeEventListener("abort", onAbort);
+    if (signal?.aborted) throw abortError(signal);
+    throw new BodyTooLargeError(prefixOf(first));
+  }
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let bytes = 0;
   let text = "";
@@ -81,7 +110,7 @@ export const readBoundedText = async (
       const chunk: unknown = next.value;
       if (!(chunk instanceof Uint8Array)) throw new BodyReadError();
       bytes += chunk.byteLength;
-      if (bytes > maxBytes) throw new BodyTooLargeError();
+      if (bytes > maxBytes) throw new BodyTooLargeError(text.length === 0 ? prefixOf(chunk) : text.slice(0, PREFIX_BYTES));
       try { text += decoder.decode(chunk, { stream: true }); } catch { throw new BodyReadError(); }
     }
     try { text += decoder.decode(); } catch { throw new BodyReadError(); }

@@ -36,7 +36,9 @@ use super::super::state::{
     Counters, Durable, Idempotency, Identity, Kind, Mode, Mutation, Phase, Placement, Record, Task,
     Versions, WorkLane,
 };
-use super::{Fault, Result, Step, codec_failure, driver_call, exact_object, parse_binding};
+use super::{
+    FailureDetail, Fault, Result, Step, codec_failure, driver_call, exact_object, parse_binding,
+};
 use super::{round_ms, shape_statement, to_json};
 use crate::canonical::{self, Json};
 use crate::identity;
@@ -323,7 +325,9 @@ const fn commit_failure(class: Class) -> Code {
         Class::Timeout => Code::DatabaseTimeout,
         Class::Unavailable => Code::DatabaseUnavailable,
         Class::NotCommitted => Code::Unavailable,
-        Class::Rejected | Class::Unknown | Class::Limit => Code::Internal,
+        // A complexity refusal is a statement-request outcome: a COMMIT is never classified
+        // this way (ADR 0027), so it is as unexpected here as `limit`.
+        Class::Rejected | Class::Unknown | Class::Limit | Class::Complex => Code::Internal,
     }
 }
 
@@ -333,7 +337,7 @@ const fn commit_failure(class: Class) -> Code {
 /// read, which is never a rejection.
 const fn execute_failure(task: &Task, class: Class) -> Code {
     match (task, class) {
-        (Task::AtomicLookup | Task::AtomicInsert, Class::Limit) => Code::Internal,
+        (Task::AtomicLookup | Task::AtomicInsert, Class::Limit | Class::Complex) => Code::Internal,
         _ => Code::for_class(class),
     }
 }
@@ -427,6 +431,7 @@ impl<C: Compiler> Step<'_, C> {
         let compiled = match self.compiler.compile(&auth_text, request.body) {
             Ok(compiled) => compiled,
             Err(error) => {
+                self.log_core_error(&error);
                 self.abort(core_error_reply(&error));
                 return Ok(());
             }
@@ -644,6 +649,7 @@ impl<C: Compiler> Step<'_, C> {
         let compiled = match self.compiler.compile(&auth_text, parsed.body) {
             Ok(compiled) => compiled,
             Err(error) => {
+                self.log_core_error(&error);
                 self.abort(core_error_reply(&error));
                 return Ok(());
             }
@@ -949,17 +955,30 @@ impl<C: Compiler> Step<'_, C> {
             }
             (
                 task @ (Task::AtomicLookup | Task::AtomicExecute | Task::AtomicInsert),
-                Event::ExecuteFailed { class, .. },
+                Event::ExecuteFailed {
+                    class,
+                    statement,
+                    database_code,
+                    cause,
+                    ..
+                },
             ) => {
                 self.set_connection(Connection::Open);
                 if self.atomic_expired() {
                     return self.expire_atomic(lane);
                 }
-                self.close(
-                    lane,
-                    Phase::Failed,
-                    Some(error_reply(execute_failure(&task, *class))),
-                )
+                let versions = self.atomic_run().ok().map(|run| run.versions.clone());
+                let reply = self.execute_failed_reply(
+                    execute_failure(&task, *class),
+                    *class,
+                    FailureDetail {
+                        statement: *statement,
+                        database_code: database_code.as_deref(),
+                        cause: cause.as_deref(),
+                        versions,
+                    },
+                );
+                self.close(lane, Phase::Failed, Some(reply))
             }
             (Task::AtomicCommitBinding, Event::BindingChecked { allowed: true, .. }) => {
                 let current = self
@@ -1254,6 +1273,7 @@ impl<C: Compiler> Step<'_, C> {
             match self.compiler.validate(atomic.handle, index, raw) {
                 Ok(result) => validated.push(result),
                 Err(error) => {
+                    self.log_core_error(&error);
                     return self.close(lane, Phase::Failed, Some(core_error_reply(&error)));
                 }
             }

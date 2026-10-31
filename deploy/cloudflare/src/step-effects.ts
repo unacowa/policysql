@@ -10,9 +10,10 @@ import { runtimeBytesLimit } from "./binary.ts";
 import { runtimeLimits } from "./limits.ts";
 import type { CostCatalog } from "./engine-config.ts";
 import { stringifyExact } from "./exact-json.ts";
+import { SqlComplexityError } from "./database-complexity.ts";
 
 /** An outcome class core accepts (ADR 0024 "Events and host facts"). */
-export type FailureClass = "timeout" | "unavailable" | "rejected" | "not_committed" | "unknown" | "limit";
+export type FailureClass = "timeout" | "unavailable" | "rejected" | "not_committed" | "unknown" | "limit" | "complex";
 
 /**
  * The class of a database or provider failure on an owner: a query timeout is `timeout`, the
@@ -20,6 +21,7 @@ export type FailureClass = "timeout" | "unavailable" | "rejected" | "not_committ
  * a byte bound, `POLICYSQL_LIMIT_EXCEEDED`, is `limit`), anything else is `unknown`.
  */
 export const failureClass = (error: unknown): FailureClass => {
+  if (error instanceof SqlComplexityError) return "complex";
   const coded = error as { name?: unknown; code?: unknown };
   if (coded?.name === "QueryTimeoutError" || coded?.code === "QUERY_TIMEOUT") return "timeout";
   if (error instanceof EngineError) {
@@ -50,9 +52,30 @@ export const directFailureClass = (error: unknown): FailureClass => {
 export const commitFailureClass = (error: unknown): FailureClass =>
   (error instanceof CommitNotSentError ? "not_committed" : "unknown");
 
+/**
+ * The `executeFailed` event of a failed `execute` effect. A database complexity refusal is class
+ * `complex` with the failed statement's index and a fixed cause name; a failure the database
+ * reported with a code no class names carries that code (only the code) for core's
+ * `database_error_unclassified` log. `classify` is the placement's class function.
+ */
+export const executeFailedEvent = (id: number, error: unknown, classify: (error: unknown) => FailureClass) => {
+  if (error instanceof SqlComplexityError) {
+    return { type: "executeFailed", id, class: "complex", statement: error.statement, cause: error.complexityCause };
+  }
+  const databaseCode = (error as { databaseCode?: unknown } | null | undefined)?.databaseCode;
+  return {
+    type: "executeFailed", id, class: classify(error),
+    ...(typeof databaseCode === "string" ? { databaseCode } : {}),
+  };
+};
+
 /** The same for the direct placement: any other failure is classified as `directFailureClass`. */
-export const directCommitFailureClass = (error: unknown): FailureClass =>
-  (error instanceof CommitNotSentError ? "not_committed" : directFailureClass(error));
+export const directCommitFailureClass = (error: unknown): FailureClass => {
+  if (error instanceof CommitNotSentError) return "not_committed";
+  // A complexity refusal is a statement outcome, never a COMMIT's (ADR 0027).
+  const errorClass = directFailureClass(error);
+  return errorClass === "complex" ? "unavailable" : errorClass;
+};
 
 const IMMEDIATE = new Set(["respond", "log", "observe", "reset"]);
 

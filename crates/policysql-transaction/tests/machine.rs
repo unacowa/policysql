@@ -126,6 +126,93 @@ fn compile_errors_close_the_transaction() {
     assert_eq!(phase_of(engine.store.as_deref()).as_deref(), Some("failed"));
 }
 
+/// ADR 0027 pull request 4: a statement the database refused for complexity (outcome class
+/// `complex`, with the statement index) is the fixed `POLICYSQL_SQL_TOO_COMPLEX` at its path,
+/// the transaction closes as failed and is rolled back, and the log names only fixed fields.
+#[test]
+fn a_database_complexity_refusal_closes_the_transaction_with_the_fixed_code() {
+    let mut engine = begun("write");
+    engine.feed(&command(
+        "statement",
+        &statement_text(1, "SELECT id FROM projects"),
+    ));
+    // checkBinding, then the statement's execute.
+    engine.resolve(true, "unknown");
+    let effect = engine.outstanding.take().unwrap_or(Value::Null);
+    assert_eq!(effect["type"], "execute");
+    engine.feed(&json!({
+        "type": "executeFailed", "id": effect["id"], "class": "complex",
+        "statement": 0, "cause": "like_pattern", "databaseCode": "SQLITE_UNKNOWN",
+    }));
+    let log = engine
+        .transcript
+        .last()
+        .map(|line| line.output.clone())
+        .unwrap_or_default();
+    engine.settle();
+    let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+    assert_eq!(code(&reply), Some("POLICYSQL_SQL_TOO_COMPLEX"), "{reply}");
+    assert_eq!(
+        reply["error"]["message"],
+        "The statement is too complex to run under the active policy."
+    );
+    assert_eq!(reply["error"]["path"], "/statements/0");
+    assert_eq!(phase_of(engine.store.as_deref()).as_deref(), Some("failed"));
+    assert!(log.contains("\"event\":\"sql_too_complex\""), "{log}");
+    assert!(log.contains("\"cause\":\"like_pattern\""), "{log}");
+    assert!(log.contains("\"statementIndex\":0"), "{log}");
+    assert!(!log.contains("SELECT"), "{log}");
+    // Later commands see an unavailable transaction.
+    let later = engine.run(&command(
+        "statement",
+        &statement_text(2, "SELECT id FROM projects"),
+    ));
+    assert_eq!(
+        code(&later),
+        Some("POLICYSQL_TRANSACTION_UNAVAILABLE"),
+        "{later}"
+    );
+}
+
+/// A database code that no outcome class names is logged as `database_error_unclassified` with
+/// the code only; an unsafe code is replaced, and the failure stays the database's 503.
+#[test]
+fn an_unclassified_database_failure_logs_its_safe_code_only() {
+    for (reported, logged) in [
+        ("SQLITE_CONSTRAINT", "SQLITE_CONSTRAINT"),
+        ("has space\n", "UNKNOWN"),
+    ] {
+        let mut engine = begun("write");
+        engine.feed(&command(
+            "statement",
+            &statement_text(1, "SELECT id FROM projects"),
+        ));
+        engine.resolve(true, "unknown");
+        let effect = engine.outstanding.take().unwrap_or(Value::Null);
+        engine.feed(&json!({
+            "type": "executeFailed", "id": effect["id"], "class": "unavailable", "databaseCode": reported,
+        }));
+        let output = engine
+            .transcript
+            .last()
+            .map(|line| line.output.clone())
+            .unwrap_or_default();
+        assert!(
+            output.contains("\"event\":\"database_error_unclassified\""),
+            "{output}"
+        );
+        assert!(
+            output.contains(&format!("\"code\":\"{logged}\"")),
+            "{output}"
+        );
+        engine.settle();
+        assert_eq!(
+            code(engine.last_reply().unwrap_or(&Value::Null)),
+            Some("POLICYSQL_DATABASE_UNAVAILABLE")
+        );
+    }
+}
+
 /// The client and server parameter namespaces are merged by core, which fails closed on a
 /// collision before any `execute` (ADR 0024 pull request 9 removed the second check from the
 /// engine's `driverArgs`). The fake compiler's server parameter is `session_tenant_id`.

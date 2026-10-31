@@ -16,7 +16,7 @@ export const RUNTIME_DEFAULT_LIMITS = Object.freeze({
   maxJsonValues: 65_536,
   maxSqlBytes: 65_536,
   maxBytesPerValue: 262_144,
-  maxParameters: 128,
+  maxParameters: 1_024,
   maxExpressionDepth: 32,
   maxProjections: 128,
   maxJoins: 8,

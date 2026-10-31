@@ -318,6 +318,82 @@ fn a_limit_failure_is_limit_exceeded_on_the_envelope_and_internal_on_the_idempot
     );
 }
 
+/// ADR 0027 pull request 4: the database's complexity refusal (`complex` with the statement
+/// index) is the client's `POLICYSQL_SQL_TOO_COMPLEX` on the envelope, rolled back before COMMIT,
+/// `POLICYSQL_INTERNAL` on the idempotency lookup or insert, and never a COMMIT's outcome.
+#[test]
+fn a_complexity_refusal_is_too_complex_on_the_envelope_and_never_on_commit_or_the_idempotency_row()
+{
+    // Effects of a keyed write: checkBinding, open, lookup, envelope, insert, commit.
+    for (successes, expected) in [
+        (2, "POLICYSQL_INTERNAL"),
+        (3, "POLICYSQL_SQL_TOO_COMPLEX"),
+        (4, "POLICYSQL_INTERNAL"),
+    ] {
+        let mut engine = Engine::atomic(false);
+        engine.feed(&execute_request(&insert("p1"), Some(KEY)));
+        for _ in 0..successes {
+            engine.resolve(true, "unknown");
+        }
+        let effect = engine.outstanding.take().unwrap_or(Value::Null);
+        engine.feed(&json!({
+            "type": "executeFailed", "id": effect["id"], "class": "complex",
+            "statement": 0, "cause": "columns",
+        }));
+        let log = engine
+            .transcript
+            .last()
+            .map(|line| line.output.clone())
+            .unwrap_or_default();
+        engine.settle();
+        let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+        assert_eq!(
+            code(&reply),
+            Some(expected),
+            "after {successes} effects: {reply}"
+        );
+        if expected == "POLICYSQL_SQL_TOO_COMPLEX" {
+            assert_eq!(reply["error"]["path"], "/statements/0");
+            assert!(log.contains("\"event\":\"sql_too_complex\""), "{log}");
+            assert!(log.contains("\"cause\":\"columns\""), "{log}");
+        } else {
+            assert!(!log.contains("sql_too_complex"), "{log}");
+        }
+        assert_eq!(engine.observed.commits_emitted, 0);
+        assert_eq!(engine.observed.rollbacks_emitted, 1);
+        assert_eq!(engine.idempotency_rows, Vec::<[String; 3]>::new());
+        assert_eq!(engine.compiler.live_handles(), 0);
+    }
+    // A COMMIT is never classified as complexity: its failure stays `POLICYSQL_INTERNAL`.
+    let mut engine = Engine::atomic(false);
+    engine.feed(&execute_request(&insert("p1"), None));
+    for _ in 0..3 {
+        engine.resolve(true, "unknown");
+    }
+    engine.resolve(false, "complex");
+    engine.settle();
+    assert_eq!(
+        code(engine.last_reply().unwrap_or(&Value::Null)),
+        Some("POLICYSQL_INTERNAL")
+    );
+    // The index of the failed statement is the event's, bounded by the envelope limit.
+    let mut engine = Engine::atomic(false);
+    engine.feed(&execute_request(&insert("p1"), None));
+    engine.resolve(true, "unknown");
+    engine.resolve(true, "unknown");
+    let effect = engine.outstanding.take().unwrap_or(Value::Null);
+    engine.feed(&json!({
+        "type": "executeFailed", "id": effect["id"], "class": "complex", "statement": 4_000_000_000_u64,
+    }));
+    engine.settle();
+    assert_eq!(
+        engine
+            .last_reply()
+            .map(|reply| reply["error"]["path"].clone()),
+        Some(json!("/statements/0"))
+    );
+}
+
 #[test]
 fn an_envelope_that_could_trigger_a_check_is_forwarded_and_its_reply_relayed() {
     let mut engine = Engine::atomic(false);
@@ -766,7 +842,7 @@ fn a_parameter_namespace_collision_executes_no_envelope_on_either_placement() {
 
 // ---- #80: a keyed retry across a snapshot change ----------------------------------------------
 
-const NEXT_SNAPSHOT: &str = "sqlite-turso-v1:schema_2:policy_2:abi-13";
+const NEXT_SNAPSHOT: &str = "sqlite-turso-v1:schema_2:policy_2:abi-14";
 
 /// `request` with its binding and snapshot set to `snapshot` and its binding's generation to
 /// `generation`, as a request after a deployment (or a database move) carries them.

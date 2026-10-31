@@ -19,7 +19,9 @@ use super::super::state::{
     Phase, Record, Replay, Task, Versions, Volatile, Work, WorkLane,
 };
 use super::super::{Compiled, MAX_SAFE_INTEGER};
-use super::{Fault, Result, ResultShape, Row, Step, codec_failure, driver_call, exact_object};
+use super::{
+    FailureDetail, Fault, Result, ResultShape, Row, Step, codec_failure, driver_call, exact_object,
+};
 use super::{redactions_of, sequence_value};
 use crate::canonical::{self, Json};
 use crate::identity;
@@ -630,7 +632,10 @@ impl<C: Compiler> Step<'_, C> {
         }
         let compiled: Compiled = match self.compile_members(&capability.session, &members) {
             Ok(compiled) => compiled,
-            Err(error) => return self.fail_validation(core_error_reply(&error)),
+            Err(error) => {
+                self.log_core_error(&error);
+                return self.fail_validation(core_error_reply(&error));
+            }
         };
         let handle = compiled.handle;
         self.allocated.push(handle);
@@ -720,6 +725,7 @@ impl<C: Compiler> Step<'_, C> {
     }
 
     /// The outcome of the callback lane's pending effect.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn callback_outcome(&mut self, event: &Event) -> Result<()> {
         let callback = self
             .volatile
@@ -781,12 +787,41 @@ impl<C: Compiler> Step<'_, C> {
                 self.release(handle);
                 self.callback_failed(live.is_some(), error_reply(Code::BindingRejected))
             }
-            (
-                CallbackTask::Binding { handle, .. } | CallbackTask::Execute { handle, .. },
-                Event::BindingCheckFailed { class, .. } | Event::ExecuteFailed { class, .. },
-            ) => {
+            (CallbackTask::Binding { handle, .. }, Event::BindingCheckFailed { class, .. }) => {
                 self.release(handle);
                 self.callback_failed(live.is_some(), error_reply(Code::for_class(*class)))
+            }
+            (
+                CallbackTask::Execute {
+                    handle, versions, ..
+                },
+                Event::ExecuteFailed {
+                    class,
+                    statement,
+                    database_code,
+                    cause,
+                    ..
+                },
+            ) => {
+                self.release(handle);
+                // A complexity refusal in a callback query is traceable in the log like any other
+                // (the validator still receives the code without a path).
+                let reply = self.execute_failed_reply(
+                    Code::for_class(*class),
+                    *class,
+                    FailureDetail {
+                        statement: *statement,
+                        database_code: database_code.as_deref(),
+                        cause: cause.as_deref(),
+                        versions: Some(versions),
+                    },
+                );
+                self.callback_failed(live.is_some(), reply)
+            }
+            (CallbackTask::Binding { handle, .. }, Event::ExecuteFailed { .. })
+            | (CallbackTask::Execute { handle, .. }, Event::BindingCheckFailed { .. }) => {
+                self.release(handle);
+                self.callback_failed(live.is_some(), error_reply(Code::Internal))
             }
             (
                 CallbackTask::Execute {
@@ -841,7 +876,10 @@ impl<C: Compiler> Step<'_, C> {
         self.release(handle);
         let validated = match validated {
             Ok(validated) => validated,
-            Err(error) => return self.fail_validation(core_error_reply(&error)),
+            Err(error) => {
+                self.log_core_error(&error);
+                return self.fail_validation(core_error_reply(&error));
+            }
         };
         let (request, sequence, versions) =
             (executed.request, executed.sequence, executed.versions);

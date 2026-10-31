@@ -158,8 +158,19 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
           cols: columns, rows: rows.map((row) => row.map(encode)), affected_row_count: affected,
           rows_read: rows.length, rows_written: affected, query_duration_ms: 1,
         } } });
-      } catch {
-        results.push({ type: "error", error: { message: "SQL rejected" } });
+      } catch (error) {
+        // The Hrana error object as the real Turso database sends it (observed by the release
+        // smoke): SQLite's own text with a wrapper, and `SQLITE_UNKNOWN` for the general error,
+        // `SQL_INPUT_ERROR` for the two refusals found while the statement is parsed,
+        // `SQLITE_CONSTRAINT` and so on for the other primary result codes.
+        const text = String(error?.message ?? "SQL rejected");
+        const primary = typeof error?.errcode === "number" ? error.errcode & 0xff : 0;
+        const parsed = /^(too many arguments on function|too many SQL variables)/u.test(text);
+        const error_ = parsed ? { code: "SQL_INPUT_ERROR", message: `SQLite input error: ${text} (at offset 0)` }
+          : primary === 1 ? { code: "SQLITE_UNKNOWN", message: `SQLite error: ${text}` }
+            : primary === 19 ? { code: "SQLITE_CONSTRAINT", message: `SQLite error: ${text}` }
+              : { code: "SQLITE_UNKNOWN", message: `SQLite error: ${text}` };
+        results.push({ type: "error", error: error_ });
         continue;
       }
       if (afterStatement) await afterStatement({ tenant, sql });

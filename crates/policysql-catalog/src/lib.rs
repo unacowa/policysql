@@ -9,6 +9,9 @@ pub struct ColumnDescriptor {
     pub id: ColumnId,
     pub name: ColumnName,
     pub value: ValueDescriptor,
+    /// UTF-8 bytes of the physical column's declared type, zero when no physical schema
+    /// supplied one. Used only to size result column metadata (ADR 0027).
+    pub declared_type_bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +55,7 @@ impl ResourceDescriptor {
                 id: ColumnId::new(id, ordinal),
                 name: column_name,
                 value,
+                declared_type_bytes: 0,
             };
             if resolved.insert(key.clone(), descriptor).is_some() {
                 return Err(CatalogError::DuplicateColumn(key));
@@ -66,6 +70,15 @@ impl ResourceDescriptor {
             source,
             columns: resolved,
         })
+    }
+
+    /// Records the byte length of a column's physical declared type.
+    #[must_use]
+    pub fn with_declared_type_bytes(mut self, column: &str, bytes: usize) -> Self {
+        if let Some(descriptor) = self.columns.get_mut(&canonical(column)) {
+            descriptor.declared_type_bytes = bytes;
+        }
+        self
     }
 
     #[must_use]

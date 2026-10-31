@@ -36,6 +36,18 @@ export type RuntimeLimits = {
   maxJsonValues?: number;
   /** UTF-8 bytes of one statement's SQL (default 65,536; 1,024 to 1,048,576, and at most `maxRequestBytes`). */
   maxSqlBytes?: number;
+  /**
+   * Distinct client parameter names in one statement (default 1,024; 1 to 16,384). Input-side:
+   * it bounds PolicySQL's own work on the client's SQL and does not promise that a request
+   * within it compiles (ADR 0027).
+   */
+  maxParameters?: number;
+  /** Binder expression depth of the client's SQL (default 32; 1 to 64). Input-side, as `maxParameters`. */
+  maxExpressionDepth?: number;
+  /** Result columns per SELECT or RETURNING in the client's SQL (default 128; 1 to 2,000). Input-side. */
+  maxProjections?: number;
+  /** Joins per FROM in the client's SQL (default 8; 1 to 63). Input-side. */
+  maxJoins?: number;
 };
 
 // The constructor's field for each `RuntimeLimits` key. The runtime owns the defaults and
@@ -54,6 +66,10 @@ const RUNTIME_LIMIT_FIELDS: Readonly<Record<keyof RuntimeLimits, string>> = Obje
   maxRequestBytes: "max_request_bytes",
   maxJsonValues: "max_json_values",
   maxSqlBytes: "max_sql_bytes",
+  maxParameters: "max_parameters",
+  maxExpressionDepth: "max_expression_depth",
+  maxProjections: "max_projections",
+  maxJoins: "max_joins",
 });
 
 /**
@@ -105,7 +121,7 @@ export type EnforcedLimits = Readonly<{
   maxSqlBytes: number;
   /** Decoded bytes of one bytes value (fixed until pull request 5). */
   maxBytesPerValue: number;
-  /** Input-side limits of the binder (fixed until pull request 4). */
+  /** Input-side limits of the binder (configured, ADR 0027 pull request 4). */
   maxParameters: number;
   maxExpressionDepth: number;
   maxProjections: number;
