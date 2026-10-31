@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  COEFFICIENTS, DEFAULT_MAX_JSON_VALUES, MIB, fitScenario, formatFitTable, inputsAtLimits, observedFactor, predictedReferenceMs,
+  COEFFICIENTS, MIB, fitScenario, formatFitTable, inputsAtLimits, observedFactor, predictedReferenceMs,
   requiredCpuMs, resultBoundBytes, summarizeFactor, summarizeFit,
 } from "../scripts/lib/cpu-model.mjs";
 import { REQUEST_SHAPES, SMOKE_SHAPES, countJsonValues } from "../scripts/lib/cpu-shapes.mjs";
@@ -23,7 +23,7 @@ const near = (actual, expected, tolerance = 1e-9) => assert.ok(Math.abs(actual -
 
 test("the formula reproduces the ADR 0027 worked examples", () => {
   // Defaults: R = 1, B = 1.13 MiB, V = 65,536 each: about 345 ms, about 860 ms with F = 2, S = 1.25.
-  const limits = { maxResultBytes: 64_000, maxStatements: 8 };
+  const limits = { maxResultBytes: 64_000, maxStatements: 8, maxRequestBytes: MIB, maxJsonValues: 65_536 };
   assert.equal(resultBoundBytes(limits), 1_183_744, "the lookup bound is the larger of the two");
   const inputs = inputsAtLimits(limits);
   near(predictedReferenceMs(inputs), 345.7, 0.1);
@@ -41,9 +41,9 @@ test("B is the lookup bound until maxResultBytes makes the text bound larger", (
   assert.equal(resultBoundBytes({ maxResultBytes: 400_000, maxStatements: 8 }), 2 * 400_000 + 512 * 8 + MIB);
 });
 
-test("inputs read maxRequestBytes and maxJsonValues from the limits when the runtime reports them", () => {
-  const base = { maxResultBytes: 64_000, maxStatements: 8 };
-  assert.deepEqual(inputsAtLimits(base), { rMiB: 1, bMiB: 1_183_744 / MIB, vReq: DEFAULT_MAX_JSON_VALUES, vRes: DEFAULT_MAX_JSON_VALUES });
+test("inputs read maxRequestBytes and maxJsonValues from the limits the runtime reports", () => {
+  const base = { maxResultBytes: 64_000, maxStatements: 8, maxRequestBytes: MIB, maxJsonValues: 65_536 };
+  assert.deepEqual(inputsAtLimits(base), { rMiB: 1, bMiB: 1_183_744 / MIB, vReq: 65_536, vRes: 65_536 });
   const configured = inputsAtLimits({ ...base, maxRequestBytes: 2 * MIB, maxJsonValues: 1_000 });
   assert.equal(configured.rMiB, 2);
   assert.equal(configured.vReq, 1_000);
@@ -127,13 +127,19 @@ test("request shapes fill about the target and count values the way the ADR does
   for (const [name, make] of Object.entries(REQUEST_SHAPES)) {
     const value = make(100_000);
     const bytes = Buffer.byteLength(JSON.stringify(value));
-    assert.ok(bytes > 95_000 && bytes <= 100_000, `${name}: ${bytes} bytes`);
+    // Dense shapes stop at the value budget before they reach the byte target.
+    const dense = ["nested arrays (depth 56)", "one object, unique keys", 'short strings "s1"', "short decimals 37.4", "small integers"].includes(name);
+    assert.ok(bytes > (dense ? 40_000 : 95_000) && bytes <= 100_000, `${name}: ${bytes} bytes`);
   }
   assert.equal(countJsonValues(1), 1);
   assert.equal(countJsonValues([1, [2]]), 4, "array, 1, array, 2");
   assert.equal(countJsonValues({ a: 1, b: [2] }), 6, "object, member names a and b, 1, array, 2");
-  // 1 MB of nested arrays is the densest shape: more than 400,000 values (ADR: 499,913).
-  assert.ok(countJsonValues(REQUEST_SHAPES["nested arrays (depth 56)"](1_000_000)) > 400_000);
+  // 1 MB of nested arrays is the densest shape (ADR: 499,913 values), which the value limit now
+  // refuses: the shape stops at the reference wrapper's maxJsonValues (65,536), 64 values short.
+  const nested = countJsonValues(REQUEST_SHAPES["nested arrays (depth 56)"](1_000_000));
+  assert.ok(nested > 60_000 && nested <= 65_536 - 64, `${nested}`);
+  assert.equal(countJsonValues(REQUEST_SHAPES["nested arrays (depth 56)"](1_000_000, 131_008)) > 130_000, true);
+  assert.ok(countJsonValues(REQUEST_SHAPES["one object, unique keys"](1_000_000)) <= 65_536 - 64);
   assert.ok(countJsonValues(REQUEST_SHAPES["one long ASCII string"](1_000_000)) <= 3);
   for (const shape of SMOKE_SHAPES) assert.ok(Object.hasOwn(REQUEST_SHAPES, shape), shape);
 });
@@ -264,7 +270,7 @@ test("pollProbeCpu gives up at its deadline and reports unavailable or partial, 
 // ---------------------------------------------------------------------------------------------
 // The release smoke's CPU step, against a faked deployment
 
-const LIMITS = { maxResultBytes: 64_000, maxStatements: 8 };
+const LIMITS = { maxResultBytes: 64_000, maxStatements: 8, maxRequestBytes: MIB, maxJsonValues: 65_536 };
 
 /** A `call` that answers every execute with 200 and a distinct ray and request id. */
 const fakeDeployment = ({ status = () => 200 } = {}) => {
@@ -321,8 +327,9 @@ test("the CPU step records each request's CPU and F, and reports the deployed li
   assert.ok(Math.abs(report.formula.requiredCpuMsAtLimits - 864.3) < 0.5);
   assert.ok(report.requests.every((entry) => entry.bodyBytes > 0 && entry.httpStatus === 200));
   // The large probes are about 1 MB of JSON in `doc`, the request the ADR is about.
-  assert.ok(report.requests[1].bodyBytes > 900_000 && report.requests[1].bodyBytes < MIB);
-  assert.ok(report.requests[1].jsonValues > 400_000);
+  // The densest shape stops at the value limit (65,536 less the envelope), not at 1 MB.
+  assert.ok(report.requests[1].bodyBytes > 100_000 && report.requests[1].bodyBytes < MIB);
+  assert.ok(report.requests[1].jsonValues > 60_000 && report.requests[1].jsonValues <= 65_536);
   assert.equal(deployment.bodies[0].statements[0].params.doc.label, "small");
 });
 

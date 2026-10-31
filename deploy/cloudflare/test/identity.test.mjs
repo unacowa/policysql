@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createInProcessPolicySql, loadRuntime } from "../../../examples/in-process/policysql.ts";
 import { identityRuntime as runtime } from "./helpers/identity.mjs";
-import { MAX_BODY_BYTES } from "../src/request-body.ts";
+// The default `maxRequestBytes` (ADR 0027), which these fixtures stay under.
+const MAX_BODY_BYTES = 1_048_576;
 
 // Core computes every identity, fingerprint, and digest (ADR 0024 pull request 2, ADR 0025);
 // the engine and the owner use its result only. These tests hold the cost of core's
@@ -114,7 +115,9 @@ const numberArrayBody = (sequence, make) => {
   const head = `{"sequence":${sequence},"sql":"SELECT id FROM projects WHERE name = :name","params":{"p":[`;
   const items = [];
   let length = head.length + 3;
-  for (let index = 0; length < 1_030_000; index++) {
+  // At most 60,000 values: the engine refuses a body past `maxJsonValues` (65,536, ADR 0027)
+  // before it reaches core, and this fixture is about the work core does for a body it admits.
+  for (let index = 0; length < 1_030_000 && index < 60_000; index++) {
     const item = make(index);
     items.push(item);
     length += item.length + 1;
@@ -138,7 +141,7 @@ const NUMBER_SHAPES = {
   "exponents": [(index) => `${(index % 9) + 1}.${index % 97}e${(index % 600) - 300}`, INVALID_PARAMETER],
 };
 
-test("regression: a statement of ~1 MB of numbers that cannot compile is answered as before and never hashed", async (t) => {
+test("regression: a statement of up to 60,000 numbers that cannot compile is answered as before and never hashed", async (t) => {
   for (const [name, [make, compileError]] of Object.entries(NUMBER_SHAPES)) {
     for (const mode of ["next sequence", "possible exact retry"]) {
       const { p, calls, context } = recordingEngine(t);
@@ -150,7 +153,7 @@ test("regression: a statement of ~1 MB of numbers that cannot compile is answere
         assert.equal(first.ok, true, JSON.stringify(first));
       }
       const bodyText = numberArrayBody(1, make);
-      assert.ok(bodyText.length > 1_000_000 && bodyText.length < MAX_BODY_BYTES);
+      assert.ok(bodyText.length > 200_000 && bodyText.length < MAX_BODY_BYTES);
       calls.length = 0;
       const started = performance.now();
       const result = await p.engine.statement({ transactionId, bodyText }, context);

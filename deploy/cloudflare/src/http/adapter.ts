@@ -74,7 +74,7 @@ export const createHttpAdapter = (engine: PolicySqlEngine): PolicySqlHttpApp => 
     const { databaseBinding, session, requestId } = c.env.context;
     return { database: databaseBinding, session, requestId };
   };
-  const body = (request: Request) => () => readBodyText(request);
+  const body = (request: Request) => (maxBytes: number) => readBodyText(request, maxBytes);
 
   app.get(ROUTES.health, async (c) => send(await engine.health({ requestId: c.env.context.requestId })));
 

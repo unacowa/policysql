@@ -8,12 +8,30 @@
 // Shared by scripts/measure-cpu.mjs (Node, the reference machine) and the release smoke
 // (scripts/provision-dev.mjs, the deployed Worker), so both sides use the same shape.
 
-/** Fills an array with `make(i)` until its JSON text is about `target - slack` bytes. */
-const fill = (make, target, slack = 200) => {
+/**
+ * The JSON values a shape may carry under the reference wrapper's `maxJsonValues` (65,536, ADR
+ * 0027): the engine refuses a body past that count (413) before it parses it, so the densest
+ * shapes are sized by values, not only by bytes. 64 values are left for the envelope around the
+ * shape (the statement object, its member names, and the other parameters).
+ */
+export const REQUEST_VALUE_BUDGET = 65_536 - 64;
+
+/** The JSON values a shape may carry under `maxJsonValues`. */
+export const valueBudget = (maxJsonValues) => maxJsonValues - 64;
+
+/**
+ * Fills an array with `make(i)` until its JSON text is about `target - slack` bytes or it
+ * holds `maxValues` JSON values, whichever comes first.
+ */
+const fill = (make, target, maxValues, slack = 200) => {
   const out = [];
   let length = 0;
+  let values = 1;
   for (let i = 0; length < target - slack; i += 1) {
     const value = make(i);
+    const count = countJsonValues(value);
+    if (values + count > maxValues) break;
+    values += count;
     out.push(value);
     length += JSON.stringify(value).length + 1;
   }
@@ -27,25 +45,28 @@ const nestedLeaf = (depth) => {
 };
 
 /**
- * Named JSON values (a `metadata` parameter) of about `target` bytes. `values` of a shape is
- * `countJsonValues(value)`, never hard-coded: the count is the model's `V`.
+ * Named JSON values (a `metadata` parameter) of about `target` bytes and at most `maxValues`
+ * JSON values. `values` of a shape is `countJsonValues(value)`, never hard-coded: the count is
+ * the model's `V`.
  */
 export const REQUEST_SHAPES = Object.freeze({
   // The ADR's densest body: depth 56, about 0.5 values per byte.
-  "nested arrays (depth 56)": (target) => fill(() => nestedLeaf(55), target),
-  "one object, unique keys": (target) => {
+  "nested arrays (depth 56)": (target, maxValues = REQUEST_VALUE_BUDGET) => fill(() => nestedLeaf(55), target, maxValues),
+  "one object, unique keys": (target, maxValues = REQUEST_VALUE_BUDGET) => {
     const object = {};
     let length = 0;
-    for (let i = 0; length < target - 200; i += 1) {
+    // One value for the object, two for each member (the name and its value).
+    for (let i = 0; length < target - 200 && 1 + 2 * (i + 1) <= maxValues; i += 1) {
       object[`k${i}`] = 1;
       length += `"k${i}":1,`.length;
     }
     return object;
   },
-  'short strings "s1"': (target) => fill((i) => `s${i % 10}`, target),
-  "short decimals 37.4": (target) => fill((i) => Number(`${i % 100}.${i % 10 || 1}`), target),
-  "small integers": (target) => fill((i) => i % 1000, target),
-  "17-digit decimals": (target) => fill((i) => Number(`${90071992547409 + i * 7}.${String(i % 1000).padStart(3, "0")}`), target),
+  'short strings "s1"': (target, maxValues = REQUEST_VALUE_BUDGET) => fill((i) => `s${i % 10}`, target, maxValues),
+  "short decimals 37.4": (target, maxValues = REQUEST_VALUE_BUDGET) => fill((i) => Number(`${i % 100}.${i % 10 || 1}`), target, maxValues),
+  "small integers": (target, maxValues = REQUEST_VALUE_BUDGET) => fill((i) => i % 1000, target, maxValues),
+  "17-digit decimals": (target, maxValues = REQUEST_VALUE_BUDGET) =>
+    fill((i) => Number(`${90071992547409 + i * 7}.${String(i % 1000).padStart(3, "0")}`), target, maxValues),
   "one long ASCII string": (target) => ({ s: "x".repeat(target - 200) }),
   "one long CJK string": (target) => ({ s: "日".repeat(Math.floor((target - 200) / 3)) }),
 });

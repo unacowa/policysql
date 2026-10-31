@@ -11,7 +11,7 @@
 import { checkRequestContext } from "../engine.ts";
 import type { PolicySqlEngine } from "../engine.ts";
 import { operationError } from "../errors.ts";
-import { MAX_BODY_BYTES, parseBodyText } from "../request-body.ts";
+import { parseBodyText } from "../request-body.ts";
 import { ERROR_STATUS } from "./status.ts";
 
 /** What a mapping must provide: the same shape `createHttpAdapter` returns. */
@@ -47,6 +47,11 @@ const same = (actual: unknown, expected: unknown, message: string) => {
 // body as a reader; one that reads it eagerly would read bodies the engine then rejects.
 let eagerBodies: string[] = [];
 
+// The request limits of the recording engine, as a real engine reads them from its runtime
+// (ADR 0027). The mapping under test must stream a reader's body at the limit it is handed, so
+// the suite uses small limits of its own and learns them from nothing but this engine.
+const LIMITS = Object.freeze({ maxRequestBytes: 4_096, maxJsonValues: 1_024 });
+
 /**
  * An engine that records each call and answers with `answer(call)` (default: a success whose
  * value names the operation). Like the real engine, it checks the request context, then reads
@@ -66,7 +71,7 @@ const recordingEngine = (answer?: Answer) => {
     }
     if (input && Object.hasOwn(input, "bodyText")) {
       if (typeof input.bodyText !== "function") eagerBodies.push(name);
-      try { call.body = (await parseBodyText(input.bodyText)).text; } catch (error) {
+      try { call.body = (await parseBodyText(input.bodyText, LIMITS)).text; } catch (error) {
         return { ok: false, error: operationError(error), requestId };
       }
     }
@@ -252,8 +257,8 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
       const cases: Array<[string, () => Request, number, string]> = [
         ["text/plain", () => post("/v1/transactions:execute", "{}", { "content-type": "text/plain" }), 415, "POLICYSQL_UNSUPPORTED_MEDIA_TYPE"],
         ["no content-type", () => new Request(`${ORIGIN}/v1/transactions:execute`, { method: "POST", body: new Uint8Array([0x7b, 0x7d]) }), 415, "POLICYSQL_UNSUPPORTED_MEDIA_TYPE"],
-        ["declared too large", () => post("/v1/transactions:execute", "{}", { "content-length": String(MAX_BODY_BYTES + 1) }), 413, "POLICYSQL_REQUEST_TOO_LARGE"],
-        ["streamed too large", () => post("/v1/transactions:execute", "x".repeat(MAX_BODY_BYTES + 1)), 413, "POLICYSQL_REQUEST_TOO_LARGE"],
+        ["declared too large", () => post("/v1/transactions:execute", "{}", { "content-length": String(LIMITS.maxRequestBytes + 1) }), 413, "POLICYSQL_REQUEST_TOO_LARGE"],
+        ["streamed too large", () => post("/v1/transactions:execute", "x".repeat(LIMITS.maxRequestBytes + 1)), 413, "POLICYSQL_REQUEST_TOO_LARGE"],
         ["malformed UTF-8", () => post("/v1/transactions:execute", new Uint8Array([0x7b, 0x22, 0xc3, 0x28, 0x22, 0x7d])), 400, "POLICYSQL_INVALID_REQUEST"],
         ["duplicate key", () => post("/v1/transactions:execute", '{"a":1,"a":2}'), 400, "POLICYSQL_INVALID_REQUEST"],
         ["no body", () => post("/v1/transactions:execute", null), 400, "POLICYSQL_INVALID_REQUEST"],

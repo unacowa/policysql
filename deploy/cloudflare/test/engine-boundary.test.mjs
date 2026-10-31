@@ -120,3 +120,57 @@ test("the scan catches each form and ignores comments and unrelated numbers", ()
   ];
   for (const text of allowed) assert.deepEqual(scanHttp("sample.ts", text), [], text);
 });
+
+// ADR 0027 ("No other byte constant may exist on the request path"): a request limit is a
+// RuntimeLimits field the runtime reports (src/limits.ts), a fixed protocol constant listed
+// here with its reason, or a bound computed by core. A numeric literal of 1,000 or more in
+// `src/` that is not listed fails the test, so a new byte (or count) limit cannot appear as a
+// private constant in the engine or an adapter. Literals are read with comments and string
+// contents removed.
+const FIXED_LITERALS = new Map([
+  ["turso-http.ts", new Map([
+    ["2_097_152", "the statement reply bound: result side, replaced by the compiled raw bound in ADR 0027 pull request 6"],
+    ["65_536", "the database control reply bound (BEGIN, COMMIT, ROLLBACK, close): a fixed protocol constant"],
+    ["1_000", "default request timeout, in milliseconds (a time, not a size)"],
+  ])],
+  ["adapters/commit-check-hook.ts", new Map([
+    ["65_536", "the validator reply bound: a fixed protocol constant"],
+    ["1000", "seconds per millisecond, for the signature timestamp"],
+  ])],
+  ["database.ts", new Map([["1_000", "the provider timeout, in milliseconds (a time, not a size)"]])],
+  ["adapters/jwt.ts", new Map([
+    ["1_500", "JWKS timeout, in milliseconds"], ["30_000", "JWKS cooldown, in milliseconds"], ["300_000", "JWKS cache age, in milliseconds"],
+  ])],
+  // The recording engine of the conformance suite is a test double with limits of its own.
+  ["http/conformance.ts", new Map([["4_096", "the double's request limit"], ["1_024", "the double's value limit"]])],
+]);
+
+const stripped = (text) => text
+  .replace(/\/\*[\s\S]*?\*\//gu, " ")
+  .replace(/(^|[^:"'`\\])\/\/[^\n]*/gu, "$1")
+  .replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`/gu, '""');
+const largeLiterals = (text) => [...stripped(text).matchAll(/(?<![\w.$])(\d[\d_]*)(?![\w.])/gu)]
+  .map((match) => match[1])
+  .filter((literal) => Number(literal.replaceAll("_", "")) >= 1_000);
+
+test("no byte or count limit literal is left in src/ outside the fixed protocol constants", () => {
+  for (const name of files) {
+    const allowed = FIXED_LITERALS.get(name) ?? new Map();
+    const unlisted = largeLiterals(readFileSync(join(root, name), "utf8")).filter((literal) => !allowed.has(literal));
+    assert.deepEqual(unlisted, [], `${name}: a limit is a RuntimeLimits field, a fixed protocol constant listed here, or computed by core (ADR 0027)`);
+  }
+  // Every listed constant is still present: the list cannot go stale.
+  for (const [name, allowed] of FIXED_LITERALS) {
+    const present = new Set(largeLiterals(readFileSync(join(root, name), "utf8")));
+    for (const literal of allowed.keys()) assert.ok(present.has(literal), `${name} no longer holds ${literal}`);
+  }
+});
+
+test("the literal scan catches a private limit and ignores comments, strings, and small numbers", () => {
+  for (const text of ["const MAX = 1_048_576;", "if (n > 65536) {}", "const limit = 2097152", "x.length > 262_144", "const b = 1024 * 1024;"]) {
+    assert.ok(largeLiterals(text).length > 0, text);
+  }
+  for (const text of ["// 1_048_576 in a comment", "/* 65536 */ const a = 1;", 'const message = "limit 65_536";', "const depth = 64; const id = 128;", "v1.2.3000"]) {
+    assert.deepEqual(largeLiterals(text), [], text);
+  }
+});
