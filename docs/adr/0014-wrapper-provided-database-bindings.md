@@ -60,11 +60,17 @@ keyed `interactive-start`):
 - This holds only when the body still compiles and is authorized under the new snapshot. On
   both placements the session check, the compile (which applies the role's policy), and the
   binding check run before the idempotency lookup (`atomic.rs`: `request_checked` in the
-  engine, `atomic_input_checked` on the owner). A deployment whose policy, schema, or the
-  caller's access now forbids the committed statement (for example a policy that no longer
-  allows the insert) answers the retry with that error, for example
-  `POLICYSQL_FORBIDDEN_OPERATION`, which the client takes as a definite rejection although the
-  write committed. #80 does not change this; it is tracked in #85.
+  engine, `atomic_input_checked` on the owner). A deployment whose policy, schema, `expected`
+  version, or the caller's access now forbids the committed statement (for example a policy
+  that no longer allows the insert) answers a keyed retry with 500 `POLICYSQL_INTERNAL`, the
+  unknown outcome, not the compile error (`POLICYSQL_FORBIDDEN_OPERATION`,
+  `POLICYSQL_STALE_OPERATION`, `POLICYSQL_SCHEMA_MISMATCH`, ...): the client takes a compile
+  error as a definite rejection although the write may have committed. Nothing is looked up or
+  replayed, and an unkeyed retry keeps its compile error. This is the #85 path-1 amendment in
+  [ADR 0007](0007-transaction-retry-and-commit-check-protocol.md), ABI 18; #80 left this path
+  open and it is no longer a definite rejection. A keyed `interactive-start` is outside this
+  rule: it compiles no committed statement, so its begin-time `expected` and snapshot answers
+  are unchanged.
 - Another body, or another generation of the same database, still conflicts. Another scope or
   database id has another key hash.
 - The snapshot is still checked before any lookup: a request whose binding names another

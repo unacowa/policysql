@@ -43,18 +43,18 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_INVALID_SQL` | 400 | SQLをparseできない |
 | `POLICYSQL_MULTIPLE_STATEMENTS` | 400 | statementが複数含まれる |
 | `POLICYSQL_UNSUPPORTED_SQL` | 400 | 対応範囲外の構文 |
-| `POLICYSQL_SQL_TOO_COMPLEX` | 400 | 入力は上限内だが、policyを合成して生成した文が下流の複雑さの上限（parserの式の高さ・再帰の深さ、結果列2,000、host parameter 32,766、LIKE/GLOBのpattern 50,000 bytes、envelopeのcolumn metadata 1 MiB、またはDBが複雑さを理由に拒否）に達した。pathは`/statements/<i>`で、messageは固定。COMMITより前に検知するため何もcommitされず、clientは拒否（`PolicySqlRejectedError`）として扱う。対話型transactionでは`failed`として閉じ、後続のcommandは409 `POLICYSQL_TRANSACTION_UNAVAILABLE`になる。同じrequestを再送しても成功しない |
+| `POLICYSQL_SQL_TOO_COMPLEX` | 400 | 入力は上限内だが、policyを合成して生成した文が下流の複雑さの上限（parserの式の高さ・再帰の深さ、結果列2,000、host parameter 32,766、LIKE/GLOBのpattern 50,000 bytes、envelopeのcolumn metadata 1 MiB、またはDBが複雑さを理由に拒否）に達した。pathは`/statements/<i>`で、messageは固定。COMMITより前に検知するため何もcommitされず、clientは拒否（`PolicySqlRejectedError`）として扱う。対話型transactionでは`failed`として閉じ、後続のcommandは409 `POLICYSQL_TRANSACTION_UNAVAILABLE`になる。`Idempotency-Key`付きのAtomic Executeでcompile時（emit時）に検出された場合は500 `POLICYSQL_INTERNAL`（結果不明。保存済み結果を返し、再実行しない）、unkeyedのAtomic Execute・Explain・DB実行時の拒否はこのcodeで、同じrequestを再送しても成功しない |
 | `POLICYSQL_DUPLICATE_RESULT_COLUMN` | 400 | alias適用後のresult column名が重複した |
 | `POLICYSQL_INVALID_PARAMETER` | 400 | parameterの不足、型、値が不正 |
 | `POLICYSQL_AMBIGUOUS_PARAMETER_TYPE` | 400 | Explainでparameter型を一意に証明できない |
 | `POLICYSQL_RESERVED_PARAMETER` | 400 | server用のparameter名を使用した |
 | `POLICYSQL_IDEMPOTENCY_KEY_INVALID` | 400 | `Idempotency-Key`が空または書式不正（16〜128文字のASCII英数字と`. _ : - + / =`以外を含む、長さが範囲外、header重複によるカンマ結合）。keyの省略では発生しない。DB処理の前に拒否するため、再送しても成功しない |
 | `POLICYSQL_FORBIDDEN_ACCESS` | 403 | `PolicySQL-Role`がtrusted sessionの`roles`にない、またはendpointに必要なaccessがない。`Idempotency-Key`付きのAtomic Executeでは500 `POLICYSQL_INTERNAL`（結果不明）になる（deployでaccessまたはroleを失った主体による、commit済みwriteの再送かもしれないため。bodyは読まず、DB処理も行わない） |
-| `POLICYSQL_MISSING_POLICY` | 403 | 適用可能なpolicyがない |
-| `POLICYSQL_FORBIDDEN_OPERATION` | 403 | operationが許可されていない |
-| `POLICYSQL_FORBIDDEN_COLUMN` | 403 | 利用できないcolumnを参照した |
-| `POLICYSQL_FORBIDDEN_COLUMN_CONTEXT` | 403 | 条件付き出力列をprojection以外で参照した |
-| `POLICYSQL_PRESET_COLUMN` | 403 | clientがserver-owned columnを指定した |
+| `POLICYSQL_MISSING_POLICY` | 403 | 適用可能なpolicyがない。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_INTERNAL`（結果不明）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
+| `POLICYSQL_FORBIDDEN_OPERATION` | 403 | operationが許可されていない。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_INTERNAL`（結果不明）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
+| `POLICYSQL_FORBIDDEN_COLUMN` | 403 | 利用できないcolumnを参照した。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_INTERNAL`（結果不明）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
+| `POLICYSQL_FORBIDDEN_COLUMN_CONTEXT` | 403 | 条件付き出力列をprojection以外で参照した。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_INTERNAL`（結果不明）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
+| `POLICYSQL_PRESET_COLUMN` | 403 | clientがserver-owned columnを指定した。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_INTERNAL`（結果不明）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
 | `POLICYSQL_TRANSACTION_MODE_VIOLATION` | 403 | read transactionでmutationを実行しようとした |
 | `POLICYSQL_DATABASE_BINDING_REJECTED` | 403 | DB bindingが不正、未登録、または現在の経路設定で許可されていない |
 | `POLICYSQL_NOT_FOUND` | 404 | endpointが存在しない |
@@ -63,8 +63,8 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_TRANSACTION_CONFLICT` | 409 | 対話型transactionのcommandが現在の状態（sequenceなど）と矛盾する |
 | `POLICYSQL_TRANSACTION_UNAVAILABLE` | 409 | transactionが存在しない、利用者に属していない、期限切れ、または失敗状態。COMMITの送信前にbindingまたは期限の確認に失敗した場合も返します（COMMITは送られておらず、rollback済みです） |
 | `POLICYSQL_COMMIT_CHECK_REJECTED` | 409 | commit checkがtransactionを拒否した、または安全に完了できない |
-| `POLICYSQL_LIMIT_EXCEEDED` | 413 | requestまたはresult limitを超えた。行数、結果bytes、結果のJSON値の数、databaseの生の応答の上限、streaming transportが応答中にdecodeした結果のBLOB値の上限（buffering providerのBLOBはcoreがresult encodingで検出するため413のまま）、`maxStatements`、応答全体の`maxResponseBytes`を含む。commit前に判断し、envelopeはrollbackして冪等性recordも残さない。ただしatomic executeで2文目以降にwriteを含み、databaseの生の応答、またはstreaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合は、後続のwriteが実行された可能性があるため500 `POLICYSQL_INTERNAL`（結果不明）になる。その例外を除き、再送しても成功しない |
-| `POLICYSQL_REQUEST_TOO_LARGE` | 413 | HTTP body（`limits.maxRequestBytes`）、body内のJSON値の数（`limits.maxJsonValues`）、またはSQL text（`limits.maxSqlBytes`、pathは`/statements/<i>/sql`）が受付上限を超えた。再送しても成功しないため、clientは拒否（`PolicySqlRejectedError`）として扱う |
+| `POLICYSQL_LIMIT_EXCEEDED` | 413 | requestまたはresult limitを超えた。行数、結果bytes、結果のJSON値の数、databaseの生の応答の上限、streaming transportが応答中にdecodeした結果のBLOB値の上限（buffering providerのBLOBはcoreがresult encodingで検出するため413のまま）、`maxStatements`、応答全体の`maxResponseBytes`を含む。commit前に判断し、envelopeはrollbackして冪等性recordも残さない。ただしatomic executeで2文目以降にwriteを含み、databaseの生の応答、またはstreaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合は、後続のwriteが実行された可能性があるため500 `POLICYSQL_INTERNAL`（結果不明）になる。その例外を除き、再送しても成功しない。さらに、`Idempotency-Key`付きのAtomic Executeでcompile時の入力上限（`maxStatements`、`maxParameters`、`maxExpressionDepth`、`maxProjections`、`maxJoins`）に達した場合は500 `POLICYSQL_INTERNAL`（結果不明）になり、unkeyedのAtomic ExecuteとExplainは413のまま |
+| `POLICYSQL_REQUEST_TOO_LARGE` | 413 | HTTP body（`limits.maxRequestBytes`）、body内のJSON値の数（`limits.maxJsonValues`）、またはSQL text（`limits.maxSqlBytes`、pathは`/statements/<i>/sql`）が受付上限を超えた。HTTP bodyと`maxJsonValues`はcompileより前のbody checkで拒否するため、keyedでも413のまま。`maxSqlBytes`はcompile時に検出するため、`Idempotency-Key`付きのAtomic Executeでは500 `POLICYSQL_INTERNAL`（結果不明）、unkeyedのAtomic ExecuteとExplainでは413。再送しても成功しないため、clientは拒否（`PolicySqlRejectedError`）として扱う |
 | `POLICYSQL_UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type`が`application/json`でない |
 | `POLICYSQL_EXPECTATION_FAILED` | 422 | transaction operationの期待条件を満たさない |
 | `POLICYSQL_SCHEMA_MISMATCH` | 422 | database値がcompiled logical contractと一致しない |

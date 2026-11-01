@@ -152,6 +152,22 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     const refused = await post(h, { statements: [bulk(342, "c")] }, EXECUTE);
     assert.equal(refused.status, 413);
     assert.equal(refused.body.error.code, "POLICYSQL_LIMIT_EXCEEDED");
+    // #85 path 1: with a key the over-limit envelope is a compile failure, so it is the unknown
+    // outcome (500) instead of the definite 413. Nothing runs and no idempotency row is written,
+    // so the key is not consumed: a later valid request with it executes.
+    const idempotency = () => h.databases.get("a").database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n;
+    const beforeRows = idempotency();
+    const keyed = await post(h, { statements: [bulk(342, "d")] }, EXECUTE, "bulk-insert-key-000003");
+    assert.equal(keyed.status, 500, JSON.stringify(keyed.body).slice(0, 300));
+    assert.equal(keyed.body.error.code, "POLICYSQL_INTERNAL");
+    assert.equal(keyed.body.error.message, "The request could not be completed.");
+    assert.equal(keyed.body.results, undefined, "no stored result");
+    await h.flush();
+    assert.equal(h.rows("a").filter((row) => row.id.startsWith("d")).length, 0, "the refused envelope ran nothing");
+    assert.equal(idempotency(), beforeRows, "the compile failure wrote no idempotency row");
+    const reused = await post(h, { statements: [bulk(1, "d")] }, EXECUTE, "bulk-insert-key-000003");
+    assert.equal(reused.status, 200, JSON.stringify(reused.body).slice(0, 300));
+    assert.equal(h.rows("a").filter((row) => row.id === "d0").length, 1, "the key was not consumed");
   });
 
   // ------------------------------------------------------------------------------------------
