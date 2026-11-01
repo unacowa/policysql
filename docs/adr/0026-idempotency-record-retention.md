@@ -154,7 +154,8 @@ Why the guarantee holds, on one clock (the database's):
 **Client rule.** The client measures only elapsed time on its own clock: a keyed write may be
 resent while `elapsed since first send < W - M`. The margin `M` covers how long one request can
 take to reach its lookup (the engine's deadlines are seconds: `transactionMs` is 4 s in the
-reference wrapper), drift, and forward steps of the database clock. After that the outcome must
+reference wrapper, `deploy/cloudflare/wrapper/limits.ts`), drift, and forward steps of the
+database clock. After that the outcome must
 be resolved another way (by reading the data), never by resending.
 
 **After the window.** A retry whose row was deleted finds no row and **executes as a new
@@ -255,11 +256,12 @@ accepted within the last `W` therefore turns that write's retry into an unknown 
 rest of the window, although its row is still present: the lookup is never reached, so the
 replay the guarantee promises is lost and the caller cannot tell whether the write committed.
 Lowering a limit is not a correctness migration, because no retry becomes a definite rejection,
-but a deployment that must honor replays within its advertised `W` **must not lower
-`maxRequestBytes` or `maxJsonValues` below a body accepted in the last `W`**; if it does, it
-stops honoring that window for those bodies. The depth limit tightened in ABI 16 is outside
-this rule: a depth-65 body is refused before the lookup under every current build, so no
-window can preserve it.
+but a deployment that must honor replays within its advertised `W` **must not lower an input
+limit below a body accepted in the last `W`** — `maxRequestBytes`, the body-side
+`maxJsonValues`, or the depth limit tightened in ABI 16; if it does, it stops honoring that
+window for those bodies. The depth limit is the one input limit no window can preserve: a
+depth-65 body is refused before the lookup under every current build, so unlike the other two
+its lowering cannot be honored even by keeping the larger window.
 
 **Library helper (pending maintainer confirmation, open question 4).** The library exports
 decision-free text: `idempotencyCleanupStatements({ retentionSeconds, batchSize })`, which
@@ -429,9 +431,10 @@ Each ships on its own; none changes core or the ABI.
   which the documented client rule excludes. Within the window it never executes twice,
   including across snapshot changes: after #80 a retry that differs only in the runtime
   snapshot replays.
-- A deployment that must keep replays cannot lower `maxRequestBytes` or the body-side
-  `maxJsonValues` below a body accepted in its advertised window: lowering one turns those
-  retries into the unknown 500, not a definite rejection (#100).
+- A deployment that must keep replays cannot lower an input limit (`maxRequestBytes`, the
+  body-side `maxJsonValues`, or the ABI 16 depth limit) below a body accepted in its advertised
+  window: lowering one turns those retries into the unknown 500, not a definite rejection
+  (#100). The depth limit cannot be honored even by keeping the larger window.
 - Stored replies, including `RETURNING` data, live for a bounded time.
 - Core, the ABI, and the snapshot are unchanged; the library gains one required config setting,
   one Capabilities field, and a decision-free SQL helper.
