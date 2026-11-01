@@ -320,6 +320,102 @@ fn a_limit_failure_is_limit_exceeded_on_the_envelope_and_internal_on_the_lookup_
     );
 }
 
+/// Issue #97: a reply the transport could not read (a response over its bound, a BLOB over the
+/// value bound, a stalled body) leaves the pipeline's outcome open. Hrana keeps running the rest
+/// of a pipeline after an error, and an error can make SQLite roll the explicit transaction back;
+/// a later write then runs in autocommit and commits. A `limit` on an envelope with a write after
+/// its first statement is therefore 500 `POLICYSQL_INTERNAL` (an unknown outcome), never a
+/// definite 413. A write at the first statement only, or a read-only envelope, keeps 413: an
+/// auto-rollback of the transaction leaves no later write that could commit.
+#[test]
+fn a_limit_failure_after_a_later_write_is_internal_not_a_definite_rejection() {
+    let write = |id: &str| {
+        (
+            "INSERT INTO projects (id, name) VALUES (:id, :name)",
+            json!({"id": id, "name": id}),
+        )
+    };
+    let read = ("SELECT id, name FROM projects", json!({}));
+    let update = ("UPDATE projects SET name = 'x'", json!({}));
+    let delete = ("DELETE FROM projects", json!({}));
+    for (label, statements, expected) in [
+        (
+            "read then insert",
+            vec![read.clone(), write("p2")],
+            "POLICYSQL_INTERNAL",
+        ),
+        (
+            "insert then insert",
+            vec![write("p1"), write("p2")],
+            "POLICYSQL_INTERNAL",
+        ),
+        (
+            "read then update",
+            vec![read.clone(), update],
+            "POLICYSQL_INTERNAL",
+        ),
+        (
+            "read then delete",
+            vec![read.clone(), delete],
+            "POLICYSQL_INTERNAL",
+        ),
+        (
+            "insert then read",
+            vec![write("p1"), read.clone()],
+            "POLICYSQL_LIMIT_EXCEEDED",
+        ),
+        (
+            "read then read",
+            vec![read.clone(), read],
+            "POLICYSQL_LIMIT_EXCEEDED",
+        ),
+    ] {
+        // Direct and owner: the classification does not depend on the placement. An owner runs
+        // write envelopes only, so the read-only envelope is direct-only.
+        let write_envelope = statements.iter().any(|(sql, _)| !sql.starts_with("SELECT"));
+        for owner in [false, true] {
+            if owner && !write_envelope {
+                continue;
+            }
+            let mut engine = Engine::atomic(owner);
+            let body = envelope(&statements);
+            let input = if owner {
+                atomic_input(&body, None)
+            } else {
+                execute_request(&body, None)
+            };
+            engine.feed(&input);
+            // Direct: checkBinding, open. Owner: checkBinding, open, persist, setTimer.
+            for _ in 0..if owner { 4 } else { 2 } {
+                engine.resolve(true, "unknown");
+            }
+            assert_eq!(
+                engine
+                    .outstanding
+                    .as_ref()
+                    .map(|effect| effect["type"].clone()),
+                Some(json!("execute")),
+                "{label} owner={owner}: awaited {:?}",
+                engine.observed.awaited
+            );
+            engine.resolve(false, "limit");
+            engine.settle();
+            let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+            assert_eq!(
+                code(&reply),
+                Some(expected),
+                "{label} owner={owner}: {reply}"
+            );
+            assert_eq!(engine.observed.commits_emitted, 0, "{label} owner={owner}");
+            assert_eq!(
+                engine.observed.rollbacks_emitted, 1,
+                "{label} owner={owner}"
+            );
+            assert_eq!(engine.compiler.live_handles(), 0, "{label} owner={owner}");
+        }
+    }
+}
+
 /// ADR 0027 pull request 4: the database's complexity refusal (`complex` with the statement
 /// index) is the client's `POLICYSQL_SQL_TOO_COMPLEX` on the envelope, rolled back before COMMIT,
 /// `POLICYSQL_INTERNAL` on the idempotency lookup or insert, and never a COMMIT's outcome.

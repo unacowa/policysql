@@ -124,6 +124,43 @@ test("the executor follows the runtime's per-value limit for arguments, results,
   }
 });
 
+// Regression (#97 review): `closeConnection` is reached when the machine releases its volatile
+// state while a connection is still open. Its rollback must be handed to the runtime's
+// background (`waitUntil`/`BackgroundTasks.run`); the old detached promise would leave the
+// background empty, so a Worker eviction could abandon the stream, and the suite stayed green.
+test("a connection left open when the volatile state is released is rolled back through the background", async () => {
+  let rolledBack = false;
+  const database = {
+    streamedReadCap: true, check() { return true; },
+    connect() {
+      return {
+        async begin() {
+          return {
+            open: true, usage: [],
+            async rollback() { rolledBack = true; this.open = false; },
+          };
+        },
+      };
+    },
+  };
+  const runtime = scripted([
+    [{ type: "open", id: 1, binding: testBinding(), mode: "read", timeoutMs: 1_000, deadlineMs: Date.now() + 60_000 }],
+    // This step returns `volatile: null`, so the executor closes the connection the first step
+    // opened before it processes the respond.
+    [{ type: "respond", lane: "client", reply }],
+  ]);
+  const tasks = [];
+  const result = await runRequestStep(
+    { getRuntime: () => runtime, database, owner() { throw new Error("no owner"); } },
+    { kind: "execute" },
+    { requestId: "req_unit", checked: testBinding(), maxBytes: 1_024, background: { run(task) { tasks.push(task); } } },
+  );
+  assert.deepEqual(result, reply);
+  assert.equal(tasks.length, 1, "the rollback was handed to the background");
+  await tasks[0];
+  assert.equal(rolledBack, true);
+});
+
 // Regression (PR #19 review): a driver value the codec cannot represent never reaches core's
 // validation as data: it is the `invalid` marker (core answers 422), and a row whose shape does
 // not match its columns fails the effect. Either way nothing is committed.

@@ -5,12 +5,14 @@
 // The body is read as a byte stream with a running count of the bytes received, not the
 // UTF-16 length of decoded text. The stream is cancelled at the first chunk that takes the
 // count over the bound, so no more than one chunk past the bound is ever held. A declared
-// `Content-Length` over the bound is rejected unread; an understated or missing one changes
-// nothing. UTF-8 is decoded strictly (`fatal`): malformed bytes are an error, never a
-// replacement character. A leading byte order mark is removed, as `Response.text()` does.
+// `Content-Length` over the bound is rejected unread, unless the caller needs the leading
+// bytes of the refused reply (then at most `PREFIX_BYTES` are read); an understated or missing
+// one changes nothing. UTF-8 is decoded strictly (`fatal`): malformed bytes are an error, never
+// a replacement character. A leading byte order mark is removed, as `Response.text()` does.
 //
 // On every failure the body is cancelled before the error is thrown. The caller classifies
-// the errors; none carries response content.
+// the errors; the only response content they carry is the leading bytes a caller asked for to
+// recover a leading protocol field (the Hrana baton), and it is never shown to a client.
 
 /** The body exceeded the byte bound (declared or received). */
 export class BodyTooLargeError extends Error {
@@ -28,8 +30,33 @@ export class BodyTooLargeError extends Error {
 }
 
 const PREFIX_BYTES = 1_024;
-const prefixOf = (chunk: Uint8Array | undefined) =>
-  (chunk ? new TextDecoder("utf-8").decode(chunk.subarray(0, PREFIX_BYTES)) : "");
+/**
+ * The first `PREFIX_BYTES` bytes of a body, kept raw until they are needed: a leading field can
+ * span two chunks (or every byte), so slicing either chunk alone misses it (#97). At most
+ * `PREFIX_BYTES` bytes are copied, whatever the body's size.
+ */
+class Prefix {
+  readonly parts: Uint8Array[] = [];
+  length = 0;
+
+  add(chunk: Uint8Array): void {
+    if (this.length >= PREFIX_BYTES) return;
+    const part = chunk.slice(0, PREFIX_BYTES - this.length);
+    this.parts.push(part);
+    this.length += part.byteLength;
+  }
+
+  /** The prefix decoded leniently: a cut in the middle of a character is not a body failure. */
+  text(): string {
+    const bytes = new Uint8Array(this.length);
+    let at = 0;
+    for (const part of this.parts) {
+      bytes.set(part, at);
+      at += part.byteLength;
+    }
+    return new TextDecoder("utf-8").decode(bytes);
+  }
+}
 
 /** The body could not be read or was not valid UTF-8. */
 export class BodyReadError extends Error {
@@ -38,6 +65,13 @@ export class BodyReadError extends Error {
     this.name = "BodyReadError";
   }
 }
+
+/**
+ * Where a caller receives the leading bytes before any failure, so it can recover a leading
+ * protocol field (the Hrana baton) from a reply it refuses or could not finish reading (#96,
+ * #97). Filled before every throw of `readBoundedText`; never shown to a client.
+ */
+export type LeadingBytes = { text: string };
 
 // What an aborted read throws: the signal's reason when it is an error (AbortSignal.timeout
 // gives a `TimeoutError` DOMException), otherwise a plain `AbortError`.
@@ -63,8 +97,11 @@ export const readBoundedText = async (
   maxBytes: number,
   signal?: AbortSignal,
   // A declared length over the bound is rejected unread, unless the caller needs the leading
-  // bytes of the refused reply (`BodyTooLargeError.prefix`): then the first chunk is read.
+  // bytes of the refused reply (`BodyTooLargeError.prefix`): then at most `PREFIX_BYTES` are read.
   prefixOfDeclared = false,
+  // Filled with the leading bytes before any failure (over the bound, read error, malformed
+  // UTF-8, or abort), for a caller that recovers a leading field from a reply it cannot read.
+  leading?: LeadingBytes,
 ): Promise<string> => {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new TypeError("maxBytes must be a non-negative safe integer");
   const body = response.body;
@@ -83,37 +120,54 @@ export const readBoundedText = async (
   const onAbort = () => { release(reader); };
   signal?.addEventListener("abort", onAbort, { once: true });
   if (Number.isFinite(declared) && declared > maxBytes) {
-    // Rejected unread, except for the first chunk, which only supplies `prefix`.
-    let first: Uint8Array | undefined;
+    // Rejected after the leading bytes, which only supply `prefix`. Reading stops at
+    // `PREFIX_BYTES`; a stalled body is ended by the signal, as in the bounded loop below.
+    const prefix = new Prefix();
     try {
-      const next = await reader.read();
-      if (!next.done && next.value instanceof Uint8Array) first = next.value;
+      while (prefix.length < PREFIX_BYTES) {
+        if (signal?.aborted) break;
+        const next = await reader.read();
+        if (signal?.aborted) break;
+        if (next.done) break;
+        if (!(next.value instanceof Uint8Array)) break;
+        prefix.add(next.value);
+      }
     } catch { /* the prefix is optional */ }
     release(reader);
     signal?.removeEventListener("abort", onAbort);
+    const text = prefix.text();
+    if (leading) leading.text = text;
     if (signal?.aborted) throw abortError(signal);
-    throw new BodyTooLargeError(prefixOf(first));
+    throw new BodyTooLargeError(text);
   }
   const decoder = new TextDecoder("utf-8", { fatal: true });
+  const prefix = new Prefix();
+  const settle = () => { if (leading) leading.text = prefix.text(); };
   let bytes = 0;
   let text = "";
   try {
     while (true) {
-      if (signal?.aborted) throw abortError(signal);
+      if (signal?.aborted) { settle(); throw abortError(signal); }
       let next: ReadableStreamReadResult<Uint8Array>;
       try { next = await reader.read(); } catch {
+        settle();
         if (signal?.aborted) throw abortError(signal);
         throw new BodyReadError();
       }
-      if (signal?.aborted) throw abortError(signal);
+      if (signal?.aborted) { settle(); throw abortError(signal); }
       if (next.done) break;
       const chunk: unknown = next.value;
-      if (!(chunk instanceof Uint8Array)) throw new BodyReadError();
+      if (!(chunk instanceof Uint8Array)) { settle(); throw new BodyReadError(); }
+      prefix.add(chunk);
       bytes += chunk.byteLength;
-      if (bytes > maxBytes) throw new BodyTooLargeError(text.length === 0 ? prefixOf(chunk) : text.slice(0, PREFIX_BYTES));
-      try { text += decoder.decode(chunk, { stream: true }); } catch { throw new BodyReadError(); }
+      if (bytes > maxBytes) {
+        const head = prefix.text();
+        if (leading) leading.text = head;
+        throw new BodyTooLargeError(head);
+      }
+      try { text += decoder.decode(chunk, { stream: true }); } catch { settle(); throw new BodyReadError(); }
     }
-    try { text += decoder.decode(); } catch { throw new BodyReadError(); }
+    try { text += decoder.decode(); } catch { settle(); throw new BodyReadError(); }
     return text;
   } catch (error) {
     release(reader);

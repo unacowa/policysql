@@ -85,6 +85,23 @@ const txId = `tx_${"a".repeat(32)}`;
 const startFingerprint = "c".repeat(64);
 const auth = { principal: "test:u1", subject: "u1", role: "member", roles: ["member"], access: ["execute"], session: { tenant_id: "tenant_a" } };
 
+// Regression (#97 review): the owner's `closeConnection` must keep a released transaction's
+// rollback alive through its background tasks. The old detached promise would leave the
+// background empty and a successor could reuse the connection's stream (and its write lock).
+test("closeConnection keeps an open connection's rollback alive through the owner background", async () => {
+  const storage = makeStorage();
+  const runs = [];
+  storage.background = { run(promise) { runs.push(promise); } };
+  const owner = new TransactionOwnerCore({ ...storage, name: txId }, { config, getRuntime: () => runtime(), database: ownerProvider(transaction()) });
+  let rolledBack = false;
+  owner.connection = { open: true, async rollback() { rolledBack = true; this.open = false; } };
+  owner.closeConnection("req");
+  assert.equal(owner.connection, null, "the connection is dropped before the task runs");
+  assert.equal(runs.length, 1, "the rollback was handed to the background");
+  await runs[0];
+  assert.equal(rolledBack, true);
+});
+
 // ADR 0024 "Effects": a batch holds immediate effects and at most one awaited effect, last.
 // A step output that breaks the rule is an engine fault: nothing of the batch runs, the owner
 // abandons its state and answers POLICYSQL_INTERNAL, so no outcome is ever dropped.

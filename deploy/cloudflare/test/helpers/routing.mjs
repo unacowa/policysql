@@ -134,13 +134,20 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
       connections.set(baton, { tenant, database: new DatabaseSync(databases.get(tenant).path) });
     }
     const connection = connections.get(baton);
-    assert.equal(connection?.tenant, tenant, "transaction baton never crosses a database boundary");
+    if (!connection) {
+      // As Hrana: a baton the stream no longer knows (consumed by a request whose reply was lost,
+      // or closed) is refused. It never reaches a statement, and the transaction stays open until
+      // the server expires it. The stream rotates its baton on every reply, like real Turso.
+      return Response.json({ error: "Baton not found" }, { status: 400 });
+    }
+    assert.equal(connection.tenant, tenant, "transaction baton never crosses a database boundary");
     const results = [];
+    let closed = false;
     for (const request of input.requests) {
       if (request.type === "close") {
         connection.database.close();
         connections.delete(baton);
-        baton = null;
+        closed = true;
         results.push({ type: "ok", response: { type: "close" } });
         continue;
       }
@@ -173,13 +180,20 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
         results.push({ type: "error", error: error_ });
         continue;
       }
-      if (afterStatement) await afterStatement({ tenant, sql });
+      if (afterStatement) await afterStatement({ tenant, sql, baton });
+    }
+    // Every reply carries a new baton, as a real server's does; a replacement reply may name it.
+    let next = null;
+    if (!closed) {
+      next = crypto.randomUUID();
+      connections.delete(baton);
+      connections.set(next, connection);
     }
     const replaced = replaceResponse && await replaceResponse({
       tenant, sqls: input.requests.map((request) => request.stmt?.sql ?? request.type),
-      requestBaton: input.baton ?? null, baton, results,
+      requestBaton: input.baton ?? null, baton: next, results,
     });
-    return replaced ?? Response.json({ baton, results });
+    return replaced ?? Response.json({ baton: next, results });
   };
   const { privateKey, publicKey } = await generateKeyPair("ES256");
   const jwk = await exportJWK(publicKey);

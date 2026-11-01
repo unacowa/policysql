@@ -190,14 +190,16 @@ test("#53: the bound counts UTF-8 bytes, not UTF-16 code units", async () => {
   assert.ok(state.bytes <= MAX_RESPONSE_BYTES + 65_536);
 });
 
-test("#53: a declared Content-Length over the bound is rejected unread; a smaller one changes nothing", async () => {
+test("#53: a declared Content-Length over the bound is rejected; statement and BEGIN read only their leading bytes", async () => {
   for (const target of ["statement", "begin", "commit"]) {
     const small = tracked(chunked(replyFor[target](1_024), 100));
     await assert.rejects(runners[target](transportFor(target, () => new Response(small.stream, {
       headers: { "content-length": String(BOUND[target] + 1) },
     }))), safe(OVERSIZED[target]), target);
-    // A statement reply's first chunk is read for its leading baton (#96); the others are unread.
-    if (target === "statement") assert.ok(small.state.bytes <= 100, `${target}: at most the first chunk read`);
+    // Statement and BEGIN replies keep at most 1,024 leading bytes (across chunks) for their
+    // baton, because a transaction the server started must be rolled back (#96, #97); COMMIT
+    // is never recovered this way, so nothing of its reply is read.
+    if (target === "statement" || target === "begin") assert.ok(small.state.bytes <= 1_024, `${target}: at most the leading bytes read`);
     else assert.equal(small.state.bytes, 0, `${target}: nothing read`);
     assert.equal(small.state.cancelled, true, `${target}: released`);
   }
@@ -321,6 +323,65 @@ test("readBoundedText: bound, non-byte chunks, aborts and argument checks", asyn
   for (const bound of [-1, 1.5, NaN, Infinity, "3"]) {
     await assert.rejects(readBoundedText(of([]), bound), TypeError, String(bound));
   }
+});
+
+// Issue #97: the leading 1,024 bytes are kept across chunks. A baton that starts in one chunk
+// and ends in the next was missed by slicing either chunk alone, so the transaction (and its
+// write lock) could not be rolled back. The same leading bytes are handed to the caller for a
+// timeout or a read error in the middle of the body, not only for an over-bound one.
+test("readBoundedText keeps the leading bytes across chunks and on every failure (#97)", async () => {
+  const baton = `b${"x".repeat(199)}`;
+  const head = encoder.encode(`{"baton":"${baton.slice(0, 40)}`);
+  const tail = encoder.encode(`${baton.slice(40)}","base_url":null,"results":[]}${" ".repeat(2_000)}`);
+  const split = (headers = {}) => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(head); controller.enqueue(tail); controller.close(); },
+  }), { headers });
+  const hasBaton = (text) => text.includes(`"baton":"${baton}"`);
+  // Over the bound, with no declared length and with one over the bound: both read the prefix
+  // across the chunk boundary.
+  for (const headers of [{}, { "content-length": "9999" }]) {
+    const seen = { text: "" };
+    await assert.rejects(readBoundedText(split(headers), 1_000, undefined, true, seen), (error) => {
+      assert.ok(error instanceof BodyTooLargeError);
+      assert.equal(hasBaton(error.prefix), true, JSON.stringify(error.prefix));
+      return true;
+    });
+    assert.equal(hasBaton(seen.text), true, "the caller's leading capture is filled too");
+  }
+  // A timeout and a read error after the first chunk both hand the leading bytes over.
+  const stalled = () => {
+    let pulls = 0;
+    return new ReadableStream({
+      pull(controller) {
+        pulls++;
+        if (pulls === 1) { controller.enqueue(encoder.encode('{"baton":"timeout-baton",')); return undefined; }
+        return new Promise(() => {});
+      },
+    }, { highWaterMark: 0 });
+  };
+  const timed = { text: "" };
+  await assert.rejects(readBoundedText(new Response(stalled()), 10_000, AbortSignal.timeout(20), false, timed), { name: "TimeoutError" });
+  assert.equal(timed.text, '{"baton":"timeout-baton",');
+  const failing = () => {
+    let pulls = 0;
+    return new ReadableStream({
+      pull(controller) {
+        pulls++;
+        if (pulls === 1) { controller.enqueue(encoder.encode('{"baton":"read-error-baton",')); return undefined; }
+        controller.error(new Error("reset"));
+      },
+    }, { highWaterMark: 0 });
+  };
+  const failed = { text: "" };
+  await assert.rejects(readBoundedText(new Response(failing()), 10_000, undefined, false, failed), BodyReadError);
+  assert.equal(failed.text, '{"baton":"read-error-baton",');
+  // Negative: a baton that begins after the kept 1,024 bytes is not recovered, so the prefix
+  // stays a plain bounded slice and never grows with the body.
+  const late = encoder.encode(`${" ".repeat(2_000)}{"baton":"too-late"}`);
+  const seen = { text: "" };
+  await assert.rejects(readBoundedText(new Response(late), 1_000, undefined, false, seen), BodyTooLargeError);
+  assert.equal(seen.text.length, 1_024);
+  assert.equal(seen.text.includes("too-late"), false);
 });
 
 // Regression (PR #86 review): releasing a body never waits for the source's cancel. A hostile

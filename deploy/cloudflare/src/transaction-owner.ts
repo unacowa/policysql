@@ -265,14 +265,16 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     this.durable = output.durable;
     this.volatile = output.volatile;
     // No volatile part: the machine holds no connection. Close any the owner still has.
-    if (output.volatile === null) this.closeConnection();
+    if (output.volatile === null) this.closeConnection(requestId);
     return output;
   }
 
-  closeConnection() {
+  closeConnection(requestId = this.name) {
     const connection = this.connection;
     this.connection = null;
-    if (connection?.open) connection.rollback().catch(() => undefined);
+    // As in request-step: a released transaction must finish rolling back after its reply, so
+    // the rollback is kept alive through the owner's background tasks (#97).
+    if (connection?.open) runInBackground(this.facilities.background, connection.rollback(), requestId);
   }
 
   /** Drops the in-memory state; the next event starts from the store, as a successor would. */
