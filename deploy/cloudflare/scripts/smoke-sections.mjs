@@ -36,6 +36,92 @@ export const summary = (outcome) => ({ status: outcome.status, code: errorCode(o
 const INSERT_PROBE = "INSERT INTO smoke_checks (id, verdict) VALUES (:id, :verdict) RETURNING id, verdict";
 
 /**
+ * #104: the session gate's denial of an interactive commit is the one intentional exception to
+ * ADR 0007's rule that a commit retry is never a definite rejection when COMMIT may have been
+ * sent. The wrapper's authentication and the engine's session gate run before the owner, so a
+ * commit denied for a missing `execute` access stops the transaction without reaching the
+ * owner's commit record. This section pins the deployed behavior:
+ *   - the denial is the definite 403 and no COMMIT was sent (an independent read sees no row);
+ *   - a retry whose SESSION value changed is another caller to the owner (409), which is why
+ *     errors.md promises the stored outcome only for the same principal, subject, role and
+ *     session values;
+ *   - the denied commit consumed no sequence: the restored session commits once;
+ *   - the same denied session on a keyed Atomic Execute is the unknown 500 (#85 path 1), so the
+ *     exception stays narrow.
+ *
+ * Ordering matters: the dev validator decides from the newest `smoke_checks` row, and this
+ * probe's row is committed. Its id prefix sorts below every other probe prefix ("a104" <
+ * "ccp" < "sv"), and the caller runs this section before `commitCheckSmoke`, so the committed
+ * row never becomes the newest row of another probe's callback query.
+ */
+export const sessionGateSmoke = async (context) => {
+  const { call, baseUrl, headers, sessionDeniedHeaders, otherSessionHeaders, expected } = context;
+  const failures = [];
+  const expect = (condition, name) => { if (!condition) failures.push(name); };
+  const post = async (path, body, requestHeaders, key) => {
+    const response = await call(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        ...requestHeaders,
+        "content-type": "application/json",
+        ...(key ? { "idempotency-key": key } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch { parsed = null; }
+    return { status: response.status, body: parsed };
+  };
+
+  const id = unique("a104");
+  const begun = await post("/v1/transactions", { mode: "write", expected }, headers, unique("smoke-begin"));
+  const transactionId = begun.body?.transactionId;
+  const path = typeof transactionId === "string" ? `/v1/transactions/${transactionId}` : null;
+  const empty = { status: 0, body: null };
+  const inserted = path ? await post(`${path}/statements`, { sequence: 1, sql: INSERT_PROBE, params: { id, verdict: "allow" } }, headers) : empty;
+  const denied = path ? await post(`${path}/commit`, { sequence: 2 }, sessionDeniedHeaders) : empty;
+  const otherSession = path ? await post(`${path}/commit`, { sequence: 2 }, otherSessionHeaders) : empty;
+  const unseen = await post("/v1/transactions:execute", {
+    expected, statements: [{ sql: "SELECT id FROM smoke_checks WHERE id = :id", params: { id } }],
+  }, headers, unique("smoke-key"));
+  const restored = path ? await post(`${path}/commit`, { sequence: 2 }, headers) : empty;
+  const seen = await post("/v1/transactions:execute", {
+    expected, statements: [{ sql: "SELECT id FROM smoke_checks WHERE id = :id", params: { id } }],
+  }, headers, unique("smoke-key"));
+  const atomic = await post("/v1/transactions:execute", {
+    expected, statements: [{ sql: INSERT_PROBE, params: { id: `${id}_atomic`, verdict: "allow" } }],
+  }, sessionDeniedHeaders, unique("smoke-key"));
+
+  const rows = (outcome) => outcome.body?.results?.[0]?.rows?.length ?? null;
+  expect(begun.status === 201 && path !== null, "the write transaction begins");
+  expect(inserted.status === 200, "the statement runs before the denied commit");
+  expect(denied.status === 403 && errorCode(denied) === "POLICYSQL_FORBIDDEN_ACCESS",
+    "a commit denied by the session gate is the definite 403");
+  expect(otherSession.status === 409 && errorCode(otherSession) === "POLICYSQL_TRANSACTION_UNAVAILABLE",
+    "a retry with a changed session value is another caller");
+  expect(unseen.status === 200 && rows(unseen) === 0, "the denied commit sent no COMMIT");
+  expect(restored.status === 200 && restored.body?.status === "committed", "the restored session commits once");
+  expect(rows(seen) === 1, "the write applied exactly once");
+  expect(atomic.status === 500 && errorCode(atomic) === "POLICYSQL_INTERNAL",
+    "the same denied session makes a keyed Atomic Execute unknown, not a definite rejection");
+
+  return {
+    failures,
+    report: {
+      begin: begun.status,
+      statement: inserted.status,
+      deniedCommit: summary(denied),
+      otherSession: summary(otherSession),
+      rowsBeforeRestore: rows(unseen),
+      restoredCommit: { ...summary(restored), commitStatus: restored.body?.status ?? null },
+      rowsAfterRestore: rows(seen),
+      keyedAtomic: summary(atomic),
+    },
+  };
+};
+
+/**
  * Commit checks through the dev validator Worker (dev-validator/): allow and deny on Atomic
  * Execute, allow and timeout on an interactive commit. Each allow needs the validator's
  * callback query to see the uncommitted probe row; a denied or timed-out commit must leave no
