@@ -59,8 +59,11 @@ in Capabilities bounds decoded values (configured per deployment; 262,144 bytes 
 execution. For an atomic Execute with an `Idempotency-Key`, malformed input and an over-limit
 parameter are both compile failures and return 500 `POLICYSQL_INTERNAL` (the unknown outcome),
 because the compile runs before the idempotency lookup; an unkeyed Execute and Explain keep 400
-for malformed input and 413 for the limit. A stored physical BLOB over this limit also returns 413
-with either database transport and rolls back the transaction. The limit applies to bytes values only. It is an upper bound: the
+for malformed input and 413 for the limit. A stored physical BLOB over this limit returns 413
+with either database transport and rolls back the transaction, except an atomic execute whose
+envelope contains a write after the first statement and whose result BLOB the streaming transport
+decodes over the limit: that is 500 `POLICYSQL_INTERNAL` (outcome unknown), because a later write
+may have autocommitted; a buffering provider's result encoding stays 413. The limit applies to bytes values only. It is an upper bound: the
 smallest applicable limit governs, so a value within it can still be refused by `maxRequestBytes`
 (`POLICYSQL_REQUEST_TOO_LARGE`) or, when read, by `maxResultBytes`, `maxResponseBytes`, or the interactive result limit
 (`docs/configuration.md`, "Per-value bytes"). See [ADR 0016](adr/0016-bytes-wire-contract.md) and the
