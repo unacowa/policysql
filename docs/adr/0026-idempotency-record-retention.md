@@ -45,17 +45,22 @@ Nothing deletes these rows, and nothing says how long they are kept:
 
 ### Rows from an earlier snapshot are not dead
 
-Issue #67 observes that the request fingerprint includes the database binding and thus the
+Issue #67 observed that the request fingerprint includes the database binding and thus the
 runtime snapshot (ADR 0014, ADR 0025), so after a snapshot-changing deployment an earlier row
-can never be *replayed*. It does not follow that such a row is unused. `keyHash` does not
-include the snapshot, so a keyed retry that straddles the deployment still finds the row and
-gets `POLICYSQL_IDEMPOTENCY_CONFLICT`. ADR 0025 relies on exactly this: "No committed keyed
-request executes twice." (`deploy/cloudflare/test/abi-bump-retry.test.mjs` pins it.) Deleting
-an earlier-snapshot row turns that conflict into a second execution of a committed write. A
-row from an earlier snapshot is a tombstone for its key, and is exactly as important as a
-current one until its retry window ends. (That the conflict is itself a false answer, because
-the write committed, is a separate problem: [#80](https://github.com/unacowa/policysql/issues/80),
-see section 2.)
+could never be *replayed*. That premise no longer holds: #80 (PR #84) removed `snapshot` from
+the request fingerprint while keeping `generation`, so a retry that differs from the original
+only in the runtime snapshot now finds the same row and replays the committed reply, provided
+the body still compiles and is authorized under the new deployment (otherwise the #85 rule
+answers the unknown 500, ADR 0007). A row written before a deployment is therefore live in the
+ordinary way: a snapshot-only retry replays rather than conflicting. It does not follow that
+such a row may be deleted when the snapshot changes. The fingerprint still keeps `version`,
+`scope`, `databaseId`, and `generation`, so a keyed retry with another payload or another
+`generation` still finds the row and gets `POLICYSQL_IDEMPOTENCY_CONFLICT`. ADR 0025 relies
+on exactly this: "No committed keyed request executes twice."
+(`deploy/cloudflare/test/abi-bump-retry.test.mjs` pins it.)
+Deleting a row turns that conflict into a second execution of a committed write. A row from
+an earlier snapshot is a tombstone for its key, and is exactly as important as a current one
+until its retry window ends.
 
 Deleting by snapshot is also not implementable: the row stores only hashes, so nothing in it
 tells which snapshot wrote it.
@@ -84,6 +89,12 @@ This is an instance of the wrapper rule, like ADR 0014 (database registration) a
 (rate limiting). The library cannot verify that a wrapper honors its advertised window, just as
 it cannot verify that a database identity is never reused; both are wrapper obligations.
 
+The split itself follows from ADR 0019 and is proposed as the answer to #67 question (a). Its
+library-side deliverables are still proposed pending maintainer confirmation: the fixed SQL
+text (`idempotencyCleanupStatements`, open question 4) and the required configured window
+(open question 5). The deletion and DDL rules of sections 4 and 6 follow from the split
+regardless, but the helper and the configuration setting are what those two questions confirm.
+
 ### 2. The retention contract
 
 A deployment chooses a **retention window** `W` (seconds) per deployment, the same for every
@@ -94,25 +105,32 @@ seconds before the database's current time, where `W` is the window the deployme
 (section 5; a deployment that advertises none deletes nothing). Rows may be kept longer; nothing else may delete
 them (not a size cap, not a snapshot change, not manual cleanup).
 
-**Client-facing guarantee.** For a keyed atomic write, let `t0` be the instant the client first
-sent it. A retry with the same key, authenticated context, endpoint, database binding (which
-includes `generation` and the runtime `snapshot`, ADR 0014), and payload, whose idempotency
+**Client-facing guarantee** (proposed; open question 5 confirms the required
+`idempotencyRetentionSeconds`, so no deployment can leave this window unadvertised). For a
+keyed atomic write, let `t0` be the instant the client first sent it. A retry with the same
+key, authenticated context, endpoint, database binding (which includes `generation` but not
+the deployment `snapshot`, #80; ADR 0014), and payload, whose idempotency
 lookup runs within `W` of `t0`, where `W` is the window the deployment advertised at `t0`
 (section 5 keeps that window honored when it is later lowered), is answered from the row when
 the original committed: it is
-replayed, and the write never executes a second time. A retry with the same key but another
-payload or another `generation` gets `POLICYSQL_IDEMPOTENCY_CONFLICT`, as today. If the
-original did not commit, no row exists and the retry executes, as today.
+replayed, and the write never executes a second time. A retry that differs only in the runtime
+snapshot, because a snapshot-changing deployment happened in between, is inside this guarantee
+and replays (#80), provided the body still compiles and is authorized under the new deployment
+(otherwise the #85 rule answers the unknown 500, ADR 0007). A retry with the same key but another
+payload or another `generation` gets `POLICYSQL_IDEMPOTENCY_CONFLICT`, as today. A request
+whose binding names another snapshot than the runtime's is `POLICYSQL_STALE_OPERATION` before
+the lookup, as today. If the original did not commit, no row exists and the retry executes, as
+today.
 
-**Known limitation: retries across a snapshot change.** A retry that differs from the original
-only in the runtime snapshot, because a snapshot-changing deployment happened in between, is
-outside the guarantee above, since its binding is not the same. Today it gets
-`POLICYSQL_IDEMPOTENCY_CONFLICT`, which the client takes as a definite rejection although the
-write committed: a false conflict (ADR 0024), on every snapshot-changing deployment. It never
-executes twice while the row exists, which is why section 4 forbids deleting by snapshot.
-Fixing the false conflict (for example by removing `snapshot` from the request fingerprint
-while keeping `generation`) is out of scope here and tracked in
-[#80](https://github.com/unacowa/policysql/issues/80).
+**Snapshot changes (the former limitation, closed by #80).** The draft of this ADR recorded
+that a retry which differed from the original only in the runtime snapshot was outside the
+guarantee and got `POLICYSQL_IDEMPOTENCY_CONFLICT`, a definite rejection although the write
+committed: a false conflict (ADR 0024). [#80](https://github.com/unacowa/policysql/issues/80)
+removed `snapshot` from the request fingerprint while keeping `generation` (PR #84), so a
+snapshot-only difference now replays, as the guarantee above states. Retention does not reopen
+the conflict, and two facts keep the deletion rule of section 4 unchanged: a row whose
+fingerprint mismatches is still a tombstone for a changed payload or generation, and deletion
+by snapshot is still unimplementable because the row stores only hashes and no snapshot.
 
 Why the guarantee holds, on one clock (the database's):
 
@@ -160,7 +178,7 @@ row because of its age, because ignoring an existing tombstone can only add exec
   - insert time and the cleanup's "now" come from the same clock (the database's), so Worker
     and owner clocks, and their skew against the database, do not matter;
   - core needs no time input and no change: no ABI bump, no snapshot change, so no keyed retry
-    straddling the rollout gets a false conflict (ADR 0024, ADR 0025);
+    straddling the rollout is affected by it (ADR 0024, ADR 0025);
   - a table without the column keeps working for the library unchanged.
 - **The lookup stays unfiltered.** Core does not add `created_at` to the lookup (section 2).
 
@@ -228,6 +246,21 @@ not on a later one; the opt-in client enforcement (follow-up 4) persists that
 `W` is lowered. Moving from `null` to a number is not a lowering (nothing was advertised); it
 follows the ordering rule of section 6.
 
+**Lowering an input limit.** The replay contract also depends on the body being accepted at
+retry time. Since #100 the body-side limits are checked before the compile and the idempotency
+lookup, and a keyed atomic execute whose body is refused by `maxRequestBytes` or the body-side
+`maxJsonValues` is answered 500 `POLICYSQL_INTERNAL`, the unknown outcome (ADR 0007, #100
+amendment), never a definite rejection. A deployment that lowers either limit below a body it
+accepted within the last `W` therefore turns that write's retry into an unknown outcome for the
+rest of the window, although its row is still present: the lookup is never reached, so the
+replay the guarantee promises is lost and the caller cannot tell whether the write committed.
+Lowering a limit is not a correctness migration, because no retry becomes a definite rejection,
+but a deployment that must honor replays within its advertised `W` **must not lower
+`maxRequestBytes` or `maxJsonValues` below a body accepted in the last `W`**; if it does, it
+stops honoring that window for those bodies. The depth limit tightened in ABI 16 is outside
+this rule: a depth-65 body is refused before the lookup under every current build, so no
+window can preserve it.
+
 **Library helper (pending maintainer confirmation, open question 4).** The library exports
 decision-free text: `idempotencyCleanupStatements({ retentionSeconds, batchSize })`, which
 returns the parameterized `DELETE` of section 4 with its arguments, and constants for the
@@ -293,8 +326,14 @@ include literal `BEGIN`/`COMMIT`, because such a batch runs each statement on it
 not stop at an error. Therefore:
 
 - **`@tursodatabase/serverless`:** send the statements between `BEGIN IMMEDIATE` and `COMMIT`
-  (not those two) as `connection.batch(statements, "write")`. The driver opens the transaction,
-  stops at the first error, and rolls back (`provision-dev.mjs` already passes `"write"`).
+  (not those two) as `connection.batch(statements, "write")`. This is safe **only if** the
+  `"write"` mode opens the transaction, stops at the first error, and rolls back. That is a
+  required property, not observed behavior: nothing on `main` exercises an erroring statement
+  inside such a batch (the `"write"` batches in `provision-dev.mjs` all succeed, including a
+  one-statement `ALTER TABLE`), so no test pins it. Follow-up pull request 1 must verify it
+  against the driver and Turso before anything relies on it; a driver that continued and
+  committed after a failed statement would commit an empty `policysql_idempotency` and lose
+  every tombstone, exactly as the statement-by-statement case above does.
 - **Any other client** (a driver, a shell, an admin console): execute the statements one by one,
   stop at the first error, and send `ROLLBACK` instead of the remaining statements and `COMMIT`
   (in the `sqlite3` shell, `.bail on` with the script stops, and the open transaction is
@@ -323,8 +362,14 @@ Advertising a window before deleting is harmless (rows may be kept longer); dele
 This ADR covers `policysql_idempotency` only. Keyed interactive starts and the terminal
 interactive records ADR 0007 calls "queryable ... during retention" live in transaction-owner
 storage (Durable Objects in the reference wrapper), not in the application database, and are
-not changed here. The false conflict for retries across a snapshot change is
-[#80](https://github.com/unacowa/policysql/issues/80).
+not changed here. The false conflict for retries across a snapshot change was
+[#80](https://github.com/unacowa/policysql/issues/80), closed by PR #84; section 2 records it
+because retention must not reintroduce it.
+
+**Delivery.** This pull request closes the design question in #67, not the issue. #67 also asks
+for a deletion procedure or an implementation in the reference wrapper or an example; that
+criterion is met by follow-up pull request 3, so #67 stays open (or its own text is updated)
+until that PR lands. Nothing here claims the implementation criterion is already met.
 
 ## Follow-up pull requests
 
@@ -341,7 +386,9 @@ Each ships on its own; none changes core or the ABI.
    rebuild keeps every row and its replay (a keyed retry before and after the rebuild replays
    the same reply); a rebuild whose copy step fails (and one that fails at any later step)
    leaves the original table and all its rows intact and commits nothing, both statement by
-   statement with stop-at-first-error and through the serverless driver's `"write"` batch; a
+   statement with stop-at-first-error and through the serverless driver's `"write"` batch, the
+   latter run against the driver and Turso so that the property section 6 requires (stops at
+   the first error, rolls back) is verified rather than assumed; a
    keyed write interleaved with the rebuild (one that commits just before
    the rebuild takes its lock, and one that waits on that lock) still replays after the
    rebuild.
@@ -360,9 +407,10 @@ Each ships on its own; none changes core or the ABI.
    bounds each statement; a missing table is a no-op; a table without `created_at` is skipped
    and logged; a `WITHOUT ROWID` table is reported, not silently skipped; with `null`
    configured no cleanup runs; a keyed retry within `W` replays after a cleanup ran; a keyed
-   retry whose row was deleted executes again (pins the documented post-window behavior); an
-   earlier-snapshot row younger than `W` survives cleanup and still yields
-   `POLICYSQL_IDEMPOTENCY_CONFLICT` (bypass regression for snapshot-based deletion). Real smoke
+   retry whose row was deleted executes again (pins the documented post-window behavior); a
+   row written before a snapshot change, younger than `W`, survives cleanup and still replays
+   its stored response on retry (bypass regression for snapshot-based deletion: deleting it
+   would let the retry execute the committed write again). Real smoke
    (`provision-dev.mjs`, then the deployed dev Worker): a keyed write creates a row with
    `created_at`; a second row is back-dated administratively; triggering the scheduled handler
    (`wrangler dev --test-scheduled` locally, then the deployed cron) deletes only the
@@ -379,7 +427,11 @@ Each ships on its own; none changes core or the ABI.
   advertised in Capabilities, and the guarantee is stated in terms of it.
 - A committed keyed write can execute twice only when its retry arrives after the window,
   which the documented client rule excludes. Within the window it never executes twice,
-  including across snapshot changes, where it currently gets a false conflict instead (#80).
+  including across snapshot changes: after #80 a retry that differs only in the runtime
+  snapshot replays.
+- A deployment that must keep replays cannot lower `maxRequestBytes` or the body-side
+  `maxJsonValues` below a body accepted in its advertised window: lowering one turns those
+  retries into the unknown 500, not a definite rejection (#100).
 - Stored replies, including `RETURNING` data, live for a bounded time.
 - Core, the ABI, and the snapshot are unchanged; the library gains one required config setting,
   one Capabilities field, and a decision-free SQL helper.
@@ -392,8 +444,7 @@ Each ships on its own; none changes core or the ABI.
   scheduled deletion, the database registry; per-request deletion also adds write work to every
   keyed request and touches rows of other principals in the caller's transaction.
 - **`expires_at` written by core.** Needs time and the window in core, an ABI bump (a snapshot
-  change and false conflicts for straddling retries), a column the library would then require,
-  and makes window changes non-retroactive.
+  change), a column the library would then require, and makes window changes non-retroactive.
 - **Ignoring rows older than `W` in the lookup.** Can only turn a replay or conflict into a
   second execution; it buys determinism at the cost of the guarantee.
 - **Deleting on snapshot change.** Removes the tombstones that keep cross-snapshot retries from
@@ -406,8 +457,9 @@ Each ships on its own; none changes core or the ABI.
 
 ## Open questions for the maintainer
 
-The proposed answers below are the review's recommendations, **pending maintainer
-confirmation**; the decision sections above already assume them.
+Items 1 to 5 are the review's recommendations, **pending maintainer confirmation**; the
+decision sections above already assume them. Item 6 records a closed issue and needs no
+confirmation.
 
 1. **Reference window and range.** Proposed: the reference wrapper uses `W = 86_400` (24 h), and
    config accepts `[3600, 31_536_000]`.
@@ -420,5 +472,6 @@ confirmation**; the decision sections above already assume them.
    enforced window from the same configuration value.
 5. **Required window.** Proposed: `idempotencyRetentionSeconds` is required as
    `number | null`.
-6. **Earlier-snapshot conflicts.** Moved to [#80](https://github.com/unacowa/policysql/issues/80)
-   (out of scope here).
+6. **Earlier-snapshot conflicts.** Closed: [#80](https://github.com/unacowa/policysql/issues/80)
+   was fixed by PR #84 (a snapshot-only difference replays, section 2). Retained here only to
+   record that deletion must not reintroduce the conflict.
