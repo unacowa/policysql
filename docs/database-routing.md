@@ -146,6 +146,18 @@ default). Core then checks the same bound on what the driver returned, after it 
 engine logs `database_read_cap_unenforced` once per provider when `maxResultBytes` exceeds 64,000,
 so the operator knows memory is not bounded while the reply is read.
 
+A transport that reads the reply as a stream must also keep the reply's leading bytes: a Hrana
+reply starts with the stream's next baton. When a statement reply is refused or cannot be
+finished, the caller continues the stream's transaction with that baton and rolls it back; a
+transport that discards it leaves the server transaction, and its write lock, open until the
+server expires the stream. The Turso HTTP adapter does this. When no baton is readable at all
+(the request failed before its headers), it makes one bounded best-effort ROLLBACK with the last
+known baton and logs `database_stream_recovery` with `outcome` `rolled_back` or `refused` (never
+the baton). A `refused` outcome means the transaction, and any write lock, remains until the
+server expires the stream — observed more than 25 minutes on real Turso — with no client-side
+recovery: the operator waits for the expiry, and nothing PolicySQL sends can shorten it. See
+ADR 0027, "Baton recovery".
+
 `TursoHttpTransport.begin` requires `options`. When called directly, an omitted or
 malformed `maxBytesPerValue` (missing, non-integer, zero, negative or `Infinity`) is a
 `TypeError` raised before any HTTP request; the transport never runs without a

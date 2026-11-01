@@ -51,6 +51,10 @@ Configure alerts in the production account for:
   regression shows long before the absolute threshold (the real p95 is far below this threshold);
 - actual rows read above the admission upper bound, or daily Turso usage above 80% of budget;
 - any `transaction_owner_unavailable` owner-loss event, or active/terminal count mismatch;
+- any `database_stream_recovery` event with `outcome` `refused`: a transaction, with any write
+  lock, is waiting for Turso to expire a stream that PolicySQL could not roll back; see ADR 0027,
+  "Baton recovery" (the lock can outlast the client by more than 25 minutes, and no client-side
+  recovery can shorten it);
 - JWKS, cost-admission, or Turso availability errors for three consecutive minutes;
 - any wrapper `rate_limiter_missing` or `rate_limiter_failed` event, and a sustained 429
   `POLICYSQL_RATE_LIMITED` rate above the seven-day baseline (separately for the client

@@ -425,6 +425,46 @@ No component buffers past a limit it knows (relates to #53):
   `maxResultBytes` exceeds 64,000 (the reference wrapper's value; the field has no library
   default), so the operator sees the gap.
 
+### Baton recovery (#96, #97)
+
+A statement request that was sent but whose reply cannot be fully read still advanced the
+server's stream: the reply starts with the next baton (`{"baton":"…", …}`), and the baton the
+client held is then stale. The transport therefore keeps the reply's leading bytes and continues
+the stream from them instead of discarding it:
+
+- The leading 1,024 raw bytes are accumulated across chunks, so a baton that starts in one chunk
+  and ends in the next is kept. The declared-length-over-bound path reads until it has them (or
+  the body ends) before it releases the body; the byte cost stays bounded by 1,024 or one
+  received chunk.
+- They are kept for every failure after the first bytes: over the bound, malformed JSON, a wrong
+  result count, malformed UTF-8, a read error, and a timeout in the middle of the body. Only the
+  `baton` field is parsed; the text is never logged, kept, or shown.
+- When the JSON parsed but the result count is wrong, the baton comes from the parsed
+  `body.baton`, so key order is irrelevant.
+- The recovered baton is the stream's current one, so the ordinary ROLLBACK continues the stream
+  and releases the transaction and its write lock.
+- A rollback started after the reply is handed to the runtime's background tasks (`waitUntil` or
+  `BackgroundTasks.run`), so a Worker is not evicted before it completes.
+
+The remaining case is the reply whose headers never arrive: a connect timeout, a transport
+failure before a response, or a non-2xx reply. No baton is readable there. The stream is marked
+unusable, and `finish("ROLLBACK")` makes exactly one bounded best-effort attempt with the last
+known baton:
+
+- If the request never reached the server, that baton is still current and the rollback releases
+  the transaction immediately.
+- If it did reach the server, the server refuses the stale baton, and the transaction, with any
+  write lock it holds, remains until the stream expires. On the observed real Turso stream this
+  lasted more than 25 minutes after the client was gone; the lifetime is the server's, not
+  PolicySQL's. `database_stream_recovery` is logged once with `outcome` `refused` (never with the
+  baton), and no client-side action can shorten it: the operator must wait for the server to
+  expire the stream before writes to that database are accepted again. This residual is
+  client-triggerable and is documented, not hidden: a slow write statement whose reply never
+  starts can hold the write lock that long.
+
+COMMIT is never recovered this way: an unusable stream is committed only if its own reply was
+read. A lost COMMIT reply stays outcome-unknown (ADR 0007), whatever the stream's eventual fate.
+
 ### Final response
 
 `maxResponseBytes` bounds what leaves PolicySQL, not only the rows:
@@ -500,11 +540,15 @@ causes added to the fixed cause names are `function_arguments`, `compound_terms`
 Review follow-ups: a database refusal is classified `complex` only when it is the one error of its
 reply and its statement is the last, because Hrana keeps running the rest of a pipeline after an
 error (a later error could roll the transaction back and a later statement commit in autocommit);
-anything else stays 503. A statement reply the transport cannot read (over 2 MiB, malformed, wrong
-count, timeout) leaves the stream unusable and no ROLLBACK is sent with the stale baton (#96). Sent
-over HTTP, `EXISTS` nests and `NOT` chains reach the binder's depth limit (413) or the parser's cap
-on the client's own SQL (400 `INVALID_SQL`) before the emitted statement reaches the recursion
-cap, so only the Rust differential test covers the recursion-cap path.
+anything else stays 503. The same rule applies to an **unreadable reply** (#97): an atomic
+execute whose envelope contains a later write and that fails with the limit class is 500
+`POLICYSQL_INTERNAL` (outcome unknown), not 413, because the write after an earlier error could
+have run in autocommit and committed. A read-only envelope, or one whose only write is its
+first statement, keeps 413. The transport recovers the reply's baton and rolls back; how,
+and the residual when no baton is readable, is in "Baton recovery". Sent over HTTP,
+`EXISTS` nests and `NOT` chains reach the binder's depth limit (413) or the parser's cap on the
+client's own SQL (400 `INVALID_SQL`) before the emitted statement reaches the recursion cap, so
+only the Rust differential test covers the recursion-cap path.
 The declared-type term of the column-metadata guard is the byte length of the physical schema's
 declared type for a column projected directly (zero for an expression, which has none), taken from
 the physical schema at construction. Left to later pull requests, as decided: the result side of
@@ -681,7 +725,8 @@ core, no `serde_json` tree for JSON-typed values beyond validation, no reviver, 
 through volatile JSON), the re-measurement of the coefficients and the maxima, and `cpu_ms`; the
 duplicate raw re-serialization in `RuntimeCompiler::validate` (the machine's `RawResult` is turned back
 into JSON text for `validate_result`) is one of those. Also open: measuring the interactive statement
-and callback replies against `maxResponseBytes` (the deviation above). #97 (separate) is not touched.
+and callback replies against `maxResponseBytes` (the deviation above). #97 (separate) is
+implemented in "Baton recovery" above.
 
 ### CPU and memory budgets
 
@@ -919,6 +964,7 @@ described as counting companion cells and column descriptors. `spec/openapi.yaml
 | Emitted SQL that fails to re-parse for any other reason | 500 `POLICYSQL_INTERNAL` | none started |
 | Bytes parameter malformed / over `maxBytesPerValue` | 400 `POLICYSQL_INVALID_PARAMETER` / 413 `POLICYSQL_LIMIT_EXCEEDED` | none started |
 | Rows, result bytes, result values, raw result bound, BLOB cell over the limit, response over `maxResponseBytes` | 413 `POLICYSQL_LIMIT_EXCEEDED` | rolled back before COMMIT; no idempotency record |
+| The same limit failure on an **atomic execute whose envelope contains a later write** (#97) | 500 `POLICYSQL_INTERNAL` (outcome unknown, not in the client's rejection table) | rolled back with the recovered baton; an earlier error could have auto-rolled the transaction back and the later write could then commit in autocommit, so this is never a definite rejection |
 | Interactive cumulative limits | 413 `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` (was 429, #62) | per ADR 0024 |
 | Control response or validator response over its fixed bound | 503 `POLICYSQL_DATABASE_UNAVAILABLE`, or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for COMMIT; validator: commit denied | per ADR 0007/0024 |
 | Session JSON over 65,536 | 500 `POLICYSQL_INTERNAL` (wrapper fault) | none started |
@@ -929,7 +975,10 @@ retrying the same request will not help"; it is never used for a COMMIT outcome.
 codes are definite rejections, so the client's `REJECTIONS` table
 (`packages/client/protocol.js`) lists `[413, ["LIMIT_EXCEEDED", "REQUEST_TOO_LARGE"]]` for
 every request kind, `POLICYSQL_SQL_TOO_COMPLEX` is added under 400, and the existing server test
-that compares the client table with the status table (`website/api/errors.md`) covers both.
+that compares the client table with the status table (`website/api/errors.md`) covers both. The
+one exception is the atomic execute with a later write in the same envelope (#97, row above):
+its limit failure is 500 and therefore unknown, because the same shape that makes a complexity
+refusal uncertain makes a lost reply uncertain.
 
 ## Breaking changes (beta; no compatibility layer, ADR 0019)
 
@@ -994,6 +1043,13 @@ that compares the client table with the status table (`website/api/errors.md`) c
     (the worst measured SQL-dense cost per MiB). `E` is zero at the reference limits, so
     `cpu_ms` stays 500 and the measured fit is unchanged; raising `maxSqlBytes` alone now
     raises the required CPU. The reference wrapper's `cpu_ms` is unchanged.
+22. **WASM ABI 17 (#97).** The snapshot changes, so open transactions from ABI 16 do not match.
+    An atomic execute that fails with the limit class after its envelope contains a later write
+    is answered 500 `POLICYSQL_INTERNAL` (outcome unknown) instead of 413
+    `POLICYSQL_LIMIT_EXCEEDED`. The client's `REJECTIONS` table is unchanged: 500 was already
+    outcome-unknown. The transport also recovers the reply's baton for the rollback and, when
+    none is readable, changes its cleanup from "send nothing" to one best-effort ROLLBACK with
+    the stale baton (logged as `database_stream_recovery`).
 
 ## Implementation pull requests
 
