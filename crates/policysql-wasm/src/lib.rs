@@ -58,8 +58,8 @@ use wasm_bindgen::prelude::*;
 /// rollback before COMMIT; result-side `max_json_values` is enforced (413); the raw result
 /// bound is compiled per envelope and replaces the 1 MiB per statement bound; the step machine
 /// writes `maxResponseBytes` on `execute` and `observe` effects, a stored response over the
-/// lookup bound is 413 on a keyed retry, and the event and volatile bounds are derived. No
-/// identity value changed.
+/// lookup bound is 500 `POLICYSQL_INTERNAL` on a keyed retry, and the event and volatile bounds
+/// are derived. No identity value changed.
 const ABI_VERSION: u32 = 15;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;

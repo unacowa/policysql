@@ -16,7 +16,7 @@ const INSERT = "INSERT INTO smoke_values (id, label, note, payload) VALUES (:id,
 const DELETE = "DELETE FROM smoke_values WHERE id = :id RETURNING id";
 
 // A SELECT of `WIDE_COLUMNS` columns with long distinct aliases and no row: its public result is
-// about 150 bytes per column of descriptors.
+// about 190 bytes per column of descriptors.
 const wideSelect = (statement) => ({
   sql: `SELECT ${Array.from({ length: WIDE_COLUMNS }, (_, column) => `id AS "${`c${statement}_${column}_`.padEnd(ALIAS_BYTES, "x")}"`).join(", ")} FROM projects WHERE id = :none`,
   params: { none: "no_such_project" },

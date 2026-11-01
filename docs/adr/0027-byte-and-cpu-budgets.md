@@ -386,7 +386,8 @@ and memory are counted in the formulas below.
 
 Two consequences are stated rather than hidden:
 
-- **Rows written under an earlier ABI (9 to 14).** Before this change `response_json` was effectively unbounded
+- **Rows written under an earlier ABI (14 and earlier, before ABI 15).** Before this change
+  `response_json` was effectively unbounded
   (`maxResultBytes` up to 2^53, Turso responses up to 2 MiB), so a stored row larger than
   1,183,744 bytes can exist. A keyed retry of it within the idempotency retention window W
   (ADR 0026, PR #79) after the upgrade finds the row (`keyHash` does not include the snapshot)
@@ -394,8 +395,10 @@ Two consequences are stated rather than hidden:
   is never misreported as success, conflict, or replay. **Amended by pull request 6:** the
   answer is 500 `POLICYSQL_INTERNAL` (an unknown outcome), not a 413: that request may have
   committed, and a definite rejection would break ADR 0007. Only rows from before this change
-  (ABI 9 to 14, which had no bound) or from a larger hard maximum can exceed the bound, the
-  library is unpublished, and such rows may be deleted. It is listed under Breaking changes.
+  (ABI 14 and earlier, which had no bound) or from a larger hard maximum can exceed the bound, the
+  library is unpublished, and such rows may be deleted. A row from before ABI 9 would otherwise
+  conflict once on the snapshot in its fingerprint (ADR 0014); an oversized one gets the lookup
+  cap's 500 first, before the fingerprint is compared. It is listed under Breaking changes.
 - **Lowering the lookup bound later** (that is, lowering the hard maximum of
   `maxResponseBytes`) is a migration that must span W, for the same reason.
 
@@ -655,20 +658,22 @@ the refused body a conflict afterwards (so no record was left), and a retry refu
 
 *ABI 15.* `limits_json` values for existing constructor inputs are unchanged, but inputs that were valid
 (`max_rows` above 100,000, and so on) are now errors, a response over `max_response_bytes` is refused, the
-raw bound and the step output (`maxResponseBytes` on `execute` and `observe`, a 413 for a stored response
-over the lookup bound) differ, so the snapshot changes; no `keyHash` or identity value changed, so keyed
-retries across the deployment still replay (the identity goldens are unchanged).
+raw bound and the step output (`maxResponseBytes` on `execute` and `observe`; a stored response over the
+lookup bound is 500 `POLICYSQL_INTERNAL` on a keyed retry) differ, so the snapshot changes; no `keyHash` or
+identity value changed, so keyed retries across the deployment still replay (the identity goldens are
+unchanged).
 
 *Deviation: only the atomic response is measured.* "Final response" decided that an interactive statement
 reply and a callback reply are measured against `maxResponseBytes` before they are sent. This pull request
 measures the atomic execution response only (before COMMIT, where it also decides rollback). An interactive
 statement reply is bounded by its compiled raw bound and by the cumulative `maxTransactionResultBytes`
-(at most 64 KiB), which counts the public rows, not the column descriptors: a wide interactive SELECT's
-descriptors sit outside that limit, so such a reply can exceed `maxResponseBytes` today (at most a few
-hundred KiB, bounded by the raw bound and the 1 MiB column-metadata guard). Capabilities and
+(at most 65,536 bytes), which counts the shaped public reply — the rows, the column descriptors, and
+`meta.result.columns`; a callback reply uses the same limit. Such a reply can therefore exceed a
+`maxResponseBytes` configured below `maxTransactionResultBytes` plus the reply framing; at the minimum
+response limit (`maxResultBytes` + 3,072) the exceed is at most about 62,000 bytes. Capabilities and
 `docs/configuration.md` say the limit is atomic-only. Follow-up: measure the interactive statement and
-callback replies against `maxResponseBytes` (failing the statement as a result limit does), or count the
-descriptors in `maxTransactionResultBytes`; add it to the remaining work of a later pull request.
+callback replies against `maxResponseBytes` (failing the statement as a result limit does); add it to the
+remaining work of a later pull request.
 
 *Left to pull request 7 and #97.* The CPU and memory reductions (a single pass over the body and result in
 core, no `serde_json` tree for JSON-typed values beyond validation, no reviver, one restatement of results
@@ -879,9 +884,9 @@ that compares the client table with the status table (`website/api/errors.md`) c
 14. Reference wrapper: `cpu_ms` 50 → 1,000 (provisional), runbook alert threshold relative to
     `cpu_ms`.
 15. Capabilities `limits` gains fields (additive).
-16. **Idempotency rows from before this change** (ABI 9 to 14) whose `response_json` exceeds
-    1,183,744 bytes: a keyed retry gets 500 `POLICYSQL_INTERNAL` instead of a replay (nothing
-    executes; see Idempotent replay). The rows may be deleted.
+16. **Idempotency rows from before this change** (ABI 14 and earlier, before ABI 15) whose
+    `response_json` exceeds 1,183,744 bytes: a keyed retry gets 500 `POLICYSQL_INTERNAL` instead of
+    a replay (nothing executes; see Idempotent replay). The rows may be deleted.
 17. JSON-typed values written by another system in non-canonical form can exceed the raw bound
     and be 413 even when their canonical public form fits (as for BLOBs, ADR 0016).
 

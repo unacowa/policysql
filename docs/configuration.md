@@ -212,7 +212,7 @@ unchanged: nothing here ever turns a COMMIT that may have been sent into a rejec
 request that did commit returns the stored response even after the limit was lowered (the stored
 response fitted when it was committed): the idempotency lookup's read cap derives from the hard
 maximum of `maxResponseBytes` (589,824), not from the current value. A stored row larger than the
-lookup bound can exist only from a release before these bounds (ABI 9 to 14) or from a larger hard
+lookup bound can exist only from a release before these bounds (ABI 14 and earlier, before ABI 15) or from a larger hard
 maximum; a keyed retry that finds one is 500 `POLICYSQL_INTERNAL` (an unknown outcome, never a
 definite rejection, since that request may have committed), before its fingerprint is compared, and
 nothing executes. Delete such rows (the library is unpublished). Only the atomic response is measured
