@@ -42,8 +42,11 @@ rollback and do not delete the idempotency row: nothing ran, the key is not cons
 deployment that restores the limit replays the stored response (ADR 0007, #100). The client must
 retry the same key and body. If those retries must replay during the rollout rather than stay
 unknown, do not lower a limit below a body accepted in the idempotency retention window W
-(ADR 0026); the depth tightening has no such window, so a depth-65 commit from before ABI 16 can
-only be resolved unknown until its row expires.
+(ADR 0026, PR #79); the depth tightening has no such window. A depth-65 body is refused before
+the idempotency lookup under every current build, so a depth-65 commit from before ABI 16 stays
+unknown even after its row expires: expiry removes only the possibility of a replay, not the
+unknown, and the same key and body cannot resolve it. The operator must reconcile that write
+explicitly.
 
 ## Monitoring and alerts
 

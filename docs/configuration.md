@@ -91,10 +91,12 @@ The limits checked by the compile (`maxSqlBytes`, `maxParameters`, `maxExpressio
 unknown outcome) when they fail, because the compile runs before the idempotency lookup and the
 retry may be of a write that committed under an earlier policy or deployment (ADR 0007, #85,
 #103); an unkeyed atomic execute and Explain keep the 413. `maxStatements` is checked in the same
-compile call, so a keyed atomic execute over it is 500 as well. A client bytes parameter over
-`maxBytesPerValue` is also refused at compile: 413 for an unkeyed execute and 500 for a keyed
-one, while malformed base64 stays 400 for both. A result cell over `maxBytesPerValue` is checked
-after execution, so it keeps its 413 and rollback.
+compile call, so a keyed atomic execute over it is 500 as well. A client bytes parameter is also
+checked at compile: one over `maxBytesPerValue` is 413 `POLICYSQL_LIMIT_EXCEEDED` for an unkeyed
+execute and Explain, and 500 `POLICYSQL_INTERNAL` (the unknown outcome) for a keyed execute, like
+every other keyed compile failure; malformed base64 is 400 `POLICYSQL_INVALID_PARAMETER` for an
+unkeyed execute and Explain, and 500 for a keyed execute. A result cell over `maxBytesPerValue`
+is checked after execution, so it keeps its 413 and rollback.
 
 #### JSON nesting
 
@@ -127,7 +129,9 @@ and numeric values are not bytes values: a text or JSON parameter longer than `m
 bounded by the request limits only. Its hard maximum, 1,048,576, is the largest value whose base64
 form (1,398,104 bytes) can fit the largest request. A value over the limit is 413
 `POLICYSQL_LIMIT_EXCEEDED`; an input that is not canonical padded base64 is 400
-`POLICYSQL_INVALID_PARAMETER` however long it is. Capabilities advertises the configured value as
+`POLICYSQL_INVALID_PARAMETER`, however long it is. Both are compile failures: a keyed atomic
+execute answers 500 `POLICYSQL_INTERNAL` (the unknown outcome) instead, while an unkeyed atomic
+execute and Explain keep the 413/400. Capabilities advertises the configured value as
 `limits.maxBytesPerValue`.
 
 It is an upper bound, not a promise. On every path **the smallest applicable limit governs**, and a

@@ -652,7 +652,7 @@ components:
             maxBytesPerValue:
               type: integer
               minimum: 1
-              description: Maximum decoded bytes of one bytes value (a bytes parameter, a policy preset, a result cell); text and JSON values are not bounded by it. The default is 262144 and the deployment may configure up to 1048576. An upper bound only, not a promise; the smallest applicable limit governs, so a value within it can still be refused by maxRequestBytes (413 POLICYSQL_REQUEST_TOO_LARGE) or, when read, by the result limits (413 POLICYSQL_LIMIT_EXCEEDED). A bytes value over it is 413 POLICYSQL_LIMIT_EXCEEDED.
+              description: Maximum decoded bytes of one bytes value (a bytes parameter, a policy preset, a result cell); text and JSON values are not bounded by it. The default is 262144 and the deployment may configure up to 1048576. An upper bound only, not a promise; the smallest applicable limit governs, so a value within it can still be refused by maxRequestBytes (413 POLICYSQL_REQUEST_TOO_LARGE, or 500 POLICYSQL_INTERNAL for a keyed atomic execute) or, when read, by the result limits (413 POLICYSQL_LIMIT_EXCEEDED). A client bytes parameter over the limit, or one that is not canonical padded base64, is a compile failure, returning 413 POLICYSQL_LIMIT_EXCEEDED / 400 POLICYSQL_INVALID_PARAMETER for an unkeyed atomic execute or Explain, and 500 POLICYSQL_INTERNAL (outcome unknown) for a keyed atomic execute, whose compile runs before the idempotency lookup. A result cell over it remains 413 POLICYSQL_LIMIT_EXCEEDED and rolls back.
             maxRequestBytes:
               type: integer
               minimum: 1

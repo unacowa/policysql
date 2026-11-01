@@ -56,8 +56,11 @@ whitespace. Invalid encodings or non-string bytes inputs return
 `POLICYSQL_INVALID_PARAMETER` (400), however long the input is. `limits.maxBytesPerValue`
 in Capabilities bounds decoded values (configured per deployment; 262,144 bytes by default, at most
 1,048,576); exceeding it with well-formed input returns `POLICYSQL_LIMIT_EXCEEDED` (413) before
-execution. A stored physical BLOB over this limit also returns 413 with either database transport
-and rolls back the transaction. The limit applies to bytes values only. It is an upper bound: the
+execution. For an atomic Execute with an `Idempotency-Key`, malformed input and an over-limit
+parameter are both compile failures and return 500 `POLICYSQL_INTERNAL` (the unknown outcome),
+because the compile runs before the idempotency lookup; an unkeyed Execute and Explain keep 400
+for malformed input and 413 for the limit. A stored physical BLOB over this limit also returns 413
+with either database transport and rolls back the transaction. The limit applies to bytes values only. It is an upper bound: the
 smallest applicable limit governs, so a value within it can still be refused by `maxRequestBytes`
 (`POLICYSQL_REQUEST_TOO_LARGE`) or, when read, by `maxResultBytes`, `maxResponseBytes`, or the interactive result limit
 (`docs/configuration.md`, "Per-value bytes"). See [ADR 0016](adr/0016-bytes-wire-contract.md) and the
