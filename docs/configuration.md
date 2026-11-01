@@ -94,9 +94,12 @@ root container as level 1. A request body over it is 400 `POLICYSQL_JSON_TOO_DEE
 nests too deeply.") rather than `POLICYSQL_INVALID_REQUEST`; a step command text over it gets
 the same code. The limit is in `crates/policysql-transaction/src/canonical.rs` (`MAX_DEPTH`) and
 re-exported by the strict body check; `deploy/cloudflare/src/request-body.ts` does not check
-depth, so there is only one value. The compiler's own typed read receives a step command wrapped
-in a one-statement envelope; the two fixed envelope levels are server JSON and do not count
-against the command's 64 levels.
+depth, so there is only one client value. A fixed server envelope around a client value does not
+spend the client's levels: the compiler's typed read receives a step command wrapped in a
+one-statement envelope, whose two levels are server JSON; the command identity wraps its command
+in one level. Both parse with an explicit allowance for that fixed envelope, not a larger client
+limit (the previous engine scan accepted 65 containers and canonical JSON 127; 64 is a one-level
+tightening).
 
 #### Per-value bytes
 
@@ -316,7 +319,7 @@ deployment knowledge ([ADR 0027](adr/0027-byte-and-cpu-budgets.md), "The library
 combination"). A wrapper sets its CPU limit from the limits it configures with
 
 ```
-cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res))
+cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res) + a_sql x E)
 ```
 
 | Symbol | Meaning | Value |
@@ -324,16 +327,19 @@ cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res))
 | `R` | request bytes the limits allow, MiB (`maxRequestBytes`) | 1 |
 | `B` | raw result bytes not attributable to values, MiB: the larger of `2 x maxResultBytes + 512 x maxStatements + 1,048,576` and the idempotency lookup bound 1,183,744 | 1.13 at the reference wrapper's limits |
 | `V_req`, `V_res` | JSON values in the request body (values plus object member names) and in the raw result (cells including companions, column descriptors, values inside JSON cells). `maxJsonValues` bounds the request side since ADR 0027 pull request 3; the result side is enforced since pull request 6, so both are numbers a request cannot exceed | 65,536 each |
+| `E` | per-statement SQL capacity above the reference 65,536 bytes: `max(0, maxSqlBytes - 65,536) / MiB` | 0 at the reference wrapper's limits |
 | `C0` | fixed cost of a request | 5 ms |
 | `a_b` | cost per MiB of request bytes (SQL text included) and of result text | 40 ms per MiB |
 | `a_v` | cost per JSON value | 0.8 microseconds |
+| `a_sql` | cost per MiB of SQL capacity above the reference `maxSqlBytes` | 275 ms per MiB |
 | `F` | Workers CPU time over reference-machine time | 2.0 (the maintainers' value; the first measurement on the dev deployment found 1.2 to 7.7, see ADR 0027 "Pull request 1 results") |
 | `S` | safety margin: isolates tolerate occasional overruns, not sustained ones | 1.25 |
 
 Since pull request 3 the formula's request side is a bound a client cannot exceed: a body past `maxJsonValues` is 413 before it is parsed. (Before it, a body of about 1 MB of nested arrays was accepted with about 500,000 values, which the formula prices at 731 ms of reference time.) The measurement script and the release smoke size their densest request shapes by that limit (`REQUEST_VALUE_BUDGET`, 65,536 minus 64 values for the envelope), so a 1 MB body of nested arrays is now about 130 KB.
 
 The coefficients are for the reference machine (i7-7700K 4.2 GHz, Node, the release WASM): the
-target `a_b` and the rounded-up `a_v` after ADR 0027 pull request 7. At the reference wrapper's limits the
+target `a_b`, the rounded-up `a_v`, and the SQL-capacity `a_sql` after ADR 0027 pull request 7.
+At the reference wrapper's limits the
 formula gives about 195 ms on the reference machine and 488 ms for `cpu_ms`
 (`wrangler.jsonc` rounds up to 500). The code is
 `deploy/cloudflare/scripts/lib/cpu-model.mjs`; `test/cpu-budget.test.mjs` checks the reference
@@ -343,15 +349,17 @@ Workers CPU from the release smoke (`deploy/cloudflare/README.md`, "Measuring CP
 
 Pull request 7 reached the `a_b` target (40 ms per MiB) but not the `a_v` target (0.5
 microseconds): the worst measured non-SQL value-bound shape is a keyed `UPDATE ... RETURNING`
-result, which needs about 0.92 microseconds per value before `S` (0.74 after the safety margin);
-the 1 MB 17-digit decimal request needs 0.80 before `S` (0.64 after). The coefficient is rounded
+result, which needs about 0.98 microseconds per value before `S` (0.79 after the safety margin);
+the 1 MB 17-digit decimal request needs 0.81 before `S` (0.65 after). The coefficient is rounded
 up to 0.8. Both shapes are dominated by the identity digest and the idempotency envelope; the
 strict body check and the result validation no longer materialize a second tree, but the digest
 pass still parses JSON-typed parameters. SQL-dense requests remain above `a_b` per MiB (up to
-275 ms per MiB of SQL text in the worst shape, about 150 ms per MiB for the large dense
-request); the formula covers them at the configured limits because such a request spends `R` on
-SQL rather than on `B` and `V`, so no separate SQL term is added. The measured WASM
-memory high-water marks are in ADR 0027 "Pull request 7 results"; the hard maxima are unchanged
+234 ms per MiB of SQL text in the latest measurement's worst shape, about 150 ms per MiB for
+the large dense request); the formula covers them at the configured limits because such a
+request spends `R` on SQL rather than on `B` and `V`. `a_sql` (275, above that measured worst)
+charges this measured cost only for `maxSqlBytes` capacity above the reference 65,536 bytes, so
+the reference formula is unchanged and raising `maxSqlBytes` alone raises `cpu_ms`. The measured
+WASM memory high-water marks are in ADR 0027 "Pull request 7 results"; the hard maxima are unchanged
 because the measured peaks do not justify raising them and scaling the densest shape to the
 131,072-value maximum keeps it under the 64 MiB phase budget.
 

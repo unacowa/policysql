@@ -319,6 +319,26 @@ fn issue_70_large_integers_keep_their_digits() {
 }
 
 #[test]
+fn json_parameters_keep_their_exact_text_for_the_driver() {
+    let mut owner = begun();
+    // Whitespace, member order, and number spelling are all deliberate: a tree round trip
+    // would compact the object, reorder its members, and print `1E2` as `100.0`.
+    let meta = r#"{ "z" : 1.0, "a" : [ 1E2, "x" ], "n" : 9007199254740993 }"#;
+    let body = format!(
+        r#"{{"sequence":1,"sql":"INSERT INTO counters (id, meta) VALUES (:id, :meta)","params":{{"id":"x","meta":{meta}}}}}"#
+    );
+    let output = owner.statement(&body);
+    let execute = owner.succeed(&output);
+    assert_eq!(execute["effects"][0]["type"], "execute", "{execute}");
+    let statement = &execute["effects"][0]["statements"][0];
+    assert_eq!(
+        statement["args"]["meta"],
+        Value::String(meta.to_owned()),
+        "the driver receives the exact JSON-typed parameter text: {execute}"
+    );
+}
+
+#[test]
 fn limits_that_could_overflow_the_durable_record_are_rejected() {
     // 256 statements of a resource named at the longest the bound allows still fit; the
     // check is in `durable_bound_holds` and runs at construction.

@@ -12,8 +12,9 @@
   },
   "limits": {
     // Per invocation (the Worker and each Durable Object call). ADR 0027: at least
-    // 1.25 x F x (5 ms + 40 ms/MiB x (R + B) + 0.8 us x (V_req + V_res)) for this file's limits
-    // (wrapper/limits.ts), F = 2.0 (the maintainers' value): about 488 ms, rounded up to 500
+    // 1.25 x F x (5 ms + 40 ms/MiB x (R + B) + 0.8 us x (V_req + V_res)
+    // + 275 ms/MiB x E) for this file's limits (wrapper/limits.ts), F = 2.0 (the maintainers'
+    // value), E = 0 (maxSqlBytes is at the reference 65,536): about 488 ms, rounded up to 500
     // (test/cpu-budget.test.mjs fails when the formula is violated; scripts/measure-cpu.mjs
     // re-measures the coefficients, the release smoke records the observed F: see ADR 0027
     // "Pull request 7 results").

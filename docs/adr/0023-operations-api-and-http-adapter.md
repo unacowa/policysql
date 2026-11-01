@@ -45,12 +45,14 @@ The engine takes the body as text (`bodyText`), either the string or a reader
 operation runs in one order: request context, session, database binding (the wrapper's
 provider), then the body, so a body is never read for a caller whose session or database is
 rejected, and the transport never buffers a body that may not be needed. The engine applies
-the transport-independent checks to the text, once, for every transport: well-formed Unicode
-(a lone surrogate has no UTF-8 form), the 1 MiB limit counted in UTF-8 bytes of the text as
-given, removal of one leading byte order mark, duplicate keys including escaped equivalents,
-then strict JSON (`src/request-body.ts`). HTTP has always accepted one leading BOM, so the
-engine keeps that rule for every transport; the BOM's 3 bytes count toward the limit on both
-sides, as they did on the wire.
+the transport-independent checks to the text, once, for every transport: a required string,
+well-formed Unicode (a lone surrogate has no UTF-8 form), a cheap UTF-16 size precheck, and
+removal of one leading byte order mark (`src/request-body.ts`). Core then does the one strict
+parse through `check_body_json` (or `begin_body_json`), which applies the exact UTF-8 limit,
+duplicate-key detection including escaped equivalents, the value and depth limits, syntax, the
+number range, and escaped lone surrogates (ADR 0027 pull request 7). HTTP has always accepted
+one leading BOM, so the engine keeps that rule for every transport; the BOM's 3 bytes count
+toward the limit on both sides, as they did on the wire.
 
 Decoding bytes is the transport's. The HTTP adapter decodes the stream with a fatal UTF-8
 decoder that keeps a BOM (`ignoreBOM: true`), so malformed bytes are rejected rather than

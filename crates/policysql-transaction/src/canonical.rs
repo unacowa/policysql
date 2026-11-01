@@ -29,10 +29,12 @@
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use std::fmt::{self, Write as _};
 
-/// The deepest nesting accepted, in arrays and objects: 64 (ADR 0027 pull request 7, #66).
-/// The engine's strict body check ([`crate::strict`]) enforces the same value before any
-/// identity is computed, and `serde_json`'s own recursion limit (127) stays a second, larger
-/// bound, so a deeper input is always this limit's error.
+/// The deepest nesting accepted in a client body, in arrays and objects: 64 (ADR 0027 pull
+/// request 7, #66). The engine's strict body check ([`crate::strict`]) enforces the same value
+/// before any identity is computed. An internal caller may add a fixed server envelope around
+/// a client value and allow its levels with [`parse_with_max_depth`]; the command identity
+/// does, because `{"op":"command","kind":…,"command":…}` adds one level around the client's
+/// command. `serde_json`'s own recursion limit (127) stays a second, larger bound.
 pub const MAX_DEPTH: usize = 64;
 
 /// The largest integer magnitude printed as plain digits whatever its spelling: 2^53 − 1.
@@ -92,10 +94,25 @@ impl Json {
 /// Returns [`ParseError`] for text that is not strict JSON, a duplicate key, nesting deeper
 /// than [`MAX_DEPTH`], a number outside the double range, or an escaped lone surrogate.
 pub fn parse(text: &str) -> Result<Json, ParseError> {
+    parse_with_max_depth(text, MAX_DEPTH)
+}
+
+/// Parses strict JSON text with an explicit nesting bound.
+///
+/// Only a caller that wraps a client-checked value in a fixed-size server envelope uses a
+/// bound above [`MAX_DEPTH`]; a client body stays at [`MAX_DEPTH`].
+///
+/// # Errors
+///
+/// Returns [`ParseError`] as [`parse`] does.
+pub fn parse_with_max_depth(text: &str, max_depth: usize) -> Result<Json, ParseError> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
-    let value = ValueSeed { depth: 0 }
-        .deserialize(&mut deserializer)
-        .map_err(|_| ParseError)?;
+    let value = ValueSeed {
+        depth: 0,
+        max_depth,
+    }
+    .deserialize(&mut deserializer)
+    .map_err(|_| ParseError)?;
     deserializer.end().map_err(|_| ParseError)?;
     Ok(value)
 }
@@ -153,18 +170,23 @@ pub(crate) fn js_string_len(text: &str) -> usize {
 /// Builds a [`Json`] from `serde_json`'s events, rejecting duplicate keys and deep nesting.
 struct ValueSeed {
     depth: usize,
+    max_depth: usize,
 }
 
 impl<'de> DeserializeSeed<'de> for ValueSeed {
     type Value = Json;
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Json, D::Error> {
-        deserializer.deserialize_any(ValueVisitor { depth: self.depth })
+        deserializer.deserialize_any(ValueVisitor {
+            depth: self.depth,
+            max_depth: self.max_depth,
+        })
     }
 }
 
 struct ValueVisitor {
     depth: usize,
+    max_depth: usize,
 }
 
 impl<'de> Visitor<'de> for ValueVisitor {
@@ -205,12 +227,13 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Json, A::Error> {
-        if self.depth >= MAX_DEPTH {
+        if self.depth >= self.max_depth {
             return Err(de::Error::custom("nesting too deep"));
         }
         let mut items = Vec::new();
         while let Some(item) = access.next_element_seed(ValueSeed {
             depth: self.depth + 1,
+            max_depth: self.max_depth,
         })? {
             items.push(item);
         }
@@ -218,7 +241,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Json, A::Error> {
-        if self.depth >= MAX_DEPTH {
+        if self.depth >= self.max_depth {
             return Err(de::Error::custom("nesting too deep"));
         }
         let mut members = Vec::new();
@@ -227,6 +250,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
                 key,
                 access.next_value_seed(ValueSeed {
                     depth: self.depth + 1,
+                    max_depth: self.max_depth,
                 })?,
             ));
         }
@@ -327,7 +351,9 @@ fn write_string(text: &str, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Json, MAX_DEPTH, ParseError, canonical_json, parse, to_canonical};
+    use super::{
+        Json, MAX_DEPTH, ParseError, canonical_json, parse, parse_with_max_depth, to_canonical,
+    };
 
     fn canonical(text: &str) -> String {
         canonical_json(text).unwrap_or_else(|_| "<error>".to_owned())
@@ -523,5 +549,11 @@ mod tests {
         assert_eq!(parse(&objects(MAX_DEPTH + 1)), Err(ParseError));
         // One value, the engine's strict body check, and canonicalization all use 64 (#66).
         assert_eq!(parse(&arrays(65)), Err(ParseError));
+        // An internal server envelope may allow its own levels without widening the client limit.
+        assert!(parse_with_max_depth(&arrays(MAX_DEPTH + 1), MAX_DEPTH + 1).is_ok());
+        assert_eq!(
+            parse_with_max_depth(&arrays(MAX_DEPTH + 1), MAX_DEPTH),
+            Err(ParseError)
+        );
     }
 }

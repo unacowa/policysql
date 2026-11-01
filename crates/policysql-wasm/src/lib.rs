@@ -62,8 +62,8 @@ use wasm_bindgen::prelude::*;
 /// are derived. No identity value changed.
 /// 16: ADR 0027 pull request 7 (#56, #60, #66): `check_body_json` and `begin_body_json` are the
 /// strict body parse, in core, and the engine uses them instead of its own scan and
-/// `JSON.parse`; the nesting limit is 64 levels everywhere (was 64 in the engine's scan, counting
-/// the root container as level 0, and 127 in canonical JSON), and a body over it is 400
+/// `JSON.parse`; the client nesting limit is 64 levels (the engine's scan accepted 65, and
+/// canonical JSON allowed 127), and a body over it is 400
 /// `POLICYSQL_JSON_TOO_DEEP` (a depth limit is no longer "not valid JSON"); JSON-typed
 /// parameters are read as their exact text, so their formatting is preserved. No identity
 /// value changed.

@@ -61,16 +61,19 @@ Configure alerts in the production account for:
 The CPU of one Worker or Durable Object invocation is bounded by `limits.cpu_ms`. The platform
 ends an invocation that exceeds it (outcome `exceededCpu`, HTTP error 1102), and the client sees
 an outcome-unknown 5xx, so the limit must exceed what a valid request can cost. ADR 0027 gives
-`cpu_ms >= 1.25 x F x (5 ms + 40 ms/MiB x (R + B) + 0.8 us x (V_req + V_res))` for the request
-bytes `R`, result bytes `B` and JSON values `V` the configured limits allow, and
+`cpu_ms >= 1.25 x F x (5 ms + 40 ms/MiB x (R + B) + 0.8 us x (V_req + V_res) + 275 ms/MiB x E)`
+for the request bytes `R`, result bytes `B` and JSON values `V` the configured limits allow and
+`E` = the per-statement SQL capacity above 65,536 bytes, and
 `deploy/cloudflare/test/cpu-budget.test.mjs` fails when `wrangler.jsonc` and `wrapper/limits.ts`
 violate it. `F` (Workers CPU over reference-machine CPU) is 2.0, the maintainers' value (the release smoke records the
 observed one, which has been higher); the value in force and every coefficient are in `deploy/cloudflare/scripts/lib/cpu-model.mjs`, and
 [configuration.md](configuration.md#cpu-model) explains them.
 
-Raising a limit (`maxResultBytes`, `maxResponseBytes`, `maxStatements`, `maxJsonValues`, and the
-request limits) raises the formula's result: raise `cpu_ms` with it, or lower the limit when the plan
-cannot (Workers Free allows 10 ms).
+Raising a limit (`maxResultBytes`, `maxResponseBytes`, `maxStatements`, `maxJsonValues`,
+`maxRequestBytes`, or `maxSqlBytes`) raises the formula's result: raise `cpu_ms` with it, or lower
+the limit when the plan cannot (Workers Free allows 10 ms). `maxSqlBytes` above 65,536 adds
+`275 ms/MiB x E`; a wrapper cannot enlarge per-statement SQL capacity without paying for it in
+the formula.
 
 Before changing a coefficient, `F` or `cpu_ms`, measure from `deploy/cloudflare`:
 

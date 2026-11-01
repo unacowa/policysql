@@ -41,13 +41,17 @@ test("B is the lookup bound until maxResultBytes makes the text bound larger", (
   assert.equal(resultBoundBytes({ maxResultBytes: 400_000, maxStatements: 8 }), 2 * 400_000 + 512 * 8 + MIB);
 });
 
-test("inputs read maxRequestBytes and maxJsonValues from the limits the runtime reports", () => {
+test("inputs read maxRequestBytes, maxJsonValues, and excess maxSqlBytes from the limits", () => {
   const base = { maxResultBytes: 64_000, maxStatements: 8, maxRequestBytes: MIB, maxJsonValues: 65_536 };
-  assert.deepEqual(inputsAtLimits(base), { rMiB: 1, bMiB: 1_183_744 / MIB, vReq: 65_536, vRes: 65_536 });
-  const configured = inputsAtLimits({ ...base, maxRequestBytes: 2 * MIB, maxJsonValues: 1_000 });
+  assert.deepEqual(inputsAtLimits(base), { rMiB: 1, bMiB: 1_183_744 / MIB, vReq: 65_536, vRes: 65_536, sqlExcessMiB: 0 });
+  const configured = inputsAtLimits({ ...base, maxRequestBytes: 2 * MIB, maxJsonValues: 1_000, maxSqlBytes: MIB });
   assert.equal(configured.rMiB, 2);
   assert.equal(configured.vReq, 1_000);
   assert.equal(configured.vRes, 1_000);
+  assert.equal(configured.sqlExcessMiB, 1 - 65_536 / MIB);
+  // Lowering maxSqlBytes does not lower the formula: it only removes capacity that was never
+  // priced above the reference.
+  assert.equal(inputsAtLimits({ ...base, maxSqlBytes: 1_024 }).sqlExcessMiB, 0);
 });
 
 test("requiredCpuMs scales with S and F and uses the coefficients it is given", () => {

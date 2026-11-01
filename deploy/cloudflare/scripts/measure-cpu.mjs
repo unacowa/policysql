@@ -121,7 +121,7 @@ const report = {
   machine: { cpu: cpus()[0]?.model ?? null, node: process.version, scale: options.scale, isolatedProcesses: !options.inProcess },
   method: { cold: options.cold, runs: options.runs, requestBodyTargetBytes: options.target, statistic: options.cold ? "first request of a fresh process, wall ms, no warm-up, simulated Turso and client response parsing excluded" : "best of runs after one warm-up, wall ms, simulated Turso and client response parsing excluded" },
   model: {
-    formula: "cpu_ms >= S * F * (C0 + a_b * (R + B) + a_v * (V_req + V_res))",
+    formula: "cpu_ms >= S * F * (C0 + a_b * (R + B) + a_v * (V_req + V_res) + a_sql * E)",
     coefficients: COEFFICIENTS, safetyMargin: SAFETY_MARGIN, hardwareFactorF: HARDWARE_FACTOR,
     atReferenceWrapperLimits: {
       inputs: wrapperInputs,
@@ -161,10 +161,10 @@ if (options.json) {
   process.stdout.write([
     "",
     `Model: ${report.model.formula}`,
-    `  C0 = ${COEFFICIENTS.c0Ms} ms, a_b = ${COEFFICIENTS.bMsPerMiB} ms/MiB, a_v = ${COEFFICIENTS.vUsPerValue} us/value, S = ${SAFETY_MARGIN}, F = ${HARDWARE_FACTOR} (measured by the release smoke, see cpu-model.mjs)`,
+    `  C0 = ${COEFFICIENTS.c0Ms} ms, a_b = ${COEFFICIENTS.bMsPerMiB} ms/MiB, a_v = ${COEFFICIENTS.vUsPerValue} us/value, a_sql = ${COEFFICIENTS.sqlMsPerMiB} ms/MiB over the reference maxSqlBytes, S = ${SAFETY_MARGIN}, F = ${HARDWARE_FACTOR} (measured by the release smoke, see cpu-model.mjs)`,
     `Fit: ${summary.scenarios} scenarios, ${summary.exceedingModel.length} above ${SAFETY_MARGIN}x the model${summary.exceedingModel.length ? `: ${summary.exceedingModel.join("; ")}` : ""}`,
     ...(summary.worst ? [`  highest measured/model: ${summary.worst.measuredOverPredicted.toFixed(2)} (${summary.worst.name})`] : []),
-    ...(report.sqlTerm.worstSqlRequest ? [`SQL bytes: the densest SQL request (${report.sqlTerm.worstSqlRequest.scenario}) costs ${report.sqlTerm.worstSqlRequest.measuredMs.toFixed(1)} ms for ${report.sqlTerm.worstSqlRequest.sqlBytes} SQL bytes; the worst cost per MiB of SQL is ${report.sqlTerm.worstMsPerMiBOfSql?.msPerMiB.toFixed(0)} ms (${report.sqlTerm.worstMsPerMiBOfSql?.scenario}; a_b = ${COEFFICIENTS.bMsPerMiB}); the formula allows ${report.sqlTerm.referenceAtLimitsMs.toFixed(0)} ms at the limits: ${report.sqlTerm.coveredByFormulaAtLimits ? "covered, no separate SQL term needed" : "NOT covered, a separate SQL term is needed"}`] : []),
+    ...(report.sqlTerm.worstSqlRequest ? [`SQL bytes: the densest SQL request (${report.sqlTerm.worstSqlRequest.scenario}) costs ${report.sqlTerm.worstSqlRequest.measuredMs.toFixed(1)} ms for ${report.sqlTerm.worstSqlRequest.sqlBytes} SQL bytes; the worst cost per MiB of SQL is ${report.sqlTerm.worstMsPerMiBOfSql?.msPerMiB.toFixed(0)} ms (${report.sqlTerm.worstMsPerMiBOfSql?.scenario}; a_b = ${COEFFICIENTS.bMsPerMiB}); the formula allows ${report.sqlTerm.referenceAtLimitsMs.toFixed(0)} ms at the limits: ${report.sqlTerm.coveredByFormulaAtLimits ? "covered by the measured terms; a_sql is zero at the reference maxSqlBytes" : "NOT covered, the model needs a larger term"}`] : []),
     `Reference wrapper limits: R ${limits.inputs.rMiB.toFixed(3)} MiB, B ${limits.inputs.bMiB.toFixed(3)} MiB, V ${limits.inputs.vReq}+${limits.inputs.vRes}: ${limits.referenceMs.toFixed(0)} ms on the reference machine, cpu_ms >= ${limits.requiredCpuMs.toFixed(0)}; wrangler.jsonc limits.cpu_ms = ${limits.configuredCpuMs}`,
     `Report: ${options.out}`,
     "",
