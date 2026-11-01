@@ -240,6 +240,30 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     });
   }
 
+  // The atomic and interactive post-reply rollback is an inline effect in the step machine, so
+  // gating it would deadlock the request; the background registration of `closeConnection` is
+  // pinned by the request-step and owner unit tests instead (#97 review).
+  for (const [placement, hooks] of [["direct", false], ["owner", true]]) {
+    // A rollback that fails before its reply is otherwise swallowed after the reply. The
+    // cleanup outcome must be logged (the reply stays the execute's 413) so the runbook's
+    // stream-recovery alert can see it (#97 review).
+    test(`${ownerAdapter}/${placement}: a failed post-reply rollback logs its cleanup outcome`, async (t) => {
+      const lines = captureLog(t);
+      const h = await setup(t, { hooks });
+      let recovered = null;
+      h.afterDatabaseStatement(({ sql, baton }) => {
+        if (sql === "ROLLBACK" && baton === recovered) throw new Error("rollback request failed");
+      });
+      replaceOnce(h, "statement", ({ baton }) => { recovered = baton; return recoverableBody(baton); });
+      const reply = await h.request("a", execute, { statements: [insert("failed_rollback")] }, null);
+      assert.equal(reply.status, 413, JSON.stringify(reply.body));
+      assert.equal(reply.body.error.code, "POLICYSQL_LIMIT_EXCEEDED");
+      await h.flush();
+      assert.deepEqual(recoveryOutcomes(lines).map(({ outcome }) => outcome), ["failed"]);
+      assert.equal(h.rows("a").filter((row) => row.id === "failed_rollback").length, 0);
+    });
+  }
+
   test(`${ownerAdapter}: an oversized reply to an interactive COMMIT is outcome-unknown, never a rejection`, async (t) => {
     t.mock.method(console, "log", () => {});
     const h = await setup(t, { hooks: false });

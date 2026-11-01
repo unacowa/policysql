@@ -23,6 +23,14 @@ const result = (columns, rows, usage = {}) => ({
     },
   },
 });
+/** The `database_stream_recovery` records in captured console.log lines. */
+const recoveryOutcomes = (lines) => lines.flatMap((line) => {
+  try {
+    const record = JSON.parse(line);
+    return record?.event === "database_stream_recovery" ? [record] : [];
+  } catch { return []; }
+});
+const closeReply = () => ({ type: "ok", response: { type: "close" } });
 
 const blobCases = JSON.parse(readFileSync(new URL("../../../tests/fixtures/hrana-blob-response.json", import.meta.url), "utf8"));
 // PolicySQL's transport wrapper always passes the runtime limit as begin options.
@@ -174,19 +182,112 @@ test("decodes exact usage metrics while preserving transaction ownership", async
   assert.equal(requests[2].baton, "baton_2");
 });
 
-test("rejects missing per-query billing metrics", async () => {
+// A BEGIN reply can name the stream's next baton even when its result is unusable. BEGIN has no
+// transaction object yet, so without the rollback the server transaction (and its write lock)
+// would wait for stream expiry (#97 review).
+test("rejects missing per-query billing metrics and rolls back the BEGIN through its baton", async (t) => {
+  const lines = [];
+  t.mock.method(console, "log", (...args) => lines.push(args.map(String).join(" ")));
+  const requests = [];
   const transport = new TursoHttpTransport(
     { url: "https://db.test", authToken: "secret" },
     "req_1",
-    async () => new Response(JSON.stringify({
-      baton: "baton",
-      results: [{
-        type: "ok",
-        response: { type: "execute", result: { cols: [], rows: [], affected_row_count: 0 } },
-      }],
-    })),
+    async (_url, init) => {
+      const body = JSON.parse(init.body);
+      requests.push({ baton: body.baton, sql: body.requests[0].stmt?.sql });
+      if (body.requests[0].stmt?.sql.startsWith("BEGIN")) {
+        return Response.json({
+          baton: "begin_baton",
+          results: [{
+            type: "ok",
+            response: { type: "execute", result: { cols: [], rows: [], affected_row_count: 0 } },
+          }],
+        });
+      }
+      return Response.json({ baton: null, results: [result([], []), closeReply()] });
+    },
   );
   await assert.rejects(transport.begin("read", 1000, undefined, runtimeLimit), (error) => error.code === "POLICYSQL_DATABASE_UNAVAILABLE");
+  assert.deepEqual(requests, [
+    { baton: undefined, sql: "BEGIN DEFERRED" },
+    { baton: "begin_baton", sql: "ROLLBACK" },
+  ]);
+  assert.deepEqual(recoveryOutcomes(lines).map(({ outcome }) => outcome), ["rolled_back"]);
+});
+
+// The control bound rejects a declared-over-bound BEGIN, but the transport asks for its leading
+// bytes first: the baton they name is the only way to roll back a BEGIN the server may already
+// have run (#97 review).
+test("rolls back a BEGIN reply over the declared control bound through the baton in its prefix", async (t) => {
+  const lines = [];
+  t.mock.method(console, "log", (...args) => lines.push(args.map(String).join(" ")));
+  const requests = [];
+  const huge = JSON.stringify({ baton: "prefix_baton", padding: " ".repeat(70_000) });
+  const transport = new TursoHttpTransport(
+    { url: "https://db.test", authToken: "secret" },
+    "req_1",
+    async (_url, init) => {
+      const body = JSON.parse(init.body);
+      requests.push({ baton: body.baton, sql: body.requests[0].stmt?.sql });
+      if (body.requests[0].stmt?.sql.startsWith("BEGIN")) {
+        return new Response(huge, { headers: { "content-length": String(new TextEncoder().encode(huge).byteLength) } });
+      }
+      return Response.json({ baton: null, results: [result([], []), closeReply()] });
+    },
+  );
+  await assert.rejects(transport.begin("read", 1000, undefined, runtimeLimit), (error) => error.code === "POLICYSQL_DATABASE_UNAVAILABLE");
+  assert.deepEqual(requests, [
+    { baton: undefined, sql: "BEGIN DEFERRED" },
+    { baton: "prefix_baton", sql: "ROLLBACK" },
+  ]);
+  assert.deepEqual(recoveryOutcomes(lines).map(({ outcome }) => outcome), ["rolled_back"]);
+});
+
+// A reply that stalls after its first bytes carries the baton too; begin must recover it from
+// the timeout's leading bytes, not only from a parsed body (#97 review).
+test("rolls back a BEGIN reply that stalls after its baton", async (t) => {
+  const lines = [];
+  t.mock.method(console, "log", (...args) => lines.push(args.map(String).join(" ")));
+  const requests = [];
+  const transport = new TursoHttpTransport(
+    { url: "https://db.test", authToken: "secret" },
+    "req_1",
+    async (_url, init) => {
+      const body = JSON.parse(init.body);
+      requests.push({ baton: body.baton, sql: body.requests[0].stmt?.sql });
+      if (body.requests[0].stmt?.sql.startsWith("BEGIN")) {
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"baton":"lead_baton","base_url":null,"results":['));
+          },
+          pull() { return new Promise(() => {}); },
+        }));
+      }
+      return Response.json({ baton: null, results: [result([], []), closeReply()] });
+    },
+  );
+  await assert.rejects(transport.begin("read", 20, undefined, runtimeLimit), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
+  assert.deepEqual(requests, [
+    { baton: undefined, sql: "BEGIN DEFERRED" },
+    { baton: "lead_baton", sql: "ROLLBACK" },
+  ]);
+  assert.deepEqual(recoveryOutcomes(lines).map(({ outcome }) => outcome), ["rolled_back"]);
+});
+
+// The residual no code can recover: no headers, no baton, nothing to continue. BEGIN must not
+// invent a recovery request (there is no stream to name), and the failure is unchanged (#97).
+test("a BEGIN whose headers never arrive has no baton and makes no recovery attempt", async () => {
+  const requests = [];
+  const transport = new TursoHttpTransport(
+    { url: "https://db.test", authToken: "secret" },
+    "req_1",
+    async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      throw new DOMException("The operation was aborted.", "TimeoutError");
+    },
+  );
+  await assert.rejects(transport.begin("write", 50, undefined, runtimeLimit), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
+  assert.equal(requests.length, 1, "no ROLLBACK is sent without a baton");
 });
 
 test("HTTP operations share an absolute deadline while rollback retains its cleanup budget", async (t) => {

@@ -180,7 +180,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
         results.push({ type: "error", error: error_ });
         continue;
       }
-      if (afterStatement) await afterStatement({ tenant, sql });
+      if (afterStatement) await afterStatement({ tenant, sql, baton });
     }
     // Every reply carries a new baton, as a real server's does; a replacement reply may name it.
     let next = null;

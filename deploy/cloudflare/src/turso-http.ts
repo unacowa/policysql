@@ -34,6 +34,12 @@ const withReplyBaton = <T extends Error>(error: T, body: unknown): T => {
   if (validBaton(baton)) (error as { nextBaton?: string }).nextBaton = baton;
   return error;
 };
+// The only record of a stream cleanup: its outcome, never the baton or reply text. `rolled_back`
+// means the stream was released; `refused` and `failed` mean the transaction, with any write
+// lock, may remain until the server expires the stream (ADR 0027, "Baton recovery").
+const logStreamRecovery = (requestId: string, outcome: string) => {
+  console.log(JSON.stringify({ event: "database_stream_recovery", requestId, outcome }));
+};
 const databaseFailure = () =>
   new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
 
@@ -168,7 +174,12 @@ export class TursoHttpTransport {
   // the rest. A read failure or malformed UTF-8 is a transport failure (503), and the
   // request's timeout also bounds the body read (504). None of these is a rejection, so a
   // COMMIT whose reply fails here is never reported as not committed (ADR 0007).
-  async pipeline(requests, baton = undefined, timeoutMs = 1_000, oversized = databaseFailure, maxResponseBytes = CONTROL_RESPONSE_BYTES) {
+  //
+  // `readDeclaredPrefix` asks for the leading bytes of a reply whose declared length is over the
+  // bound, so the caller can recover its baton (#97). Statement execution asks for them because
+  // its over-bound class is the 413 limit; BEGIN asks explicitly because its over-bound class is
+  // the 503 default, but it still needs the baton to roll back a transaction the server started.
+  async pipeline(requests, baton = undefined, timeoutMs = 1_000, oversized = databaseFailure, maxResponseBytes = CONTROL_RESPONSE_BYTES, readDeclaredPrefix = oversized !== databaseFailure) {
     const signal = AbortSignal.timeout(timeoutMs);
     const timedOut = () => new EngineError("POLICYSQL_DATABASE_TIMEOUT", "The database operation timed out.");
     const isAbort = (error) => error?.name === "TimeoutError" || error?.name === "AbortError";
@@ -194,7 +205,7 @@ export class TursoHttpTransport {
     // The leading bytes are kept for every failure, not only the over-bound one: a reply that
     // stalls or fails mid-body has already sent its baton (#97).
     const leading = { text: "" };
-    const text = await readBoundedText(response, maxResponseBytes, signal, oversized !== databaseFailure, leading).catch((error) => {
+    const text = await readBoundedText(response, maxResponseBytes, signal, readDeclaredPrefix, leading).catch((error) => {
       if (error instanceof BodyTooLargeError) throw withBaton(oversized(), error.prefix);
       if (isAbort(error)) throw withBaton(timedOut(), leading.text);
       throw withBaton(databaseFailure(), leading.text);
@@ -213,14 +224,58 @@ export class TursoHttpTransport {
     // The runtime's per-value limit is required. An omitted or malformed limit fails
     // closed before any request, so a direct caller cannot disable the BLOB bound.
     const maxBytes = bytesLimit(options?.maxBytesPerValue);
-    const body = await this.pipeline(
-      [executeRequest({ sql: mode === "write" ? "BEGIN IMMEDIATE" : "BEGIN DEFERRED" }, maxBytes)],
-      undefined,
-      Math.min(timeoutMs, remainingDatabaseTime(deadlineMs)),
-    );
-    const beginResult = decodeResult(body.results[0], maxBytes);
+    let body;
+    try {
+      body = await this.pipeline(
+        [executeRequest({ sql: mode === "write" ? "BEGIN IMMEDIATE" : "BEGIN DEFERRED" }, maxBytes)],
+        undefined,
+        Math.min(timeoutMs, remainingDatabaseTime(deadlineMs)),
+        databaseFailure,
+        CONTROL_RESPONSE_BYTES,
+        true,
+      );
+    } catch (error) {
+      // A BEGIN reply can name the stream's next baton even when the reply is refused or cannot
+      // be read; the server may already have started the transaction (BEGIN IMMEDIATE takes the
+      // write lock). One bounded best-effort rollback+close through that baton, then rethrow the
+      // original failure. A reply whose headers never arrived carries no baton: if the server
+      // runs BEGIN later, that transaction stays until the stream expires (ADR 0027).
+      const next = (error as { nextBaton?: unknown } | null)?.nextBaton;
+      if (validBaton(next)) await this.recoverStream(next, maxBytes, timeoutMs);
+      throw error;
+    }
+    let beginResult;
+    try {
+      beginResult = decodeResult(body.results[0], maxBytes);
+    } catch (error) {
+      // The reply parsed and named the stream's baton, but its result is unusable. The server
+      // may have started the transaction, so roll it back through the baton before rethrowing.
+      if (validBaton(body.baton)) await this.recoverStream(body.baton, maxBytes, timeoutMs);
+      throw error;
+    }
     if (!body.baton) throw databaseFailure();
     return new TursoHttpTransaction(this, body.baton, timeoutMs, beginResult.usage, deadlineMs, maxBytes);
+  }
+
+  /**
+   * One bounded best-effort ROLLBACK+close on a stream whose baton is known (#97): a failed
+   * BEGIN (before a transaction object exists) and an abandoned transaction both use it. Never
+   * throws: the caller's failure is already terminal. Logs only the outcome, never the baton.
+   */
+  async recoverStream(baton: string, maxBytes: number, timeoutMs: number) {
+    let outcome = "refused";
+    let usage: any = null;
+    try {
+      const body = await this.pipeline(
+        [executeRequest({ sql: "ROLLBACK" }, maxBytes), { type: "close" }],
+        baton,
+        timeoutMs,
+      );
+      usage = decodeResult(body.results[0], maxBytes).usage;
+      if (body.results[1]?.type === "ok" && body.results[1].response?.type === "close") outcome = "rolled_back";
+    } catch { /* best effort: the stream is abandoned either way */ }
+    logStreamRecovery(this.requestId, outcome);
+    return usage;
   }
 }
 
@@ -332,38 +387,37 @@ class TursoHttpTransaction {
       }
     }
     if (sql === "COMMIT") this.commitAttempted = true;
-    const body = await this.transport.pipeline(
-      [executeRequest({ sql }, this.maxBytes), { type: "close" }],
-      this.baton,
-      timeoutMs,
-    );
-    const terminal = decodeResult(body.results[0], this.maxBytes);
-    this.usage.push(terminal.usage);
-    if (body.results[1]?.type !== "ok" || body.results[1].response?.type !== "close") {
-      throw databaseFailure();
+    try {
+      const body = await this.transport.pipeline(
+        [executeRequest({ sql }, this.maxBytes), { type: "close" }],
+        this.baton,
+        timeoutMs,
+      );
+      const terminal = decodeResult(body.results[0], this.maxBytes);
+      this.usage.push(terminal.usage);
+      if (body.results[1]?.type !== "ok" || body.results[1].response?.type !== "close") {
+        throw databaseFailure();
+      }
+      this.open = false;
+    } catch (error) {
+      // A cleanup ROLLBACK runs after the reply (or is handed to the background) and its
+      // failure is otherwise swallowed. Log the outcome so a rollback that never reached the
+      // server is visible to the runbook's stream-recovery alert (#97 review); the reply is
+      // unchanged and no baton is logged.
+      if (sql === "ROLLBACK") logStreamRecovery(this.transport.requestId, "failed");
+      throw error;
     }
-    this.open = false;
   }
 
   /**
    * Best-effort ROLLBACK after a reply was never read (#97). Never throws: the transaction is
-   * already abandoned, so cleanup cannot change the reply. `database_stream_recovery` records
-   * only its outcome, never the baton: `refused` means the server no longer knows that stream,
-   * and the transaction, with any write lock, remains until the server expires it.
+   * already abandoned, so cleanup cannot change the reply. The outcome log is `rolled_back` or
+   * `refused` (the server no longer knows that stream), and the transaction, with any write
+   * lock, remains until the server expires it.
    */
   private async recover() {
-    let outcome = "refused";
-    try {
-      const body = await this.transport.pipeline(
-        [executeRequest({ sql: "ROLLBACK" }, this.maxBytes), { type: "close" }],
-        this.baton,
-        this.timeoutMs,
-      );
-      const terminal = decodeResult(body.results[0], this.maxBytes);
-      this.usage.push(terminal.usage);
-      if (body.results[1]?.type === "ok" && body.results[1].response?.type === "close") outcome = "rolled_back";
-    } catch { /* best effort: the stream is abandoned either way */ }
-    console.log(JSON.stringify({ event: "database_stream_recovery", requestId: this.transport.requestId, outcome }));
+    const usage = await this.transport.recoverStream(this.baton, this.maxBytes, this.timeoutMs);
+    if (usage) this.usage.push(usage);
   }
 
   commit() { return this.finish("COMMIT"); }

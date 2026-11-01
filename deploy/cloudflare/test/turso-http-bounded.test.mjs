@@ -190,15 +190,16 @@ test("#53: the bound counts UTF-8 bytes, not UTF-16 code units", async () => {
   assert.ok(state.bytes <= MAX_RESPONSE_BYTES + 65_536);
 });
 
-test("#53: a declared Content-Length over the bound is rejected unread; a smaller one changes nothing", async () => {
+test("#53: a declared Content-Length over the bound is rejected; statement and BEGIN read only their leading bytes", async () => {
   for (const target of ["statement", "begin", "commit"]) {
     const small = tracked(chunked(replyFor[target](1_024), 100));
     await assert.rejects(runners[target](transportFor(target, () => new Response(small.stream, {
       headers: { "content-length": String(BOUND[target] + 1) },
     }))), safe(OVERSIZED[target]), target);
-    // A statement reply's leading bytes (at most 1,024, across chunks) are read for its baton
-    // (#96, #97); the rest is unread.
-    if (target === "statement") assert.ok(small.state.bytes <= 1_024, `${target}: at most the leading bytes read`);
+    // Statement and BEGIN replies keep at most 1,024 leading bytes (across chunks) for their
+    // baton, because a transaction the server started must be rolled back (#96, #97); COMMIT
+    // is never recovered this way, so nothing of its reply is read.
+    if (target === "statement" || target === "begin") assert.ok(small.state.bytes <= 1_024, `${target}: at most the leading bytes read`);
     else assert.equal(small.state.bytes, 0, `${target}: nothing read`);
     assert.equal(small.state.cancelled, true, `${target}: released`);
   }

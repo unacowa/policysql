@@ -150,13 +150,19 @@ A transport that reads the reply as a stream must also keep the reply's leading 
 reply starts with the stream's next baton. When a statement reply is refused or cannot be
 finished, the caller continues the stream's transaction with that baton and rolls it back; a
 transport that discards it leaves the server transaction, and its write lock, open until the
-server expires the stream. The Turso HTTP adapter does this. When no baton is readable at all
-(the request failed before its headers), it makes one bounded best-effort ROLLBACK with the last
-known baton and logs `database_stream_recovery` with `outcome` `rolled_back` or `refused` (never
-the baton). A `refused` outcome means the transaction, and any write lock, remains until the
-server expires the stream — observed more than 25 minutes on real Turso — with no client-side
-recovery: the operator waits for the expiry, and nothing PolicySQL sends can shorten it. See
-ADR 0027, "Baton recovery".
+server expires the stream. The Turso HTTP adapter does this. A BEGIN reply carries the same next
+baton even when its result is unusable, and a refused or unreadable reply may carry it in its
+leading bytes; when a baton is readable, `begin` makes one bounded best-effort ROLLBACK+close
+through it before rethrowing. When no baton is readable at all (the
+request failed before its headers), a statement's `finish("ROLLBACK")` makes one bounded
+best-effort ROLLBACK with the last known baton and logs `database_stream_recovery` with `outcome`
+`rolled_back` or `refused` (never the baton). A `refused` outcome means the transaction, and any
+write lock, remains until the server expires the stream — observed more than 25 minutes on real
+Turso — with no client-side recovery: the operator waits for the expiry, and nothing PolicySQL
+sends can shorten it. A cleanup rollback on a known baton whose own request fails logs `outcome`
+`failed` and has the same consequence. A BEGIN whose headers never arrive has no baton at all:
+no event is logged, and if the server runs BEGIN IMMEDIATE later, its transaction and write lock
+remain until the stream expires. See ADR 0027, "Baton recovery".
 
 `TursoHttpTransport.begin` requires `options`. When called directly, an omitted or
 malformed `maxBytesPerValue` (missing, non-integer, zero, negative or `Infinity`) is a
