@@ -281,6 +281,16 @@ reply or the unknown outcome.
 Another principal or database is rejected as before, and every other command requires the
 current snapshot. The order of the checks is in ADR 0007.
 
+The wrapper's authentication and the engine's session gate run before the owner. A commit
+they deny (401 from the wrapper, or 403 `POLICYSQL_FORBIDDEN_ACCESS` from the session gate)
+is the intentional exception to ADR 0007's rule that a commit retry is never a definite
+rejection when COMMIT may have been sent ([ADR
+0007](adr/0007-transaction-retry-and-commit-check-protocol.md), amendment #104): the
+transaction stops without consulting the owner's commit record, and clients keep treating
+both as definite rejections. The denial does not prove that an earlier COMMIT was not
+applied; verify application data, and after access is restored a raw retry of the identical
+commit replays the recorded outcome without sending COMMIT again.
+
 ## Catalog and capabilities
 
 `GET /v1/catalog` returns the role-visible logical schema. `GET /v1/capabilities` advertises accepted SQL surface, transaction support, and enforced limits. Generated clients pin requests with the Catalog `schemaVersion` and `policyVersion`.

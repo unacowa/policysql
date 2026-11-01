@@ -49,7 +49,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_AMBIGUOUS_PARAMETER_TYPE` | 400 | Explainでparameter型を一意に証明できない |
 | `POLICYSQL_RESERVED_PARAMETER` | 400 | server用のparameter名を使用した |
 | `POLICYSQL_IDEMPOTENCY_KEY_INVALID` | 400 | `Idempotency-Key`が空または書式不正（16〜128文字のASCII英数字と`. _ : - + / =`以外を含む、長さが範囲外、header重複によるカンマ結合）。keyの省略では発生しない。DB処理の前に拒否するため、再送しても成功しない |
-| `POLICYSQL_FORBIDDEN_ACCESS` | 403 | `PolicySQL-Role`がtrusted sessionの`roles`にない、またはendpointに必要なaccessがない。`Idempotency-Key`付きのAtomic Executeでは500 `POLICYSQL_INTERNAL`（結果不明）になる（deployでaccessまたはroleを失った主体による、commit済みwriteの再送かもしれないため。bodyは読まず、DB処理も行わない） |
+| `POLICYSQL_FORBIDDEN_ACCESS` | 403 | `PolicySQL-Role`がtrusted sessionの`roles`にない、またはendpointに必要なaccessがない。`Idempotency-Key`付きのAtomic Executeでは500 `POLICYSQL_INTERNAL`（結果不明）になる（deployでaccessまたはroleを失った主体による、commit済みwriteの再送かもしれないため。bodyは読まず、DB処理も行わない）。対話型transactionのcommitでは403のまま返り、これはADR 0007 #104の意図的な例外（session gateはownerより前に実行され、拒否されたsessionでownerのcommit記録を照会するとtransactionの存在やCOMMITの有無が漏れるため）。以前に送ったCOMMITが適用されなかったことを意味しない |
 | `POLICYSQL_MISSING_POLICY` | 403 | 適用可能なpolicyがない。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_INTERNAL`（結果不明）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
 | `POLICYSQL_FORBIDDEN_OPERATION` | 403 | operationが許可されていない。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_INTERNAL`（結果不明）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
 | `POLICYSQL_FORBIDDEN_COLUMN` | 403 | 利用できないcolumnを参照した。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_INTERNAL`（結果不明）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
@@ -100,11 +100,11 @@ cost見積もりはcommit後（direct placementのreplayを含む）に別のrea
 <!-- policysql:error-status-table:wrapper -->
 | Code | Status | 意味 |
 | --- | --- | --- |
-| `POLICYSQL_UNAUTHENTICATED` | 401 | credentialがない、または無効・期限切れ・失効。ラッパーが返す401の標準code。参考ラッパーとJWT adapterはこのcodeだけを使う |
-| `POLICYSQL_AUTHENTICATION_FAILED` | 401 | 予約code。同梱のコードはどれも返さない。独自のラッパーが「credentialはあるが検証に失敗した」を、credentialがない場合と区別したいときに使える。clientは`POLICYSQL_UNAUTHENTICATED`と同じく「実行されていない」拒否として扱う |
+| `POLICYSQL_UNAUTHENTICATED` | 401 | credentialがない、または無効・期限切れ・失効。ラッパーが返す401の標準code。参考ラッパーとJWT adapterはこのcodeだけを使う。対話型commitの再送でこの401になった場合、その拒否は以前のCOMMITが適用されなかったことを意味しない（ADR 0007 #104） |
+| `POLICYSQL_AUTHENTICATION_FAILED` | 401 | 予約code。同梱のコードはどれも返さない。独自のラッパーが「credentialはあるが検証に失敗した」を、credentialがない場合と区別したいときに使える。clientは`POLICYSQL_UNAUTHENTICATED`と同じく「実行されていない」拒否として扱う。対話型commitでは同じ#104の例外であり、以前のCOMMITの結果を意味しない |
 | `POLICYSQL_RATE_LIMITED` | 429 | request rate limitを超えた |
 
-認証はライブラリの機能ではなく、ラッパーの責務です（[JWT認証](../security/jwt)）。ラッパーはcredentialを検証し、失敗した場合は`app.fetch`を呼ばずにHTTP 401を返します。標準codeは`POLICYSQL_UNAUTHENTICATED`です（参考実装はこれだけを返す）。`POLICYSQL_AUTHENTICATION_FAILED`は予約codeで、独自のラッパーが「credentialはあるが検証に失敗した」場合を区別したいときだけ使います。ライブラリは401を返しません。対話型transactionのcommandとcommitも毎回認証するため、token失効や期限切れの後はtransactionを継続できません。
+認証はライブラリの機能ではなく、ラッパーの責務です（[JWT認証](../security/jwt)）。ラッパーはcredentialを検証し、失敗した場合は`app.fetch`を呼ばずにHTTP 401を返します。標準codeは`POLICYSQL_UNAUTHENTICATED`です（参考実装はこれだけを返す）。`POLICYSQL_AUTHENTICATION_FAILED`は予約codeで、独自のラッパーが「credentialはあるが検証に失敗した」場合を区別したいときだけ使います。ライブラリは401を返しません。対話型transactionのcommandとcommitも毎回認証するため、token失効や期限切れの後はtransactionを継続できません。対話型commitの再送がこの401になる場合、その拒否は以前のCOMMITが適用されなかったことを意味しません（ADR 0007 #104）。accessまたはcredentialを復旧し、同じtransaction ID・sequence・payloadのcommitを再送すると、ownerに保存された結果を確認できます。
 
 レート制限もライブラリの機能ではなく、実装側（ラッパー）の責務です。ラッパーはWorkerの`fetch`で`app.fetch`より前にrequestを判定し、上限を超えた場合は`POLICYSQL_RATE_LIMITED`（HTTP 429）を返します。キー（IP、token、ラッパーが判定したtenantなど）と制限基盤もラッパーが決めます。ライブラリはlimiterのbindingを読まず、bindingがなくても全endpointが動作します。
 
@@ -147,4 +147,4 @@ return createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", 
 
 ## Retry
 
-SQL・policy・parameter errorは、同じrequestを再送しても成功しません。requestを修正してください。timeout、rate limit、一時的なadapter error、commit conflictのretryは上限とbackoffを設けます。ライブラリはどのresponseにも`Retry-After`を付けません。ラッパーが429に`Retry-After`を付けた場合は、その秒数以上待ってから再送します。初回からkeyを指定したwriteの再送には、同じidempotency keyと同じpayloadを使用し、結果が確定する前に新しいkeyで再実行しません。keyなしのwriteは重複排除を保証しないため、結果不明時に自動再送すると二重更新になり得ます。`Idempotency-Key`付きのAtomic Executeが500 `POLICYSQL_INTERNAL`になった場合、それは結果不明です（deploy後のcompile・認可の失敗、または入力上限の引き下げ・深さ制限の厳格化を含みます）。rollbackされたとみなさず、同じkeyと同じpayloadで再送して結果を確定してください。
+SQL・policy・parameter errorは、同じrequestを再送しても成功しません。requestを修正してください。timeout、rate limit、一時的なadapter error、commit conflictのretryは上限とbackoffを設けます。ライブラリはどのresponseにも`Retry-After`を付けません。ラッパーが429に`Retry-After`を付けた場合は、その秒数以上待ってから再送します。初回からkeyを指定したwriteの再送には、同じidempotency keyと同じpayloadを使用し、結果が確定する前に新しいkeyで再実行しません。keyなしのwriteは重複排除を保証しないため、結果不明時に自動再送すると二重更新になり得ます。`Idempotency-Key`付きのAtomic Executeが500 `POLICYSQL_INTERNAL`になった場合、それは結果不明です（deploy後のcompile・認可の失敗、または入力上限の引き下げ・深さ制限の厳格化を含みます）。rollbackされたとみなさず、同じkeyと同じpayloadで再送して結果を確定してください。対話型commitが403 `POLICYSQL_FORBIDDEN_ACCESS`または401になった場合も、その拒否は以前に送ったCOMMITの結果を確定しません（ADR 0007 #104）。rollbackされたとみなさず、アプリケーションのデータで確認してください。accessを復旧した後、同じtransaction ID・sequence・payloadのcommitを再送すると、ownerに保存された結果を確認できます。

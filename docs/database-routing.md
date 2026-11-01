@@ -216,7 +216,12 @@ Changing to a validator role never reselects the database.
 
 Interactive commands must supply the same binding and trusted session (same `principal`,
 subject, role, and session values) as start. The wrapper authenticates every command and
-commit; stopping a transaction after token expiry or revocation is its obligation.
+commit; stopping a transaction after token expiry or revocation is its obligation. A commit
+denied there (401 from the wrapper, or 403 `POLICYSQL_FORBIDDEN_ACCESS` from the engine's
+session gate) is the intended exception to ADR 0007's commit-retry rule: the gate runs before
+the owner, so the denial stops the transaction but does not confirm whether an earlier COMMIT
+applied, and the client keeps treating it as a definite rejection (see [ADR
+0007](adr/0007-transaction-retry-and-commit-check-protocol.md), amendment #104).
 Owner loss, connection loss, or a changed runtime snapshot cannot resume a transaction
 on a new connection. Credentials and original JWTs are not stored in owner state or
 sent in callback payloads. Remote timeout remains necessary after owner eviction.

@@ -144,6 +144,8 @@ terminal status の再確認は、直前と同じ command（commit または rol
 
 COMMIT を送った後に結果を確定できない場合、commit とその再送は HTTP 503 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` になります。COMMIT を送る前の失敗（ownerの喪失、期限切れ、commit checkの拒否、COMMIT直前のbindingまたは期限の確認の失敗など）は、従来どおり確定的な拒否（409）です。ownerはCOMMITを送る前に`committing`状態を保存し、commit後の状態（`committed`、次のsequence、保存済みresponse）を1回の書き込みで保存します。そのため、COMMITの送信後にownerを失った場合や記録の保存に失敗した場合でも、commitの再送が409で拒否されることはありません。deployで snapshot が変わった後の commit の再送も同様です（同じ principal・subject・role・session・database（scope、ID、generation）で、違いが snapshot だけの場合。commit 以外の command は現在の snapshot が必要で、別の principal や database からの再送は従来どおり拒否します）。`POLICYSQL_COMMIT_OUTCOME_UNKNOWN` は commit 済みの可能性があるため、別 transaction でやり直す前に、アプリケーションのデータで結果を確認してください。
 
+この規則には、ラッパーの認証とtrusted sessionの検証（session gate）だけが意図的な例外です（ADR 0007 #104）。ラッパーがcredentialを検証できない場合は、ライブラリに届く前にHTTP 401 `POLICYSQL_UNAUTHENTICATED`（または予約code `POLICYSQL_AUTHENTICATION_FAILED`）を返します。engineは各commandの`execute` accessとroleを、ownerの参照やcommit記録の確認より前に検証するため、`PolicySQL-Role`がsessionの`roles`にない、または`execute` accessがない場合のcommitは403 `POLICYSQL_FORBIDDEN_ACCESS`になります。ラッパーはtokenの失効・期限切れ後にtransactionを止める責務があり、拒否されたsessionでownerの記録を照会するとtransactionの存在やCOMMITを送ったかどうかが漏れるため、どちらもこの順序のまま確定的な拒否として返します。clientは従来どおり403/401を拒否として扱い、pendingのcommitを破棄してtransactionを失敗させます。したがってこの拒否は「このrequestが認可されず、transactionを停止した」ことを示すだけで、以前に送ったCOMMITが適用されなかったことを意味しません。応答を失ったcommitがある場合はアプリケーションのデータで結果を確認してください。accessが復旧した後、または同じprincipal・subject・role・sessionの値を持つ新しいcredentialで、同じtransaction ID・同じsequence・同じpayloadのcommitをHTTPで再送すると、ownerに保存された結果（保存済みresponseまたは`POLICYSQL_COMMIT_OUTCOME_UNKNOWN`）を確認できます。COMMITは再送されません。
+
 ## Failure
 
 statement、policy、check、expect、limitのいずれかが失敗するとtransaction全体をrollbackし、`failed`状態にします。失敗後にstatementを追加できません。
