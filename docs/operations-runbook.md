@@ -153,7 +153,17 @@ remove the wrapper step in code. To change limits, edit `simple.limit`/`period` 
 ## Incident drills
 
 - Expired/revoked JWT: expect 401 from the wrapper before the library runs (no compilation or
-  database access). The wrapper authenticates every interactive command and commit.
+  database access). The wrapper authenticates every interactive command and commit. A commit
+  denied after its response was lost is the ADR 0007 #104 exception: the transaction stops,
+  but the 401 does not prove that an earlier COMMIT did not apply. Verify application data;
+  after refreshing the credential with the same principal, subject, role, and session values,
+  a raw retry of the identical commit replays the owner's recorded outcome without a second
+  COMMIT.
+- Session gate denies a commit (403 `POLICYSQL_FORBIDDEN_ACCESS`, for example after a deploy
+  removed the role or `execute` access): the same #104 exception. The denial is not a
+  rollback; restore access with the same principal, subject, role, and session values and
+  retry the identical commit, or verify application data. A retry whose session value changed
+  is 409 `POLICYSQL_TRANSACTION_UNAVAILABLE`, not the recorded outcome.
 - `trusted_session_rejected` log with 500 `POLICYSQL_INTERNAL`: the wrapper passed a malformed
   session (often identity-provider claims that break the session rules). Fix the wrapper or IdP.
 - Rate limit exhausted: expect 429 `POLICYSQL_RATE_LIMITED` with `Retry-After` from the wrapper,

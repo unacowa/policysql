@@ -159,7 +159,12 @@ paths:
         lost, its record could not be stored, or the database connection failed during
         COMMIT), the commit and every repetition of it answer 503
         POLICYSQL_COMMIT_OUTCOME_UNKNOWN. That code is never a rejection: the transaction may
-        have committed. A 409 answers only a commit whose COMMIT was never sent.
+        have committed. A 409 answers only a commit whose COMMIT was never sent. The
+        wrapper's authentication and the session gate run before the transaction owner; a
+        commit they deny (401 from the wrapper, or 403 POLICYSQL_FORBIDDEN_ACCESS) is the
+        intentional exception to this rule (ADR 0007, amendment #104). It stops the
+        transaction without consulting the owner's commit record and is not proof that an
+        earlier COMMIT did not apply.
       parameters:
         - $ref: '#/components/parameters/TransactionId'
         - $ref: '#/components/parameters/Role'
@@ -274,7 +279,10 @@ components:
         custom wrapper may use when a present credential failed verification. Clients treat
         both as not executed. Required access and
         PolicySQL-Role selection are checked by PolicySQL against the trusted session
-        (403 POLICYSQL_FORBIDDEN_ACCESS). The reference wrapper uses a bearer JWT with
+        (403 POLICYSQL_FORBIDDEN_ACCESS). For an interactive commit retry, a 401 or 403 is
+        the documented exception to the commit-retry rule (ADR 0007, amendment #104): the
+        request was not executed, but an earlier identical commit may have completed, so the
+        rejection is not proof that it did not. The reference wrapper uses a bearer JWT with
         the PolicySQL JWT profile (ADR 0020); other deployments may use any scheme.
     callbackCapability:
       type: http

@@ -683,6 +683,13 @@ today.
   the same key then reaches this rule. This changes what `step_json` returns for existing
   inputs, so `ABI_VERSION` is 18; `keyHash`, the fingerprints and every identity golden are
   unchanged.
+- **Session gate and authentication (#104).** The machine's rules cover events that reach the
+  owner. The wrapper authenticates every request and the engine's session gate authorizes
+  every interactive command before the owner lookup (ADR 0020); a commit denied there is 401
+  or 403 and never reaches the machine. That is the intentional exception to ADR 0007's rule
+  that a commit retry is never a definite rejection (ADR 0007, amendment #104), not a machine
+  decision: a denied caller must not learn from the owner's record whether the transaction
+  exists or whether COMMIT may have been sent. No state, event, or ABI changes.
 
 
 ## Migration

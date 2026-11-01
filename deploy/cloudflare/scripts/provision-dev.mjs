@@ -11,7 +11,7 @@ import { POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
 import { runtimeLimits, runtimeLimitsJson } from "../src/limits.ts";
 import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 import { DEPLOYMENT_VERSION_HEADER, versionTracker, waitForRelease } from "./release-readiness.mjs";
-import { bytesNullSmoke, commitCheckSmoke } from "./smoke-sections.mjs";
+import { bytesNullSmoke, commitCheckSmoke, sessionGateSmoke } from "./smoke-sections.mjs";
 import { sqlComplexitySmoke } from "./smoke-complexity.mjs";
 import { responseBudgetSmoke } from "./smoke-response.mjs";
 import { COMPLEXITY_ALLOWLIST, SqlComplexityError } from "../src/database-complexity.ts";
@@ -182,7 +182,7 @@ const commitCheckTables = () => {
   return Object.values(policy.commit_checks ?? {}).flatMap((check) => check.triggered_by ?? []);
 };
 
-const smoke = async (baseUrl, token, tracker, database) => {
+const smoke = async (baseUrl, token, tracker, database, sessionTokens) => {
   const headers = { authorization: `Bearer ${token}` };
   const call = tracker.call;
   const health = await call(`${baseUrl}/healthz`).then((response) => response.json());
@@ -417,6 +417,13 @@ const smoke = async (baseUrl, token, tracker, database) => {
   // Development-only resources (#42): commit checks through the dev validator, then bytes
   // (ADR 0016) and NULL assignment (ADR 0017).
   const sectionContext = { call, baseUrl, headers, expected: expectedVersions };
+  // #104 first: it commits a `smoke_checks` row, and the dev validator decides from the newest
+  // one (its probe id prefix also sorts below every other section's).
+  const sessionGate = await sessionGateSmoke({
+    ...sectionContext,
+    sessionDeniedHeaders: { authorization: `Bearer ${sessionTokens.denied}` },
+    otherSessionHeaders: { authorization: `Bearer ${sessionTokens.otherSession}` },
+  });
   const commitChecks = await commitCheckSmoke(sectionContext, {
     hookTimeoutMs: capabilities.transactions?.maxHookDurationMs ?? null, atomicTimeoutMs: capabilities.limits?.timeoutMs ?? null,
   });
@@ -448,6 +455,7 @@ const smoke = async (baseUrl, token, tracker, database) => {
   if (
     tracker.skewed.length > 0 ||
     tracker.unversioned.length > 0 ||
+    sessionGate.failures.length > 0 ||
     commitChecks.failures.length > 0 ||
     bytesNull.failures.length > 0 ||
     sqlComplexity.failures.length > 0 ||
@@ -497,6 +505,7 @@ const smoke = async (baseUrl, token, tracker, database) => {
       // page, e.g. 1101 or 52x): a failure of this release, never skew.
       unversioned: tracker.unversioned,
       rateLimited: tracker.rateLimited,
+      sessionGate,
       commitChecks,
       bytesNull,
       sqlComplexity,
@@ -584,6 +593,7 @@ const smoke = async (baseUrl, token, tracker, database) => {
       deleteStatus: deleted.response.status,
       replayStable: true,
     },
+    sessionGate: sessionGate.report,
     commitChecks: commitChecks.report,
     bytesNull: bytesNull.report,
     sqlComplexity: sqlComplexity.report,
@@ -748,12 +758,15 @@ async function main() {
   const startup = combined.match(/Worker Startup Time:\s+(\d+) ms/);
   // A fresh 10-minute token per attempt: one attempt (readiness wait of at most 180 s, a
   // possible 60 s rate-limit pause, the smoke) always ends before it expires.
-  const mintToken = () => new SignJWT({
+  // `access` and `tenant` parameterize the #104 probes: a session that lost `execute` (a role
+  // change or a revocation, same principal, subject and session value) and a session whose
+  // `tenant_id` value differs (another caller to the owner).
+  const mintToken = (access = ["catalog", "explain", "execute"], tenant = "tenant_a") => new SignJWT({
     policysql: {
       roles: ["member"],
       default_role: "member",
-      access: ["catalog", "explain", "execute"],
-      session: { tenant_id: "tenant_a" },
+      access,
+      session: { tenant_id: tenant },
     },
   })
     .setProtectedHeader({ alg: "ES256", kid: publicJwk.kid })
@@ -769,13 +782,17 @@ async function main() {
   let acceptance;
   for (let attempt = 1; ; attempt += 1) {
     const jwt = await mintToken();
+    const sessionTokens = {
+      denied: await mintToken(["catalog"]),
+      otherSession: await mintToken(["catalog", "explain", "execute"], "tenant_b"),
+    };
     readiness.push(await waitForRelease({
       baseUrl, token: jwt, version: deployed.version,
       validator: { url: validatorUrl, version: validator.version }, capabilitiesMatch,
     }));
     const tracker = versionTracker(deployed.version);
     try {
-      acceptance = await smoke(baseUrl, jwt, tracker, { url: databaseUrl, token: databaseToken });
+      acceptance = await smoke(baseUrl, jwt, tracker, { url: databaseUrl, token: databaseToken }, sessionTokens);
       break;
     } catch (error) {
       if (!error.retryable || attempt >= 3) throw error;

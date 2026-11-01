@@ -69,9 +69,12 @@ up a transaction owner, or checks or connects to a database.
 For a keyed atomic execute, the engine answers the session-gate denial (the second row) with
 500 `POLICYSQL_INTERNAL`, the unknown outcome, instead of the 403: the retry may be of a write
 committed before a deploy changed the session policy, and the client takes the 403 as a
-definite rejection (ADR 0007 #85 path 1). Unkeyed execute and every interactive command keep
-the 403; the session validation itself is unchanged, and a malformed session is still a 500
-wrapper fault.
+definite rejection (ADR 0007 #85 path 1). Unkeyed execute keeps the 403. Every interactive
+command keeps the 403 too, including a `commit` whose earlier request may have committed: the
+gate runs before the owner and the wrapper must not consult the owner's record with a denied
+session, so this is the intentional exception to ADR 0007's commit-retry rule (ADR 0007,
+amendment #104). The session validation itself is unchanged, and a malformed session is
+still a 500 wrapper fault.
 
 Both 401 codes are wrapper-returned and built with `createErrorResponse`; the library emits
 neither. `POLICYSQL_UNAUTHENTICATED` is the wrapper's 401 for a missing or invalid
@@ -120,7 +123,10 @@ after rate limiting and before `app.fetch`, and return 401 through `createErrorR
 
 - Authenticate every client request, including every interactive command and commit. The
   library stores the session fingerprint, not the credential, so stopping a transaction
-  after token expiry or revocation is the wrapper's job.
+  after token expiry or revocation is the wrapper's job. A commit denied by this
+  authentication (401) or by the engine's session gate (403) is the intentional exception
+  to ADR 0007's commit-retry rule: it stops the transaction, and the wrapper must not
+  consult the owner's commit record with a denied session (ADR 0007, amendment #104).
 - Encode `principal` unambiguously and namespace it so it cannot collide across identity
   providers or tenants (for example a JSON array of its parts, never a plain `:` join).
 - Treat a 500 `POLICYSQL_INTERNAL` with a `trusted_session_rejected` log as a wrapper or
