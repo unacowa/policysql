@@ -165,7 +165,7 @@ async function retry() {
 }
 ```
 
-キー付き atomic 更新では、利用 DB に `policysql_idempotency` を事前作成します。同じ認証 context・endpoint・DB binding・payload と、保持中の記録を使う前提です。キーの形式は 16〜128 文字の ASCII 英数字と `. _ : - + / =` です（base64 のキーをそのまま使えます）。形式不正のキーはサーバーが `POLICYSQL_IDEMPOTENCY_KEY_INVALID`（400）で拒否します。不正な明示キーを省略や自動生成で補いません。
+キー付き atomic 更新では、利用 DB に `policysql_idempotency` を事前作成します（`created_at` 列を含む形で）。同じ認証 context・endpoint・DB binding・payload と、保持中の記録を使う前提です。deployment は古い記録を管理側で削除でき、参照実装は30日より古い行を毎時削除します。再送は初回送信の直後に行い、日をまたいだ再送に頼らないでください。キーの形式は 16〜128 文字の ASCII 英数字と `. _ : - + / =` です（base64 のキーをそのまま使えます）。形式不正のキーはサーバーが `POLICYSQL_IDEMPOTENCY_KEY_INVALID`（400）で拒否します。不正な明示キーを省略や自動生成で補いません。
 
 | 設定 | 操作ごとのキー | 動作 |
 | --- | --- | --- |

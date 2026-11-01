@@ -104,6 +104,14 @@ or automatic creation of that table occurs. Each unkeyed request is a new execut
 does not guarantee deduplication if resent. These rules also apply to the commit-check DO
 path; policy checks, callbacks, and transaction rollback remain enforced.
 
+A stored reply is replayed **while retained**, with no advertised duration. A deployment may
+delete rows administratively once they are old enough
+([ADR 0028](adr/0028-idempotency-cleanup-without-an-advertised-window.md)); the reference
+wrapper deletes rows older than 30 days. `Capabilities` reports no window, so a client must not
+assume one beyond the resend it actually needs: a retry is normally seconds to minutes after the
+first send, and a keyed write resent after the deployment's retention has elapsed executes as a
+new request.
+
 Interactive start without a key creates a fresh transaction ID/owner for each request.
 Keyed starts retain their existing DO replay behavior. Once started, interactive commands
 retain sequence-based retries with or without a start key and do not use this DB table.

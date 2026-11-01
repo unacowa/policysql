@@ -13,6 +13,7 @@ import {
 } from "./deployment-version.ts";
 import { createWrapperFetch } from "./fetch.ts";
 import { authenticateJwt } from "./auth.ts";
+import { cleanupFromEnv } from "./idempotency-retention.ts";
 import type { RateLimitedBindings } from "./rate-limit.ts";
 
 const ABI_VERSION = 1;
@@ -46,6 +47,13 @@ export default {
         ownerVersionRoute(request, env as RateLimitedBindings & VersionBindings, session, requestId),
     },
   )),
+  // The idempotency cleanup (ADR 0028). It runs outside the public endpoint with the
+  // deployment's own credentials: the table is outside the catalog, so default deny rejects
+  // every path to it from a client. A failed run logs its outcome and returns; the next
+  // scheduled run retries, and a missed run only delays a deletion.
+  scheduled: async (_controller: ScheduledController, env: RateLimitedBindings) => {
+    await cleanupFromEnv(env, (event) => console.log(JSON.stringify(event)));
+  },
 };
 export { ABI_VERSION };
 

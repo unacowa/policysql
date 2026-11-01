@@ -19,7 +19,12 @@
     // re-measures the coefficients, the release smoke records the observed F: see ADR 0027
     // "Pull request 7 results").
     "cpu_ms": 500,
-    "subrequests": 10
+    // The scheduled idempotency cleanup (ADR 0028) spends three subrequests per batch (BEGIN,
+    // DELETE, COMMIT) plus one for its PRAGMA, so its batch cap must fit here;
+    // test/idempotency-retention.test.mjs checks that arithmetic against this file and
+    // wrapper/idempotency-retention.ts. The fetch path's own use is a few subrequests, far
+    // below this value.
+    "subrequests": 400
   },
   "ratelimits": [
     {
@@ -36,6 +41,12 @@
   // The deployed version id, which the wrapper reports in the `policysql-deployment-version`
   // header and on `/healthz/owner` so the release smoke can wait for the new version (#42).
   "version_metadata": { "binding": "CF_VERSION_METADATA" },
+  // The idempotency cleanup (ADR 0028): `scheduled` in wrapper/index.ts deletes keyed replies
+  // older than the wrapper's fixed window, by age only, in bounded batches. Hourly, because a
+  // missed run only delays a deletion and never shortens retention. Cron Triggers are UTC.
+  "triggers": {
+    "crons": ["17 * * * *"]
+  },
   "durable_objects": {
     "bindings": [
       { "name": "TRANSACTION_OWNER", "class_name": "TransactionOwner" }

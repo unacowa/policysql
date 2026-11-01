@@ -64,7 +64,7 @@ clientは`mode`を指定しません。PolicySQLが全statementを実行前にpa
 - すべてSELECT: read transaction
 - 一つでもINSERT、UPDATE、DELETEを含む: write transaction
 
-`Idempotency-Key` headerは更新を含むrequestでも任意です。キーを指定した更新は、利用DBの`policysql_idempotency`で既存結果を照合し、更新と同じtransactionに結果を保存します。キーを省略すると同テーブルの参照・追記・存在確認を行わないため、テーブルがなくても実行できます。通常経路とcommit checkを行うDO経路の両方に適用します。
+`Idempotency-Key` headerは更新を含むrequestでも任意です。キーを指定した更新は、利用DBの`policysql_idempotency`で既存結果を照合し、更新と同じtransactionに結果を保存します。保存した結果は保持中のみ再送され、保持期間は広告しません。参照実装は30日より古い行を管理側で削除するため、再送は初回送信の直後に行ってください。キーを省略すると同テーブルの参照・追記・存在確認を行わないため、テーブルがなくても実行できます。通常経路とcommit checkを行うDO経路の両方に適用します。
 
 キーは16〜128文字のASCII英数字と`. _ : - + / =`です。base64（標準・URL-safe、paddingあり・なし）のキーをそのまま使えます。空、範囲外の長さ、カンマ・途中の空白・非ASCIIを含むキー、重複したheaderは、DB処理の前に`400 POLICYSQL_IDEMPOTENCY_KEY_INVALID`で拒否します。headerの前後の空白とtabはHTTP層（Fetchの`Headers`）が取り除くため、キーには含まれません。
 
