@@ -722,8 +722,8 @@ With the defaults (`R` = 1; `B` = max(128,000 + 4,096 + 1,048,576, 1,183,744) = 
 which the reference wrapper rounds up to 500 ms. The model is conservative for the non-SQL
 shapes after pull request 7, using the same definitions; see "Pull request 7 results" for the
 measured values and the SQL-dense exceptions. At the hard maxima (`R` = 2, `B` = 2.03, `V` =
-131,072 each, and `maxSqlBytes` = 1 MiB, so `E` = 0.9375) it is about 529 ms on the reference
-machine (376 ms without the SQL-capacity term).
+131,072 each, and `maxSqlBytes` = 1 MiB, so `E` = 0.9375) it is about 634 ms on the reference
+machine (376 ms without the SQL-capacity term), about 1,584 ms with `F` and `S`.
 
 **Pull request 1 results (2026-10-31).** `scripts/measure-cpu.mjs` reproduces the Context tables
 on the reference machine (i7-7700K, Node 26.4, ABI 12) within a few percent (atomic keyed 1 MB:
@@ -864,8 +864,8 @@ back, while SQL-dense shapes are the documented exception. `a_v` = 0.8 misses th
 RETURNING` result: 31.8 ms for 27,037 values, about 0.98 µs/value after `C0` and the byte term
 (0.79 after `S`). The 1 MB 17-digit decimal request costs 88.5 ms for 56,136 values, 0.81
 µs/value before `S` (0.65 after). The coefficient 0.8 is above those after `S`. The request path
-is 14.2 ms for 65,480 nested-array values and 36.9 ms for 65,486 unique-key members; the result
-path is 35.5 ms for 51,059 raw values. The remaining value cost is the identity digest, which
+is 13.8 ms for 65,480 nested-array values and 36.9 ms for 65,486 unique-key members; the result
+path is 36.0 ms for 51,059 raw values. The remaining value cost is the identity digest, which
 still parses JSON-typed parameters into a tree to canonicalize them (the strict check and
 compile use the exact text, not a second tree). The 50 B/value memory target is also missed on
 the full request path: atomic keyed requests peak at 6.6 to 16.7 MiB for about 65,000 values
