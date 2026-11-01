@@ -200,3 +200,30 @@ test("a deployment without credentials deletes nothing and reports not_configure
   assert.equal(created, false, "no runner is built without both credentials");
   assert.ok(events.every((event) => event.event === "idempotency_cleanup" && event.outcome === "not_configured"));
 });
+
+test("the documented rebuild keeps every tombstone and gives each row a real created_at", () => {
+  // ADR 0028's statements, run as one write transaction against a pre-column table. The failure
+  // this guards against is a committed empty table: it would drop every tombstone, so a keyed
+  // retry could execute a committed write a second time.
+  const database = new DatabaseSync(":memory:");
+  database.exec("CREATE TABLE policysql_idempotency (key_hash TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, response_json TEXT NOT NULL)");
+  insert(database, "a");
+  insert(database, "b");
+  database.exec(`
+    BEGIN IMMEDIATE;
+    CREATE TABLE policysql_idempotency_next (
+      key_hash TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL,
+      response_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO policysql_idempotency_next (key_hash, fingerprint, response_json)
+      SELECT key_hash, fingerprint, response_json FROM policysql_idempotency;
+    DROP TABLE policysql_idempotency;
+    ALTER TABLE policysql_idempotency_next RENAME TO policysql_idempotency;
+    CREATE INDEX policysql_idempotency_created_at ON policysql_idempotency (created_at);
+    COMMIT;`);
+  assert.deepEqual(keys(database), ["a", "b"]);
+  const rows = database.prepare("SELECT created_at FROM policysql_idempotency").all();
+  assert.ok(rows.every((row) => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/u.test(row.created_at)));
+  // And the rebuilt table is one the cleanup works on.
+  return run(database, { batchSize: 10 }).then(({ result }) => assert.equal(result.outcome, "nothing_to_delete"));
+});

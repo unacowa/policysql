@@ -83,9 +83,10 @@ Configure alerts in the production account for:
   delete expired keyed replies, so `policysql_idempotency` is growing. `reason` classifies it
   (`database_error`, `unreadable_columns`) and never carries the database's text. `skipped` with
   `no_created_at` on a table that should be cleaned means the table predates the `created_at`
-  column and needs the rebuild described in ADR 0028; `skipped` with `no_table` is normal for a
-  deployment that never uses idempotency keys. `deleted` with `batch_budget_exhausted` means a
-  backlog larger than one run's cap is draining over several runs, not a failure.
+  column and needs the rebuild whose statements are in ADR 0028; `skipped` with `no_table` is
+  normal for a deployment that never uses idempotency keys. `deleted` with
+  `batch_budget_exhausted` means a backlog larger than one run's cap is draining over several
+  runs, not a failure.
 
 ## CPU budget
 

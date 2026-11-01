@@ -84,13 +84,34 @@ Adopt **part 1 only**, in the reference wrapper
 
   Existing deployments must rebuild the table to add the column: SQLite refuses
   `ALTER TABLE ... ADD COLUMN` with a `CURRENT_TIMESTAMP` default on a table that has rows,
-  and a constant default would give every future row one timestamp. The rebuild runs as one
-  explicit write transaction, and must stop at the first failed statement and roll back
-  instead of sending `COMMIT` (SQLite does not abort a transaction when a statement fails, and
-  a committed empty table would drop every tombstone, so keyed retries could execute a
-  committed write twice).
-  Until they do, the cleanup skips that table (`no_created_at`): the library keeps working and
-  nothing is deleted.
+  and a constant default would give every future row one timestamp. The statements are:
+
+  ```sql
+  BEGIN IMMEDIATE;
+  CREATE TABLE policysql_idempotency_next (
+    key_hash TEXT PRIMARY KEY NOT NULL,
+    fingerprint TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  INSERT INTO policysql_idempotency_next (key_hash, fingerprint, response_json)
+    SELECT key_hash, fingerprint, response_json FROM policysql_idempotency;
+  DROP TABLE policysql_idempotency;
+  ALTER TABLE policysql_idempotency_next RENAME TO policysql_idempotency;
+  CREATE INDEX policysql_idempotency_created_at ON policysql_idempotency (created_at);
+  COMMIT;
+  ```
+
+  The rebuild must stop at the first failed statement and send `ROLLBACK` instead of `COMMIT`.
+  SQLite does not abort a transaction when a statement inside it fails: run statement by
+  statement, a failing `INSERT ... SELECT` still lets the `DROP` and `RENAME` run, and the
+  `COMMIT` then commits an empty `policysql_idempotency`, so every tombstone is gone and every
+  keyed retry can execute a committed write a second time. A driver's batch mode has the same
+  hazard unless it opens one transaction and stops at the first error. Every existing row gets
+  the migration time as `created_at`, so it is kept for a full window from the migration.
+
+  Until the rebuild, the cleanup skips that table (`no_created_at`): the library keeps working
+  and nothing is deleted.
 - **Release smoke:** a new section (`scripts/smoke-retention.mjs`) checks against the real
   database that the table has the canonical shape and is not `WITHOUT ROWID`, that one cleanup
   run deletes a row older than the window while keeping a fresh one in the same run, and that
