@@ -211,11 +211,13 @@ as a new attempt. The check happens before the commit checks of a policy run, an
 unchanged: nothing here ever turns a COMMIT that may have been sent into a rejection. A retry of a
 request that did commit returns the stored response even after the limit was lowered (the stored
 response fitted when it was committed): the idempotency lookup's read cap derives from the hard
-maximum of `maxResponseBytes` (589,824), not from the current value. A row stored by a release
-older than these bounds that is larger than the lookup bound is 413 `POLICYSQL_LIMIT_EXCEEDED` on a
-keyed retry within the retention window, before its fingerprint is compared: nothing executes. The
-interactive statement reply and a callback query are bounded by `maxTransactionResultBytes` (at most
-65,536) as before. Explain, Catalog, and Capabilities are bounded by the configuration that
+maximum of `maxResponseBytes` (589,824), not from the current value. A stored row larger than the
+lookup bound can exist only from a release before these bounds (ABI 9 to 14) or from a larger hard
+maximum; a keyed retry that finds one is 500 `POLICYSQL_INTERNAL` (an unknown outcome, never a
+definite rejection, since that request may have committed), before its fingerprint is compared, and
+nothing executes. Delete such rows (the library is unpublished). Only the atomic response is measured
+against `maxResponseBytes`; the interactive statement reply and a callback query are bounded by
+`maxTransactionResultBytes` (at most 65,536) as before. Explain, Catalog, and Capabilities are bounded by the configuration that
 produces them (at most 1 MiB each), not per request.
 
 The default leaves 64 KiB above `maxResultBytes`; the minimum, `maxResultBytes` + 3,072, keeps the

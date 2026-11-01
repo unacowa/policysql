@@ -9,7 +9,9 @@
 import { client, errorCode, summary, unique } from "./smoke-sections.mjs";
 
 const WIDE_COLUMNS = 128;
-const ALIAS_BYTES = 80;
+// 120 bytes of alias: each descriptor is about 190 bytes, so seven statements are about 170 KB,
+// about 33% over the reference limit (129,536 less the 1,024-byte reserve), not a marginal excess.
+const ALIAS_BYTES = 120;
 const INSERT = "INSERT INTO smoke_values (id, label, note, payload) VALUES (:id, :label, :note, :payload) RETURNING id";
 const DELETE = "DELETE FROM smoke_values WHERE id = :id RETURNING id";
 
@@ -43,40 +45,46 @@ export const responseBudgetSmoke = async (context, { limits }) => {
     return outcome.status === 200 ? (outcome.body?.results?.[0]?.rows ?? []).length : -1;
   };
 
-  // A positive control: a few wide statements are within the limit, so the width itself is not
-  // refused. The write commits and is cleaned up.
+  // Rows a regression or a failed request could leave behind are removed whatever happens,
+  // including a control write that committed before its request failed.
   const controlId = unique("rsp");
-  const control = await api.execute([write(controlId), ...selects(2)], unique("smoke-response-control"));
-  report.control = { ...summary(control), responseBytes: JSON.stringify(control.body).length };
-  expect(control.status === 200, "a response well within maxResponseBytes is served");
-  await api.execute([{ sql: DELETE, params: { id: controlId } }]);
+  const cleanup = [probe, controlId];
+  try {
+    // A positive control: a few wide statements are within the limit, so the width itself is not
+    // refused. The write commits and is cleaned up below.
+    const control = await api.execute([write(controlId), ...selects(2)], unique("smoke-response-control"));
+    report.control = { ...summary(control), responseBytes: JSON.stringify(control.body).length };
+    expect(control.status === 200, "a response well within maxResponseBytes is served");
 
-  // Enough wide statements that the response (plus the 1,024-byte reserve) exceeds the limit
-  // while every row-based limit is far away: at least 4 statements more than the control.
-  const wide = Math.min(maxStatements - 1, 12);
-  const refused = await api.execute([write(probe), ...selects(wide)], key);
-  report.refused = summary(refused);
-  expect(refused.status === 413 && errorCode(refused) === "POLICYSQL_LIMIT_EXCEEDED", "a response over maxResponseBytes is 413 POLICYSQL_LIMIT_EXCEEDED");
-  expect(JSON.stringify(refused.body ?? {}).length < 2_048, "the refusal carries no part of the response");
-  expect(await present(probe) === 0, "the write of a refused response was rolled back");
+    // Enough wide statements that the response (plus the 1,024-byte reserve) exceeds the limit
+    // while every row-based limit is far away: at least 4 statements more than the control.
+    const wide = Math.min(maxStatements - 1, 12);
+    const refused = await api.execute([write(probe), ...selects(wide)], key);
+    report.refused = summary(refused);
+    expect(refused.status === 413 && errorCode(refused) === "POLICYSQL_LIMIT_EXCEEDED", "a response over maxResponseBytes is 413 POLICYSQL_LIMIT_EXCEEDED");
+    expect(JSON.stringify(refused.body ?? {}).length < 2_048, "the refusal carries no part of the response");
+    expect(await present(probe) === 0, "the write of a refused response was rolled back");
 
-  // No idempotency record: the same key is free for a different body (a conflict would be 409), and
-  // that body commits; the key is then bound to it.
-  const other = await api.execute([write(probe)], key);
-  report.keyFree = summary(other);
-  expect(other.status === 200, "the key of a refused response is free: another body commits under it");
-  expect(await present(probe) === 1, "the other body wrote its row");
-  // The refused request itself was not replayed from a record and does not conflict now: its key is
-  // bound to the other body, so the refused body is a conflict (409), proving the first attempt left
-  // nothing and the second is the first record.
-  const conflict = await api.execute([write(probe), ...selects(wide)], key);
-  report.afterwards = summary(conflict);
-  expect(conflict.status === 409 && errorCode(conflict) === "POLICYSQL_IDEMPOTENCY_CONFLICT", "after another body committed under the key, the refused body conflicts: no record was left by the refused attempt");
+    // No idempotency record: the same key is free for a different body (a conflict would be 409), and
+    // that body commits; the key is then bound to it.
+    const other = await api.execute([write(probe)], key);
+    report.keyFree = summary(other);
+    expect(other.status === 200, "the key of a refused response is free: another body commits under it");
+    expect(await present(probe) === 1, "the other body wrote its row");
+    // The refused request itself was not replayed from a record and does not conflict now: its key is
+    // bound to the other body, so the refused body is a conflict (409), proving the first attempt left
+    // nothing and the second is the first record.
+    const conflict = await api.execute([write(probe), ...selects(wide)], key);
+    report.afterwards = summary(conflict);
+    expect(conflict.status === 409 && errorCode(conflict) === "POLICYSQL_IDEMPOTENCY_CONFLICT", "after another body committed under the key, the refused body conflicts: no record was left by the refused attempt");
 
-  // The same refused request with a fresh key runs again from scratch (nothing is remembered).
-  const again = await api.execute([write(unique("rsp")), ...selects(wide)], unique("smoke-response-key"));
-  expect(again.status === 413 && errorCode(again) === "POLICYSQL_LIMIT_EXCEEDED", "a retry of the refused shape is refused the same way, as a new attempt");
-
-  await api.execute([{ sql: DELETE, params: { id: probe } }]);
+    // The same refused request with a fresh key runs again from scratch (nothing is remembered).
+    const againId = unique("rsp");
+    cleanup.push(againId);
+    const again = await api.execute([write(againId), ...selects(wide)], unique("smoke-response-key"));
+    expect(again.status === 413 && errorCode(again) === "POLICYSQL_LIMIT_EXCEEDED", "a retry of the refused shape is refused the same way, as a new attempt");
+  } finally {
+    for (const id of cleanup) await api.execute([{ sql: DELETE, params: { id } }]).catch(() => {});
+  }
   return { failures, report };
 };

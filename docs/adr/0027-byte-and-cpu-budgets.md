@@ -386,14 +386,16 @@ and memory are counted in the formulas below.
 
 Two consequences are stated rather than hidden:
 
-- **Rows written under ABI 8.** Before this change `response_json` was effectively unbounded
+- **Rows written under an earlier ABI (9 to 14).** Before this change `response_json` was effectively unbounded
   (`maxResultBytes` up to 2^53, Turso responses up to 2 MiB), so a stored row larger than
   1,183,744 bytes can exist. A keyed retry of it within the idempotency retention window W
   (ADR 0026, PR #79) after the upgrade finds the row (`keyHash` does not include the snapshot)
-  and the lookup's read cap rejects it with 413 `POLICYSQL_LIMIT_EXCEEDED` before the
-  fingerprint is compared. Nothing executes, so it is safe and never misreported as success,
-  conflict, or replay, but it is the one exception to ADR 0007's replay contract, and it ends
-  when W has passed. It is listed under Breaking changes.
+  and the lookup's read cap rejects it before the fingerprint is compared. Nothing executes, so it
+  is never misreported as success, conflict, or replay. **Amended by pull request 6:** the
+  answer is 500 `POLICYSQL_INTERNAL` (an unknown outcome), not a 413: that request may have
+  committed, and a definite rejection would break ADR 0007. Only rows from before this change
+  (ABI 9 to 14, which had no bound) or from a larger hard maximum can exceed the bound, the
+  library is unpublished, and such rows may be deleted. It is listed under Breaking changes.
 - **Lowering the lookup bound later** (that is, lowering the hard maximum of
   `maxResponseBytes`) is a migration that must span W, for the same reason.
 
@@ -610,10 +612,12 @@ trace of a debug request included) plus a 1,024-byte reserve (`RESPONSE_RESERVE_
 rolls back; no COMMIT or INSERT was emitted, so nothing survives. ADR 0007 is untouched: the measurement
 precedes every effect that could commit, and the COMMIT outcome mapping gained no entry.
 
-*Replay.* A stored response over the lookup bound (a row of an earlier release) is the lookup's `limit`
-class, which the machine now answers as 413 `POLICYSQL_LIMIT_EXCEEDED` (it was `POLICYSQL_INTERNAL`) before
-the fingerprint is compared, as "Idempotent replay" decided. The idempotency INSERT's `limit` stays
-`POLICYSQL_INTERNAL`. Replay of a committed request after `maxResponseBytes` and `maxResultBytes` were
+*Replay.* A stored response over the lookup bound (a row of an earlier release, or written under a larger
+hard maximum) is the lookup's `limit` class. The text above decided 413; review found that a definite 413
+on a retry of a possibly committed write breaks ADR 0007 (the client treats `POLICYSQL_LIMIT_EXCEEDED` as
+a rejection), so it stays `POLICYSQL_INTERNAL` (500, unknown outcome), before the fingerprint is compared,
+and `POLICYSQL_LIMIT_EXCEEDED` keeps the rule that it is always decided before commit and leaves no
+record. The idempotency INSERT's `limit` is `POLICYSQL_INTERNAL` too. Replay of a committed request after `maxResponseBytes` and `maxResultBytes` were
 lowered returns the stored response with nothing executed, on both placements (machine tests, and
 `result-budget.test.mjs` through a redeployed runtime on both owner adapters); a stored response whose
 characters are quotes, so that they escape twice (once in the public JSON and again as a Hrana string), is
@@ -655,11 +659,23 @@ raw bound and the step output (`maxResponseBytes` on `execute` and `observe`, a 
 over the lookup bound) differ, so the snapshot changes; no `keyHash` or identity value changed, so keyed
 retries across the deployment still replay (the identity goldens are unchanged).
 
+*Deviation: only the atomic response is measured.* "Final response" decided that an interactive statement
+reply and a callback reply are measured against `maxResponseBytes` before they are sent. This pull request
+measures the atomic execution response only (before COMMIT, where it also decides rollback). An interactive
+statement reply is bounded by its compiled raw bound and by the cumulative `maxTransactionResultBytes`
+(at most 64 KiB), which counts the public rows, not the column descriptors: a wide interactive SELECT's
+descriptors sit outside that limit, so such a reply can exceed `maxResponseBytes` today (at most a few
+hundred KiB, bounded by the raw bound and the 1 MiB column-metadata guard). Capabilities and
+`docs/configuration.md` say the limit is atomic-only. Follow-up: measure the interactive statement and
+callback replies against `maxResponseBytes` (failing the statement as a result limit does), or count the
+descriptors in `maxTransactionResultBytes`; add it to the remaining work of a later pull request.
+
 *Left to pull request 7 and #97.* The CPU and memory reductions (a single pass over the body and result in
 core, no `serde_json` tree for JSON-typed values beyond validation, no reviver, one restatement of results
 through volatile JSON), the re-measurement of the coefficients and the maxima, and `cpu_ms`; the
 duplicate raw re-serialization in `RuntimeCompiler::validate` (the machine's `RawResult` is turned back
-into JSON text for `validate_result`) is one of those. #97 (separate) is not touched.
+into JSON text for `validate_result`) is one of those. Also open: measuring the interactive statement
+and callback replies against `maxResponseBytes` (the deviation above). #97 (separate) is not touched.
 
 ### CPU and memory budgets
 
@@ -863,9 +879,9 @@ that compares the client table with the status table (`website/api/errors.md`) c
 14. Reference wrapper: `cpu_ms` 50 → 1,000 (provisional), runbook alert threshold relative to
     `cpu_ms`.
 15. Capabilities `limits` gains fields (additive).
-16. **Idempotency rows written under ABI 8** whose `response_json` exceeds 1,183,744 bytes: a
-    keyed retry within the retention window W after the upgrade gets 413
-    `POLICYSQL_LIMIT_EXCEEDED` instead of a replay (nothing executes; see Idempotent replay).
+16. **Idempotency rows from before this change** (ABI 9 to 14) whose `response_json` exceeds
+    1,183,744 bytes: a keyed retry gets 500 `POLICYSQL_INTERNAL` instead of a replay (nothing
+    executes; see Idempotent replay). The rows may be deleted.
 17. JSON-typed values written by another system in non-canonical form can exceed the raw bound
     and be 413 even when their canonical public form fits (as for BLOBs, ADR 0016).
 
@@ -940,8 +956,8 @@ smoke (`deploy/cloudflare/scripts/provision-dev.mjs`) before merge.
    abort; the response measured before COMMIT; the `streamedReadCap` port capability and its
    log; the Hrana-encoded property test. Rollback and replay tests: over the limit leaves no row
    and no idempotency record; a retry of a committed request returns the stored response,
-   including after `maxResponseBytes` is lowered; an oversized ABI-8 row gives 413 before the
-   fingerprint comparison.
+   including after `maxResponseBytes` is lowered; an oversized old row gives 500 (unknown
+   outcome, amended in the pull request 6 results) before the fingerprint comparison.
 7. **CPU and memory reductions (#56).** Parse, count, and duplicate-check the body once, in
    core, without materializing a `serde_json` tree for JSON-typed parameters beyond what
    validation needs; read step output without a reviver when it holds no unsafe integer; stop

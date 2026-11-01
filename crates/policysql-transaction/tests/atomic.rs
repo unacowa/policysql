@@ -278,14 +278,15 @@ fn a_commit_failure_is_never_a_rejection_and_rolls_back() {
 
 /// ADR 0024 pull request 8: a result the adapter could not carry (`limit`) is the client's
 /// `POLICYSQL_LIMIT_EXCEEDED` on the envelope, as the TypeScript direct path answered, and
-/// `POLICYSQL_INTERNAL` on the idempotency insert. A stored response over the lookup bound (a row
-/// written before the bounds existed) is `POLICYSQL_LIMIT_EXCEEDED` on the lookup (ADR 0027
-/// "Idempotent replay"): nothing executes, never `IDEMPOTENCY_CONFLICT`, and it never runs again.
+/// `POLICYSQL_INTERNAL` on the idempotency lookup and insert. A stored response over the lookup
+/// bound (a row written before the bounds existed) belongs to a request that may have committed:
+/// reading it is an unknown outcome (500), never a definite 413 (ADR 0007), never
+/// `IDEMPOTENCY_CONFLICT`, and the request never runs again.
 #[test]
-fn a_limit_failure_is_limit_exceeded_on_the_envelope_and_the_lookup_and_internal_on_the_insert() {
+fn a_limit_failure_is_limit_exceeded_on_the_envelope_and_internal_on_the_lookup_and_the_insert() {
     // Effects of a keyed write: checkBinding, open, lookup, envelope, insert, commit.
     for (successes, expected) in [
-        (2, "POLICYSQL_LIMIT_EXCEEDED"),
+        (2, "POLICYSQL_INTERNAL"),
         (3, "POLICYSQL_LIMIT_EXCEEDED"),
         (4, "POLICYSQL_INTERNAL"),
     ] {

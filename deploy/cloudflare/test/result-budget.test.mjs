@@ -319,7 +319,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(replay.body.results[0].rows[0].name, name);
   });
 
-  test(`${ownerAdapter}: a row stored before the bounds existed is 413 before the fingerprint is compared, and nothing runs`, async (t) => {
+  test(`${ownerAdapter}: a row stored before the bounds existed is 500 (outcome unknown, never a definite 413) before the fingerprint is compared, and nothing runs`, async (t) => {
     const h = await setup(t);
     const id = uid();
     const insert = [{ sql: "INSERT INTO projects(id,name) VALUES(:id,:name) RETURNING id", params: { id, name: "n" } }];
@@ -331,11 +331,13 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     await h.flush();
     const before = h.events.length;
     const retry = await post(h, insert, key);
-    assert.equal(retry.status, 413);
-    assert.equal(retry.body.error.code, "POLICYSQL_LIMIT_EXCEEDED");
+    // The request may have committed: the answer is an unknown outcome, which the client never
+    // takes for a rejection (ADR 0007).
+    assert.equal(retry.status, 500);
+    assert.equal(retry.body.error.code, "POLICYSQL_INTERNAL");
     // Another body under the same key would be a conflict by fingerprint: the cap answers first.
     const other = await post(h, [{ sql: "INSERT INTO projects(id,name) VALUES(:id,:name) RETURNING id", params: { id: uid(), name: "another" } }], key);
-    assert.equal(other.status, 413);
+    assert.equal(other.status, 500);
     await h.flush();
     assert.equal(h.events.slice(before).filter((event) => event.sql.startsWith('INSERT INTO "projects"')).length, 0, "nothing executed");
     assert.equal(count(h, id), 1);

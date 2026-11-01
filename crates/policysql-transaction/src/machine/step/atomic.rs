@@ -340,10 +340,9 @@ const fn commit_failure(class: Class) -> Code {
 /// read, which is never a rejection.
 const fn execute_failure(task: &Task, class: Class) -> Code {
     match (task, class) {
-        // A stored response over the lookup bound (a row written before the bounds existed):
-        // nothing executes, and the request is refused as over a limit (ADR 0027, "Idempotent
-        // replay").
-        (Task::AtomicLookup, Class::Limit) => Code::LimitExceeded,
+        // A stored response over the lookup bound (a row written before the bounds existed, or
+        // under a larger hard maximum) is the outcome of a request that may have committed, so
+        // reading it failed with an unknown outcome, never a definite 413 (ADR 0007, ADR 0027).
         (Task::AtomicLookup | Task::AtomicInsert, Class::Limit | Class::Complex) => Code::Internal,
         _ => Code::for_class(class),
     }
