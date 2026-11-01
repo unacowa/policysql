@@ -35,6 +35,16 @@ const fromCore = <T>(runtime: IdentityRuntime, input: unknown, read: (result: an
 // joined value, which never matches the key syntax.
 const keyMember = (key: unknown) => key === undefined ? {} : { key: typeof key === "string" ? key : null };
 
+// ADR 0007's key syntax, as core's `valid_idempotency_key` reads it. The engine uses this before
+// the body is read, only to tell a request that can be the retry of a keyed write from one that
+// can never have committed (ADR 0007, #100); core remains the authority that rejects a malformed
+// key, and the two must agree (`key-syntax.test.mjs` compares them against `identity_json`).
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:+\/=-]{16,128}$/u;
+
+/** Whether `key` is a well-formed `Idempotency-Key`; a non-string or malformed value is not. */
+export const validIdempotencyKey = (key: unknown): boolean =>
+  typeof key === "string" && IDEMPOTENCY_KEY.test(key);
+
 /**
  * `{ keyHash, fingerprint }` of a request with an optional idempotency key, or null without
  * one. `bodyText` is the exact text the engine parsed.

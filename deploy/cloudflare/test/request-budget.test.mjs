@@ -74,7 +74,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   // maxRequestBytes
 
   for (const maxRequestBytes of [65_536, 1_048_576, 2_097_152]) {
-    test(`${ownerAdapter}: maxRequestBytes ${maxRequestBytes}: the limit is served and one byte over is 413 with no database work`, async (t) => {
+    test(`${ownerAdapter}: maxRequestBytes ${maxRequestBytes}: the limit is served and one byte over is a definite 413 without a key, with no database work`, async (t) => {
       t.mock.method(console, "log", () => {});
       const h = await setup(t, { maxRequestBytes, maxSqlBytes: 1_024 });
       for (const fill of ["x", "é", "日"]) {
@@ -83,7 +83,10 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         assert.equal(served.status, 200, `${fill}: ${JSON.stringify(served.body).slice(0, 200)}`);
         const over = bodyOf(maxRequestBytes + 1, statementBody(), fill);
         const before = await work(h);
-        refused(await post(h, over, `over-${fill.codePointAt(0)}-key-000001`), "POLICYSQL_REQUEST_TOO_LARGE");
+        // Without a key the rejection is definite; with a well-formed key it is the unknown
+        // outcome, because the retry may predate a deployment that lowered the limit (#100,
+        // keyed-input-limit-retry.test.mjs).
+        refused(await post(h, over), "POLICYSQL_REQUEST_TOO_LARGE");
         assert.deepEqual(await work(h), before, `${fill}: no connection and no statement for a refused body`);
       }
     });
@@ -116,8 +119,10 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     const nested = (depth) => `${"[".repeat(depth)}1${"]".repeat(depth)}`;
     const body = (depth) => JSON.stringify({ statements: [insert("deep")], deep: JSON.parse(nested(depth)) });
     const before = await work(h);
-    // The root object is level 1, so 63 nested arrays are 64 levels and 64 are 65.
-    const error = refused(await post(h, body(64), "deep-key-00000001"), "POLICYSQL_JSON_TOO_DEEP", 400);
+    // The root object is level 1, so 63 nested arrays are 64 levels and 64 are 65. Without a
+    // key this is definite; with a well-formed key it is the unknown outcome, because the
+    // limit used to accept 65 nested containers (#100, keyed-input-limit-retry.test.mjs).
+    const error = refused(await post(h, body(64)), "POLICYSQL_JSON_TOO_DEEP", 400);
     assert.equal(error.message, "Request body nests too deeply.");
     assert.deepEqual(await work(h), before, "no connection and no statement");
     // Exactly 64 is accepted (then refused for its unapproved extra member, not for depth).
@@ -172,7 +177,9 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       const over = withMetadata(maxJsonValues - base + 1, "values_over");
       assert.equal(countJsonValues(JSON.parse(over)), maxJsonValues + 1);
       const before = await work(h);
-      const error = refused(await post(h, over, "values-over-key-0001"), "POLICYSQL_REQUEST_TOO_LARGE");
+      // Definite without a key; a well-formed key gets the unknown outcome (see
+      // keyed-input-limit-retry.test.mjs), because a retry may predate a lower limit (#100).
+      const error = refused(await post(h, over), "POLICYSQL_REQUEST_TOO_LARGE");
       assert.equal(error.path, null);
       assert.deepEqual(await work(h), before, "no connection and no statement");
       assert.equal(rowCount(h, "values_over"), 0);
