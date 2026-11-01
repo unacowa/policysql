@@ -27,8 +27,9 @@ policysql-turso = { path = "../policysql-turso" }
 policysql-transaction = { path = "../policysql-transaction" }
 serde = { version = "1", features = ["derive"] }
 # Correctly rounded decimals, as `policysql-transaction` reads them for hashing (ADR 0025):
-# without it `9007199254740991.0` reads as 9007199254740990.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+# without it `9007199254740991.0` reads as 9007199254740990. `raw_value` keeps a JSON-typed
+# parameter as its exact text instead of a tree (ADR 0027 pull request 7).
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 serde_yaml = "0.9"
 regex-lite = "0.1"
 wasm-bindgen = "0.2.104"

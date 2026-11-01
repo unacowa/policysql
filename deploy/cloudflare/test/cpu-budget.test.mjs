@@ -50,9 +50,9 @@ test("the formula at the reference wrapper's limits is the ADR's worked number",
   assert.ok(Math.abs(inputs.bMiB - 1_183_744 / 1_048_576) < 1e-9);
   assert.equal(inputs.vReq, 65_536);
   assert.equal(inputs.vRes, 65_536);
-  assert.ok(Math.abs(predictedReferenceMs(inputs) - 345.7) < 0.2, "about 345 ms on the reference machine");
+  assert.ok(Math.abs(predictedReferenceMs(inputs) - 195.0) < 0.2, "about 195 ms on the reference machine");
   assert.equal(HARDWARE_FACTOR, 2, "F is the maintainers' 2.0 until they decide otherwise (ADR 0027)");
-  assert.ok(Math.abs(requiredCpuMs(inputs) - 864.3) < 0.5, "about 860 ms with F = 2.0 and S = 1.25");
+  assert.ok(Math.abs(requiredCpuMs(inputs) - 487.5) < 0.5, "about 488 ms with F = 2.0 and S = 1.25");
   assert.ok(Math.abs(requiredCpuMs(inputs) - 1.25 * HARDWARE_FACTOR * predictedReferenceMs(inputs)) < 1e-9);
   // The reference wrapper rounds that up; it does not sit far above (a limit far above the need
   // only widens the window in which a stuck request burns CPU).
@@ -74,7 +74,7 @@ test("the check fails for limits the formula says need more CPU than configured"
 
 test("the library accepts limits whatever they cost in CPU", () => {
   // ADR 0027: CPU is deployment knowledge, so construction never refuses on it. Limits far above
-  // anything the reference wrapper could run in 1,000 ms still construct.
+  // anything the reference wrapper could run in 500 ms still construct.
   const heavy = { maxRows: 100_000, maxResultBytes: 524_288, timeoutMs: 60_000, maxStatements: 64, maxRequestBytes: 2_097_152, maxJsonValues: 131_072, maxResponseBytes: 589_824 };
   const runtime = PolicySqlRuntime.newWithPhysicalSchema(
     example("catalog.yaml"), example("policy.yaml"), "schema_cpu_2", "policy_cpu_2",

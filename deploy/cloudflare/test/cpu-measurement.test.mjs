@@ -22,18 +22,18 @@ const near = (actual, expected, tolerance = 1e-9) => assert.ok(Math.abs(actual -
 // The model
 
 test("the formula reproduces the ADR 0027 worked examples", () => {
-  // Defaults: R = 1, B = 1.13 MiB, V = 65,536 each: about 345 ms, about 860 ms with F = 2, S = 1.25.
+  // Defaults: R = 1, B = 1.13 MiB, V = 65,536 each: about 195 ms, about 488 ms with F = 2, S = 1.25.
   const limits = { maxResultBytes: 64_000, maxStatements: 8, maxRequestBytes: MIB, maxJsonValues: 65_536 };
   assert.equal(resultBoundBytes(limits), 1_183_744, "the lookup bound is the larger of the two");
   const inputs = inputsAtLimits(limits);
-  near(predictedReferenceMs(inputs), 345.7, 0.1);
-  near(requiredCpuMs(inputs), 864.3, 0.3);
-  // 1 MB of 17-digit decimals: 5 + 80 x 1 + 1.3 us x 56,121 = 158 ms (the ADR rounds R to 1 MiB).
-  near(predictedReferenceMs({ rMiB: 1, vReq: 56_121 }), 157.96, 0.01);
-  // The 1 MB string: 85 ms.
-  near(predictedReferenceMs({ rMiB: 1, vReq: 0 }), 85);
-  // Hard maxima: R = 2, B = 2.03, V = 131,072 each: about 668 ms.
-  near(predictedReferenceMs({ rMiB: 2, bMiB: 2.03, vReq: 131_072, vRes: 131_072 }), 668.4, 0.5);
+  near(predictedReferenceMs(inputs), 195.0, 0.1);
+  near(requiredCpuMs(inputs), 487.5, 0.3);
+  // 1 MB of 17-digit decimals: 5 + 40 x 1 + 0.8 us x 56,121 = 90 ms (the ADR rounds R to 1 MiB).
+  near(predictedReferenceMs({ rMiB: 1, vReq: 56_121 }), 89.90, 0.01);
+  // The 1 MB string: 45 ms.
+  near(predictedReferenceMs({ rMiB: 1, vReq: 0 }), 45);
+  // Hard maxima: R = 2, B = 2.03, V = 131,072 each: about 376 ms.
+  near(predictedReferenceMs({ rMiB: 2, bMiB: 2.03, vReq: 131_072, vRes: 131_072 }), 375.9, 0.5);
 });
 
 test("B is the lookup bound until maxResultBytes makes the text bound larger", () => {
@@ -61,13 +61,13 @@ test("requiredCpuMs scales with S and F and uses the coefficients it is given", 
 // The fit
 
 test("fitScenario flags a measurement above S times the prediction, and only then", () => {
-  const inputs = { rMiB: 1, bMiB: 0, vReq: 0, vRes: 0 }; // 85 ms
+  const inputs = { rMiB: 1, bMiB: 0, vReq: 0, vRes: 0 }; // 45 ms
   const at = (measuredMs) => fitScenario({ name: "s", group: "g", measuredMs, inputs });
-  near(at(42.5).measuredOverPredicted, 0.5);
-  assert.equal(at(85).exceedsModel, false);
-  assert.equal(at(1.25 * 85).exceedsModel, false, "exactly 1.25x is still inside the margin");
-  assert.equal(at(1.25 * 85 + 0.01).exceedsModel, true);
-  assert.equal(at(200).predictedMs, 85);
+  near(at(22.5).measuredOverPredicted, 0.5);
+  assert.equal(at(45).exceedsModel, false);
+  assert.equal(at(1.25 * 45).exceedsModel, false, "exactly 1.25x is still inside the margin");
+  assert.equal(at(1.25 * 45 + 0.01).exceedsModel, true);
+  assert.equal(at(200).predictedMs, 45);
 });
 
 test("fitScenario takes custom coefficients and safety margin", () => {
@@ -80,7 +80,7 @@ test("summarizeFit counts exceeding scenarios and names the worst ratio", () => 
   const rows = [
     fitScenario({ name: "a", group: "g", measuredMs: 10, inputs: { rMiB: 1 } }),
     fitScenario({ name: "b", group: "g", measuredMs: 200, inputs: { rMiB: 1 } }),
-    fitScenario({ name: "c", group: "g", measuredMs: 90, inputs: { rMiB: 1 } }),
+    fitScenario({ name: "c", group: "g", measuredMs: 40, inputs: { rMiB: 1 } }),
   ];
   const summary = summarizeFit(rows);
   assert.equal(summary.scenarios, 3);
@@ -99,7 +99,7 @@ test("the fit table has one aligned line per scenario and marks the ones above t
   const lines = formatFitTable(rows).split("\n");
   assert.equal(lines.length, 4, "header, rule, two rows");
   assert.match(lines[0], /scenario +R MiB +B MiB +V req +V res +measured ms +model ms +meas\/model +flag/u);
-  assert.match(lines[2], /^within +1\.000 +0\.000 +100 +0 +10\.0 +85\.1 +0\.12 +ok/u);
+  assert.match(lines[2], /^within +1\.000 +0\.000 +100 +0 +10\.0 +45\.1 +0\.22 +ok/u);
   assert.match(lines[3], /^over the model .*EXCEEDS 1\.25x$/u);
   assert.equal(new Set(lines.map((line) => line.length)).size <= 2, true, "fixed-width columns");
 });
@@ -324,7 +324,7 @@ test("the CPU step records each request's CPU and F, and reports the deployed li
   assert.deepEqual(report.belowFloor.map((entry) => entry.name), ["one long ASCII string"]);
   assert.equal(report.nodeReference.floorMs, 50);
   assert.equal(report.nodeReference.shapes["short decimals 37.4"].coldMs, 150);
-  assert.ok(Math.abs(report.formula.requiredCpuMsAtLimits - 864.3) < 0.5);
+  assert.ok(Math.abs(report.formula.requiredCpuMsAtLimits - 487.5) < 0.5);
   assert.ok(report.requests.every((entry) => entry.bodyBytes > 0 && entry.httpStatus === 200));
   // The large probes are about 1 MB of JSON in `doc`, the request the ADR is about.
   // The densest shape stops at the value limit (65,536 less the envelope), not at 1 MB.
@@ -501,7 +501,7 @@ test("measure-cpu runs a scenario against the real WASM and writes a machine-rea
     assert.ok(scenario.measuredMs > 0);
     assert.equal(typeof scenario.fit.exceedsModel, "boolean");
     assert.equal(report.model.coefficients.bMsPerMiB, COEFFICIENTS.bMsPerMiB);
-    assert.equal(report.model.atReferenceWrapperLimits.configuredCpuMs, 1_000);
+    assert.equal(report.model.atReferenceWrapperLimits.configuredCpuMs, 500);
     const json = spawnSync(process.execPath, [script, "--only", "OR chain", "--runs", "1", "--json", "--out", out], { encoding: "utf8" });
     assert.equal(JSON.parse(json.stdout).scenarios[0].id, scenario.id, "--json prints the report and nothing else");
     const bad = spawnSync(process.execPath, [script, "--only", "no such scenario", "--out", out], { encoding: "utf8" });

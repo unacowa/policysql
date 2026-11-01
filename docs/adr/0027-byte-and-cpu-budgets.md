@@ -224,8 +224,8 @@ defaults and ranges.
 
 | Field | Default | Range | Counted as | Enforced where | Error |
 | --- | --- | --- | --- | --- | --- |
-| `maxRequestBytes` (new; was fixed) | 1,048,576 | 65,536 – 2,097,152 | UTF-8 bytes of the body as received, BOM included | HTTP adapter (streamed), engine, core (derived bounds) | 413 `POLICYSQL_REQUEST_TOO_LARGE` |
-| `maxJsonValues` (new) | 65,536 | 1,024 – 131,072 | Request: JSON values plus object member names in one body. Result, separately: the values of the raw database response of one atomic envelope or interactive statement — every cell including visibility and check companion cells, every column descriptor in `cols`, and every value inside a JSON-typed cell — cumulatively; Capabilities documents that companions and descriptors count | engine body scan before `JSON.parse`, aborting at the limit (core in pull request 7); core while validating results | body: 413 `POLICYSQL_REQUEST_TOO_LARGE`; results: 413 `POLICYSQL_LIMIT_EXCEEDED` |
+| `maxRequestBytes` (new; was fixed) | 1,048,576 | 65,536 – 2,097,152 | UTF-8 bytes of the body as received, BOM included | HTTP adapter (streamed), engine (cheap UTF-16 precheck and the removed BOM), core (`check_body_json`, exact UTF-8 bytes after that mark; also derived bounds) | 413 `POLICYSQL_REQUEST_TOO_LARGE` |
+| `maxJsonValues` (new) | 65,536 | 1,024 – 131,072 | Request: JSON values plus object member names in one body. Result, separately: the values of the raw database response of one atomic envelope or interactive statement — every cell including visibility and check companion cells, every column descriptor in `cols`, and every value inside a JSON-typed cell — cumulatively; Capabilities documents that companions and descriptors count | core strict visitor, aborting at the limit before a tree exists (pull request 7); core while validating results | body: 413 `POLICYSQL_REQUEST_TOO_LARGE`; results: 413 `POLICYSQL_LIMIT_EXCEEDED` |
 | `maxSqlBytes` (new; was fixed) | 65,536 | 1,024 – min(1,048,576, `maxRequestBytes`) | UTF-8 bytes of one statement's `sql` | core, before parsing | 413 `POLICYSQL_REQUEST_TOO_LARGE`, path `/statements/<i>/sql` (was 400) |
 | `maxBytesPerValue` (new; was fixed) | 262,144 | 1 – 1,048,576 | decoded bytes of one bytes value (parameter, preset, result cell) | core codecs, the Turso adapters (from the runtime) | 413 `POLICYSQL_LIMIT_EXCEEDED` (malformed: 400 `POLICYSQL_INVALID_PARAMETER`) |
 | `maxParameters` (new) | 1,024 | 1 – 16,384 | distinct client parameter names per statement | binder | 413 `POLICYSQL_LIMIT_EXCEEDED`, statement path |
@@ -299,7 +299,7 @@ now rejected. Every other default equals today's value.
 | Configuration input (catalog, policy, physical schema) | 1 MiB each | construction input, not request data |
 | Session input JSON (wrapper-supplied) `A` | 65,536 (was 1 MiB) | wrapper data; a larger one is a wrapper fault, 500 `POLICYSQL_INTERNAL` |
 | Database binding, Idempotency-Key | 2,048; 128 | already bounded by their syntax (four parts ≤ 256 characters; 16–128 characters) |
-| Body JSON nesting (engine) / canonical nesting (core) | 64 / 127 | parser recursion; unchanged |
+| Body JSON nesting (strict core parse, canonical JSON, step command text) | 64 | one depth limit everywhere (pull request 7, #66); a body over it is 400 `POLICYSQL_JSON_TOO_DEEP`, not "not valid JSON" |
 | Database control response (BEGIN, COMMIT, ROLLBACK, close) | 65,536 | not result data; over it is a transport failure (503, or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for COMMIT), never a limit |
 | Validator (commit-check) response | 65,536 | an allow/deny answer; over it denies the commit as a failed validator |
 | Upstream expression height and parse recursion | 100 each (`turso_parser` 0.7.2) | dependency; client SQL beyond them is 400 `POLICYSQL_INVALID_SQL` before PolicySQL sees a tree; emitted SQL beyond them is `POLICYSQL_SQL_TOO_COMPLEX` (below) |
@@ -409,8 +409,9 @@ No component buffers past a limit it knows (relates to #53):
 - **HTTP request body:** already streamed (`readBodyText`); it reads the limit from the
   engine's runtime limits instead of `MAX_BODY_BYTES` and cancels the stream at the first
   chunk that crosses it. A declared `Content-Length` over the limit is rejected unread.
-- **JSON values:** counted by the body scan that already walks every value, aborting before
-  `JSON.parse` (and before WASM) at the first value over `maxJsonValues`.
+- **JSON values:** counted by core's strict body check (`check_body_json` / `begin_body_json`,
+  pull request 7), which walks every value and member name without building a tree and aborts
+  at the first value over `maxJsonValues`, before the typed parse.
 - **Turso HTTP response:** read as a byte stream, counting bytes received, cancelled at the
   first chunk over the cap (the remaining raw budget for a statement, the lookup bound for the
   idempotency lookup, 65,536 for a control request). A declared `Content-Length` over the cap
@@ -699,24 +700,23 @@ cpu_ms ≥ S × F × (C0 + a_b × (R + B) + a_v × (V_req + V_res))
 - `V_req` = `V_res` = `maxJsonValues`; on the result side that is the raw value count (cells
   including companions, column descriptors, values inside JSON cells), the same number that
   bounds the raw text.
-- Coefficients on the reference machine, worst measured shape per term, current code:
-  `C0` = 5 ms, `a_b` = 80 ms per MiB (byte-bound shapes: 22–55 ms per request MiB, 14–17 ms per
-  MiB of text result), `a_v` = 1.3 µs per value (request 0.4–0.9 µs; result 1.0–1.3 µs per value
-  inside JSON cells, and 1.06–1.17 µs per raw value of the companion-heavy shapes after `C0`).
+- Coefficients on the reference machine, worst measured shape per term, current code after pull
+  request 7: `C0` = 5 ms, `a_b` = 40 ms per MiB (the target and chosen coefficient; every
+  non-SQL scenario fits with it at `S`, including the 1 MB strings and the one-object `SELECT`
+  back, while SQL-dense requests remain above it but are covered at the limits), `a_v` =
+  0.8 µs per value (the worst non-SQL value-bound shape, the keyed `UPDATE ... RETURNING`
+  result, needs about 0.92 µs per value before `S`; 1 MB of 17-digit decimals needs 0.80. The
+  target was 0.5, see "Pull request 7 results").
 - `F` = Workers CPU time / reference machine time, `S` = 1.25 safety margin (isolates
   tolerate occasional overruns; sustained ones are terminated).
 
 With the defaults (`R` = 1; `B` = max(128,000 + 4,096 + 1,048,576, 1,183,744) = 1.13 MiB;
-`V` = 65,536 each): `5 + 80 × 2.13 + 1.3 µs × 131,072` ≈ 345 ms on the reference machine; with
-`F` = 2.0 and `S` = 1.25, **about 860 ms**, which the reference wrapper rounds up to
-1,000 ms. The model is conservative against every
-measurement, using the same definitions: 85 ms predicted for the 1 MB string (measured 22),
-158 ms for 1 MB of 17-digit decimals (66), 30 ms for the 100 × 64 conditional result
-(`5 + 80 × 0.1 + 1.3 µs × 13,029` raw values; measured 18.9–20.3), 96 ms for the 1,000 × 25
-one-character-alias conditional result (`5 + 80 × 0.31 + 1.3 µs × 51,051`; measured 54), and,
-at the default value limit, 118 ms for the densest body shape (about 59 ms measured). At the
-hard maxima (`R` = 2, `B` = 2.03, `V` = 131,072 each) it is about 668 ms on the reference
-machine.
+`V` = 65,536 each): `5 + 40 × 2.13 + 0.8 µs × 131,072` ≈ 195 ms on the reference machine; with
+`F` = 2.0 and `S` = 1.25, **about 488 ms**, which the reference wrapper rounds up to
+500 ms. The model is conservative for the non-SQL shapes after pull request 7, using the same
+definitions; see "Pull request 7 results" for the measured values and the SQL-dense exceptions.
+At the hard maxima (`R` = 2, `B` = 2.03, `V` = 131,072 each) it is about 376 ms on the
+reference machine.
 
 **Pull request 1 results (2026-10-31).** `scripts/measure-cpu.mjs` reproduces the Context tables
 on the reference machine (i7-7700K, Node 26.4, ABI 12) within a few percent (atomic keyed 1 MB:
@@ -804,6 +804,68 @@ Decisions:
   cannot, because it fails valid requests of the authenticated caller with an
   outcome-unknown 5xx (#56) instead of rejecting them up front with 413.
 
+**Pull request 7 results (2026-11-01).** Implemented as decided; ABI 16. The engine no longer
+scans a body's JSON or materializes a `serde_json` tree for it: `check_body_json` and
+`begin_body_json` in core are the engine's one strict parse of the transport body (syntax,
+escaped lone surrogates, duplicate keys after escape decoding, the depth limit,
+`maxJsonValues`, and the exact UTF-8 size), and `request-body.ts` keeps only the transport
+checks (required body, raw lone surrogates, the cheap UTF-16 size test, and one leading byte
+order mark). The owner and the compiler re-check at their own boundaries, as a direct call can
+skip the engine's check; the compiler's internal check allows the two fixed levels of the
+one-statement envelope it builds around a step command, so they do not spend the command's 64
+levels. JSON-typed parameters are carried as their exact text (`RawValue`) rather than a
+`serde_json::Value`, and a result is validated once from the owned raw result, measuring its
+wire bytes with a counting writer instead of serializing it to text and parsing it again.
+`exact-json.ts` runs its reviver only when a 16-digit run is present and falls back from the
+BigInt replacer only when plain `JSON.stringify` throws.
+
+The depth limit is now 64 everywhere: the strict body check, canonical JSON, and the step
+command text (#66). A body over it is 400 `POLICYSQL_JSON_TOO_DEEP` with "Request body nests too
+deeply.", not `POLICYSQL_INVALID_REQUEST` "not valid JSON"; the new code is in the client's
+`REJECTIONS`, the status table, and `website/api/errors.md`. Duplicate keys (including an
+escaped equivalent of the same name), lone surrogates, syntax errors, and the size and value
+limits keep their previous codes and messages.
+
+Measured with the same method and machine as pull request 1, ABI 16, 35 scenarios. At `a_b` =
+40 ms/MiB and `a_v` = 0.8 µs/value, every non-SQL scenario fits under `S` = 1.25; the highest is
+the keyed `UPDATE ... RETURNING` result at 1.12 times its prediction. Four SQL-dense scenarios
+exceed their own prediction: 128 projections of 30-deep `lower()` nesting (12.5 ms measured, 6.1
+predicted), one 64 KiB statement (11.8 vs 7.5), eight 64 KiB statements dense and padded (80.1
+vs 25.0), and eight statements of eight joins each (6.6 vs 5.1; 1.29 times, the fourth just over
+the line). SQL text costs up to 275 ms per MiB of SQL in the worst shape (about 150 for the large
+dense request), above `a_b`, but the formula still covers them at the reference limits (488 ms
+required, 500 configured): such a request spends `R` on SQL, not on `B` and `V`, and 80.1 ms is
+far below 488. No separate SQL term is added.
+
+Against the targets: `a_b` = 40 is the target value and is the coefficient in force; every
+non-SQL scenario fits with it at `S`, including the 1 MB strings and the one-object `SELECT`
+back, while SQL-dense shapes are the documented exception. `a_v` = 0.8 misses the 0.5 target. The worst non-SQL value-bound shape is the keyed `UPDATE ...
+RETURNING` result: 30.2 ms for 27,037 values, about 0.92 µs/value after `C0` and the byte term
+(0.74 after `S`). The 1 MB 17-digit decimal request costs 88.1 ms for 56,136 values, 0.80
+µs/value before `S` (0.64 after). The coefficient 0.8 is above those after `S`. The request path
+is 14.2 ms for 65,480 nested-array values and 36.9 ms for 65,486 unique-key members; the result
+path is 35.5 ms for 51,059 raw values. The remaining value cost is the identity digest, which
+still parses JSON-typed parameters into a tree to canonicalize them (the strict check and
+compile use the exact text, not a second tree). The 50 B/value memory target is also missed on
+the full request path: atomic keyed requests peak at 6.6 to 16.7 MiB for about 65,000 values
+(17-digit decimals 16.7, nested arrays 9.4), compile-rejected shapes at 2.2 to 8.6 MiB, and
+results at 2.3 to 4.8 MiB for 6,573 to 51,059 raw values; the 1 MB string peaks at 15.1 MiB
+(ASCII) and 15.4 MiB (CJK) atomic keyed. The strict body check and the result validation
+themselves no longer build a tree, but the digest and the idempotency envelope dominate these
+peaks. The hard maxima are unchanged: the measured peaks do not justify raising them, and
+scaling the densest request shape to the 131,072-value maximum stays under the 64 MiB phase
+budget.
+
+`cpu_ms` becomes 500 (from 1,000); the formula requires 487.5 at the reference limits. `F`
+remains 2.0 (decisions 2 and 10); the release smoke after this pull request is below. It passed
+on the dev deployment with ABI 16 and `cpu_ms` 500: observability was read, every probe was 200,
+no invocation ended `exceededCpu`, and no probe was above 400 ms; the highest Worker CPU was
+51 ms. `observedF` is `null` because every warm Node reference is under the 50 ms floor (nested
+arrays 13.9 ms warm / 89.0 cold, short decimals 21.4 / 108.5, one long ASCII string 25.0 /
+123.9). The below-floor factors range from 0.34 (the cold short-decimals request) to 2.80 (one
+warm nested-arrays sample); with a 14 ms reference the ratio is dominated by whole-millisecond
+platform overhead, so the maintainers' `F` = 2.0 stands (decisions 2 and 10).
+
 ### Capabilities
 
 `limits` in Capabilities is built only from `limits_json` and advertises exactly the enforced
@@ -826,7 +888,8 @@ described as counting companion cells and column descriptors. `spec/openapi.yaml
 
 | Condition | Status, code | Transaction effect |
 | --- | --- | --- |
-| Body over `maxRequestBytes` (declared, streamed, or engine text) or over `maxJsonValues` | 413 `POLICYSQL_REQUEST_TOO_LARGE` | none started |
+| Body over `maxRequestBytes` (declared, streamed, or core text) or over `maxJsonValues` | 413 `POLICYSQL_REQUEST_TOO_LARGE` | none started |
+| Body JSON nested deeper than 64 levels (or a step command text over it) | 400 `POLICYSQL_JSON_TOO_DEEP` | none started |
 | SQL text over `maxSqlBytes` | 413 `POLICYSQL_REQUEST_TOO_LARGE`, `/statements/<i>/sql` | none started |
 | Parameters, depth, projections, or joins of the client's SQL over their limit | 413 `POLICYSQL_LIMIT_EXCEEDED`, statement path | none started |
 | Client SQL beyond the parser's caps | 400 `POLICYSQL_INVALID_SQL` | none started |
@@ -881,14 +944,27 @@ that compares the client table with the status table (`website/api/errors.md`) c
     ABI 13 (pull request 3; 9 was used by #80, 10 by #65, 11 by #85, 12 by #54). The snapshot
     changes, so open transactions from the previous ABI do not match (as for every ABI change).
 13. `DatabaseProvider` gains the `streamedReadCap` capability.
-14. Reference wrapper: `cpu_ms` 50 → 1,000 (provisional), runbook alert threshold relative to
-    `cpu_ms`.
+14. Reference wrapper: `cpu_ms` 50 → 1,000 (provisional; pull request 7 lowers it to 500), runbook
+    alert threshold relative to `cpu_ms`.
 15. Capabilities `limits` gains fields (additive).
 16. **Idempotency rows from before this change** (ABI 14 and earlier, before ABI 15) whose
     `response_json` exceeds 1,183,744 bytes: a keyed retry gets 500 `POLICYSQL_INTERNAL` instead of
     a replay (nothing executes; see Idempotent replay). The rows may be deleted.
 17. JSON-typed values written by another system in non-canonical form can exceed the raw bound
     and be 413 even when their canonical public form fits (as for BLOBs, ADR 0016).
+18. **WASM ABI 16 (pull request 7).** The snapshot changes, so open transactions from ABI 15 do
+    not match. `check_body_json` and `begin_body_json` replace the engine's own body scan and
+    `JSON.parse`; duplicate keys, escaped lone surrogates, the value count, the exact UTF-8
+    size, and the depth limit are core decisions.
+19. **Depth and its code (pull request 7, #66).** The body and canonical depth limit is 64
+    everywhere (was 64 in the engine scan and 127 in canonical JSON), and a body over it is 400
+    `POLICYSQL_JSON_TOO_DEEP` instead of 400 `POLICYSQL_INVALID_REQUEST`. The client's
+    `REJECTIONS` lists the new code as a definite rejection.
+20. **JSON-typed parameter text (pull request 7).** A JSON-typed parameter is passed through as
+    its exact request text instead of being re-serialized from a `serde_json` tree; the JSON
+    value is unchanged, but whitespace and number spelling inside it can reach the database
+    unchanged. Invalid JSON, a duplicate key, a lone surrogate, and a value or depth over a
+    limit keep their previous codes except for item 19.
 
 ## Implementation pull requests
 

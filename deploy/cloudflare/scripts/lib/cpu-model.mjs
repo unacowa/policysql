@@ -11,14 +11,24 @@
 
 export const MIB = 1_048_576;
 
-/** Coefficients on the reference machine, ADR 0027 (worst measured shape per term, current code). */
+/**
+ * Coefficients on the reference machine, ADR 0027 (worst measured shape per term, current code).
+ * Pull request 7 re-measured after the strict body parse, exact-text JSON parameters, and the
+ * single result validation: `a_b` = 40 is the target value and every non-SQL scenario fits with
+ * it at `S`, including the 1 MB strings and the one-object `SELECT` back.
+ * The worst non-SQL value-bound shape is the keyed `UPDATE ... RETURNING` result, at about 0.92
+ * us/value before `S` (0.74 after it); 1 MB of 17-digit decimals needs 0.80 before `S` (0.64
+ * after). Both miss the 0.5 target, and 0.8 is the round-up that covers them (ADR 0027 "Pull
+ * request 7 results"). SQL-dense requests still exceed `a_b` per MiB but stay under the formula's
+ * total at the reference limits, which is why there is no separate SQL term.
+ */
 export const COEFFICIENTS = Object.freeze({
   /** Fixed cost of one request, ms. */
   c0Ms: 5,
   /** Cost per MiB of request bytes and of raw result bytes not attributable to values, ms. */
-  bMsPerMiB: 80,
+  bMsPerMiB: 40,
   /** Cost per JSON value (request or raw result), microseconds. */
-  vUsPerValue: 1.3,
+  vUsPerValue: 0.8,
 });
 
 /** `S`: tolerates occasional overruns; sustained ones are terminated by the platform. */

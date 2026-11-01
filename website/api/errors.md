@@ -39,6 +39,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | Code | Status | 意味 |
 | --- | --- | --- |
 | `POLICYSQL_INVALID_REQUEST` | 400 | JSON、必須field、header（`PolicySQL-Role`の複数指定など）が不正 |
+| `POLICYSQL_JSON_TOO_DEEP` | 400 | request bodyのJSONの入れ子が上限（64 level）を超えた。単なるJSON構文エラーではなく原因を表す専用code。DB処理の前に拒否し、再送しても成功しないため、clientは拒否（`PolicySqlRejectedError`）として扱う |
 | `POLICYSQL_INVALID_SQL` | 400 | SQLをparseできない |
 | `POLICYSQL_MULTIPLE_STATEMENTS` | 400 | statementが複数含まれる |
 | `POLICYSQL_UNSUPPORTED_SQL` | 400 | 対応範囲外の構文 |

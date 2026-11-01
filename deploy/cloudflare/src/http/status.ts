@@ -7,6 +7,7 @@
 export const ERROR_STATUS: Readonly<Record<string, number>> = Object.freeze({
   // Malformed request, SQL, or parameter.
   POLICYSQL_INVALID_REQUEST: 400,
+  POLICYSQL_JSON_TOO_DEEP: 400,
   POLICYSQL_INVALID_SQL: 400,
   POLICYSQL_MULTIPLE_STATEMENTS: 400,
   POLICYSQL_UNSUPPORTED_SQL: 400,

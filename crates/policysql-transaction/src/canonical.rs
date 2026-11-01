@@ -29,10 +29,11 @@
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use std::fmt::{self, Write as _};
 
-/// The deepest nesting accepted: `serde_json`'s recursion limit. The engine rejects bodies
-/// nested deeper than 64 levels before any identity is computed, so every body it accepts is
-/// within this bound.
-pub const MAX_DEPTH: usize = 127;
+/// The deepest nesting accepted, in arrays and objects: 64 (ADR 0027 pull request 7, #66).
+/// The engine's strict body check ([`crate::strict`]) enforces the same value before any
+/// identity is computed, and `serde_json`'s own recursion limit (127) stays a second, larger
+/// bound, so a deeper input is always this limit's error.
+pub const MAX_DEPTH: usize = 64;
 
 /// The largest integer magnitude printed as plain digits whatever its spelling: 2^53 − 1.
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -92,7 +93,7 @@ impl Json {
 /// than [`MAX_DEPTH`], a number outside the double range, or an escaped lone surrogate.
 pub fn parse(text: &str) -> Result<Json, ParseError> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
-    let value = ValueSeed
+    let value = ValueSeed { depth: 0 }
         .deserialize(&mut deserializer)
         .map_err(|_| ParseError)?;
     deserializer.end().map_err(|_| ParseError)?;
@@ -149,18 +150,22 @@ pub(crate) fn js_string_len(text: &str) -> usize {
     out.len()
 }
 
-/// Builds a [`Json`] from `serde_json`'s events, rejecting duplicate keys.
-struct ValueSeed;
+/// Builds a [`Json`] from `serde_json`'s events, rejecting duplicate keys and deep nesting.
+struct ValueSeed {
+    depth: usize,
+}
 
 impl<'de> DeserializeSeed<'de> for ValueSeed {
     type Value = Json;
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Json, D::Error> {
-        deserializer.deserialize_any(ValueVisitor)
+        deserializer.deserialize_any(ValueVisitor { depth: self.depth })
     }
 }
 
-struct ValueVisitor;
+struct ValueVisitor {
+    depth: usize,
+}
 
 impl<'de> Visitor<'de> for ValueVisitor {
     type Value = Json;
@@ -200,17 +205,30 @@ impl<'de> Visitor<'de> for ValueVisitor {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<Json, A::Error> {
+        if self.depth >= MAX_DEPTH {
+            return Err(de::Error::custom("nesting too deep"));
+        }
         let mut items = Vec::new();
-        while let Some(item) = access.next_element_seed(ValueSeed)? {
+        while let Some(item) = access.next_element_seed(ValueSeed {
+            depth: self.depth + 1,
+        })? {
             items.push(item);
         }
         Ok(Json::Array(items))
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Json, A::Error> {
+        if self.depth >= MAX_DEPTH {
+            return Err(de::Error::custom("nesting too deep"));
+        }
         let mut members = Vec::new();
         while let Some(key) = access.next_key::<String>()? {
-            members.push((key, access.next_value_seed(ValueSeed)?));
+            members.push((
+                key,
+                access.next_value_seed(ValueSeed {
+                    depth: self.depth + 1,
+                })?,
+            ));
         }
         // One sort and one pass over neighbours: `O(n log n)` key comparisons. Checking each
         // new key against every earlier one is quadratic in the member count, which a body
@@ -503,7 +521,7 @@ mod tests {
         assert_eq!(canonical(&objects(MAX_DEPTH)), objects(MAX_DEPTH));
         assert_eq!(parse(&arrays(MAX_DEPTH + 1)), Err(ParseError));
         assert_eq!(parse(&objects(MAX_DEPTH + 1)), Err(ParseError));
-        // The engine's bound (64 levels) is well within.
-        assert_eq!(canonical(&arrays(65)), arrays(65));
+        // One value, the engine's strict body check, and canonicalization all use 64 (#66).
+        assert_eq!(parse(&arrays(65)), Err(ParseError));
     }
 }

@@ -12,6 +12,7 @@ resources:
       tenant_id: { type: string }
       big: { type: int64, representation: number, nullable: true }
       ratio: { type: number, nullable: true }
+      meta: { type: json, representation: object, storage: text, nullable: true }
 ";
 const POLICY: &str = "version: 1
 resources:
@@ -23,7 +24,7 @@ resources:
           filter: { tenant_id: { eq: { session: tenant_id } } }
           limit: 100
         insert:
-          columns: [id, big, ratio]
+          columns: [id, big, ratio, meta]
           presets: { tenant_id: { session: tenant_id } }
           check: { tenant_id: { eq: { session: tenant_id } } }
 ";
@@ -133,10 +134,10 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 }
 
 #[test]
-fn abi_8_names_the_step_machine_with_atomic_execution() {
+fn abi_16_names_the_step_machine_with_body_and_result_reductions() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 15);
-    assert!(owner.runtime.snapshot().ends_with(":abi-15"));
+    assert_eq!(owner.runtime.abi_version(), 16);
+    assert!(owner.runtime.snapshot().ends_with(":abi-16"));
 }
 
 /// ADR 0024 pull request 5 with the real compiler: the policy's check triggers on the
@@ -248,6 +249,60 @@ fn issue_70_overflow_is_rejected_from_the_text() {
     assert_eq!(
         reply["reply"]["error"]["code"], "POLICYSQL_INVALID_REQUEST",
         "{reply}"
+    );
+}
+
+#[test]
+fn command_text_over_the_depth_limit_is_json_too_deep() {
+    let mut owner = begun();
+    let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+    let accepted = owner.statement(&format!(
+        r#"{{"sequence":1,"sql":"SELECT id FROM counters","params":{{}},"extra":{}}}"#,
+        nested(63)
+    ));
+    let accepted = accepted["effects"]
+        .as_array()
+        .and_then(|effects| effects.iter().find(|effect| effect["type"] == "respond"));
+    assert!(accepted.is_some(), "an unknown member is still invalid");
+    if let Some(accepted) = accepted {
+        assert_eq!(
+            accepted["reply"]["error"]["code"], "POLICYSQL_INVALID_REQUEST",
+            "64 levels pass the strict check and the typed read rejects the extra member"
+        );
+    }
+    let deep = owner.statement(&format!(
+        r#"{{"sequence":1,"sql":"SELECT id FROM counters","params":{{}},"extra":{}}}"#,
+        nested(64)
+    ));
+    let deep = &deep["effects"][0];
+    assert_eq!(deep["type"], "respond", "{deep}");
+    assert_eq!(
+        deep["reply"]["error"]["code"], "POLICYSQL_JSON_TOO_DEEP",
+        "{deep}"
+    );
+    assert_eq!(
+        deep["reply"]["error"]["message"], "The request JSON nests too deeply.",
+        "{deep}"
+    );
+}
+
+#[test]
+fn a_command_at_the_depth_limit_compiles_inside_the_machine_envelope() {
+    // The command is one level short of the limit: its root object is level 1, the parameter
+    // object is level 2, and 62 nested parameter objects put the deepest value at level 64. The
+    // machine wraps the command in a one-statement envelope, whose two fixed levels must not
+    // spend the client's budget.
+    let mut owner = begun();
+    let object = |depth: usize| format!("{}1{}", "{\"a\":".repeat(depth), "}".repeat(depth));
+    let body = format!(
+        r#"{{"sequence":1,"sql":"INSERT INTO counters (id, meta) VALUES (:id, :meta)","params":{{"id":"x","meta":{}}}}}"#,
+        object(62)
+    );
+    let output = owner.statement(&body);
+    let execute = owner.succeed(&output);
+    assert_eq!(
+        execute["effects"][0]["type"], "execute",
+        "a body at the limit must not be rejected by the envelope wrapper: {execute}"
     );
 }
 

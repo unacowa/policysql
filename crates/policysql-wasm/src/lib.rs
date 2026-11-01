@@ -60,7 +60,20 @@ use wasm_bindgen::prelude::*;
 /// writes `maxResponseBytes` on `execute` and `observe` effects, a stored response over the
 /// lookup bound is 500 `POLICYSQL_INTERNAL` on a keyed retry, and the event and volatile bounds
 /// are derived. No identity value changed.
-const ABI_VERSION: u32 = 15;
+/// 16: ADR 0027 pull request 7 (#56, #60, #66): `check_body_json` and `begin_body_json` are the
+/// strict body parse, in core, and the engine uses them instead of its own scan and
+/// `JSON.parse`; the nesting limit is 64 levels everywhere (was 64 in the engine's scan, counting
+/// the root container as level 0, and 127 in canonical JSON), and a body over it is 400
+/// `POLICYSQL_JSON_TOO_DEEP` (a depth limit is no longer "not valid JSON"); JSON-typed
+/// parameters are read as their exact text, so their formatting is preserved. No identity
+/// value changed.
+const ABI_VERSION: u32 = 16;
+/// The fixed JSON levels the machine adds when it wraps an interactive command in the
+/// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
+/// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must
+/// still compile, so the internal envelope check allows those two server-added levels; the
+/// client body limit stays [`policysql_transaction::strict::MAX_DEPTH`].
+const COMPILE_ENVELOPE_DEPTH: usize = 2;
 const PROFILE_ID: &str = "sqlite-turso-v1";
 const MAX_CONFIGURATION_BYTES: usize = 1_048_576;
 const MAX_ACTIVE_EXECUTIONS: usize = 64;
@@ -156,7 +169,9 @@ struct ExpectedSnapshot {
 #[serde(deny_unknown_fields)]
 struct RequestStatement {
     sql: String,
-    params: BTreeMap<String, serde_json::Value>,
+    /// Exact text per parameter: a JSON-typed parameter is kept as its input text instead of a
+    /// tree (ADR 0027 pull request 7); the strict body check already validated it.
+    params: BTreeMap<String, Box<serde_json::value::RawValue>>,
     expect: Option<RequestExpectation>,
 }
 
@@ -197,6 +212,97 @@ struct RawExecuteResult {
     columns: Vec<String>,
     rows: Vec<Vec<serde_json::Value>>,
     affected_rows: u64,
+}
+
+/// The byte length the raw result would have as JSON, without building the text: the same
+/// `{"columns":...,"rows":...,"affectedRows":...}` serialization the bound was measured on
+/// (ADR 0027 pull request 7).
+fn raw_result_bytes(raw: &policysql_transaction::machine::RawResult) -> u64 {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RawResultWire<'a> {
+        columns: &'a [String],
+        rows: &'a [Vec<serde_json::Value>],
+        affected_rows: u64,
+    }
+
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .saturating_add(u64::try_from(buffer.len()).unwrap_or(u64::MAX));
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let wire = RawResultWire {
+        columns: &raw.columns,
+        rows: &raw.rows,
+        affected_rows: raw.affected_rows,
+    };
+    let mut counter = Counter(0);
+    match serde_json::to_writer(&mut counter, &wire) {
+        Ok(()) => counter.0,
+        // A `serde_json::Value` always serializes; treating an impossible failure as over
+        // every bound keeps it a result-size rejection rather than an internal error.
+        Err(_) => u64::MAX,
+    }
+}
+
+/// The strict body check's success (`check_body_json`); the text itself is checked and dropped.
+#[derive(Serialize)]
+struct BodyOk {
+    ok: bool,
+}
+
+/// A body check's client-facing error. The code is one the public table documents: the engine
+/// maps it to an `EngineError` and never invents one.
+#[derive(Serialize)]
+struct BodyErrorEnvelope {
+    error: BodyErrorBody,
+}
+
+#[derive(Serialize)]
+struct BodyErrorBody {
+    code: &'static str,
+    message: &'static str,
+}
+
+fn body_error(error: BodyErrorBody) -> String {
+    serialize_or_internal(&BodyErrorEnvelope { error })
+}
+
+/// `begin_body_json`'s success: what the engine used to read from `JSON.parse` (ADR 0027 pull
+/// request 7). `expected` is omitted when the body has none, exactly as the engine treats it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BeginBodyResponse {
+    ok: bool,
+    mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected: Option<serde_json::Value>,
+}
+
+/// The begin body's shape, checked after the strict parse. `deny_unknown_fields` and the
+/// required `mode` reproduce the engine's checks; `expected`, when the member is present, must
+/// be an object with exactly the two names the engine compares. `deserialize_present` keeps a
+/// present `null` distinct from an absent member (both used to be checked differently).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BeginBody {
+    mode: String,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    expected: Option<serde_json::Value>,
+}
+
+fn deserialize_present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 /// Private ABI value: preserves physical BLOB identity independently of the
@@ -629,6 +735,59 @@ impl PolicySqlRuntime {
         self.plans.borrow_mut().remove(&handle).is_some()
     }
 
+    /// The strict check of an operation's body text (ADR 0027 pull request 7, #60, #66).
+    ///
+    /// This is the only strict JSON parse of a body: syntax, Unicode escapes (including escaped
+    /// lone surrogates), duplicate object keys after escape decoding, `maxJsonValues` (every
+    /// value and every member name), and nesting depth ([`policysql_transaction::strict::MAX_DEPTH`]).
+    /// The text's UTF-8 byte length is checked against `maxRequestBytes` too, because the engine
+    /// no longer encodes the JavaScript string to measure it. Returns `{"ok":true}` or
+    /// `{"error":{"code":...,"message":...}}` with a code from the public status table.
+    #[must_use]
+    pub fn check_body_json(&self, body_text: &str) -> String {
+        let limits = self.machine_limits();
+        match check_body(body_text, &limits) {
+            Ok(()) => serialize_or_internal(&BodyOk { ok: true }),
+            Err(error) => body_error(error),
+        }
+    }
+
+    /// The strict check and typed read of an interactive `begin` body, in one call: returns
+    /// `{"ok":true,"mode":"read"|"write","expected":{...}}` or the same error envelope as
+    /// [`Self::check_body_json`]. The shape rules are the engine's (ADR 0024): exactly `mode`
+    /// and optionally `expected`, which has exactly `schemaVersion` and `policyVersion`.
+    #[must_use]
+    pub fn begin_body_json(&self, body_text: &str) -> String {
+        let limits = self.machine_limits();
+        if let Err(error) = check_body(body_text, &limits) {
+            return body_error(error);
+        }
+        let Ok(body) = serde_json::from_str::<BeginBody>(body_text) else {
+            return body_error(invalid_request_body());
+        };
+        let mode = match body.mode.as_str() {
+            "read" => "read",
+            "write" => "write",
+            _ => return body_error(invalid_request_body()),
+        };
+        let expected = match body.expected {
+            None => None,
+            Some(serde_json::Value::Object(members))
+                if members.len() == 2
+                    && members.contains_key("schemaVersion")
+                    && members.contains_key("policyVersion") =>
+            {
+                Some(serde_json::Value::Object(members))
+            }
+            Some(_) => return body_error(invalid_request_body()),
+        };
+        serialize_or_internal(&BeginBodyResponse {
+            ok: true,
+            mode,
+            expected,
+        })
+    }
+
     /// Validates a wrapper-supplied trusted session, selects the role named by the
     /// `PolicySQL-Role` header (or `defaultRole` when absent), and checks the endpoint's
     /// required access. This is the only place these rules exist.
@@ -773,6 +932,70 @@ fn value_limit(limits: &limits::RuntimeLimits) -> usize {
     usize::try_from(limits.max_bytes_per_value).unwrap_or(usize::MAX)
 }
 
+/// The strict check before the compiler's typed read (ADR 0027 pull request 7). The engine
+/// checked the client body, but compile is also reachable from a host that skipped that check:
+/// syntax, duplicates, and depth are re-checked, and the value count stays the body's own limit,
+/// enforced there. The typed read never sees text this check rejected, so a duplicate key cannot
+/// silently keep its last value.
+///
+/// An interactive command arrives wrapped in the machine envelope (two fixed levels of server
+/// JSON); those levels are not client nesting, so they may not turn a body that passed the
+/// client limit into an envelope error. Atomic request envelopes are already wrapped by the
+/// client, so the allowance is unused for them.
+fn check_compile_input(request_json: &str) -> Result<(), RuntimeError> {
+    policysql_transaction::strict::check_with_max_depth(
+        request_json,
+        None,
+        policysql_transaction::strict::MAX_DEPTH + COMPILE_ENVELOPE_DEPTH,
+    )
+    .map_err(|_| RuntimeError::Envelope)
+}
+
+/// The body check shared by `check_body_json` and `begin_body_json` (ADR 0027 pull request 7).
+fn check_body(
+    body_text: &str,
+    limits: &policysql_transaction::machine::Limits,
+) -> Result<(), BodyErrorBody> {
+    if body_text.len() > limits.max_request_bytes() {
+        return Err(BodyErrorBody {
+            code: "POLICYSQL_REQUEST_TOO_LARGE",
+            message: "Request body exceeds the size limit.",
+        });
+    }
+    let max_values = usize::try_from(limits.max_json_values).unwrap_or(usize::MAX);
+    match policysql_transaction::strict::check(body_text, Some(max_values)) {
+        Ok(()) => Ok(()),
+        Err(policysql_transaction::StrictError::TooManyValues) => Err(BodyErrorBody {
+            code: "POLICYSQL_REQUEST_TOO_LARGE",
+            message: "Request body has too many JSON values.",
+        }),
+        Err(policysql_transaction::StrictError::TooDeep) => Err(BodyErrorBody {
+            code: "POLICYSQL_JSON_TOO_DEEP",
+            message: "Request body nests too deeply.",
+        }),
+        Err(policysql_transaction::StrictError::LoneSurrogate) => Err(BodyErrorBody {
+            code: "POLICYSQL_INVALID_REQUEST",
+            message: "Request body is not valid UTF-8.",
+        }),
+        Err(
+            policysql_transaction::StrictError::Syntax
+            | policysql_transaction::StrictError::DuplicateKey,
+        ) => Err(BodyErrorBody {
+            code: "POLICYSQL_INVALID_REQUEST",
+            message: "Request body is not valid JSON.",
+        }),
+    }
+}
+
+/// The engine's `invalidRequest()` answer for a begin body of the wrong shape (not JSON
+/// syntax: a JSON document whose members are not `mode`/`expected` as ADR 0024 defines them).
+fn invalid_request_body() -> BodyErrorBody {
+    BodyErrorBody {
+        code: "POLICYSQL_INVALID_REQUEST",
+        message: "The request is invalid.",
+    }
+}
+
 fn binding_limits(limits: &limits::RuntimeLimits) -> policysql_parser::BindingLimits {
     policysql_parser::BindingLimits {
         max_expression_depth: usize::try_from(limits.max_expression_depth).unwrap_or(usize::MAX),
@@ -874,6 +1097,54 @@ impl PolicySqlRuntime {
         }
         let raw: RawExecuteResult =
             serde_json::from_str(raw_result_json).map_err(|_| RuntimeError::RemoteResult)?;
+        self.validate_result_parts(
+            handle,
+            index,
+            raw.columns,
+            raw.rows,
+            raw.affected_rows,
+            raw_bytes,
+            budget,
+        )
+    }
+
+    /// Validates the step machine's typed raw result without turning it back into JSON text
+    /// (ADR 0027 pull request 7): the machine had the rows already, and the previous
+    /// re-serialization parsed a second full copy. `raw_bytes` is the same length the old
+    /// serialization had, measured by writing it to a counter instead of a string.
+    fn validate_raw_result_within(
+        &self,
+        handle: u64,
+        index: usize,
+        raw: policysql_transaction::machine::RawResult,
+        budget: policysql_transaction::machine::ResultBudget,
+    ) -> Result<ValidatedExecuteResult, RuntimeError> {
+        let raw_bytes = raw_result_bytes(&raw);
+        if raw_bytes > budget.raw_bytes {
+            return Err(RuntimeError::Rejected(RejectionKind::LimitExceeded));
+        }
+        self.validate_result_parts(
+            handle,
+            index,
+            raw.columns,
+            raw.rows,
+            raw.affected_rows,
+            raw_bytes,
+            budget,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_result_parts(
+        &self,
+        handle: u64,
+        index: usize,
+        columns: Vec<String>,
+        rows: Vec<Vec<serde_json::Value>>,
+        affected_rows: u64,
+        raw_bytes: u64,
+        budget: policysql_transaction::machine::ResultBudget,
+    ) -> Result<ValidatedExecuteResult, RuntimeError> {
         let plans = self.plans.borrow();
         let statement = plans
             .get(&handle)
@@ -899,14 +1170,13 @@ impl PolicySqlRuntime {
         // limit (ADR 0027): the column descriptors, every cell, and every value inside a
         // JSON-typed cell.
         let values_limit = budget.values;
-        let mut values = u64::try_from(raw.columns.len()).unwrap_or(u64::MAX);
+        let mut values = u64::try_from(columns.len()).unwrap_or(u64::MAX);
         let over_limit = || RuntimeError::Rejected(RejectionKind::LimitExceeded);
         if values > values_limit {
             return Err(over_limit());
         }
-        let columns = raw.columns;
-        let mut rows = Vec::with_capacity(raw.rows.len());
-        for row in raw.rows {
+        let mut converted_rows = Vec::with_capacity(rows.len());
+        for row in rows {
             values = values.saturating_add(u64::try_from(row.len()).unwrap_or(u64::MAX));
             if values > values_limit {
                 return Err(over_limit());
@@ -929,13 +1199,13 @@ impl PolicySqlRuntime {
                     expected,
                 )?);
             }
-            rows.push(converted);
+            converted_rows.push(converted);
         }
         let mut result = policysql_turso::ExecuteResult {
             columns,
-            rows,
+            rows: converted_rows,
             redactions: Vec::new(),
-            affected_rows: raw.affected_rows,
+            affected_rows,
         };
         policysql_turso::validate_sealed_result_within(
             &statement.plan,
@@ -1085,6 +1355,7 @@ impl PolicySqlRuntime {
         }
         let endpoint = endpoint_permission(permission)?;
         let auth = activate_auth(verified_auth_json, endpoint)?;
+        check_compile_input(request_json)?;
         let raw_request: AtomicRequest =
             serde_json::from_str(request_json).map_err(|_| RuntimeError::Envelope)?;
         if raw_request.expected.as_ref().is_some_and(|expected| {
@@ -2108,9 +2379,9 @@ fn statement_request(
         .map(|(name, value)| {
             let name = ClientParameterName::new(name)
                 .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidParameter))?;
-            let value = logical_value(
+            let value = logical_parameter_value(
                 max_bytes_per_value,
-                value,
+                &value,
                 parameter_types
                     .get(&name)
                     .map(policysql_sqlite::ClientParameterContract::logical_type),
@@ -2163,6 +2434,28 @@ fn statement_parameter_types(
         .map_err(|_| RuntimeError::Rejected(RejectionKind::AmbiguousParameterType))
 }
 
+/// A client parameter from its exact body text (ADR 0027 pull request 7). An array or object
+/// for a JSON-typed parameter is kept as its text instead of a tree; every other value is the
+/// scalar the body held, read once.
+fn logical_parameter_value(
+    max_bytes: usize,
+    raw: &serde_json::value::RawValue,
+    expected: Option<LogicalType>,
+) -> Result<LogicalValue, RuntimeError> {
+    let text = raw.get();
+    if matches!(text.as_bytes().first(), Some(b'{' | b'[')) {
+        // The strict body check made the text valid JSON; only a JSON-typed parameter may be
+        // an array or object (the scalar rules below reject one for every other type).
+        return if expected == Some(LogicalType::Json) {
+            Ok(LogicalValue::Json(text.to_owned()))
+        } else {
+            Err(invalid_parameter())
+        };
+    }
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| invalid_parameter())?;
+    logical_value(max_bytes, value, expected)
+}
+
 fn logical_value(
     max_bytes: usize,
     value: serde_json::Value,
@@ -2213,6 +2506,10 @@ fn logical_value(
             Err(RuntimeError::Rejected(RejectionKind::InvalidParameter))
         }
     }
+}
+
+fn invalid_parameter() -> RuntimeError {
+    RuntimeError::Rejected(RejectionKind::InvalidParameter)
 }
 
 fn logical_result_value(

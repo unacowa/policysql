@@ -58,6 +58,28 @@ export class PolicySqlRuntime {
         }
     }
     /**
+     * The strict check and typed read of an interactive `begin` body, in one call: returns
+     * `{"ok":true,"mode":"read"|"write","expected":{...}}` or the same error envelope as
+     * [`Self::check_body_json`]. The shape rules are the engine's (ADR 0024): exactly `mode`
+     * and optionally `expected`, which has exactly `schemaVersion` and `policyVersion`.
+     * @param {string} body_text
+     * @returns {string}
+     */
+    begin_body_json(body_text) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(body_text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.policysqlruntime_begin_body_json(this.__wbg_ptr, ptr0, len0);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * Returns the activated, role-visible logical Catalog.
      * @param {string} verified_auth_json
      * @returns {string}
@@ -69,6 +91,32 @@ export class PolicySqlRuntime {
             const ptr0 = passStringToWasm0(verified_auth_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len0 = WASM_VECTOR_LEN;
             const ret = wasm.policysqlruntime_catalog_json(this.__wbg_ptr, ptr0, len0);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * The strict check of an operation's body text (ADR 0027 pull request 7, #60, #66).
+     *
+     * This is the only strict JSON parse of a body: syntax, Unicode escapes (including escaped
+     * lone surrogates), duplicate object keys after escape decoding, `maxJsonValues` (every
+     * value and every member name), and nesting depth ([`policysql_transaction::strict::MAX_DEPTH`]).
+     * The text's UTF-8 byte length is checked against `maxRequestBytes` too, because the engine
+     * no longer encodes the JavaScript string to measure it. Returns `{"ok":true}` or
+     * `{"error":{"code":...,"message":...}}` with a code from the public status table.
+     * @param {string} body_text
+     * @returns {string}
+     */
+    check_body_json(body_text) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(body_text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.policysqlruntime_check_body_json(this.__wbg_ptr, ptr0, len0);
             deferred2_0 = ret[0];
             deferred2_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);

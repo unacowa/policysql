@@ -468,6 +468,8 @@ pub enum Code {
     KeyInvalid,
     Timeout,
     SqlTooComplex,
+    /// Request JSON nests deeper than the documented depth (ADR 0027 pull request 7, #66).
+    JsonTooDeep,
 }
 
 impl Code {
@@ -536,6 +538,10 @@ impl Code {
             Self::SqlTooComplex => (
                 "POLICYSQL_SQL_TOO_COMPLEX",
                 "The statement is too complex to run under the active policy.",
+            ),
+            Self::JsonTooDeep => (
+                "POLICYSQL_JSON_TOO_DEEP",
+                "The request JSON nests too deeply.",
             ),
         }
     }

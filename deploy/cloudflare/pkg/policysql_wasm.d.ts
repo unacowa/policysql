@@ -17,9 +17,27 @@ export class PolicySqlRuntime {
      */
     authorize_session_json(session_json: string, requested_role: string | null | undefined, required_access: string): string;
     /**
+     * The strict check and typed read of an interactive `begin` body, in one call: returns
+     * `{"ok":true,"mode":"read"|"write","expected":{...}}` or the same error envelope as
+     * [`Self::check_body_json`]. The shape rules are the engine's (ADR 0024): exactly `mode`
+     * and optionally `expected`, which has exactly `schemaVersion` and `policyVersion`.
+     */
+    begin_body_json(body_text: string): string;
+    /**
      * Returns the activated, role-visible logical Catalog.
      */
     catalog_json(verified_auth_json: string): string;
+    /**
+     * The strict check of an operation's body text (ADR 0027 pull request 7, #60, #66).
+     *
+     * This is the only strict JSON parse of a body: syntax, Unicode escapes (including escaped
+     * lone surrogates), duplicate object keys after escape decoding, `maxJsonValues` (every
+     * value and every member name), and nesting depth ([`policysql_transaction::strict::MAX_DEPTH`]).
+     * The text's UTF-8 byte length is checked against `maxRequestBytes` too, because the engine
+     * no longer encodes the JavaScript string to measure it. Returns `{"ok":true}` or
+     * `{"error":{"code":...,"message":...}}` with a code from the public status table.
+     */
+    check_body_json(body_text: string): string;
     /**
      * Compiles an authenticated atomic request into profile-verified statements.
      */
@@ -125,7 +143,9 @@ export interface InitOutput {
     readonly __wbg_policysqlruntime_free: (a: number, b: number) => void;
     readonly policysqlruntime_abi_version: (a: number) => number;
     readonly policysqlruntime_authorize_session_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+    readonly policysqlruntime_begin_body_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_catalog_json: (a: number, b: number, c: number) => [number, number];
+    readonly policysqlruntime_check_body_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_commit_checks_enabled: (a: number) => number;
     readonly policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly policysqlruntime_cost_estimate_json: (a: number, b: number, c: number) => [number, number];

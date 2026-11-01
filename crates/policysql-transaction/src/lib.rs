@@ -15,10 +15,12 @@ pub mod canonical;
 pub mod cost;
 pub mod identity;
 pub mod machine;
+pub mod strict;
 
 pub use canonical::{Json, ParseError, canonical_json};
 pub use cost::cost_estimate_json;
 pub use identity::{IdentityError, identity_json, sha256_hex, valid_idempotency_key};
+pub use strict::StrictError;
 
 #[cfg(test)]
 mod purity_tests {
@@ -44,6 +46,7 @@ mod purity_tests {
             include_str!("canonical.rs"),
             include_str!("cost.rs"),
             include_str!("identity.rs"),
+            include_str!("strict.rs"),
             include_str!("machine/mod.rs"),
             include_str!("machine/compiler.rs"),
             include_str!("machine/io.rs"),
