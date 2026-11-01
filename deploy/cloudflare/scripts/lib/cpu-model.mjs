@@ -1,25 +1,50 @@
 // The CPU model of ADR 0027 ("CPU and memory budgets"), as pure functions.
 //
-//   cpu_ms >= S * F * (C0 + a_b * (R + B) + a_v * (V_req + V_res))
+//   cpu_ms >= S * F * (C0 + a_b * (R + B) + a_v * (V_req + V_res) + a_sql * E)
 //
-// `R` and `B` are in MiB, `V_req` and `V_res` are JSON value counts. The coefficients are in
-// reference-machine units (i7-7700K 4.2 GHz, Node, the release WASM); `F` converts them to
-// Workers CPU time. Used by scripts/measure-cpu.mjs (fit of the model against measurements),
-// by the release smoke (observed F), and by test/cpu-budget.test.mjs (the reference wrapper's
-// `cpu_ms` against its limits). The library itself never reads this: it does not refuse a limit
-// for CPU reasons (ADR 0027, "The library does not refuse a combination").
+// `R` and `B` are in MiB, `V_req` and `V_res` are JSON value counts, and `E` is the extra
+// per-statement SQL capacity above the reference 65,536 bytes, in MiB. The SQL term is zero at
+// the reference limits and prices only a raised `maxSqlBytes`; the measured reference shapes
+// already include 64 KiB statements in `R`, and a dense SQL request is the documented exception
+// to `a_b` (ADR 0027 "Pull request 7 results"). The coefficients are in reference-machine
+// units (i7-7700K 4.2 GHz, Node, the release WASM); `F` converts them to Workers CPU time.
+// Used by scripts/measure-cpu.mjs (fit of the model against measurements), by the release
+// smoke (observed F), and by test/cpu-budget.test.mjs (the reference wrapper's `cpu_ms` against
+// its limits). The library itself never reads this: it does not refuse a limit for CPU reasons
+// (ADR 0027, "The library does not refuse a combination").
 
 export const MIB = 1_048_576;
 
-/** Coefficients on the reference machine, ADR 0027 (worst measured shape per term, current code). */
+/**
+ * Coefficients on the reference machine, ADR 0027 (worst measured shape per term, current code).
+ * Pull request 7 re-measured after the strict body parse, exact-text JSON parameters, and the
+ * single result validation: `a_b` = 40 is the target value and every non-SQL scenario fits with
+ * it at `S`, including the 1 MB strings and the one-object `SELECT` back.
+ * The worst non-SQL value-bound shape is the keyed `UPDATE ... RETURNING` result, at about 0.98
+ * us/value before `S` (0.79 after it); 1 MB of 17-digit decimals needs 0.81 before `S` (0.65
+ * after). Both miss the 0.5 target, and 0.8 is the round-up that covers them (ADR 0027 "Pull
+ * request 7 results"). SQL-dense requests still exceed `a_b` per MiB but stay under the formula's
+ * total at the reference limits. A raised `maxSqlBytes` is priced by `sqlMsPerMiB` (below).
+ */
 export const COEFFICIENTS = Object.freeze({
   /** Fixed cost of one request, ms. */
   c0Ms: 5,
   /** Cost per MiB of request bytes and of raw result bytes not attributable to values, ms. */
-  bMsPerMiB: 80,
+  bMsPerMiB: 40,
   /** Cost per JSON value (request or raw result), microseconds. */
-  vUsPerValue: 1.3,
+  vUsPerValue: 0.8,
+  /**
+   * Cost per MiB of per-statement SQL capacity above the reference 65,536 bytes, ms. The
+   * latest measurement's worst SQL-dense shape needs 234 ms/MiB; 275 is the conservative
+   * coefficient (the worst seen while tuning). This term is zero at the reference
+   * `maxSqlBytes`, so it does not change the measured fit, and it makes raising `maxSqlBytes`
+   * alone raise the CPU the wrapper must configure.
+   */
+  sqlMsPerMiB: 275,
 });
+
+/** The per-statement SQL size the pull request 7 measurements cover; extra capacity is priced. */
+export const REFERENCE_MAX_SQL_BYTES = 65_536;
 
 /** `S`: tolerates occasional overruns; sustained ones are terminated by the platform. */
 export const SAFETY_MARGIN = 1.25;
@@ -54,18 +79,23 @@ export const resultBoundBytes = ({ maxResultBytes, maxStatements }) =>
  * The model inputs at a deployment's limits. `limits` is what the runtime reports
  * (`runtimeLimits`, which fills `maxRequestBytes` and `maxJsonValues` since ADR 0027 pull
  * request 3): `maxJsonValues` is the request-side value count and, since pull request 6
- * enforces it on results too, the result-side count as well.
+ * enforces it on results too, the result-side count as well. `sqlExcessMiB` is only the
+ * per-statement SQL capacity above the measured reference `maxSqlBytes`; at or below it, the
+ * term is zero.
  */
 export const inputsAtLimits = (limits) => ({
   rMiB: limits.maxRequestBytes / MIB,
   bMiB: resultBoundBytes(limits) / MIB,
   vReq: limits.maxJsonValues,
   vRes: limits.maxJsonValues,
+  // `maxSqlBytes` is optional in a bare test fixture; absent means the reference value.
+  sqlExcessMiB: Math.max(0, (limits.maxSqlBytes ?? REFERENCE_MAX_SQL_BYTES) - REFERENCE_MAX_SQL_BYTES) / MIB,
 });
 
-/** Reference-machine CPU, ms, predicted for `{ rMiB, bMiB, vReq, vRes }`. */
-export const predictedReferenceMs = ({ rMiB = 0, bMiB = 0, vReq = 0, vRes = 0 }, coefficients = COEFFICIENTS) =>
-  coefficients.c0Ms + coefficients.bMsPerMiB * (rMiB + bMiB) + (coefficients.vUsPerValue / 1000) * (vReq + vRes);
+/** Reference-machine CPU, ms, predicted for `{ rMiB, bMiB, vReq, vRes, sqlExcessMiB }`. */
+export const predictedReferenceMs = ({ rMiB = 0, bMiB = 0, vReq = 0, vRes = 0, sqlExcessMiB = 0 }, coefficients = COEFFICIENTS) =>
+  coefficients.c0Ms + coefficients.bMsPerMiB * (rMiB + bMiB) + (coefficients.vUsPerValue / 1000) * (vReq + vRes)
+  + (coefficients.sqlMsPerMiB ?? 0) * sqlExcessMiB;
 
 /** The smallest `cpu_ms` the formula allows: `S * F * predictedReferenceMs`. */
 export const requiredCpuMs = (inputs, { f = HARDWARE_FACTOR, s = SAFETY_MARGIN, coefficients = COEFFICIENTS } = {}) =>
@@ -78,7 +108,7 @@ export const requiredCpuMs = (inputs, { f = HARDWARE_FACTOR, s = SAFETY_MARGIN, 
  */
 export const fitScenario = ({ name, group, measuredMs, inputs, notes }, { s = SAFETY_MARGIN, coefficients = COEFFICIENTS } = {}) => {
   const predictedMs = predictedReferenceMs(inputs, coefficients);
-  inputs = { rMiB: 0, bMiB: 0, vReq: 0, vRes: 0, ...inputs };
+  inputs = { rMiB: 0, bMiB: 0, vReq: 0, vRes: 0, sqlExcessMiB: 0, ...inputs };
   return {
     name, group, inputs, measuredMs, predictedMs,
     // < 1: the model is conservative for this shape. 1 / S is the line at which the margin is gone.

@@ -157,10 +157,9 @@ const FIXED_LITERALS = new Map([
     ["cooldownDuration:30000", [1, "JWKS cooldown, in milliseconds"]],
     ["cacheMaxAge:300000", [1, "JWKS cache age, in milliseconds"]],
   ])],
-  // The recording engine of the conformance suite is a test double with limits of its own.
+  // The recording engine of the conformance suite is a test double with a limit of its own.
   ["http/conformance.ts", new Map([
     ["maxRequestBytes:4096", [1, "the double's request limit"]],
-    ["maxJsonValues:1024", [1, "the double's value limit"]],
   ])],
 ]);
 

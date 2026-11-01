@@ -247,8 +247,9 @@ Recorded by the follow-up pull request (ABI 5):
   rejects neighbouring equal keys) with `float_roundtrip`: `serde_json`'s default reads
   `9007199254740991.0` as 2^53 − 2, which (b) does not allow. `policysql-wasm` enables the
   feature explicitly, so compile reads decimals as the same correctly rounded double; before,
-  such a parameter could be one unit off. Nesting is bounded by `serde_json`'s recursion limit
-  (127 levels).
+  such a parameter could be one unit off. Nesting was bounded by `serde_json`'s recursion limit
+  (127 levels); ADR 0027 pull request 7 lowered it to 64, the same limit as the strict body
+  check (#66).
   The client-facing note, including that a REAL value written by an older release may no
   longer match an equality predicate with the same literal, is in
   [`docs/http-api.md`](../http-api.md#numeric-parameters) and the website page on types and

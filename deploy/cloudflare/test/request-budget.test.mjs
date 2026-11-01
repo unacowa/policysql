@@ -110,6 +110,46 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(fitsStatement.status, 200, JSON.stringify(fitsStatement.body).slice(0, 200));
   });
 
+  test(`${ownerAdapter}: a body nested deeper than 64 levels is 400 JSON_TOO_DEEP before database work`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, {});
+    const nested = (depth) => `${"[".repeat(depth)}1${"]".repeat(depth)}`;
+    const body = (depth) => JSON.stringify({ statements: [insert("deep")], deep: JSON.parse(nested(depth)) });
+    const before = await work(h);
+    // The root object is level 1, so 63 nested arrays are 64 levels and 64 are 65.
+    const error = refused(await post(h, body(64), "deep-key-00000001"), "POLICYSQL_JSON_TOO_DEEP", 400);
+    assert.equal(error.message, "Request body nests too deeply.");
+    assert.deepEqual(await work(h), before, "no connection and no statement");
+    // Exactly 64 is accepted (then refused for its unapproved extra member, not for depth).
+    assert.notEqual((await post(h, body(63))).body.error?.code, "POLICYSQL_JSON_TOO_DEEP");
+    // The begin and interactive command routes use the same core check.
+    refused(await h.request("a", "/v1/transactions", new RawJson(`{"mode":"read","deep":${nested(64)}}`), null),
+      "POLICYSQL_JSON_TOO_DEEP", 400);
+    const started = await h.request("a", "/v1/transactions", { mode: "read" }, null);
+    assert.equal(started.status, 201);
+    const path = `/v1/transactions/${started.body.transactionId}/statements`;
+    refused(await post(h, JSON.stringify({ sequence: 1, ...insert("deep"), deep: JSON.parse(nested(64)) }), null, path),
+      "POLICYSQL_JSON_TOO_DEEP", 400);
+  });
+
+  test(`${ownerAdapter}: duplicate object keys, escaped equivalents included, are 400 before database work`, async (t) => {
+    t.mock.method(console, "log", () => {});
+    const h = await setup(t, {});
+    const before = await work(h);
+    // The strict core parse is the only duplicate-key check (ADR 0027 pull request 7).
+    for (const text of [
+      `{"statements":[],"statements":[${JSON.stringify(insert("duplicate"))}]}`,
+      `{"statements":[],"\\u0073tatements":[${JSON.stringify(insert("duplicate"))}]}`,
+    ]) {
+      const error = refused(await post(h, text, "duplicate-key-000001"), "POLICYSQL_INVALID_REQUEST", 400);
+      assert.equal(error.message, "Request body is not valid JSON.");
+    }
+    assert.deepEqual(await work(h), before, "no connection and no statement");
+    // The begin route parses with the same strict check before the owner exists.
+    refused(await h.request("a", "/v1/transactions", new RawJson('{"mode":"read","mode":"write"}'), null),
+      "POLICYSQL_INVALID_REQUEST", 400);
+  });
+
   // ------------------------------------------------------------------------------------------
   // maxJsonValues
 

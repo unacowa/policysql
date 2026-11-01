@@ -9,7 +9,7 @@
 // commit-check validator and health.
 import { internalError, operationError, EngineError } from "./errors.ts";
 import type { OperationError } from "./errors.ts";
-import { parseBodyText } from "./request-body.ts";
+import { readBodyText } from "./request-body.ts";
 import type { BodyText } from "./request-body.ts";
 import { requestIdentity, startDigest } from "./core-identity.ts";
 import { authorizeSession } from "./session.ts";
@@ -270,17 +270,27 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         const snapshot = dependencies.getRuntime().snapshot;
         const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, snapshot);
         const body = await readBody(fields.bodyText);
+        // The body is strict JSON, checked once in core (ADR 0027 pull request 7): syntax,
+        // duplicates, depth, `maxJsonValues`, and its exact UTF-8 size. The owner then gets
+        // the same verified text (the step machine hashes it itself, #70).
+        checkBody(dependencies.getRuntime(), body);
         // The owner's step machine compiles and hashes the verified text itself (ADR 0024 pull
         // request 7, #70), and derives the auth fingerprint from `auth` and the binding.
         const reply = await owner(fields.transactionId).command(kind, {
-          transactionId: fields.transactionId, auth, command: body.text, databaseBinding, snapshot,
+          transactionId: fields.transactionId, auth, command: body, databaseBinding, snapshot,
         }, checked.requestId);
         return fromOwner(reply, checked.requestId);
       });
 
-  // The body, read and checked against the runtime's request limits (ADR 0027): the transport
-  // streams at most `maxRequestBytes`, and the scan stops at `maxJsonValues`.
-  const readBody = (bodyText: BodyText) => parseBodyText(bodyText, runtimeLimits(dependencies.getRuntime()));
+  // The body text, after the transport read and the checks that need JavaScript's view of it;
+  // core checks the JSON itself (ADR 0027 pull request 7).
+  const readBody = (bodyText: BodyText) => readBodyText(bodyText, runtimeLimits(dependencies.getRuntime()));
+  // A body the operation does not otherwise parse (execute, explain, and a transaction
+  // command): core's strict check is the only parse here, and a body it rejects never reaches
+  // a database or an owner.
+  const checkBody = (runtime: any, text: string) => {
+    parsedRuntimeCall(runtime.check_body_json(text));
+  };
 
   const health = async (context?: CallbackContext): Promise<OperationResult> => {
     let requestId: string;
@@ -315,7 +325,8 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       const runtime = dependencies.getRuntime();
       await checkDatabaseBinding(dependencies.database, checked.databaseBinding, runtime.snapshot);
       const body = await readBody(fields.bodyText);
-      const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body.text, "explain"));
+      checkBody(runtime, body);
+      const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body, "explain"));
       return { ok: true as const, value: explainResponse(compiled, auth, checked.requestId) };
     }),
 
@@ -332,6 +343,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       const maxBytes = runtimeBytesLimit(runtime);
       runtimeLimits(runtime);
       const body = await readBody(fields.bodyText);
+      checkBody(runtime, body);
       // Everything else is the step machine's `request` kind (ADR 0024 pull request 8): the
       // binding check, compile of the verified text (#70), idempotency, placement (direct, or
       // the owner of an envelope that could trigger a commit check), and the response.
@@ -346,7 +358,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         auth,
         databaseBinding,
         snapshot: runtime.snapshot,
-        bodyText: body.text,
+        bodyText: body,
         ...(fields.idempotencyKey === undefined ? {} : { idempotencyKey: fields.idempotencyKey }),
         trace: dependencies.executionTrace?.enabled === true,
       }, { requestId, checked: databaseBinding, maxBytes, background: checked.background });
@@ -364,40 +376,42 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       const snapshot = dependencies.getRuntime().snapshot;
       const databaseBinding = await checkDatabaseBinding(dependencies.database, checked.databaseBinding, snapshot);
       const body = await readBody(fields.bodyText);
-      const keys = body.value && typeof body.value === "object" && !Array.isArray(body.value)
-        ? Object.keys(body.value) : [];
-      if (!keys.every((key) => ["mode", "expected"].includes(key)) || !keys.includes("mode") ||
-        !["read", "write"].includes(body.value.mode)) {
+      const runtime = dependencies.getRuntime();
+      // Core checks the JSON and reads the two fields this operation uses in one call: the
+      // strict rules are the same as every other body, and the engine no longer builds a tree
+      // of the whole body here (ADR 0027 pull request 7).
+      const begin = parsedRuntimeCall(runtime.begin_body_json(body));
+      if (!begin || typeof begin.mode !== "string" || !["read", "write"].includes(begin.mode)) {
         throw invalidRequest();
       }
-      if (body.value.expected !== undefined &&
-        (!body.value.expected || Array.isArray(body.value.expected) || typeof body.value.expected !== "object" ||
-          Object.keys(body.value.expected).length !== 2 ||
-          !Object.hasOwn(body.value.expected, "schemaVersion") ||
-          !Object.hasOwn(body.value.expected, "policyVersion"))) {
+      const expected = begin.expected as { schemaVersion: unknown; policyVersion: unknown } | undefined;
+      if (expected !== undefined &&
+        (expected === null || typeof expected !== "object" || Array.isArray(expected) ||
+          Object.keys(expected).length !== 2 ||
+          !Object.hasOwn(expected, "schemaVersion") ||
+          !Object.hasOwn(expected, "policyVersion"))) {
         throw invalidRequest();
       }
-      if (body.value.expected &&
-        (body.value.expected.schemaVersion !== (dependencies.publicConfig?.schemaVersion ?? SCHEMA_VERSION) ||
-         body.value.expected.policyVersion !== (dependencies.publicConfig?.policyVersion ?? POLICY_VERSION))) {
+      if (expected &&
+        (expected.schemaVersion !== (dependencies.publicConfig?.schemaVersion ?? SCHEMA_VERSION) ||
+         expected.policyVersion !== (dependencies.publicConfig?.policyVersion ?? POLICY_VERSION))) {
         throw new EngineError("POLICYSQL_STALE_OPERATION", "The operation was compiled for a different active snapshot.");
       }
-      const runtime = dependencies.getRuntime();
       const { requestId } = checked;
       const idempotency = requestIdentity(runtime, {
-        key: fields.idempotencyKey, auth, bodyText: body.text, endpoint: "interactive-start", databaseBinding,
+        key: fields.idempotencyKey, auth, bodyText: body, endpoint: "interactive-start", databaseBinding,
       });
       const transactionId = `tx_${idempotency?.keyHash.slice(0, 32) ?? crypto.randomUUID().replaceAll("-", "")}`;
       // The owner still validates its start command; this digest is not a public retry key.
       // The owner computes the auth fingerprint from `auth` and the binding (ADR 0024).
-      const startFingerprint = idempotency?.fingerprint ?? startDigest(runtime, transactionId, body.text);
+      const startFingerprint = idempotency?.fingerprint ?? startDigest(runtime, transactionId, body);
       const reply: OwnerReply = await owner(transactionId).begin({
         transactionId,
         startFingerprint,
-        mode: body.value.mode,
+        mode: begin.mode,
         auth,
         // Omitted, not undefined, when absent: the owner checks exact keys.
-        ...(body.value.expected === undefined ? {} : { expected: body.value.expected }),
+        ...(expected === undefined ? {} : { expected }),
         databaseBinding,
         snapshot,
       }, checked.requestId);
@@ -418,11 +432,12 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         const fields = operationInput<CallbackQueryInput>(input, ["validationId", "capability", "bodyText"]);
         if (typeof fields.validationId !== "string" || !VALIDATION_ID.test(fields.validationId)) throw invalidRequest();
         const body = await readBody(fields.bodyText);
+        checkBody(dependencies.getRuntime(), body);
         const reply = await owner(`tx_${fields.validationId.slice("cval_".length)}`).callbackQuery({
           validationId: fields.validationId,
           capability: typeof fields.capability === "string" ? fields.capability : "",
           // The verified text: the owner compiles and hashes it, never a re-serialization (#70).
-          command: body.text,
+          command: body,
         }, requestId);
         return fromOwner(reply, requestId);
       } catch (error) {

@@ -11,7 +11,7 @@
 import { checkRequestContext } from "../engine.ts";
 import type { PolicySqlEngine } from "../engine.ts";
 import { operationError } from "../errors.ts";
-import { parseBodyText } from "../request-body.ts";
+import { readBodyText } from "../request-body.ts";
 import { ERROR_STATUS } from "./status.ts";
 
 /** What a mapping must provide: the same shape `createHttpAdapter` returns. */
@@ -49,8 +49,8 @@ let eagerBodies: string[] = [];
 
 // The request limits of the recording engine, as a real engine reads them from its runtime
 // (ADR 0027). The mapping under test must stream a reader's body at the limit it is handed, so
-// the suite uses small limits of its own and learns them from nothing but this engine.
-const LIMITS = Object.freeze({ maxRequestBytes: 4_096, maxJsonValues: 1_024 });
+// the suite uses a small limit of its own and learns it from nothing but this engine.
+const LIMITS = Object.freeze({ maxRequestBytes: 4_096 });
 
 /**
  * An engine that records each call and answers with `answer(call)` (default: a success whose
@@ -71,7 +71,7 @@ const recordingEngine = (answer?: Answer) => {
     }
     if (input && Object.hasOwn(input, "bodyText")) {
       if (typeof input.bodyText !== "function") eagerBodies.push(name);
-      try { call.body = (await parseBodyText(input.bodyText, LIMITS)).text; } catch (error) {
+      try { call.body = await readBodyText(input.bodyText, LIMITS); } catch (error) {
         return { ok: false, error: operationError(error), requestId };
       }
     }
@@ -260,7 +260,8 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
         ["declared too large", () => post("/v1/transactions:execute", "{}", { "content-length": String(LIMITS.maxRequestBytes + 1) }), 413, "POLICYSQL_REQUEST_TOO_LARGE"],
         ["streamed too large", () => post("/v1/transactions:execute", "x".repeat(LIMITS.maxRequestBytes + 1)), 413, "POLICYSQL_REQUEST_TOO_LARGE"],
         ["malformed UTF-8", () => post("/v1/transactions:execute", new Uint8Array([0x7b, 0x22, 0xc3, 0x28, 0x22, 0x7d])), 400, "POLICYSQL_INVALID_REQUEST"],
-        ["duplicate key", () => post("/v1/transactions:execute", '{"a":1,"a":2}'), 400, "POLICYSQL_INVALID_REQUEST"],
+        // Duplicate keys, depth, and the value count are core's strict body check (ADR 0027
+        // pull request 7): the recording engine has no runtime, so the engine tests cover them.
         ["no body", () => post("/v1/transactions:execute", null), 400, "POLICYSQL_INVALID_REQUEST"],
       ];
       for (const [label, request, status, code] of cases) {

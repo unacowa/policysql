@@ -176,15 +176,12 @@ impl Compiler for RuntimeCompiler<'_> {
     ) -> Result<Validated, CoreError> {
         let at = |error: RuntimeError| core_error(self.0, error.at_statement(index));
         let dto = self.0.statement_dto(handle, index).map_err(at)?;
-        let raw_json = serde_json::json!({
-            "columns": raw.columns,
-            "rows": raw.rows,
-            "affectedRows": raw.affected_rows,
-        })
-        .to_string();
+        // The machine already has the rows: validate them directly instead of restating the
+        // result through volatile JSON (ADR 0027 pull request 7). The length the bound is
+        // measured against is unchanged (see `raw_result_bytes`).
         let validated = self
             .0
-            .validate_result_within(handle, index, &raw_json, budget)
+            .validate_raw_result_within(handle, index, raw, budget)
             .map_err(at)?;
         let result_columns = dto
             .result

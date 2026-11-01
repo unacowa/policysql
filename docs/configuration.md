@@ -77,14 +77,29 @@ limits").
 | `maxCallbackRows` | `max_callback_rows` | 100 | 1 to 10,000 | owner: cumulative callback rows per commit check |
 | `beginTimeoutMs` | `begin_timeout_ms` | 1,000 | 1 to 60,000 | owner: BEGIN of an interactive transaction |
 | `costTimeoutMs` | `cost_timeout_ms` | 1,000 | 1 to 10,000 | engine and owner: connection deadline and BEGIN of the after-response cost observation |
-| `maxRequestBytes` | `max_request_bytes` | 1,048,576 | 65,536 to 2,097,152 | HTTP adapter (streamed, a declared `Content-Length` over it is refused unread), engine (UTF-8 bytes of the text as received, a byte order mark counted), core (derived bounds); over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` |
-| `maxJsonValues` | `max_json_values` | 65,536 | 1,024 to 131,072 | engine: JSON values plus object member names in one request body, counted by the scan that checks duplicate keys, which stops at the first value over the limit, before `JSON.parse` and before WASM; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE`. **Result side, counted separately:** the raw values of the database's response to one atomic envelope or one interactive statement, cumulatively over its statements: every cell (the visibility companion of each conditional column and the check column of a mutation included), every column descriptor in `cols`, and every value inside a JSON-typed cell (with its object member names). Core counts them while it validates, and stops at the first row over the limit; over it is 413 `POLICYSQL_LIMIT_EXCEEDED`, rolled back. Companions and descriptors count, so it is not a hidden limit: a result of `c` emitted columns and `n` rows has `c x (1 + n)` values (a JSON cell adds the values inside it) |
+| `maxRequestBytes` | `max_request_bytes` | 1,048,576 | 65,536 to 2,097,152 | HTTP adapter (streamed, a declared `Content-Length` over it is refused unread), engine (a cheap UTF-16 precheck and the one removed byte order mark), core (`check_body_json`: exact UTF-8 bytes of the text after that mark), and derived bounds; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` |
+| `maxJsonValues` | `max_json_values` | 65,536 | 1,024 to 131,072 | core: JSON values plus object member names in one request body, counted by the strict parse (`check_body_json` / `begin_body_json`) that also checks syntax, duplicate keys, and depth, and stops at the first value over the limit before a `serde_json` tree exists; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE`. **Result side, counted separately:** the raw values of the database's response to one atomic envelope or one interactive statement, cumulatively over its statements: every cell (the visibility companion of each conditional column and the check column of a mutation included), every column descriptor in `cols`, and every value inside a JSON-typed cell (with its object member names). Core counts them while it validates, and stops at the first row over the limit; over it is 413 `POLICYSQL_LIMIT_EXCEEDED`, rolled back. Companions and descriptors count, so it is not a hidden limit: a result of `c` emitted columns and `n` rows has `c x (1 + n)` values (a JSON cell adds the values inside it) |
 | `maxSqlBytes` | `max_sql_bytes` | 65,536 | 1,024 to 1,048,576, and at most `maxRequestBytes` | core, UTF-8 bytes of one statement's `sql`, checked before any statement is parsed; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` with path `/statements/<i>/sql` (it was 400 `POLICYSQL_INVALID_REQUEST`) |
 | `maxBytesPerValue` | `max_bytes_per_value` | 262,144 | 1 to 1,048,576 | decoded bytes of one bytes value: core (client parameters, policy presets at activation, result cells of `SELECT` and `RETURNING`), the engine and the Turso transport (driver values, before decoding); over it is 413 `POLICYSQL_LIMIT_EXCEEDED` (malformed input stays 400 `POLICYSQL_INVALID_PARAMETER`); the smallest applicable limit governs, see "Per-value bytes" |
 | `maxParameters` | `max_parameters` | 1,024 (was 128) | 1 to 16,384 | binder: distinct client parameter names in one statement; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
 | `maxExpressionDepth` | `max_expression_depth` | 32 | 1 to 64 | binder: expression depth of the client's SQL (an n-term `OR` chain has depth n); over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
 | `maxProjections` | `max_projections` | 128 | 1 to 2,000 | binder: result columns of one `SELECT` or `RETURNING` in the client's SQL; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
 | `maxJoins` | `max_joins` | 8 | 1 to 63 | binder: joins in one `FROM` of the client's SQL; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
+
+#### JSON nesting
+
+One depth limit applies to request JSON (the strict body check), canonical JSON (JSON-typed
+parameters and identity input), and the step command's own JSON: **64 levels**, counting the
+root container as level 1. A request body over it is 400 `POLICYSQL_JSON_TOO_DEEP` ("Request body
+nests too deeply.") rather than `POLICYSQL_INVALID_REQUEST`; a step command text over it gets
+the same code. The limit is in `crates/policysql-transaction/src/canonical.rs` (`MAX_DEPTH`) and
+re-exported by the strict body check; `deploy/cloudflare/src/request-body.ts` does not check
+depth, so there is only one client value. A fixed server envelope around a client value does not
+spend the client's levels: the compiler's typed read receives a step command wrapped in a
+one-statement envelope, whose two levels are server JSON; the command identity wraps its command
+in one level. Both parse with an explicit allowance for that fixed envelope, not a larger client
+limit (the previous engine scan accepted 65 containers and canonical JSON 127; 64 is a one-level
+tightening).
 
 #### Per-value bytes
 
@@ -304,7 +319,7 @@ deployment knowledge ([ADR 0027](adr/0027-byte-and-cpu-budgets.md), "The library
 combination"). A wrapper sets its CPU limit from the limits it configures with
 
 ```
-cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res))
+cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res) + a_sql x E)
 ```
 
 | Symbol | Meaning | Value |
@@ -312,21 +327,41 @@ cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res))
 | `R` | request bytes the limits allow, MiB (`maxRequestBytes`) | 1 |
 | `B` | raw result bytes not attributable to values, MiB: the larger of `2 x maxResultBytes + 512 x maxStatements + 1,048,576` and the idempotency lookup bound 1,183,744 | 1.13 at the reference wrapper's limits |
 | `V_req`, `V_res` | JSON values in the request body (values plus object member names) and in the raw result (cells including companions, column descriptors, values inside JSON cells). `maxJsonValues` bounds the request side since ADR 0027 pull request 3; the result side is enforced since pull request 6, so both are numbers a request cannot exceed | 65,536 each |
+| `E` | per-statement SQL capacity above the reference 65,536 bytes: `max(0, maxSqlBytes - 65,536) / MiB` | 0 at the reference wrapper's limits |
 | `C0` | fixed cost of a request | 5 ms |
-| `a_b` | cost per MiB of request bytes (SQL text included) and of result text | 80 ms per MiB |
-| `a_v` | cost per JSON value | 1.3 microseconds |
+| `a_b` | cost per MiB of request bytes (SQL text included) and of result text | 40 ms per MiB |
+| `a_v` | cost per JSON value | 0.8 microseconds |
+| `a_sql` | cost per MiB of SQL capacity above the reference `maxSqlBytes` | 275 ms per MiB |
 | `F` | Workers CPU time over reference-machine time | 2.0 (the maintainers' value; the first measurement on the dev deployment found 1.2 to 7.7, see ADR 0027 "Pull request 1 results") |
 | `S` | safety margin: isolates tolerate occasional overruns, not sustained ones | 1.25 |
 
 Since pull request 3 the formula's request side is a bound a client cannot exceed: a body past `maxJsonValues` is 413 before it is parsed. (Before it, a body of about 1 MB of nested arrays was accepted with about 500,000 values, which the formula prices at 731 ms of reference time.) The measurement script and the release smoke size their densest request shapes by that limit (`REQUEST_VALUE_BUDGET`, 65,536 minus 64 values for the envelope), so a 1 MB body of nested arrays is now about 130 KB.
 
-The coefficients are for the reference machine (i7-7700K 4.2 GHz, Node, the release WASM): the worst
-measured shape per term. At the reference wrapper's limits the formula gives about 346 ms on the
-reference machine and 864 ms for `cpu_ms` (`wrangler.jsonc` rounds up to 1,000). The code is
+The coefficients are for the reference machine (i7-7700K 4.2 GHz, Node, the release WASM): the
+target `a_b`, the rounded-up `a_v`, and the SQL-capacity `a_sql` after ADR 0027 pull request 7.
+At the reference wrapper's limits the
+formula gives about 195 ms on the reference machine and 488 ms for `cpu_ms`
+(`wrangler.jsonc` rounds up to 500). The code is
 `deploy/cloudflare/scripts/lib/cpu-model.mjs`; `test/cpu-budget.test.mjs` checks the reference
 wrapper's `limits.cpu_ms` against it. A wrapper that raises a limit raises `cpu_ms` by the formula
 or lowers the limit; re-measure on its own shapes with `npm run measure:cpu` and read the real
 Workers CPU from the release smoke (`deploy/cloudflare/README.md`, "Measuring CPU").
+
+Pull request 7 reached the `a_b` target (40 ms per MiB) but not the `a_v` target (0.5
+microseconds): the worst measured non-SQL value-bound shape is a keyed `UPDATE ... RETURNING`
+result, which needs about 0.98 microseconds per value before `S` (0.79 after the safety margin);
+the 1 MB 17-digit decimal request needs 0.81 before `S` (0.65 after). The coefficient is rounded
+up to 0.8. Both shapes are dominated by the identity digest and the idempotency envelope; the
+strict body check and the result validation no longer materialize a second tree, but the digest
+pass still parses JSON-typed parameters. SQL-dense requests remain above `a_b` per MiB (up to
+234 ms per MiB of SQL text in the latest measurement's worst shape, about 150 ms per MiB for
+the large dense request); the formula covers them at the configured limits because such a
+request spends `R` on SQL rather than on `B` and `V`. `a_sql` (275, above that measured worst)
+charges this measured cost only for `maxSqlBytes` capacity above the reference 65,536 bytes, so
+the reference formula is unchanged and raising `maxSqlBytes` alone raises `cpu_ms`. The measured
+WASM memory high-water marks are in ADR 0027 "Pull request 7 results"; the hard maxima are unchanged
+because the measured peaks do not justify raising them and scaling the densest shape to the
+131,072-value maximum keeps it under the 64 MiB phase budget.
 
 ## Validation and failures
 

@@ -190,12 +190,14 @@ would be the expiry, not the loss. Owner loss stays covered by the local owner t
 CPU limit with one formula, in `scripts/lib/cpu-model.mjs`:
 
 ```
-cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res))
+cpu_ms >= S x F x (C0 + a_b x (R + B) + a_v x (V_req + V_res) + a_sql x E)
 ```
 
-(`C0` 5 ms, `a_b` 80 ms per MiB, `a_v` 1.3 microseconds per value, `S` 1.25, `F` 2.0, the
-maintainers' value, while this smoke records the observed one; `R`, `B` in MiB, `V` in JSON values; see `docs/configuration.md`, "CPU model".) The
-reference wrapper's `limits.cpu_ms` in `wrangler.jsonc` is 1,000, and `test/cpu-budget.test.mjs`
+(`C0` 5 ms, `a_b` 40 ms per MiB, `a_v` 0.8 microseconds per value, `a_sql` 275 ms per MiB of
+SQL capacity above the reference 65,536 bytes, `S` 1.25, `F` 2.0, the maintainers' value, while
+this smoke records the observed one; `R`, `B`, `E` in MiB, `V` in JSON values; `E` is zero at
+the reference `maxSqlBytes`; see `docs/configuration.md`, "CPU model".) The
+reference wrapper's `limits.cpu_ms` in `wrangler.jsonc` is 500, and `test/cpu-budget.test.mjs`
 fails when it falls below the formula's result at `wrapper/limits.ts`. Two tools keep the
 numbers honest.
 
@@ -261,7 +263,7 @@ reference's CPU model, Node version and method (`nodeReference`).
 
 - Fatal: any probe answered with anything but 200 (a platform CPU or memory termination answers
   1102 without the version header), an invocation with outcome `exceededCpu`, or an invocation
-  above `limits.cpu_ms` divided by the safety margin S = 1.25 (800 ms at 1,000: the formula's
+  above `limits.cpu_ms` divided by the safety margin S = 1.25 (400 ms at 500: the formula's
   margin; the platform itself ends the invocation at `cpu_ms`).
 - Not fatal: observability that is not ingested before the deadline, or not readable (missing
   permission, API error). The report then says `unavailable` with the reason (a status, never a

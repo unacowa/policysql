@@ -28,6 +28,12 @@ use std::fmt::Write as _;
 const INTERNAL: &str = r#"{"error":{"code":"POLICYSQL_INTERNAL","message":"The request could not be completed.","path":null}}"#;
 const KEY_INVALID: &str = r#"{"error":{"code":"POLICYSQL_IDEMPOTENCY_KEY_INVALID","message":"Idempotency-Key must be 16-128 characters from letters, digits, and . _ : - + / = when provided.","path":null}}"#;
 
+/// The command identity's server envelope is one level (`{"op":…,"kind":…,"command":…}`): a
+/// client command at the body depth limit must still get a digest, so the whole input allows
+/// one more level than the client value. A `body` string (the request and start operations)
+/// is parsed separately at [`canonical::MAX_DEPTH`] by [`body`].
+const COMMAND_ENVELOPE_DEPTH: usize = 1;
+
 /// Why an identity could not be computed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityError {
@@ -97,7 +103,11 @@ pub fn compute(input: &str, max_input_bytes: usize) -> Result<String, IdentityEr
     if input.len() > max_input_bytes {
         return Err(IdentityError::Internal);
     }
-    let input = canonical::parse(input).map_err(|_| IdentityError::Internal)?;
+    let input = canonical::parse_with_max_depth(
+        input,
+        canonical::MAX_DEPTH.saturating_add(COMMAND_ENVELOPE_DEPTH),
+    )
+    .map_err(|_| IdentityError::Internal)?;
     let op = text(input.get("op"))?;
     match op {
         "request" => request(&input),
@@ -385,6 +395,7 @@ fn body(value: Option<&Json>) -> Result<Json, IdentityError> {
 #[cfg(test)]
 mod tests {
     use super::{sha256_hex, valid_idempotency_key};
+    use crate::canonical;
 
     fn identity_json(input: &str) -> String {
         super::identity_json(input, crate::bounds::hash_input_bytes(1_048_576))
@@ -607,6 +618,28 @@ mod tests {
         assert_eq!(
             identity_json(r#"{"op":"callback","command":{}}"#),
             format!(r#"{{"digest":"{}"}}"#, sha256_hex(b"{}"))
+        );
+    }
+
+    #[test]
+    fn a_command_at_the_body_depth_limit_gets_a_digest() {
+        let nested = |levels: usize| format!("{}0{}", "[".repeat(levels), "]".repeat(levels));
+        let input = |levels: usize| {
+            format!(
+                r#"{{"op":"command","kind":"statement","command":{}}}"#,
+                nested(levels)
+            )
+        };
+        // The command envelope adds one server level around the client value; a command at
+        // the body limit (64 containers) must not be refused by the identity parse.
+        let accepted = identity_json(&input(canonical::MAX_DEPTH));
+        assert!(!accepted.contains(r#""error""#), "{accepted}");
+        assert!(accepted.contains(r#""digest""#), "{accepted}");
+        // One container over the client limit is still rejected.
+        let rejected = identity_json(&input(canonical::MAX_DEPTH + 1));
+        assert!(
+            rejected.contains("POLICYSQL_INTERNAL"),
+            "a value over the limit must fail: {rejected}"
         );
     }
 }

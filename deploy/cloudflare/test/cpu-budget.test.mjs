@@ -1,11 +1,13 @@
 // The reference wrapper stays consistent with ADR 0027's CPU formula by test:
 //
-//   cpu_ms >= S * F * (C0 + a_b * (R + B) + a_v * (V_req + V_res))
+//   cpu_ms >= S * F * (C0 + a_b * (R + B) + a_v * (V_req + V_res) + a_sql * E)
 //
 // evaluated at the limits the wrapper configures (wrapper/limits.ts, as the runtime reports them)
-// and compared with `limits.cpu_ms` in wrangler.jsonc. The library itself never refuses a limit
-// for CPU reasons (ADR 0027, "The library does not refuse a combination"); this is the wrapper's
-// own check, and a wrapper with another F, platform or limits adapts its own copy.
+// and compared with `limits.cpu_ms` in wrangler.jsonc. A `maxSqlBytes` above the measured
+// reference 65,536 adds the separate SQL-capacity term, so raising it alone still raises the
+// required CPU. The library itself never refuses a limit for CPU reasons (ADR 0027, "The library
+// does not refuse a combination"); this is the wrapper's own check, and a wrapper with another F,
+// platform or limits adapts its own copy.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -50,9 +52,10 @@ test("the formula at the reference wrapper's limits is the ADR's worked number",
   assert.ok(Math.abs(inputs.bMiB - 1_183_744 / 1_048_576) < 1e-9);
   assert.equal(inputs.vReq, 65_536);
   assert.equal(inputs.vRes, 65_536);
-  assert.ok(Math.abs(predictedReferenceMs(inputs) - 345.7) < 0.2, "about 345 ms on the reference machine");
+  assert.equal(inputs.sqlExcessMiB, 0, "the reference maxSqlBytes adds no SQL-capacity term");
+  assert.ok(Math.abs(predictedReferenceMs(inputs) - 195.0) < 0.2, "about 195 ms on the reference machine");
   assert.equal(HARDWARE_FACTOR, 2, "F is the maintainers' 2.0 until they decide otherwise (ADR 0027)");
-  assert.ok(Math.abs(requiredCpuMs(inputs) - 864.3) < 0.5, "about 860 ms with F = 2.0 and S = 1.25");
+  assert.ok(Math.abs(requiredCpuMs(inputs) - 487.5) < 0.5, "about 488 ms with F = 2.0 and S = 1.25");
   assert.ok(Math.abs(requiredCpuMs(inputs) - 1.25 * HARDWARE_FACTOR * predictedReferenceMs(inputs)) < 1e-9);
   // The reference wrapper rounds that up; it does not sit far above (a limit far above the need
   // only widens the window in which a stuck request burns CPU).
@@ -72,9 +75,22 @@ test("the check fails for limits the formula says need more CPU than configured"
   assert.ok(Math.abs(checkCpuBudget(1, RUNTIME_LIMITS, { f: 4 }).needed - 2 * checkCpuBudget(1, RUNTIME_LIMITS, { f: 2 }).needed) < 1e-6);
 });
 
+test("raising maxSqlBytes alone raises the CPU the formula needs", () => {
+  // The reference measurements include 64 KiB statements in R; capacity above that is a
+  // separate measured term, so a wrapper cannot enlarge one statement without paying for it.
+  const reference = checkCpuBudget(config.limits.cpu_ms, RUNTIME_LIMITS);
+  assert.ok(reference.ok);
+  const raised = checkCpuBudget(config.limits.cpu_ms, { ...RUNTIME_LIMITS, maxSqlBytes: 1_048_576 });
+  assert.ok(raised.needed > reference.needed, "the SQL-capacity term grows with maxSqlBytes");
+  assert.equal(raised.ok, false, "cpu_ms 500 does not cover a 1 MiB per-statement SQL limit");
+  const sqlInputs = inputsAtLimits(effectiveLimits({ ...RUNTIME_LIMITS, maxSqlBytes: 1_048_576 }));
+  assert.equal(sqlInputs.sqlExcessMiB, 1 - 65_536 / 1_048_576);
+  assert.equal(sqlInputs.rMiB, 1, "only the SQL term changes");
+});
+
 test("the library accepts limits whatever they cost in CPU", () => {
   // ADR 0027: CPU is deployment knowledge, so construction never refuses on it. Limits far above
-  // anything the reference wrapper could run in 1,000 ms still construct.
+  // anything the reference wrapper could run in 500 ms still construct.
   const heavy = { maxRows: 100_000, maxResultBytes: 524_288, timeoutMs: 60_000, maxStatements: 64, maxRequestBytes: 2_097_152, maxJsonValues: 131_072, maxResponseBytes: 589_824 };
   const runtime = PolicySqlRuntime.newWithPhysicalSchema(
     example("catalog.yaml"), example("policy.yaml"), "schema_cpu_2", "policy_cpu_2",
@@ -99,10 +115,12 @@ test("the formula's V is the maxJsonValues the runtime reports, and the body sid
 });
 
 test("the formula at the hard maxima needs more than the reference wrapper's cpu_ms", () => {
-  // R = 2 (maxRequestBytes 2,097,152), V = 131,072 each side (maxJsonValues 131,072).
-  const hard = effectiveLimits({ ...RUNTIME_LIMITS, maxRequestBytes: 2_097_152, maxJsonValues: 131_072 });
+  // R = 2 (maxRequestBytes 2,097,152), V = 131,072 each side (maxJsonValues 131,072), and
+  // 1 MiB per statement (maxSqlBytes 1,048,576).
+  const hard = effectiveLimits({ ...RUNTIME_LIMITS, maxRequestBytes: 2_097_152, maxJsonValues: 131_072, maxSqlBytes: 1_048_576 });
   const inputs = inputsAtLimits(hard);
   assert.equal(inputs.rMiB, 2);
   assert.equal(inputs.vReq, 131_072);
+  assert.equal(inputs.sqlExcessMiB, 1 - 65_536 / 1_048_576);
   assert.ok(requiredCpuMs(inputs) > config.limits.cpu_ms, "a wrapper that raises the limits raises cpu_ms by the formula");
 });

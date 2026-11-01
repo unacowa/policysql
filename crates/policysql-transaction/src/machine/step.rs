@@ -1891,6 +1891,25 @@ impl<C: Compiler> Step<'_, C> {
 
     #[allow(clippy::too_many_lines)]
     fn command(&mut self, kind: &'static str, input: &Value) -> Result<()> {
+        // The command text carries the statement envelope or commit payload and is JSON in a
+        // string: the engine's body check cannot see inside it (ADR 0027 pull request 7). Two
+        // rules the typed read below would miss are checked here: a duplicate key, which it
+        // would keep as the last value, and a depth over the limit, which it would accept up
+        // to serde's recursion limit. Every other strict failure is left to the typed read, so
+        // its existing rejection and transaction outcome do not change.
+        if let Some(text) = input.get("command").and_then(Value::as_str) {
+            match crate::strict::check(text, None) {
+                Err(crate::StrictError::DuplicateKey) => {
+                    self.respond(error_reply(Code::Invalid));
+                    return Ok(());
+                }
+                Err(crate::StrictError::TooDeep) => {
+                    self.respond(error_reply(Code::JsonTooDeep));
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         let Some(command) = Self::parse_command(kind, input) else {
             self.respond(error_reply(Code::Invalid));
             return Ok(());
