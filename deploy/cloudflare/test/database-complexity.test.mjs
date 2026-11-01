@@ -204,6 +204,33 @@ test("the release smoke sends a statement for exactly the allowlist entries mark
   assert.equal(result.failures.filter((failure) => failure.startsWith("allowlist entry")).length, 1, "only the reworded entry fails");
 });
 
+test("the release smoke reports a failed begin and a failed rollback instead of throwing (#97)", async () => {
+  const idle = async () => ({
+    status: 400, text: async () => JSON.stringify({ error: { code: "POLICYSQL_SQL_TOO_COMPLEX", message: "The statement is too complex to run under the active policy.", path: "/statements/0" } }),
+  });
+  const context = { call: idle, baseUrl: "https://worker.test", headers: {}, expected: {} };
+  // A transport whose begin never starts: each probe is a named failure, not a rejection that
+  // aborts the section (and the smoke) before its cleanup or the later CPU section runs.
+  const noBegin = await sqlComplexitySmoke(context, {
+    transport: { begin: async () => { throw new Error("unavailable"); } },
+    allowlist: COMPLEXITY_ALLOWLIST, classify: () => null,
+  });
+  assert.ok(noBegin.failures.includes("a statement reply over the transport bound is refused as a limit"));
+  assert.ok(noBegin.failures.includes("the oversized statement's transaction was cleaned up without an error"));
+  // A failing rollback is recorded by probe name rather than hidden by `.catch`.
+  const badRollback = await sqlComplexitySmoke(context, {
+    transport: {
+      begin: async () => ({
+        execute: async () => { throw Object.assign(new Error("limit"), { code: "POLICYSQL_LIMIT_EXCEEDED" }); },
+        rollback: async () => { throw new Error("rollback failed"); },
+      }),
+    },
+    allowlist: COMPLEXITY_ALLOWLIST, classify: () => null,
+  });
+  assert.ok(badRollback.failures.some((failure) => failure.startsWith("every probe transaction rolled back") && failure.includes("allowlist:too many columns in ")), JSON.stringify(badRollback.failures));
+  assert.ok(badRollback.failures.includes("the oversized statement's transaction was cleaned up without an error"));
+});
+
 const complexity = () => refusal("SQLite error: too many columns in result set", "SQLITE_UNKNOWN");
 
 test("a complexity refusal is classified only when it is the one error and the last statement of its reply", async () => {
@@ -232,52 +259,137 @@ test("a complexity refusal is classified only when it is the one error and the l
   assert.ok(twice instanceof DatabaseStatementError && !(twice instanceof SqlComplexityError));
 });
 
-test("a statement reply that cannot be read: the rollback continues from the reply's leading baton, or nothing is sent with a stale one (#96)", async () => {
+test("a statement reply that cannot be read: the rollback continues from the reply's leading baton, or tries the last one (#96, #97)", async (t) => {
+  const encoder = new TextEncoder();
   const pad = (head) => `${head}${" ".repeat(2_097_200)}`;
-  // `next`: the baton the reply started with (the rollback must use it); null: none readable.
+  /** A body that sends `first` and then stalls until its timeout. */
+  const stalled = (first) => {
+    let pulls = 0;
+    return new Response(new ReadableStream({
+      pull(controller) {
+        pulls++;
+        if (pulls === 1) { controller.enqueue(encoder.encode(first)); return undefined; }
+        return new Promise(() => {});
+      },
+      cancel() {},
+    }, { highWaterMark: 0 }));
+  };
+  /** A body that sends `first` and then errors. */
+  const failing = (first) => {
+    let pulls = 0;
+    return new Response(new ReadableStream({
+      pull(controller) {
+        pulls++;
+        if (pulls === 1) { controller.enqueue(encoder.encode(first)); return undefined; }
+        controller.error(new Error("connection reset: secret-detail"));
+      },
+      cancel() {},
+    }, { highWaterMark: 0 }));
+  };
+  // The baton spans the first 1,024 bytes' chunk boundary: the first chunk ends inside it, and
+  // neither the decoded text of the earlier chunks nor the overflow chunk alone contains it.
+  const baton = `b${"c".repeat(199)}`;
+  const head = encoder.encode(`{"baton":"${baton.slice(0, 80)}`);
+  const tail = encoder.encode(`${baton.slice(80)}","base_url":null,"results":[]}${" ".repeat(2_097_200)}`);
+  const split = () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(head); controller.enqueue(tail); controller.close(); },
+  }));
+  // `next`: the baton the reply started with (the rollback must use it); null: none readable, so
+  // the rollback is a bounded best-effort attempt with the last baton (#97).
   const kinds = {
     "reply over the bound": { reply: () => new Response(pad('{"baton":"b2","base_url":null,"results":[]}')), next: "b2" },
     "reply over the bound by Content-Length": { reply: () => new Response('{"baton":"b3","base_url":null,', { headers: { "content-length": "9999999" } }), next: "b3" },
+    "reply over the bound with the baton across chunks": { reply: split, next: baton },
+    "reply over the bound with the baton across chunks by Content-Length": {
+      reply: () => new Response(new ReadableStream({
+        start(controller) { controller.enqueue(head); controller.enqueue(tail); },
+      }), { headers: { "content-length": "9999999" } }),
+      next: baton,
+    },
     "reply over the bound with no readable baton": { reply: () => new Response(pad("")), next: null },
     "malformed JSON": { reply: () => new Response('{"baton":"b4","results":[{'), next: "b4" },
     "malformed JSON without a baton": { reply: () => new Response("{not json"), next: null },
     "wrong result count": { reply: () => Response.json({ baton: "b5", results: [] }), next: "b5" },
+    "wrong result count with the baton after results": { reply: () => Response.json({ results: [], baton: "b9" }), next: "b9" },
+    "stalled after the baton": { reply: () => stalled('{"baton":"b6","base_url":null,'), next: "b6", timeoutMs: 50 },
+    "read error after the baton": { reply: () => failing('{"baton":"b7","base_url":null,'), next: "b7" },
     "no baton": { reply: () => Response.json({ baton: null, results: [ok()] }), next: null },
     "HTTP failure": { reply: () => new Response("no", { status: 502 }), next: null },
   };
-  for (const [kind, { reply, next }] of Object.entries(kinds)) {
+  const logged = [];
+  t.mock.method(console, "log", (line) => { try { logged.push(JSON.parse(line)); } catch { /* not a record */ } });
+  for (const [kind, { reply, next, timeoutMs = 1_000 }] of Object.entries(kinds)) {
+    logged.length = 0;
     const sent = [];
     const instance = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "unreadable", async (_url, init) => {
-      const { baton, requests } = JSON.parse(init.body);
+      const { baton: used, requests } = JSON.parse(init.body);
       const sql = requests[0]?.stmt?.sql ?? requests[0]?.type;
-      sent.push({ baton: baton ?? null, sql });
+      sent.push({ baton: used ?? null, sql });
       if (/^BEGIN/u.test(sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
       if (sql === "ROLLBACK") return Response.json({ baton: null, results: [ok(), { type: "ok", response: { type: "close" } }] });
       return reply();
     });
-    const transaction = await instance.begin("write", 1_000, undefined, limit);
+    const transaction = await instance.begin("write", timeoutMs, undefined, limit);
     await assert.rejects(transaction.execute([{ sql: "SELECT big" }], { maxResponseBytes: READ_CAP }), (error) => error instanceof EngineError, kind);
     const before = sent.length;
     await transaction.rollback();
     if (next === null) {
-      assert.equal(sent.length, before, `${kind}: nothing is sent with the stale baton`);
+      // The baton never arrived: one best-effort attempt with the last one; this fixture accepts
+      // it, so the recovery is recorded (a real server refuses a consumed baton, see below).
+      assert.deepEqual(sent.at(-1), { baton: "b1", sql: "ROLLBACK" }, `${kind}: the last baton is tried`);
+      assert.equal(sent.length, before + 1, kind);
+      assert.deepEqual(logged, [{ event: "database_stream_recovery", requestId: "unreadable", outcome: "rolled_back" }], kind);
       await assert.rejects(transaction.commit().then(() => { throw new Error("committed"); }), () => true, kind);
-      assert.equal(sent.length, before, `${kind}: COMMIT is not sent either`);
+      assert.equal(sent.length, before + 1, `${kind}: COMMIT is not sent either`);
     } else {
       assert.deepEqual(sent.at(-1), { baton: next, sql: "ROLLBACK" }, `${kind}: the rollback continues from the reply's baton`);
+      assert.deepEqual(logged, [], `${kind}: no best-effort recovery was needed`);
     }
     assert.equal(transaction.open, false, kind);
   }
-  // A timeout is the same.
+
+  // A timeout before any response (header-before-timeout, a slow write statement): no baton can
+  // be read, and the last one is tried. If the request never reached the server, the baton is
+  // still current and this releases the transaction; `rolled_back`.
   const sent = [];
-  const instance = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "timeout", async (_url, init) => {
-    const { requests } = JSON.parse(init.body);
-    sent.push(requests[0].stmt?.sql);
-    if (/^BEGIN/u.test(requests[0].stmt?.sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
+  const instance = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "header-timeout", async (_url, init) => {
+    const { baton: used, requests } = JSON.parse(init.body);
+    const sql = requests[0]?.stmt?.sql;
+    sent.push({ baton: used ?? null, sql });
+    if (/^BEGIN/u.test(sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
+    if (sql === "ROLLBACK") return Response.json({ baton: null, results: [ok(), { type: "ok", response: { type: "close" } }] });
     throw Object.assign(new Error("aborted"), { name: "TimeoutError" });
   });
-  const transaction = await instance.begin("write", 1_000, undefined, limit);
+  logged.length = 0;
+  const transaction = await instance.begin("write", 50, undefined, limit);
   await assert.rejects(transaction.execute([{ sql: "SELECT slow" }], { maxResponseBytes: READ_CAP }), { code: "POLICYSQL_DATABASE_TIMEOUT" });
   await transaction.rollback();
-  assert.deepEqual(sent, ["BEGIN IMMEDIATE", "SELECT slow"]);
+  assert.deepEqual(sent, [
+    { baton: null, sql: "BEGIN IMMEDIATE" },
+    { baton: "b1", sql: "SELECT slow" },
+    { baton: "b1", sql: "ROLLBACK" },
+  ]);
+  assert.deepEqual(logged, [{ event: "database_stream_recovery", requestId: "header-timeout", outcome: "rolled_back" }]);
+
+  // The request did reach the server: it consumed the baton, the server refuses the stale one,
+  // and the transaction (with its write lock) stays until the server expires the stream. The
+  // rollback still resolves, never changing the request's answer; the outcome is logged.
+  for (const refusal of [
+    () => Response.json({ baton: null, results: [{ type: "error", error: { code: "SQLITE_UNKNOWN", message: "SQLite error: baton not found" } }, ok()] }),
+    () => new Response("baton not found", { status: 400 }),
+  ]) {
+    logged.length = 0;
+    const refused = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "header-timeout", async (_url, init) => {
+      const { requests } = JSON.parse(init.body);
+      const sql = requests[0]?.stmt?.sql;
+      if (/^BEGIN/u.test(sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
+      if (sql === "ROLLBACK") return refusal();
+      throw Object.assign(new Error("aborted"), { name: "TimeoutError" });
+    });
+    const abandoned = await refused.begin("write", 50, undefined, limit);
+    await assert.rejects(abandoned.execute([{ sql: "SELECT slow" }], { maxResponseBytes: READ_CAP }), { code: "POLICYSQL_DATABASE_TIMEOUT" });
+    await abandoned.rollback();
+    assert.deepEqual(logged, [{ event: "database_stream_recovery", requestId: "header-timeout", outcome: "refused" }]);
+    assert.equal(abandoned.open, false);
+  }
 });

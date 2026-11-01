@@ -91,7 +91,10 @@ export const runRequestStep = async (
   const closeConnection = () => {
     const open = connection;
     connection = null;
-    if (open?.open) open.rollback().catch(() => undefined);
+    // The rollback runs after the reply is produced; hand it to the runtime's background so a
+    // Worker is not evicted before it releases the stream (and its write lock, #97). It never
+    // changes the reply; a best-effort recovery after an unreadable reply logs its outcome.
+    if (open?.open) runInBackground(context.background, open.rollback(), requestId);
   };
 
   const step = (event: unknown) => {

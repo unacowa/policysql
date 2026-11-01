@@ -13,15 +13,25 @@ import { SqlComplexityError, statementFailure } from "./database-complexity.ts";
 const CONTROL_RESPONSE_BYTES = 65_536;
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
-// A reply the transport refuses (over its bound, malformed, wrong count) still starts with the
-// stream's next baton: `{"baton":"...","base_url":...,"results":[...]}` (observed on real Turso).
-// It is read from the leading text and attached to the failure, so the rollback that follows can
-// continue the stream instead of leaving the transaction, and its write lock, open (#96). The text
-// is parsed only for that field and never kept or shown.
+// A reply the transport refuses or cannot finish reading (over its bound, malformed, wrong
+// count, a read error, or a timeout after its first bytes) still starts with the stream's next
+// baton: `{"baton":"...","base_url":...,"results":[...]}` (observed on real Turso). It is read
+// from the leading bytes and attached to the failure, so the rollback that follows can continue
+// the stream instead of leaving the transaction, and its write lock, open (#96, #97). The text is
+// parsed only for that field and never kept, logged, or shown.
 const BATON_PREFIX = /^\s*\{\s*"baton"\s*:\s*"([^"\\]{1,512})"/u;
+const BATON_LENGTH = 512;
+const validBaton = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && value.length <= BATON_LENGTH;
 const withBaton = <T extends Error>(error: T, leading: string): T => {
   const baton = BATON_PREFIX.exec(leading)?.[1];
-  if (baton !== undefined) (error as { nextBaton?: string }).nextBaton = baton;
+  if (validBaton(baton)) (error as { nextBaton?: string }).nextBaton = baton;
+  return error;
+};
+// A parsed reply's baton needs no key-order-dependent pattern (#97).
+const withReplyBaton = <T extends Error>(error: T, body: unknown): T => {
+  const baton = (body as { baton?: unknown } | null | undefined)?.baton;
+  if (validBaton(baton)) (error as { nextBaton?: string }).nextBaton = baton;
   return error;
 };
 const databaseFailure = () =>
@@ -181,19 +191,21 @@ export class TursoHttpTransport {
       await discardBody(response);
       throw databaseFailure();
     }
-    const text = await readBoundedText(response, maxResponseBytes, signal, oversized !== databaseFailure).catch((error) => {
+    // The leading bytes are kept for every failure, not only the over-bound one: a reply that
+    // stalls or fails mid-body has already sent its baton (#97).
+    const leading = { text: "" };
+    const text = await readBoundedText(response, maxResponseBytes, signal, oversized !== databaseFailure, leading).catch((error) => {
       if (error instanceof BodyTooLargeError) throw withBaton(oversized(), error.prefix);
-      if (isAbort(error)) throw timedOut();
-      throw databaseFailure();
+      if (isAbort(error)) throw withBaton(timedOut(), leading.text);
+      throw withBaton(databaseFailure(), leading.text);
     });
     let body;
     try { body = JSON.parse(text); } catch { throw withBaton(databaseFailure(), text); }
-    if (
-      !body ||
-      !Array.isArray(body.results) ||
-      body.results.length !== requests.length ||
-      !(body.baton === null || typeof body.baton === "string")
-    ) throw withBaton(databaseFailure(), text);
+    if (!body || !Array.isArray(body.results) || !(body.baton === null || typeof body.baton === "string")) {
+      throw withBaton(databaseFailure(), text);
+    }
+    // The JSON is parsed, so the baton is read from it: no pattern and no key order (#97).
+    if (body.results.length !== requests.length) throw withReplyBaton(databaseFailure(), body);
     return body;
   }
 
@@ -254,13 +266,14 @@ class TursoHttpTransaction {
         readCap,
       );
     } catch (error) {
-      // The reply was refused or never read. The baton held here is stale (the request may have
-      // run): a ROLLBACK sent with it is refused and leaves the transaction open. When the reply
-      // began with the next baton (a reply over the bound, malformed, or of the wrong count) the
-      // stream continues from it; otherwise (timeout, transport failure, nothing readable) the
-      // stream is unusable and nothing is sent with the stale baton (#96).
+      // The reply was refused or never read. The baton held here may be stale (the request may
+      // have run), but the reply's leading bytes almost always carry the next one: the stream
+      // continues from it (a reply over the bound, malformed, the wrong count, or one that
+      // stalled or failed after its first bytes). Only when no baton was read is the stream
+      // unusable; the rollback then makes one bounded best-effort attempt with the stale baton
+      // (finish, #97), and the server may still expire the stream.
       const next = (error as { nextBaton?: unknown } | null)?.nextBaton;
-      if (typeof next === "string") this.baton = next; else this.unusable = true;
+      if (validBaton(next)) this.baton = next; else this.unusable = true;
       throw error;
     }
     if (!body.baton) { this.unusable = true; throw databaseFailure(); }
@@ -293,11 +306,15 @@ class TursoHttpTransaction {
 
   async finish(sql) {
     if (!this.open) return;
-    // A stream whose last reply was never read cannot be continued: nothing is sent, and the
-    // server expires the stream (and with it the transaction). COMMIT is never skipped this way:
-    // it is only reachable after a successful statement, and a failed one is rolled back instead.
+    // A stream whose last reply was never read cannot be continued with certainty: the baton
+    // held here may already be stale. ROLLBACK still makes one bounded best-effort attempt with
+    // it (#97): when the request never reached the server the baton is current and this releases
+    // the transaction and its write lock now; when it did, the server refuses it and the stream
+    // stays until the server expires it (ADR 0027, "Baton recovery"). COMMIT is never skipped
+    // or attempted this way: an unusable stream is committed only if that same reply was read.
     if (this.unusable && sql === "ROLLBACK") {
       this.open = false;
+      await this.recover();
       return;
     }
     if (this.unusable) throw new CommitNotSentError(databaseFailure());
@@ -326,6 +343,27 @@ class TursoHttpTransaction {
       throw databaseFailure();
     }
     this.open = false;
+  }
+
+  /**
+   * Best-effort ROLLBACK after a reply was never read (#97). Never throws: the transaction is
+   * already abandoned, so cleanup cannot change the reply. `database_stream_recovery` records
+   * only its outcome, never the baton: `refused` means the server no longer knows that stream,
+   * and the transaction, with any write lock, remains until the server expires it.
+   */
+  private async recover() {
+    let outcome = "refused";
+    try {
+      const body = await this.transport.pipeline(
+        [executeRequest({ sql: "ROLLBACK" }, this.maxBytes), { type: "close" }],
+        this.baton,
+        this.timeoutMs,
+      );
+      const terminal = decodeResult(body.results[0], this.maxBytes);
+      this.usage.push(terminal.usage);
+      if (body.results[1]?.type === "ok" && body.results[1].response?.type === "close") outcome = "rolled_back";
+    } catch { /* best effort: the stream is abandoned either way */ }
+    console.log(JSON.stringify({ event: "database_stream_recovery", requestId: this.transport.requestId, outcome }));
   }
 
   commit() { return this.finish("COMMIT"); }

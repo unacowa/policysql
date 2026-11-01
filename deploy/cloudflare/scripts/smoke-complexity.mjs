@@ -56,23 +56,34 @@ export const sqlComplexitySmoke = async (context, { transport, allowlist, classi
   const verified = allowlist.filter((entry) => entry.smokeVerified);
   expect(JSON.stringify(verified.map((entry) => entry.prefix).sort()) === JSON.stringify(Object.keys(COMPLEXITY_PROBES).sort()),
     "the smoke has a statement for exactly the allowlist entries marked smokeVerified");
-  const run = async (sql) => {
-    const connection = await transport.begin("read", 10_000, undefined, { maxBytesPerValue: 262_144 });
-    try { await connection.execute([{ sql }], { maxResponseBytes: READ_CAP }); return null; } catch (error) { return error; } finally { await connection.rollback().catch(() => {}); }
+  // A probe that cannot begin (for example because an earlier failure left a write lock) is a
+  // failed probe, not an exception that aborts the whole section; a probe whose rollback fails is
+  // recorded by name, so it cannot hide behind a plain `.catch`.
+  const rollbackFailures = [];
+  const run = async (sql, name) => {
+    let connection;
+    try { connection = await transport.begin("read", 10_000, undefined, { maxBytesPerValue: 262_144 }); }
+    catch (error) { return error; }
+    try { await connection.execute([{ sql }], { maxResponseBytes: READ_CAP }); return null; }
+    catch (error) { return error; }
+    finally {
+      try { await connection.rollback(); } catch { rollbackFailures.push(name); }
+    }
   };
   for (const entry of verified) {
-    const error = await run(COMPLEXITY_PROBES[entry.prefix]);
+    const error = await run(COMPLEXITY_PROBES[entry.prefix], `allowlist:${entry.prefix}`);
     const cause = error === null ? null : classify(error);
     report.allowlist[entry.prefix] = { cause: cause ?? (error === null ? "accepted" : "unmatched"), expected: entry.cause };
     expect(cause === entry.cause, `allowlist entry "${entry.prefix}" no longer matches what real Turso sends`);
   }
   for (const [name, sql] of Object.entries(COMPLEXITY_CONTROLS)) {
-    const error = await run(sql);
+    const error = await run(sql, `control:${name}`);
     report.controls[name] = error === null ? "accepted" : "refused";
     expect(error === null, `real Turso still accepts ${name}`);
   }
-  const unrelated = await run("SELECT * FROM no_such_table_for_the_smoke");
+  const unrelated = await run("SELECT * FROM no_such_table_for_the_smoke", "unrelated");
   expect(unrelated !== null && classify(unrelated) === null, "an unrelated database error is not classified as complexity");
+  expect(rollbackFailures.length === 0, `every probe transaction rolled back (failed: ${rollbackFailures.join(", ")})`);
 
   const noInternalText = (outcome) => INTERNAL_TEXT.every((text) => !JSON.stringify(outcome.body).includes(text));
   const tooComplex = (outcome, index = 0) => outcome.status === 400 && errorCode(outcome) === "POLICYSQL_SQL_TOO_COMPLEX"
@@ -110,26 +121,39 @@ export const sqlComplexitySmoke = async (context, { transport, allowlist, classi
   const next = begin.status === 201 ? await api.statement(transactionId, { sequence: 2, sql: "SELECT id FROM projects", params: {} }) : empty;
   expect(next.status === 409 && errorCode(next) === "POLICYSQL_TRANSACTION_UNAVAILABLE", "the transaction is closed after the refusal");
 
-  // #96: a statement reply the transport cannot read (over its read cap, 1 MiB here, against a 3 MB reply) leaves the stream
-  // unusable; nothing is sent with a stale baton, so the server expires the stream and releases its
-  // write lock, and a following BEGIN on the same database succeeds. The wait is recorded.
-  const oversized = { refused: false, beginAfterMs: null };
+  // #97: a statement reply the transport cannot read (over its read cap, 1 MiB here, against a
+  // 3 MB reply) starts with the stream's next baton. The transport recovers it, and the rollback
+  // continues that stream, releasing the write lock, so a following BEGIN on the same database
+  // succeeds promptly. If no baton is readable, the one best-effort ROLLBACK is refused and the
+  // server keeps the stream, and its write lock, until it expires; the bounded wait below then
+  // fails by name instead of surfacing as confusing failures in later smoke sections. Every path
+  // still attempts the rollback, and a begin that cannot start is a failed check, not a crash.
+  const oversized = { refused: false, cleanedUp: false, beginAfterMs: null };
   {
-    const connection = await transport.begin("write", 10_000, undefined, { maxBytesPerValue: 262_144 });
-    try { await connection.execute([{ sql: "SELECT replace(hex(zeroblob(1500000)),'0','a')" }], { maxResponseBytes: READ_CAP }); } catch (error) {
-      oversized.refused = error?.code === "POLICYSQL_LIMIT_EXCEEDED";
+    let connection = null;
+    try {
+      connection = await transport.begin("write", 10_000, undefined, { maxBytesPerValue: 262_144 });
+      try { await connection.execute([{ sql: "SELECT replace(hex(zeroblob(1500000)),'0','a')" }], { maxResponseBytes: READ_CAP }); }
+      catch (error) { oversized.refused = error?.code === "POLICYSQL_LIMIT_EXCEEDED"; }
+    } catch { oversized.refused = false; }
+    finally {
+      if (connection) {
+        try { await connection.rollback(); oversized.cleanedUp = true; } catch { oversized.cleanedUp = false; }
+      }
     }
-    await connection.rollback().catch(() => {});
     expect(oversized.refused, "a statement reply over the transport bound is refused as a limit");
-    const started = Date.now();
-    while (oversized.beginAfterMs === null && Date.now() - started < 60_000) {
-      try {
-        const next = await transport.begin("write", 2_000, undefined, { maxBytesPerValue: 262_144 });
-        oversized.beginAfterMs = Date.now() - started;
-        await next.rollback().catch(() => {});
-      } catch { await new Promise((resolve) => setTimeout(resolve, 1_000)); }
+    expect(oversized.cleanedUp, "the oversized statement's transaction was cleaned up without an error");
+    if (oversized.refused && oversized.cleanedUp) {
+      const started = Date.now();
+      while (oversized.beginAfterMs === null && Date.now() - started < 10_000) {
+        try {
+          const next = await transport.begin("write", 2_000, undefined, { maxBytesPerValue: 262_144 });
+          oversized.beginAfterMs = Date.now() - started;
+          try { await next.rollback(); } catch { expect(false, "the lock check's write transaction rolled back"); }
+        } catch { await new Promise((resolve) => setTimeout(resolve, 250)); }
+      }
+      expect(oversized.beginAfterMs !== null, "a BEGIN on the same database succeeds after an oversized statement reply");
     }
-    expect(oversized.beginAfterMs !== null, "a BEGIN on the same database succeeds after an oversized statement reply");
   }
   report.oversizedReply = oversized;
 
