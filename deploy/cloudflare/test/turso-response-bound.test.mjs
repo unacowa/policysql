@@ -11,6 +11,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
 
+// The read cap core passes with each execute (ADR 0027); these tests choose their own.
+const READ_CAP = 2_097_152;
+
 const { sendCommand, PolicySqlOutcomeUnknownError } = await import("../../../packages/client/protocol.js");
 
 const MAX_RESPONSE_BYTES = 2_097_152;

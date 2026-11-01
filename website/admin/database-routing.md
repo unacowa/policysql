@@ -57,10 +57,11 @@ export default {
 
 ## 接続提供と認証の分離
 
-`DatabaseProvider`には次のメソッドがあります。DBを選ぶメソッドはありません。
+`DatabaseProvider`には次のメンバーがあります。DBを選ぶメソッドはありません。
 
-| メソッド | 用途 |
+| メンバー | 用途 |
 | --- | --- |
+| `streamedReadCap` | 必須のboolean。providerが作るtransportが、databaseの応答をstreamで読み、coreが渡す読み取り上限（`maxResponseBytes`）を超えた時点で打ち切るなら`true`。応答を内部でまとめて読むdriver（`@tursodatabase/serverless`など）は`false`にします。`false`のproviderは、`maxResultBytes`が64,000 byteを超えると`database_read_cap_unenforced`を一度だけlogに出します |
 | `check(binding)` | 渡されたbindingが登録済み・互換・有効なら正確に`true`を返す |
 | `connect(binding, requestId)` | そのDBへのtransportを生成する。transactionは開始しない |
 

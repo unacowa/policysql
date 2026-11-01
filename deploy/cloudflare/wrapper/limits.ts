@@ -23,4 +23,7 @@ export const RUNTIME_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
   // applicable limit governs: with maxResultBytes 64,000 a value is readable only up to about
   // 47 KB, whatever this says (docs/configuration.md, "Per-value bytes").
   maxBytesPerValue: 262_144,
+  // The whole response (ADR 0027 pull request 6): the result limit and 64 KiB for the envelope,
+  // the column descriptors, and the statements' framing. The runtime's default is the same value.
+  maxResponseBytes: 129_536,
 });

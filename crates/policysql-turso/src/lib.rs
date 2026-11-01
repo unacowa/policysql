@@ -50,7 +50,7 @@ impl<Transport: TursoTransport> DatabaseExecutor<SqliteProfile> for TursoExecuto
             return Err(AdapterError::TransactionRequired);
         }
         let mut result = self.transport.execute(plan)?;
-        validate_result(plan, &mut result)?;
+        validate_result(plan, &mut result, plan.limits().max_result_bytes)?;
         Ok(result)
     }
 }
@@ -58,6 +58,7 @@ impl<Transport: TursoTransport> DatabaseExecutor<SqliteProfile> for TursoExecuto
 fn validate_result(
     plan: &VerifiedExecutionPlan<SqliteProfile>,
     result: &mut ExecuteResult,
+    max_result_bytes: u64,
 ) -> Result<(), AdapterError> {
     if result.affected_rows != 0 {
         return Err(AdapterError::InvalidResult);
@@ -65,7 +66,7 @@ fn validate_result(
     if !result.redactions.is_empty() {
         return Err(AdapterError::InvalidResult);
     }
-    validate_public_result(plan, result)
+    validate_public_result(plan, result, max_result_bytes)
 }
 
 /// Validates an untrusted remote result against a profile-sealed execution plan.
@@ -77,16 +78,33 @@ pub fn validate_sealed_result(
     plan: &VerifiedExecutionPlan<SqliteProfile>,
     result: &mut ExecuteResult,
 ) -> Result<(), AdapterError> {
+    validate_sealed_result_within(plan, result, plan.limits().max_result_bytes)
+}
+
+/// [`validate_sealed_result`] with a result-byte budget that may be smaller than the plan's own
+/// limit: an atomic envelope's statements share one cumulative budget (ADR 0027), so a later
+/// statement stops at the first row that crosses what the earlier ones left.
+///
+/// # Errors
+///
+/// As [`validate_sealed_result`]; a row crossing `max_result_bytes` is `LimitExceeded`.
+pub fn validate_sealed_result_within(
+    plan: &VerifiedExecutionPlan<SqliteProfile>,
+    result: &mut ExecuteResult,
+    max_result_bytes: u64,
+) -> Result<(), AdapterError> {
+    let max_result_bytes = max_result_bytes.min(plan.limits().max_result_bytes);
     if plan.operation() == policysql_core::OperationKind::Select {
-        validate_result(plan, result)
+        validate_result(plan, result, max_result_bytes)
     } else {
-        validate_mutation_result(plan, result)
+        validate_mutation_result(plan, result, max_result_bytes)
     }
 }
 
 fn validate_public_result(
     plan: &VerifiedExecutionPlan<SqliteProfile>,
     result: &mut ExecuteResult,
+    max_result_bytes: u64,
 ) -> Result<(), AdapterError> {
     if !result.redactions.is_empty() {
         return Err(AdapterError::InvalidResult);
@@ -124,7 +142,7 @@ fn validate_public_result(
             bytes = bytes
                 .checked_add(value_size(value))
                 .ok_or(AdapterError::LimitExceeded)?;
-            if bytes > plan.limits().max_result_bytes {
+            if bytes > max_result_bytes {
                 return Err(AdapterError::LimitExceeded);
             }
         }
@@ -215,6 +233,7 @@ fn strip_visibility_columns(
 fn validate_mutation_result(
     plan: &VerifiedExecutionPlan<SqliteProfile>,
     result: &mut ExecuteResult,
+    max_result_bytes: u64,
 ) -> Result<(), AdapterError> {
     if !result.redactions.is_empty() {
         return Err(AdapterError::InvalidResult);
@@ -256,7 +275,7 @@ fn validate_mutation_result(
     }
     let affected_rows = result.affected_rows;
     result.affected_rows = 0;
-    validate_public_result(plan, result)?;
+    validate_public_result(plan, result, max_result_bytes)?;
     result.affected_rows = affected_rows;
     Ok(())
 }

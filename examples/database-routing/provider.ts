@@ -45,6 +45,8 @@ export const createDatabaseRegistry = (
   return {
     provider(env: RegistryEnv): DatabaseProvider {
       return {
+        // The transport the example builds reads each reply as a stream, bounded by its read cap.
+        streamedReadCap: true,
         check(binding) { return Boolean(find(binding, env)); },
         connect(binding, requestId) {
           const route = find(binding, env);

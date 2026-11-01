@@ -1,16 +1,15 @@
 import { CommitNotSentError, EngineError, binaryLimitExceeded } from "./errors.ts";
 import { remainingDatabaseTime } from "./database.ts";
-import type { DatabaseTransportOptions } from "./database.ts";
+import type { DatabaseExecuteOptions, DatabaseTransportOptions } from "./database.ts";
 import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.ts";
 import { discardBody, fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { BodyTooLargeError, readBoundedText } from "./bounded-body.ts";
 import { SqlComplexityError, statementFailure } from "./database-complexity.ts";
 
-// Statement replies carry result rows: the result-side bound, replaced by the compiled raw
-// bound in ADR 0027 pull request 6. Control replies (BEGIN, COMMIT, ROLLBACK, close) carry no
-// result data, so their bound is a fixed protocol constant (ADR 0027 "Fixed protocol constants").
-const STATEMENT_RESPONSE_BYTES = 2_097_152;
+// Statement replies carry result rows: their read cap comes with each call (core's compiled raw
+// result bound, ADR 0027). Control replies (BEGIN, COMMIT, ROLLBACK, close) carry no result data,
+// so their bound is a fixed protocol constant (ADR 0027 "Fixed protocol constants").
 const CONTROL_RESPONSE_BYTES = 65_536;
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
@@ -235,8 +234,12 @@ class TursoHttpTransaction {
     this.usage = [beginUsage];
   }
 
-  async execute(statements) {
+  async execute(statements, options: DatabaseExecuteOptions) {
     if (!this.open) throw databaseFailure();
+    // The read cap is core's. An omitted or malformed one fails closed before any request, so a
+    // direct caller cannot read an unbounded reply.
+    const readCap = options?.maxResponseBytes;
+    if (!Number.isSafeInteger(readCap) || readCap <= 0) throw databaseFailure();
     // Nothing is sent yet: an expired deadline or an unencodable value fails here, and the stream
     // stays usable (the baton is still the server's current one).
     const timeoutMs = Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs));
@@ -248,7 +251,7 @@ class TursoHttpTransaction {
         this.baton,
         timeoutMs,
         binaryLimitExceeded,
-        STATEMENT_RESPONSE_BYTES,
+        readCap,
       );
     } catch (error) {
       // The reply was refused or never read. The baton held here is stale (the request may have

@@ -345,11 +345,15 @@ pub enum Effect {
         deadline_ms: Option<u64>,
     },
     /// `trace`, when present, is the execution trace (`turso.ts` `executionTrace`) the engine
-    /// publishes to its sink before it runs the statements.
+    /// publishes to its sink before it runs the statements. `max_response_bytes` is the read cap
+    /// of the database's reply to these statements (ADR 0027): the compiled raw result bound, the
+    /// idempotency lookup bound, or the fixed bound of a statement with no result data.
+    #[serde(rename_all = "camelCase")]
     Execute {
         id: u64,
         statements: Vec<DriverCall>,
         trace: Option<Box<RawValue>>,
+        max_response_bytes: u64,
     },
     Commit {
         id: u64,
@@ -384,9 +388,12 @@ pub enum Effect {
         lane: &'static str,
         reply: Box<RawValue>,
     },
+    #[serde(rename_all = "camelCase")]
     Observe {
         statements: Vec<DriverCall>,
         context: ObserveContext,
+        /// The read cap of the cost statements' reply (the envelope's raw result bound).
+        max_response_bytes: u64,
     },
     Log {
         record: Box<RawValue>,

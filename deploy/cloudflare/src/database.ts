@@ -17,10 +17,19 @@ export type DatabaseResult = {
   rowsAffected: number;
   usage: DatabaseUsage;
 };
+/**
+ * How one `execute` call is bounded (ADR 0027). `maxResponseBytes` is the read cap of the
+ * database's reply to these statements, computed by core (the compiled raw result bound, the
+ * idempotency lookup bound, or a fixed bound for a statement with no result data). A transport
+ * that reads the reply as a stream (`streamedReadCap: true`) must cancel it at the first byte
+ * over the cap and fail with `POLICYSQL_LIMIT_EXCEEDED`; one that buffers cannot, and core checks
+ * the same bound on what it returns.
+ */
+export type DatabaseExecuteOptions = Readonly<{ maxResponseBytes: number }>;
 export interface DatabaseTransaction {
   readonly open: boolean;
   readonly usage: DatabaseUsage[];
-  execute(statements: { sql: string; args?: Record<string, unknown> }[]): Promise<DatabaseResult[]>;
+  execute(statements: { sql: string; args?: Record<string, unknown> }[], options: DatabaseExecuteOptions): Promise<DatabaseResult[]>;
   commit(): Promise<void>;
   rollback(): Promise<void>;
 }
@@ -44,6 +53,14 @@ export interface DatabaseTransport {
  * builds it with whatever credentials and registry it owns (ADR 0021).
  */
 export interface DatabaseProvider {
+  /**
+   * Declares whether the transports this provider builds enforce the read cap while the reply
+   * arrives (`DatabaseExecuteOptions.maxResponseBytes`). Required, no default: a driver that
+   * buffers the whole reply internally (for example `@tursodatabase/serverless`) declares
+   * `false`, and the engine logs `database_read_cap_unenforced` once per provider when
+   * `maxResultBytes` exceeds what such a buffer should hold.
+   */
+  readonly streamedReadCap: boolean;
   /** Must return exactly true. Called in the Worker and DO, including before callbacks/commit. */
   check(binding: DatabaseBinding): boolean | Promise<boolean>;
   /** Construct a transport only; PolicySQL owns BEGIN and the transaction lifecycle. */
@@ -69,6 +86,25 @@ export const validateDatabaseProvider = (provider: unknown) => {
     ["check", "connect"].some((key) => typeof provider[key] !== "function")) {
     throw new TypeError("database is required and must provide check and connect functions");
   }
+  if (typeof (provider as { streamedReadCap?: unknown }).streamedReadCap !== "boolean") {
+    throw new TypeError("database.streamedReadCap is required and must be a boolean");
+  }
+};
+
+// Result bytes above which a provider that buffers its replies is worth a log line: the
+// reference wrapper's `maxResultBytes`. The library has no default of its own for the field.
+const BUFFERED_RESULT_BYTES = 64_000;
+const noticed = new WeakSet<object>();
+
+/**
+ * Logs `database_read_cap_unenforced` once per provider that declared it buffers replies, when
+ * the configured `maxResultBytes` is large enough for that to matter (ADR 0027 "Streamed
+ * enforcement"). Core still bounds what such a driver returns, after it returns.
+ */
+export const noteReadCap = (provider: DatabaseProvider, maxResultBytes: number) => {
+  if (provider.streamedReadCap || maxResultBytes <= BUFFERED_RESULT_BYTES || noticed.has(provider)) return;
+  noticed.add(provider);
+  console.log(JSON.stringify({ event: "database_read_cap_unenforced", maxResultBytes }));
 };
 
 // A wrapper failure must neither leak its error text nor hold a transaction indefinitely.
@@ -152,9 +188,9 @@ export const databaseTransportFactory = (
         return {
           get open() { return transaction.open; },
           get usage() { return transaction.usage; },
-          async execute(statements) {
+          async execute(statements, executeOptions) {
             remainingDatabaseTime(expiresAt);
-            const results = await transaction.execute(statements);
+            const results = await transaction.execute(statements, executeOptions);
             remainingDatabaseTime(expiresAt);
             return results;
           },

@@ -6,6 +6,6 @@ export const testConfig = (overrides = {}) => ({ environment: "test", ...overrid
 // A TransactionOwner port for tests whose requests must never reach an owner (ADR 0022).
 export const testOwners = () => ({ route() { throw new Error("Unexpected transaction owner lookup"); } });
 export const testProvider =(connect = () => { throw new Error("Unexpected connection"); }) => ({
-  check: (binding) => binding.scope === "test" && binding.databaseId === "test-db",
+  streamedReadCap: true, check: (binding) => binding.scope === "test" && binding.databaseId === "test-db",
   connect,
 });

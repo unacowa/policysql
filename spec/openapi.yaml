@@ -660,7 +660,23 @@ components:
             maxJsonValues:
               type: integer
               minimum: 1
-              description: Maximum JSON values plus object member names in one request body, counted before the body is parsed. A body with more is 413 POLICYSQL_REQUEST_TOO_LARGE.
+              description: >-
+                Maximum JSON values plus object member names in one request body, counted before the
+                body is parsed; a body with more is 413 POLICYSQL_REQUEST_TOO_LARGE. Counted separately on
+                the result side: the raw values of the database's response to one atomic envelope or
+                interactive statement, which include every cell (visibility companion cells and the check
+                column of a mutation among them), every column descriptor, and every value inside a
+                JSON-typed cell. A result with more is 413 POLICYSQL_LIMIT_EXCEEDED and is rolled back.
+            maxResponseBytes:
+              type: integer
+              minimum: 1
+              description: >-
+                Maximum UTF-8 bytes of the complete success response of an atomic execution, plus a
+                fixed 1024-byte reserve for the fields added after commit (default maxResultBytes + 65536,
+                from maxResultBytes + 3072 to 589824). A response over it is 413 POLICYSQL_LIMIT_EXCEEDED,
+                decided before COMMIT: the envelope is rolled back and no idempotency record is written.
+                A keyed retry of a request that did commit returns its stored response, whatever the
+                limit is now.
             maxSqlBytes:
               type: integer
               minimum: 1

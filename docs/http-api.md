@@ -59,7 +59,7 @@ in Capabilities bounds decoded values (configured per deployment; 262,144 bytes 
 execution. A stored physical BLOB over this limit also returns 413 with either database transport
 and rolls back the transaction. The limit applies to bytes values only. It is an upper bound: the
 smallest applicable limit governs, so a value within it can still be refused by `maxRequestBytes`
-(`POLICYSQL_REQUEST_TOO_LARGE`) or, when read, by `maxResultBytes` or the interactive result limit
+(`POLICYSQL_REQUEST_TOO_LARGE`) or, when read, by `maxResultBytes`, `maxResponseBytes`, or the interactive result limit
 (`docs/configuration.md`, "Per-value bytes"). See [ADR 0016](adr/0016-bytes-wire-contract.md) and the
 [conformance ledger](user-document-conformance.md) for scope and evidence.
 

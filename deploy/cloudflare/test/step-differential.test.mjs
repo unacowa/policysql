@@ -201,7 +201,7 @@ const COMPARED_LOGS = new Set([
 // A database transport over one SQLite file. `faults` is shared by both sides' scenario code;
 // every call is recorded for the comparison (cost observation connections excepted).
 const sqliteProvider = (path, calls, faults, connections) => ({
-  check() { return faults.check ? faults.check() : true; },
+  streamedReadCap: true, check() { return faults.check ? faults.check() : true; },
   connect(_binding, requestId) {
     const cost = requestId.endsWith("-cost");
     return {

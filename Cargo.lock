@@ -384,6 +384,7 @@ dependencies = [
  "policysql-sqlite",
  "policysql-transaction",
  "policysql-turso",
+ "proptest",
  "regex-lite",
  "serde",
  "serde_json",

@@ -8,8 +8,8 @@
 
 use super::{PolicySqlRuntime, RuntimeError, compiled_statement, error_body};
 use policysql_transaction::machine::{
-    Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, StatementLimits,
-    StatementSummary, TriggeredCheck, Validated,
+    Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, ResultBudget,
+    StatementLimits, StatementSummary, TriggeredCheck, Validated,
 };
 use serde::Serialize;
 
@@ -81,6 +81,9 @@ impl PolicySqlRuntime {
             max_callback_rows: self.limits.max_callback_rows,
             max_statements: self.limits.max_statements,
             max_request_bytes: self.limits.max_request_bytes,
+            max_result_bytes: self.limits.max_result_bytes,
+            max_json_values: self.limits.max_json_values,
+            max_response_bytes: self.limits.max_response_bytes,
         }
     }
 
@@ -158,7 +161,19 @@ impl Compiler for RuntimeCompiler<'_> {
             .collect()
     }
 
-    fn validate(&self, handle: u64, index: usize, raw: RawResult) -> Result<Validated, CoreError> {
+    fn raw_result_bound(&self, handle: u64) -> Result<u64, CoreError> {
+        self.0
+            .raw_result_bound(handle)
+            .map_err(|error| core_error(self.0, error))
+    }
+
+    fn validate(
+        &self,
+        handle: u64,
+        index: usize,
+        raw: RawResult,
+        budget: ResultBudget,
+    ) -> Result<Validated, CoreError> {
         let at = |error: RuntimeError| core_error(self.0, error.at_statement(index));
         let dto = self.0.statement_dto(handle, index).map_err(at)?;
         let raw_json = serde_json::json!({
@@ -169,7 +184,7 @@ impl Compiler for RuntimeCompiler<'_> {
         .to_string();
         let validated = self
             .0
-            .validate_result(handle, index, &raw_json)
+            .validate_result_within(handle, index, &raw_json, budget)
             .map_err(at)?;
         let result_columns = dto
             .result
@@ -193,6 +208,8 @@ impl Compiler for RuntimeCompiler<'_> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Validated {
+            raw_bytes: validated.raw_bytes,
+            values: validated.values,
             columns: validated.columns,
             rows: validated.rows,
             redactions: validated.redactions,

@@ -212,7 +212,7 @@ const bindingOf = (runtime) => ({ version: 1, scope: "tenant", databaseId: "db_a
 
 // A database provider over one SQLite file; every call outside cost observation is recorded.
 const sqliteProvider = (path, calls, faults, connections) => ({
-  check() { return faults.check ? faults.check() : true; },
+  streamedReadCap: true, check() { return faults.check ? faults.check() : true; },
   connect(_binding, requestId) {
     const cost = requestId.endsWith("-cost");
     return {
@@ -726,11 +726,11 @@ test(`allowlist request-fingerprint-without-snapshot: ${ALLOWLIST["request-finge
   assert.equal(step.keyHash, ts.keyHash, "the key hash is unchanged");
   assert.deepEqual(step.record.results, ts.record.results);
   const binding = bindingOf(env.runtime);
-  assert.match(binding.snapshot, /:abi-14$/u);
+  assert.match(binding.snapshot, /:abi-15$/u);
   const { snapshot: _snapshot, ...withoutSnapshot } = binding;
   // The recorded side hashed the binding with its release's snapshot (ABI 8); core hashes it
   // without any snapshot.
-  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-14$/u, ":abi-8") }));
+  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-15$/u, ":abi-8") }));
   assert.equal(step.fingerprint, requestFingerprint(body, withoutSnapshot));
   assert.notEqual(step.fingerprint, requestFingerprint(body, binding), "nor the current snapshot");
   // The relabeling maps both to the same name: it hides the value and nothing else.

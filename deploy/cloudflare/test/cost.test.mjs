@@ -59,7 +59,7 @@ const observe = (statements = [{ operation: "select", explainResource: 1 }]) => 
 
 /** A provider whose cost connection answers each statement with `rows` of `detail`. */
 const provider = (rows, seen = {}) => ({
-  check() { return true; },
+  streamedReadCap: true, check() { return true; },
   connect(_binding, requestId) {
     seen.requestId = requestId;
     return {
@@ -131,7 +131,7 @@ test("without a catalog the observation is logged as unknown and opens no databa
   let connected = 0;
   // ADR 0021: a configuration without `costCatalog` (formerly in config.test.mjs).
   await observeCost(observe(), {
-    getRuntime: () => runtime, database: { check() {}, connect() { connected++; } }, costCatalog: validateConfig({ environment: "test" }).costCatalog,
+    getRuntime: () => runtime, database: { streamedReadCap: true, check() {}, connect() { connected++; } }, costCatalog: validateConfig({ environment: "test" }).costCatalog,
   });
   assert.equal(connected, 0);
   assert.deepEqual(logs, [{ event: "cost_observation_failed", requestId: "req-cost", code: "POLICYSQL_COST_UNKNOWN" }]);
@@ -140,7 +140,7 @@ test("without a catalog the observation is logged as unknown and opens no databa
 test("a failed cost connection is logged and rolled back, and an estimate over the budget is logged", async (t) => {
   const runtime = withRuntime(t);
   const logs = logged(t);
-  const refused = { check() { return true; }, connect() { throw new Error("connection refused"); } };
+  const refused = { streamedReadCap: true, check() { return true; }, connect() { throw new Error("connection refused"); } };
   await observeCost(observe(), { getRuntime: () => runtime, database: refused, costCatalog });
   const seen = {};
   const failing = provider(["SCAN projects"], seen);
@@ -172,7 +172,7 @@ test("a malformed per-value limit fails before the cost connection is opened", a
     let connected = 0;
     const runtime = { limits_json: limitsJson({ maxBytesPerValue: limit }) };
     await assert.rejects(observeCost(observe(), {
-      getRuntime: () => runtime, database: { check() {}, connect() { connected++; } }, costCatalog,
+      getRuntime: () => runtime, database: { streamedReadCap: true, check() {}, connect() { connected++; } }, costCatalog,
     }), TypeError, String(limit));
     assert.equal(connected, 0);
   }

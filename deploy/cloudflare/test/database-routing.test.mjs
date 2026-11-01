@@ -565,7 +565,7 @@ test("Worker/DO provider configuration mismatch fails before connecting", async 
   const message = h.ownerInputs(start.body.transactionId)[0].input;
   // An owner whose deployment registers no such database checks the binding first.
   const ownerWithoutProvider = createMemoryTransactionOwners(() => ({ getRuntime: () => h.runtime, config: h.config, database: {
-    check: () => false,
+    streamedReadCap: true, check: () => false,
     connect: () => { assert.fail("No default database is available"); },
   } })).port.route(start.body.transactionId);
   const reply = await ownerWithoutProvider.begin({
@@ -580,7 +580,7 @@ for (const hooks of [false, true]) {
   test(`generation changes conflict on retry without duplicating writes (DO=${hooks})`, async (t) => {
     let generation = "1";
     const h = await harness(t, { hooks, customizeBinding: (binding) => ({ ...binding, generation }), customizeProvider: (provider) => ({
-      check: (binding) => provider.check({ ...binding, generation: "1" }),
+      streamedReadCap: true, check: (binding) => provider.check({ ...binding, generation: "1" }),
       connect: (binding, ...args) => provider.connect({ ...binding, generation: "1" }, ...args),
     }) });
     const body = envelope(insert("one_write"));
@@ -642,7 +642,7 @@ for (const scenario of JSON.parse(readFileSync(new URL("./fixtures/database-dead
     let connected = false;
     t.mock.method(Date, "now", () => now);
     const h = await harness(t, { hooks: false, customizeProvider: (provider) => ({
-      check(...args) {
+      streamedReadCap: true, check(...args) {
         if (connected) now += scenario.commitCheckMs;
         return provider.check(...args);
       },
@@ -672,7 +672,7 @@ test("a slow commit authorization cannot extend the transaction deadline", async
   let rolledBack = false;
   let slow = false;
   const provider = {
-    check: async () => { if (slow) await new Promise((resolve) => setTimeout(resolve, 150)); return true; },
+    streamedReadCap: true, check: async () => { if (slow) await new Promise((resolve) => setTimeout(resolve, 150)); return true; },
     connect: () => ({ begin: async () => ({ open: true, usage: [], execute: async () => [],
       commit: async () => { committed = true; }, rollback: async () => { rolledBack = true; },
     }) }),
@@ -728,7 +728,7 @@ test("malformed database configuration cannot enable a legacy fixed-DB fallback"
     assert.throws(() => createApp({ getRuntime: () => ({}), database, config }), TypeError);
     assert.throws(() => new TransactionOwnerCore({}, { getRuntime: () => ({}), database, config }), TypeError);
   }
-  const database = { check() {}, connect() {} };
+  const database = { streamedReadCap: true, check() {}, connect() {} };
   assert.throws(() => createApp({ getRuntime: () => ({}), database, config, transportFactory() {} }), TypeError);
   assert.throws(() => createApp({ getRuntime: () => ({}), database, config, costTransportFactory() {} }), TypeError);
 });
@@ -738,7 +738,7 @@ test("revocation before direct commit rolls back without opening a replacement c
   let allowed = true;
   let commits = 0;
   let rollbacks = 0;
-  const provider = { check: () => allowed, connect: () => ({ begin: async () => ({
+  const provider = { streamedReadCap: true, check: () => allowed, connect: () => ({ begin: async () => ({
     open: true, usage: [], execute: async () => [],
     commit: async () => { commits++; }, rollback: async () => { rollbacks++; },
   }) }) };
@@ -755,7 +755,7 @@ test("a second wrapper commit() after a sent COMMIT failed is never CommitNotSen
   let now = 50_000;
   t.mock.method(Date, "now", () => now);
   let commits = 0;
-  const provider = { check: () => true, connect: () => ({ begin: async () => ({
+  const provider = { streamedReadCap: true, check: () => true, connect: () => ({ begin: async () => ({
     open: true, usage: [], execute: async () => [],
     commit: async () => { commits++; throw new Error("reply lost"); }, rollback: async () => {},
   }) }) };

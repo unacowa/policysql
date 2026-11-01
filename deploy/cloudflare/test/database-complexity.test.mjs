@@ -10,6 +10,9 @@ import { COMPLEXITY_PROBES, sqlComplexitySmoke } from "../scripts/smoke-complexi
 import { CommitNotSentError, EngineError } from "../src/errors.ts";
 import { directCommitFailureClass, directFailureClass, executeFailedEvent, failureClass } from "../src/step-effects.ts";
 
+// The read cap core passes with each execute (ADR 0027); these tests choose their own.
+const READ_CAP = 2_097_152;
+
 // The messages of SQLite 3.4x for each allowlist entry (the real server's text is checked by
 // the release smoke for the entries marked `smokeVerified`).
 const MESSAGES = new Map([
@@ -137,7 +140,7 @@ test("after a refused statement the rollback continues the stream with the baton
     return refusal("SQLite error: too many columns in result set", "SQLITE_UNKNOWN");
   }, batons);
   const transaction = await instance.begin("write", 1_000, undefined, limit);
-  await assert.rejects(transaction.execute([{ sql: "SELECT refused" }]), (error) => error instanceof SqlComplexityError);
+  await assert.rejects(transaction.execute([{ sql: "SELECT refused" }], { maxResponseBytes: READ_CAP }), (error) => error instanceof SqlComplexityError);
   await transaction.rollback();
   // BEGIN has no baton; the refused statement used the BEGIN reply's; the rollback the refusal's.
   assert.deepEqual(batons, [null, "complexity-baton-1", "complexity-baton-2"]);
@@ -145,7 +148,7 @@ test("after a refused statement the rollback continues the stream with the baton
   const other = [];
   const failing = await transport((request) => (request.stmt?.sql === "SELECT other" ? refusal("SQLite error: no such table: x", "SQLITE_UNKNOWN") : /^BEGIN|^ROLLBACK/u.test(request.stmt?.sql ?? "") ? ok() : { type: "ok", response: { type: "close" } }), other)
     .begin("write", 1_000, undefined, limit);
-  await assert.rejects(failing.execute([{ sql: "SELECT other" }]), (error) => error instanceof DatabaseStatementError);
+  await assert.rejects(failing.execute([{ sql: "SELECT other" }], { maxResponseBytes: READ_CAP }), (error) => error instanceof DatabaseStatementError);
   await failing.rollback();
   assert.deepEqual(other, [null, "complexity-baton-1", "complexity-baton-2"]);
 });
@@ -161,7 +164,7 @@ test("the transport classifies the first refused statement of a pipeline by its 
     return index === 1 ? columns : refusal("LIKE or GLOB pattern too complex");
   });
   const transaction = await instance.begin("write", 1_000, undefined, limit);
-  await assert.rejects(transaction.execute([{ sql: "SELECT first" }, { sql: "SELECT second" }]),
+  await assert.rejects(transaction.execute([{ sql: "SELECT first" }, { sql: "SELECT second" }], { maxResponseBytes: READ_CAP }),
     (error) => error instanceof SqlComplexityError && error.statement === 1 && error.complexityCause === "columns");
   // A COMMIT whose reply is a complexity message is a transport failure, never a classification.
   await assert.rejects(transaction.commit(), (error) => !(error instanceof SqlComplexityError) && error.code === "POLICYSQL_DATABASE_UNAVAILABLE");
@@ -211,7 +214,7 @@ test("a complexity refusal is classified only when it is the one error and the l
       return replies[sql] ?? ok();
     });
     const transaction = await instance.begin("write", 1_000, undefined, limit);
-    return transaction.execute(Object.keys(replies).map((sql) => ({ sql }))).then(() => null, (error) => error);
+    return transaction.execute(Object.keys(replies).map((sql) => ({ sql })), { maxResponseBytes: READ_CAP }).then(() => null, (error) => error);
   };
   // Alone and last: a definite refusal.
   const alone = await run({ "SELECT a": ok(), "SELECT b": complexity() });
@@ -253,7 +256,7 @@ test("a statement reply that cannot be read: the rollback continues from the rep
       return reply();
     });
     const transaction = await instance.begin("write", 1_000, undefined, limit);
-    await assert.rejects(transaction.execute([{ sql: "SELECT big" }]), (error) => error instanceof EngineError, kind);
+    await assert.rejects(transaction.execute([{ sql: "SELECT big" }], { maxResponseBytes: READ_CAP }), (error) => error instanceof EngineError, kind);
     const before = sent.length;
     await transaction.rollback();
     if (next === null) {
@@ -274,7 +277,7 @@ test("a statement reply that cannot be read: the rollback continues from the rep
     throw Object.assign(new Error("aborted"), { name: "TimeoutError" });
   });
   const transaction = await instance.begin("write", 1_000, undefined, limit);
-  await assert.rejects(transaction.execute([{ sql: "SELECT slow" }]), { code: "POLICYSQL_DATABASE_TIMEOUT" });
+  await assert.rejects(transaction.execute([{ sql: "SELECT slow" }], { maxResponseBytes: READ_CAP }), { code: "POLICYSQL_DATABASE_TIMEOUT" });
   await transaction.rollback();
   assert.deepEqual(sent, ["BEGIN IMMEDIATE", "SELECT slow"]);
 });

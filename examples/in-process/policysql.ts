@@ -69,6 +69,9 @@ const sqliteProvider = (binding: DatabaseBinding, database: DatabaseSync): Datab
   const registered = (selected: DatabaseBinding) =>
     (Object.keys(binding) as Array<keyof DatabaseBinding>).every((key) => binding[key] === selected[key]);
   return {
+    // node:sqlite returns the whole result in memory, so the read cap cannot be applied while it
+    // arrives; core checks the same bound on what is returned.
+    streamedReadCap: false,
     check: registered,
     connect(selected) {
       if (!registered(selected)) throw new Error("unregistered database");

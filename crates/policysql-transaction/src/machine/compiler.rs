@@ -115,9 +115,26 @@ pub struct RawResult {
     pub affected_rows: u64,
 }
 
+/// What a result may still use (ADR 0027): the cumulative budget of an atomic envelope minus what
+/// its earlier statements consumed, or the whole budget of an interactive statement. The
+/// compiler stops at the first row that crosses `result_bytes` or `values`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResultBudget {
+    /// Bytes of the raw result text (the compiled raw bound minus the earlier statements').
+    pub raw_bytes: u64,
+    /// Raw Hrana values (cells, column descriptors, values inside JSON cells).
+    pub values: u64,
+    /// Public encoding of the rows.
+    pub result_bytes: u64,
+}
+
 /// A result that passed the compiled contract, with what the public result shape needs.
 #[derive(Clone, Debug)]
 pub struct Validated {
+    /// Bytes of raw result text this statement consumed.
+    pub raw_bytes: u64,
+    /// Raw values this statement consumed.
+    pub values: u64,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub redactions: Vec<Vec<bool>>,
@@ -149,12 +166,28 @@ pub trait Compiler {
     /// `POLICYSQL_INTERNAL` for an unknown handle.
     fn statements(&self, handle: u64) -> Result<Vec<DriverStatement>, CoreError>;
 
-    /// Validates a raw result of statement `index` against a live handle.
+    /// The raw result bound of a live handle, computed when it was compiled (ADR 0027): the
+    /// read cap the machine hands the transport and the budget [`ResultBudget::raw_bytes`] starts
+    /// from.
     ///
     /// # Errors
     ///
-    /// The validation's client-facing error (`POLICYSQL_SCHEMA_MISMATCH`, ...).
-    fn validate(&self, handle: u64, index: usize, raw: RawResult) -> Result<Validated, CoreError>;
+    /// `POLICYSQL_INTERNAL` for an unknown handle.
+    fn raw_result_bound(&self, handle: u64) -> Result<u64, CoreError>;
+
+    /// Validates a raw result of statement `index` against a live handle, within `budget`.
+    ///
+    /// # Errors
+    ///
+    /// The validation's client-facing error (`POLICYSQL_SCHEMA_MISMATCH`, ...), or
+    /// `POLICYSQL_LIMIT_EXCEEDED` when the result crosses `budget`.
+    fn validate(
+        &self,
+        handle: u64,
+        index: usize,
+        raw: RawResult,
+        budget: ResultBudget,
+    ) -> Result<Validated, CoreError>;
 
     /// Releases a handle; releasing an unknown handle does nothing.
     fn release(&self, handle: u64);

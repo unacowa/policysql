@@ -6,6 +6,9 @@ import { CommitNotSentError } from "../src/errors.ts";
 import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
 import { redirectResponses } from "./helpers/redirects.mjs";
 
+// The read cap core passes with each execute (ADR 0027); these tests choose their own.
+const READ_CAP = 2_097_152;
+
 const result = (columns, rows, usage = {}) => ({
   type: "ok",
   response: {
@@ -36,7 +39,7 @@ const readBlob = async (base64, options = runtimeLimit) => {
     }) });
   });
   const transaction = await transport.begin("read", 1000, undefined, options);
-  return (await transaction.execute([{ sql: "SELECT state FROM projects" }]))[0].rows[0][0];
+  return (await transaction.execute([{ sql: "SELECT state FROM projects" }], { maxResponseBytes: READ_CAP }))[0].rows[0][0];
 };
 
 test("decodes padded and unpadded Hrana BLOB responses without changing their bytes", async () => {
@@ -129,7 +132,7 @@ test("classifies oversized Hrana statement responses as result limit errors", as
       });
     });
     const transaction = await transport.begin("read", 1000, undefined, runtimeLimit);
-    return transaction.execute([{ sql: "SELECT state FROM projects" }]);
+    return transaction.execute([{ sql: "SELECT state FROM projects" }], { maxResponseBytes: READ_CAP });
   };
   for (const declare of [false, true]) {
     await assert.rejects(run({ declare }), { code: "POLICYSQL_LIMIT_EXCEEDED" }, `declare=${declare}`);
@@ -164,7 +167,7 @@ test("decodes exact usage metrics while preserving transaction ownership", async
     fetchImpl,
   );
   const transaction = await transport.begin("read", 1000, undefined, runtimeLimit);
-  const output = await transaction.execute([{ sql: "SELECT id FROM projects", args: {} }]);
+  const output = await transaction.execute([{ sql: "SELECT id FROM projects", args: {} }], { maxResponseBytes: READ_CAP });
   await transaction.commit();
   assert.equal(output[0].usage.rowsRead, 12);
   assert.equal(requests[1].baton, "baton_1");
@@ -206,7 +209,7 @@ test("HTTP operations share an absolute deadline while rollback retains its clea
   });
   const first = await transport.begin("read", 1000, 10_200, runtimeLimit);
   now += 120;
-  await first.execute([{ sql: "SELECT id FROM projects" }]);
+  await first.execute([{ sql: "SELECT id FROM projects" }], { maxResponseBytes: READ_CAP });
   now += 50;
   await first.commit();
   assert.deepEqual(budgets, [200, 80, 30]);
@@ -214,7 +217,7 @@ test("HTTP operations share an absolute deadline while rollback retains its clea
   const second = await transport.begin("read", 1000, 10_200, runtimeLimit);
   now = 10_200;
   const count = requests.length;
-  await assert.rejects(second.execute([{ sql: "SELECT id FROM projects" }]), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
+  await assert.rejects(second.execute([{ sql: "SELECT id FROM projects" }], { maxResponseBytes: READ_CAP }), (error) => error.code === "POLICYSQL_DATABASE_TIMEOUT");
   // A COMMIT whose deadline passed is refused before any byte is sent: a typed pre-send failure (#54).
   await assert.rejects(second.commit(), (error) => error instanceof CommitNotSentError && error.cause.code === "POLICYSQL_DATABASE_TIMEOUT");
   assert.equal(requests.length, count, "no SQL or COMMIT after expiry");
@@ -264,7 +267,7 @@ test("encodes BigInt arguments as exact Hrana integers within the signed 64-bit 
   });
   const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
   const args = { big: 9007199254740993n, min: -(2n ** 63n), max: 2n ** 63n - 1n, small: 7 };
-  await transaction.execute([{ sql: "INSERT INTO counters (big) VALUES (:big)", args }]);
+  await transaction.execute([{ sql: "INSERT INTO counters (big) VALUES (:big)", args }], { maxResponseBytes: READ_CAP });
   assert.deepEqual(sent.at(-1).stmt.named_args, [
     { name: "big", value: { type: "integer", value: "9007199254740993" } },
     { name: "min", value: { type: "integer", value: "-9223372036854775808" } },
@@ -273,7 +276,7 @@ test("encodes BigInt arguments as exact Hrana integers within the signed 64-bit 
   ]);
   const before = sent.length;
   for (const value of [2n ** 63n, -(2n ** 63n) - 1n]) {
-    await assert.rejects(transaction.execute([{ sql: "SELECT :v", args: { v: value } }]), { code: "POLICYSQL_INTERNAL" });
+    await assert.rejects(transaction.execute([{ sql: "SELECT :v", args: { v: value } }], { maxResponseBytes: READ_CAP }), { code: "POLICYSQL_INTERNAL" });
   }
   assert.equal(sent.length, before, "nothing is sent for an out-of-range integer");
 });

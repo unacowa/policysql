@@ -68,8 +68,8 @@ violate it. `F` (Workers CPU over reference-machine CPU) is 2.0, the maintainers
 observed one, which has been higher); the value in force and every coefficient are in `deploy/cloudflare/scripts/lib/cpu-model.mjs`, and
 [configuration.md](configuration.md#cpu-model) explains them.
 
-Raising a limit (`maxResultBytes`, `maxStatements`, and the request limits when they become
-configurable) raises the formula's result: raise `cpu_ms` with it, or lower the limit when the plan
+Raising a limit (`maxResultBytes`, `maxResponseBytes`, `maxStatements`, `maxJsonValues`, and the
+request limits) raises the formula's result: raise `cpu_ms` with it, or lower the limit when the plan
 cannot (Workers Free allows 10 ms).
 
 Before changing a coefficient, `F` or `cpu_ms`, measure from `deploy/cloudflare`:

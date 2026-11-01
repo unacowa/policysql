@@ -10,13 +10,16 @@
  * defaults are in `docs/configuration.md`. Any other key is rejected.
  */
 export type RuntimeLimits = {
-  /** Rows per statement. */
+  /** Rows per statement (at most 100,000, ADR 0027). */
   maxRows: number;
-  /** Encoded result bytes per statement. */
+  /**
+   * Encoded result bytes per statement, and cumulatively per atomic envelope (at most 524,288,
+   * ADR 0027).
+   */
   maxResultBytes: number;
   /** Database timeout per statement, in milliseconds. */
   timeoutMs: number;
-  /** Statements per atomic envelope. */
+  /** Statements per atomic envelope (at most 64, ADR 0027). */
   maxStatements: number;
   /** Interactive transaction duration from begin, in milliseconds (default 4,000, at most 60,000). */
   transactionMs?: number;
@@ -32,7 +35,12 @@ export type RuntimeLimits = {
   costTimeoutMs?: number;
   /** UTF-8 bytes of a request body as received, BOM included (default 1,048,576; 65,536 to 2,097,152; ADR 0027). */
   maxRequestBytes?: number;
-  /** JSON values plus object member names in one request body (default 65,536; 1,024 to 131,072). */
+  /**
+   * JSON values plus object member names in one request body, and, separately, the raw values of
+   * one atomic envelope's or interactive statement's database result: every cell (visibility and
+   * check companions included), every column descriptor, and every value inside a JSON-typed cell
+   * (default 65,536; 1,024 to 131,072).
+   */
   maxJsonValues?: number;
   /** UTF-8 bytes of one statement's SQL (default 65,536; 1,024 to 1,048,576, and at most `maxRequestBytes`). */
   maxSqlBytes?: number;
@@ -55,6 +63,13 @@ export type RuntimeLimits = {
   maxProjections?: number;
   /** Joins per FROM in the client's SQL (default 8; 1 to 63). Input-side. */
   maxJoins?: number;
+  /**
+   * UTF-8 bytes of a complete success response (default `maxResultBytes` + 65,536; from
+   * `maxResultBytes` + 3,072 to 589,824). An atomic envelope whose response, plus a 1,024-byte
+   * reserve for what is added after commit, exceeds it is rolled back with 413
+   * `POLICYSQL_LIMIT_EXCEEDED` before COMMIT (ADR 0027).
+   */
+  maxResponseBytes?: number;
 };
 
 // The constructor's field for each `RuntimeLimits` key. The runtime owns the defaults and
@@ -78,6 +93,7 @@ const RUNTIME_LIMIT_FIELDS: Readonly<Record<keyof RuntimeLimits, string>> = Obje
   maxExpressionDepth: "max_expression_depth",
   maxProjections: "max_projections",
   maxJoins: "max_joins",
+  maxResponseBytes: "max_response_bytes",
 });
 
 /**
@@ -123,7 +139,7 @@ export type EnforcedLimits = Readonly<{
   costTimeoutMs: number;
   /** Request body bytes as received (configured, ADR 0027). */
   maxRequestBytes: number;
-  /** JSON values plus member names in one request body (configured). Result side: pull request 6. */
+  /** JSON values plus member names in one request body, and raw values of a result (configured). */
   maxJsonValues: number;
   /** UTF-8 bytes of one statement's SQL (configured). */
   maxSqlBytes: number;
@@ -134,7 +150,7 @@ export type EnforcedLimits = Readonly<{
   maxExpressionDepth: number;
   maxProjections: number;
   maxJoins: number;
-  /** Reported at its default; enforced from pull request 6, so not advertised before. */
+  /** UTF-8 bytes of a complete success response (configured, ADR 0027 pull request 6). */
   maxResponseBytes: number;
   /** Fixed protocol constants that core enforces. */
   maxCommitChecks: number;

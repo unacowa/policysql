@@ -25,8 +25,8 @@ mod step;
 pub mod time;
 
 pub use compiler::{
-    Compiled, Compiler, CoreError, DriverStatement, Operation, RawResult, StatementLimits,
-    StatementSummary, TriggeredCheck, Validated,
+    Compiled, Compiler, CoreError, DriverStatement, Operation, RawResult, ResultBudget,
+    StatementLimits, StatementSummary, TriggeredCheck, Validated,
 };
 pub use io::{Class, Effect, Event, HostFacts};
 pub use state::{
@@ -39,11 +39,6 @@ pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// The latest time the machine accepts (9999-12-31T23:59:59.999Z, minus a day so every
 /// deadline it computes stays in range).
 pub const MAX_TIME_MS: u64 = 253_402_300_799_999 - 86_400_000;
-/// Raw results per statement in an `Executed` event. This is the result-side bound of ADR
-/// 0027, which pull request 6 replaces with the compiled raw bound; the request side of the
-/// event is derived from the configured request limit ([`crate::bounds::event_bytes`]).
-pub const EVENT_RESULT_BYTES: usize = 1_048_576;
-
 /// The runtime limits the machine enforces (`RuntimeLimits`, ADR 0024 pull request 3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
@@ -57,26 +52,43 @@ pub struct Limits {
     pub max_statements: u64,
     /// The configured request body limit; bounds the body text an event carries.
     pub max_request_bytes: u64,
+    /// The configured result limits (ADR 0027): they bound the raw results an event carries.
+    pub max_result_bytes: u64,
+    /// Raw Hrana values of one atomic envelope or interactive statement's result.
+    pub max_json_values: u64,
+    /// UTF-8 bytes of a complete success response, measured before COMMIT.
+    pub max_response_bytes: u64,
 }
 
 impl Limits {
-    /// The largest volatile JSON: [`MAX_VOLATILE_BYTES`] plus room for an atomic execution's
-    /// validated results (derived from one `Executed` event, whose raw rows they restate as
-    /// objects) and the body text it compiled.
+    /// The largest volatile JSON (ADR 0027 "Derived internal bounds"): [`MAX_VOLATILE_BYTES`],
+    /// the body text it compiled, and the validated results or pending replay reply.
     #[must_use]
     pub fn max_volatile_bytes(&self) -> usize {
-        MAX_VOLATILE_BYTES.saturating_add(self.max_event_bytes().saturating_mul(4))
+        crate::bounds::volatile_bytes(
+            self.max_request_bytes(),
+            usize::try_from(self.max_response_bytes).unwrap_or(usize::MAX),
+        )
     }
 
-    /// The largest event JSON, derived from the request limit and the raw result bound
-    /// (ADR 0027 "Derived internal bounds"): the JSON-escaped body, the auth, the binding,
-    /// `max_statements` × 1 MiB of raw results, and framing.
+    /// The largest event JSON, derived from the request limit and the largest raw read
+    /// (ADR 0027 "Derived internal bounds"): the JSON-escaped body, the auth, the binding, the
+    /// larger of the envelope raw bound and the idempotency lookup bound, and framing.
     #[must_use]
     pub fn max_event_bytes(&self) -> usize {
-        let results = usize::try_from(self.max_statements.max(1))
-            .unwrap_or(usize::MAX)
-            .saturating_mul(EVENT_RESULT_BYTES);
-        crate::bounds::event_bytes(self.max_request_bytes(), results)
+        crate::bounds::event_bytes(self.max_request_bytes(), self.largest_read_bytes())
+    }
+
+    /// The largest raw database read one effect can request: the raw bound at the limits'
+    /// maxima, or the idempotency lookup.
+    #[must_use]
+    pub fn largest_read_bytes(&self) -> usize {
+        let to_usize = |value: u64| usize::try_from(value).unwrap_or(usize::MAX);
+        crate::bounds::largest_read_bytes(crate::bounds::raw_result_bound_max(
+            to_usize(self.max_result_bytes),
+            to_usize(self.max_json_values),
+            to_usize(self.max_statements.max(1)),
+        ))
     }
 
     /// The configured request limit as a length.

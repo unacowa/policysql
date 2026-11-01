@@ -148,6 +148,8 @@ code generatorやquery builderは、固定された想定ではなくCapabilitie
 
 `idempotency.mutationsRequired`と`interactiveStartRequired`はともに`false`です。`persistent: true`はキーを指定した要求の再送処理を表します。キーなしの更新は冪等性テーブルを使用せず、要求間の重複排除を保証しません。キーの形式とDBテーブルの要件は[Atomic Execute](../api/execute#transaction-mode)を参照してください。
 
+`limits.maxResponseBytes`はatomic実行の成功responseの全体（envelope、各文のcolumn descriptor、`meta`を含む）の上限で、commit前に測ります。超える場合は413 `POLICYSQL_LIMIT_EXCEEDED`を返し、envelopeをrollbackして冪等性recordも残しません。同じ要求の再送は新しい試行として最初から実行されます。commit済みの要求の再送は、上限を下げた後でも保存済みのresponseをそのまま返します。`limits.maxJsonValues`は結果側ではdatabaseの生のresponseに含まれる値（visibility companionとcheck columnを含むすべてのcell、すべてのcolumn descriptor、JSON型のcellの内側の値）を数え、超えると413 `POLICYSQL_LIMIT_EXCEEDED`でrollbackします。
+
 Capabilitiesに掲載する上限は、deploymentが実際に強制している値そのものです。値はdeploymentのruntime設定 (`RuntimeLimits`) と、coreが固定で強制するprotocol上の定数から得ます。掲載用に別の値を設定する方法はありません。`transactions.maxStatements`と`transactions.maxResultBytes`は1つの対話型transactionの文の数と累積結果bytes、`maxInteractiveDurationMs`は開始からの期限、`maxCallbackQueriesPerCheck`、`maxCallbackRowsPerCheck`、`maxCallbackBytesPerCheck`は1つのcommit checkのcallback queryの数、累積行数、累積bytesです。
 
 `maxParameters`、`maxExpressionDepth`、`maxProjections`、`maxJoins`は、client SQLに対してPolicySQL自身が行うparseとbindの仕事を守る入力側の上限です（既定は1,024、32、128、8、上限は16,384、64、2,000、63）。上限内のrequestがcompileできることは約束しません。実際に生成した文（client SQLにpolicyのrow filterやcompanion columnを合成したもの）が下流の上限に達した場合は、予測ではなく生成した文を計測して、`POLICYSQL_SQL_TOO_COMPLEX`（400）を返します。

@@ -84,6 +84,7 @@ export const capabilities = (runtime: any, publicConfig: any = {}) => {
   const limits = {
     maxRows: enforced.maxRows,
     maxResultBytes: enforced.maxResultBytes,
+    maxResponseBytes: enforced.maxResponseBytes,
     timeoutMs: enforced.timeoutMs,
     maxStatements: enforced.maxStatements,
     maxRequestBytes: enforced.maxRequestBytes,

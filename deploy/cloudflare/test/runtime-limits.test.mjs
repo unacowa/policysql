@@ -33,6 +33,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const ADVERTISED_SOURCES = {
   "limits.maxRows": "maxRows",
   "limits.maxResultBytes": "maxResultBytes",
+  "limits.maxResponseBytes": "maxResponseBytes",
   "limits.timeoutMs": "timeoutMs",
   "limits.maxStatements": "maxStatements",
   "limits.maxRequestBytes": "maxRequestBytes",
@@ -113,8 +114,9 @@ test("the reference wrapper's limits are what its runtime enforces and advertise
 
 test("construction rejects every invalid limit and names the field", () => {
   const ranges = {
-    maxRows: [1, 9_007_199_254_740_991], maxResultBytes: [1, 9_007_199_254_740_991],
-    timeoutMs: [1, 9_007_199_254_740_991], maxStatements: [1, 4_294_967_295],
+    // ADR 0027 pull request 6: hard maxima for the result side.
+    maxRows: [1, 100_000], maxResultBytes: [1, 524_288],
+    timeoutMs: [1, 9_007_199_254_740_991], maxStatements: [1, 64],
     transactionMs: [1, 60_000], maxTransactionStatements: [1, 256], maxTransactionResultBytes: [1, 65_536],
     maxCallbackRows: [1, 10_000], beginTimeoutMs: [1, 60_000], costTimeoutMs: [1, 10_000],
     // ADR 0027: the request-side limits have a minimum (the envelope must fit) and a hard maximum.
@@ -151,8 +153,7 @@ test("construction rejects every invalid limit and names the field", () => {
     (error) => String(error).includes("`max_sql_bytes` must not exceed `max_request_bytes`"));
   construct({ ...REQUIRED, maxRequestBytes: 65_536, maxSqlBytes: 65_536 }).free();
   construct({ ...REQUIRED, maxRequestBytes: 2_097_152, maxSqlBytes: 1_048_576 }).free();
-  // The limits later pull requests make configurable are not constructor fields yet.
-  for (const key of ["transactionMS", "maxInteractiveDurationMs", "maxResponseBytes", "max_rows"]) {
+  for (const key of ["transactionMS", "maxInteractiveDurationMs", "max_rows"]) {
     assert.throws(() => runtimeLimitsJson({ ...REQUIRED, [key]: 1 }),
       (error) => error instanceof TypeError && error.message === `limits.${key} is not a runtime limit`, key);
   }

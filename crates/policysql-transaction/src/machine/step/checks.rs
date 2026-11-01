@@ -767,6 +767,10 @@ impl<C: Compiler> Step<'_, C> {
                 for statement in &statements {
                     calls.push(driver_call(&statement.sql, statement)?);
                 }
+                let max_response_bytes = self
+                    .compiler
+                    .raw_result_bound(handle)
+                    .map_err(|_| Fault("plan"))?;
                 self.wait_callback(
                     request,
                     token_hash,
@@ -780,6 +784,7 @@ impl<C: Compiler> Step<'_, C> {
                         id,
                         statements: calls,
                         trace: None,
+                        max_response_bytes,
                     },
                 )
             }
@@ -872,7 +877,8 @@ impl<C: Compiler> Step<'_, C> {
             rows: result.rows.clone(),
             affected_rows: result.rows_affected,
         };
-        let validated = self.compiler.validate(handle, 0, raw);
+        let budget = self.statement_budget(handle)?;
+        let validated = self.compiler.validate(handle, 0, raw, budget);
         self.release(handle);
         let validated = match validated {
             Ok(validated) => validated,

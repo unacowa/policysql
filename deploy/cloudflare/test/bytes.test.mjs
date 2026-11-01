@@ -322,7 +322,7 @@ test("bytes containing SQL text stay bound data and NULL bytes parameters follow
 });
 
 test("decoded maximum is accepted independently of hosting defaults and advertised in Capabilities", async t => {
-  const h = await harness(t, { hooks: false, fixture, runtimeLimits: { maxRows: 100, maxResultBytes: 800_000, timeoutMs: 1_000, maxStatements: 8 } });
+  const h = await harness(t, { hooks: false, fixture, runtimeLimits: { maxRows: 100, maxResultBytes: 524_288, timeoutMs: 1_000, maxStatements: 8 } });
   assert.equal(h.runtime.max_bytes_per_value, undefined, "the per-value limit is read from limits_json");
   const capabilities = await h.request("a", "/v1/capabilities", undefined, null);
   assert.equal(capabilities.body.limits.maxBytesPerValue, MAX_BYTES_PER_VALUE);

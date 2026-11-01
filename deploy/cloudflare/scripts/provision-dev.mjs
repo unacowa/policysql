@@ -13,6 +13,7 @@ import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 import { DEPLOYMENT_VERSION_HEADER, versionTracker, waitForRelease } from "./release-readiness.mjs";
 import { bytesNullSmoke, commitCheckSmoke } from "./smoke-sections.mjs";
 import { sqlComplexitySmoke } from "./smoke-complexity.mjs";
+import { responseBudgetSmoke } from "./smoke-response.mjs";
 import { COMPLEXITY_ALLOWLIST, SqlComplexityError } from "../src/database-complexity.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 import { SHAPE_TARGET_BYTES, cpuSmoke, referenceScenarioId } from "./smoke-cpu.mjs";
@@ -98,6 +99,7 @@ const loadOrCreateIssuer = async () => {
 const advertisedLimits = (capabilities) => ({
   "limits.maxRows": capabilities.limits?.maxRows,
   "limits.maxResultBytes": capabilities.limits?.maxResultBytes,
+  "limits.maxResponseBytes": capabilities.limits?.maxResponseBytes,
   "limits.timeoutMs": capabilities.limits?.timeoutMs,
   "limits.maxStatements": capabilities.limits?.maxStatements,
   "limits.maxRequestBytes": capabilities.limits?.maxRequestBytes,
@@ -137,6 +139,7 @@ const configuredLimits = () => {
   return {
     "limits.maxRows": limits.maxRows,
     "limits.maxResultBytes": limits.maxResultBytes,
+    "limits.maxResponseBytes": limits.maxResponseBytes,
     "limits.timeoutMs": limits.timeoutMs,
     "limits.maxStatements": limits.maxStatements,
     "limits.maxRequestBytes": limits.maxRequestBytes,
@@ -426,6 +429,14 @@ const smoke = async (baseUrl, token, tracker, database) => {
     allowlist: COMPLEXITY_ALLOWLIST,
     classify: (error) => (error instanceof SqlComplexityError ? error.complexityCause : null),
   });
+  // The response budget (ADR 0027): a write whose response exceeds maxResponseBytes is refused
+  // before COMMIT against the real database, rolled back, and leaves no idempotency record.
+  const responseBudget = await responseBudgetSmoke(sectionContext, {
+    limits: {
+      maxResultBytes: capabilities.limits?.maxResultBytes, maxResponseBytes: capabilities.limits?.maxResponseBytes,
+      maxStatements: capabilities.limits?.maxStatements,
+    },
+  });
   // Real CPU time of the worst request shapes (#56, ADR 0027): fatal when a request exceeds
   // `cpu_ms`; an unreadable observability result is reported, not fatal.
   const cpu = await cpuSmoke(sectionContext, {
@@ -440,6 +451,7 @@ const smoke = async (baseUrl, token, tracker, database) => {
     commitChecks.failures.length > 0 ||
     bytesNull.failures.length > 0 ||
     sqlComplexity.failures.length > 0 ||
+    responseBudget.failures.length > 0 ||
     cpu.failures.length > 0 ||
     capabilities.transactions?.commitChecksConfigured !== true ||
     !health.ready ||
@@ -488,6 +500,7 @@ const smoke = async (baseUrl, token, tracker, database) => {
       commitChecks,
       bytesNull,
       sqlComplexity,
+      responseBudget,
       cpu,
       health,
       capabilities,
@@ -574,6 +587,7 @@ const smoke = async (baseUrl, token, tracker, database) => {
     commitChecks: commitChecks.report,
     bytesNull: bytesNull.report,
     sqlComplexity: sqlComplexity.report,
+    responseBudget: responseBudget.report,
     cpu: cpu.report,
   };
 };
