@@ -236,6 +236,14 @@ not exist. Unkeyed requests are independent executions without request-level ded
 Interactive starts also accept an optional key; their state and sequenced retries use DO
 storage and never require this DB table.
 
+A deployment that lowers an input limit (`maxRequestBytes`, the body-side `maxJsonValues`, or
+the depth limit tightened in ABI 16) can refuse the body of a keyed retry that committed under
+the earlier limits. A keyed atomic execute answers that as 500 `POLICYSQL_INTERNAL` (the unknown
+outcome), never a definite 413/400; it does not look up, replay, execute, or consume the key, and
+a later deployment that restores the limit replays the stored response (ADR 0007, #100). If such
+retries must replay rather than stay unknown, do not lower the limit below a body accepted in the
+idempotency retention window W (ADR 0026); the depth tightening cannot preserve that window.
+
 Never repoint an existing database identity at another physical database. Provision a
 new identity, validate its actual schema (and `policysql_idempotency` if using keyed atomic mutations), retire the
 old route, and reconcile ambiguous writes before submitting replacements to the new DB.

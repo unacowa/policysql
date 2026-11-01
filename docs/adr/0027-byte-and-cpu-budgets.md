@@ -975,10 +975,10 @@ described as counting companion cells and column descriptors. `spec/openapi.yaml
 
 | Condition | Status, code | Transaction effect |
 | --- | --- | --- |
-| Body over `maxRequestBytes` (declared, streamed, or core text) or over `maxJsonValues` | 413 `POLICYSQL_REQUEST_TOO_LARGE` | none started |
-| Body JSON nested deeper than 64 levels (or a step command text over it) | 400 `POLICYSQL_JSON_TOO_DEEP` | none started |
-| SQL text over `maxSqlBytes` | 413 `POLICYSQL_REQUEST_TOO_LARGE`, `/statements/<i>/sql` | none started |
-| Parameters, depth, projections, or joins of the client's SQL over their limit | 413 `POLICYSQL_LIMIT_EXCEEDED`, statement path | none started |
+| Body over `maxRequestBytes` (declared, streamed, or core text) or over the body-side `maxJsonValues` | 413 `POLICYSQL_REQUEST_TOO_LARGE`; 500 `POLICYSQL_INTERNAL` (outcome unknown) for a keyed atomic execute, because a deploy may have lowered the limit since the commit (#100) | none started; for the keyed 500, nothing is looked up or executed and the key is not consumed |
+| Body JSON nested deeper than 64 levels (or a step command text over it) | 400 `POLICYSQL_JSON_TOO_DEEP`; 500 `POLICYSQL_INTERNAL` (outcome unknown) for a keyed atomic execute, because the limit tightened from 65 to 64 (#100) | none started; for the keyed 500, nothing is looked up or executed and the key is not consumed |
+| SQL text over `maxSqlBytes` | 413 `POLICYSQL_REQUEST_TOO_LARGE`, `/statements/<i>/sql`; 500 `POLICYSQL_INTERNAL` (outcome unknown) for a keyed atomic execute, whose compile runs before the idempotency lookup (ADR 0007, #85/#103) | none started; for the keyed 500, nothing is looked up or executed and the key is not consumed |
+| Parameters, depth, projections, or joins of the client's SQL over their limit | 413 `POLICYSQL_LIMIT_EXCEEDED`, statement path; 500 `POLICYSQL_INTERNAL` (outcome unknown) for a keyed atomic execute, for the same compile reason | none started; for the keyed 500, nothing is looked up or executed and the key is not consumed |
 | Client SQL beyond the parser's caps | 400 `POLICYSQL_INVALID_SQL` | none started |
 | The emitted statement exceeds a downstream complexity limit (parser height or recursion, result columns, host parameters, LIKE pattern, column metadata, or a recognized database complexity error) | 400 `POLICYSQL_SQL_TOO_COMPLEX`, statement path, fixed message | atomic: none started, or rolled back before COMMIT. Interactive: whether detected at emit time or by the database, the transaction closes as `failed` and is rolled back, like any compile or execute failure (ADR 0024); later statements and COMMIT get 409 `POLICYSQL_TRANSACTION_UNAVAILABLE` |
 | Emitted SQL that fails to re-parse for any other reason | 500 `POLICYSQL_INTERNAL` | none started |
@@ -991,16 +991,19 @@ described as counting companion cells and column descriptors. `spec/openapi.yaml
 | Invalid or inconsistent limits | construction error naming the field, never a value | no request served |
 
 413 means "this request or its result is too large under this deployment's limits and
-retrying the same request will not help"; it is never used for a COMMIT outcome. Both 413
+retrying the same request will not help"; it is never used for a COMMIT outcome. The 413
 codes are definite rejections, so the client's `REJECTIONS` table
 (`packages/client/protocol.js`) lists `[413, ["LIMIT_EXCEEDED", "REQUEST_TOO_LARGE"]]` for
 every request kind, `POLICYSQL_SQL_TOO_COMPLEX` is added under 400, and the existing server test
 that compares the client table with the status table (`website/api/errors.md`) covers both. The
-one exception is the transport's raw limit on an atomic execute with a later write in the same
-envelope (#97, second row above): it is 500 and therefore unknown, because the same shape that
-makes a complexity refusal uncertain makes a lost reply uncertain. Core-side row, result-byte,
-result-value, and response-size checks run after the full reply has been read, so they stay
-413 even with a later write.
+exceptions are the paths where the retry may be of a commit made under an earlier deployment:
+the transport's raw limit on an atomic execute with a later write in the same envelope (#97,
+second row above), the compile-time limits of a keyed atomic execute (ADR 0007, #85), and the
+body-side input limits a deployment can lower or that were tightened (#100, first two rows
+above). Those answer 500 `POLICYSQL_INTERNAL` and are therefore unknown, never a definite
+rejection. Core-side row, result-byte, result-value, and response-size checks run after the full
+reply has been read, so they stay 413 even with a later write; a stored response over the
+lookup bound also stays 500, as described under "Idempotent replay".
 
 ## Breaking changes (beta; no compatibility layer, ADR 0019)
 
@@ -1017,7 +1020,10 @@ result-value, and response-size checks run after the full reply has been read, s
 5. **Client:** `@unacowa/policysql` client's `REJECTIONS` adds 413 `REQUEST_TOO_LARGE`, so
    oversized bodies and SQL become definite rejections (`PolicySqlRejectedError`) instead of
    `PolicySqlOutcomeUnknownError`. Applications that caught the latter for this case see the
-   former.
+   former. Amended by #100: a keyed atomic execute whose body is over `maxRequestBytes` or the
+   body-side `maxJsonValues`, or deeper than 64 levels, is 500 `POLICYSQL_INTERNAL` and stays an
+   unknown outcome, because the retry may be of a write that committed under an earlier
+   deployment (ADR 0007); unkeyed requests and Explain keep the definite 413/400.
 6. Parser defaults: 1,024 parameters (more accepted); depth 32, joins 8, and projections 128
    unchanged. These are advertised as input-side limits that no longer promise that every
    request within them compiles.
@@ -1053,8 +1059,10 @@ result-value, and response-size checks run after the full reply has been read, s
     64 everywhere (canonical JSON was 127; the engine scan checked `depth > 64` from root depth
     0, so it accepted 65 containers). This is a one-level tightening: a body with 65 nested
     containers is now 400 `POLICYSQL_JSON_TOO_DEEP`, where the old scan let it through. The
-    client's `REJECTIONS` lists the new code as a definite rejection. Fixed server envelope
-    levels (two for compile, one for the command identity) do not count against the client's 64.
+    client's `REJECTIONS` lists the new code as a definite rejection, except for a keyed atomic
+    execute, whose retry may be of a depth-65 write committed before ABI 16: that request is 500
+    `POLICYSQL_INTERNAL` (outcome unknown; ADR 0007, #100). Fixed server envelope levels (two for
+    compile, one for the command identity) do not count against the client's 64.
 20. **JSON-typed parameter text (pull request 7).** A JSON-typed parameter is passed through as
     its exact request text instead of being re-serialized from a `serde_json` tree; the JSON
     value is unchanged, but whitespace and number spelling inside it can reach the database
@@ -1085,6 +1093,22 @@ result-value, and response-size checks run after the full reply has been read, s
     (403 `POLICYSQL_FORBIDDEN_ACCESS` becomes 500). No byte or CPU budget changes: the compile
     fails at the same point it did before, and the path opens no connection and reads no
     result.
+24. **Keyed body-limit rejections (#100).** A keyed atomic execute whose body is refused by
+    `maxRequestBytes` (declared, streamed, or core text), the body-side `maxJsonValues`, or the
+    depth limit (65 to 64 in ABI 16) is answered 500 `POLICYSQL_INTERNAL` (outcome unknown)
+    instead of 413 `POLICYSQL_REQUEST_TOO_LARGE` / 400 `POLICYSQL_JSON_TOO_DEEP`, because a
+    deploy may have lowered the limit since the commit and the retry must not be a definite
+    rejection (ADR 0007). The key is read from the header before the body; nothing is looked up,
+    replayed, executed, or consumed, and the body read stays bounded (a declared length over the
+    limit is refused unread, a streamed body is cancelled at the bound). An unkeyed request, a
+    malformed key, the interactive paths, and Explain keep their definite answer, as do
+    rejections that were invalid under every deployment (syntax, duplicate keys, lone
+    surrogates, invalid UTF-8, a missing body, a wrong content type). The wire ABI is unchanged
+    (the change is in the Worker engine); the behavior changes for clients that resend a keyed
+    body over a lowered limit. Regression: `deploy/cloudflare/test/keyed-input-limit-retry.test.mjs`
+    (both owner adapters and placements: the lowering, the controls, no lookup/execution/key
+    consumption, the client classification, and the replay after restoring the limit),
+    `key-syntax.test.mjs` (the engine predicate against core), and the request-budget suite.
 
 ## Implementation pull requests
 

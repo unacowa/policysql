@@ -34,6 +34,17 @@ Database migrations are a separate pre-deploy step. Never rely on Worker rollbac
 schema migration. Keep the preceding Worker version compatible until the health and security gates
 pass.
 
+Lowering `maxRequestBytes` or `maxJsonValues`, or deploying an ABI that tightens the JSON depth
+limit (65 to 64 in ABI 16), can make a keyed retry whose body was accepted before its commit hit
+the new limit. The Worker answers 500 `POLICYSQL_INTERNAL` and logs `keyed_body_limit_unknown`
+with the rejected code; that is an unknown outcome, not a failed write. Do not treat it as a
+rollback and do not delete the idempotency row: nothing ran, the key is not consumed, and a later
+deployment that restores the limit replays the stored response (ADR 0007, #100). The client must
+retry the same key and body. If those retries must replay during the rollout rather than stay
+unknown, do not lower a limit below a body accepted in the idempotency retention window W
+(ADR 0026); the depth tightening has no such window, so a depth-65 commit from before ABI 16 can
+only be resolved unknown until its row expires.
+
 ## Monitoring and alerts
 
 Cloudflare invocation logs are enabled at full sampling for this development deployment. Structured

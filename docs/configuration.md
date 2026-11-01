@@ -77,8 +77,8 @@ limits").
 | `maxCallbackRows` | `max_callback_rows` | 100 | 1 to 10,000 | owner: cumulative callback rows per commit check |
 | `beginTimeoutMs` | `begin_timeout_ms` | 1,000 | 1 to 60,000 | owner: BEGIN of an interactive transaction |
 | `costTimeoutMs` | `cost_timeout_ms` | 1,000 | 1 to 10,000 | engine and owner: connection deadline and BEGIN of the after-response cost observation |
-| `maxRequestBytes` | `max_request_bytes` | 1,048,576 | 65,536 to 2,097,152 | HTTP adapter (streamed, a declared `Content-Length` over it is refused unread), engine (a cheap UTF-16 precheck and the one removed byte order mark), core (`check_body_json`: exact UTF-8 bytes of the text after that mark), and derived bounds; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` |
-| `maxJsonValues` | `max_json_values` | 65,536 | 1,024 to 131,072 | core: JSON values plus object member names in one request body, counted by the strict parse (`check_body_json` / `begin_body_json`) that also checks syntax, duplicate keys, and depth, and stops at the first value over the limit before a `serde_json` tree exists; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE`. **Result side, counted separately:** the raw values of the database's response to one atomic envelope or one interactive statement, cumulatively over its statements: every cell (the visibility companion of each conditional column and the check column of a mutation included), every column descriptor in `cols`, and every value inside a JSON-typed cell (with its object member names). Core counts them while it validates, and stops at the first row over the limit; over it is 413 `POLICYSQL_LIMIT_EXCEEDED`, rolled back. Companions and descriptors count, so it is not a hidden limit: a result of `c` emitted columns and `n` rows has `c x (1 + n)` values (a JSON cell adds the values inside it) |
+| `maxRequestBytes` | `max_request_bytes` | 1,048,576 | 65,536 to 2,097,152 | HTTP adapter (streamed, a declared `Content-Length` over it is refused unread), engine (a cheap UTF-16 precheck and the one removed byte order mark), core (`check_body_json`: exact UTF-8 bytes of the text after that mark), and derived bounds; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE`. A keyed atomic execute answers 500 `POLICYSQL_INTERNAL` (the unknown outcome) instead, because a deploy may have lowered the limit since the commit; an unkeyed request or a malformed key keeps the 413 ([ADR 0007](adr/0007-transaction-retry-and-commit-check-protocol.md), #100) |
+| `maxJsonValues` | `max_json_values` | 65,536 | 1,024 to 131,072 | core: JSON values plus object member names in one request body, counted by the strict parse (`check_body_json` / `begin_body_json`) that also checks syntax, duplicate keys, and depth, and stops at the first value over the limit before a `serde_json` tree exists; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE`, except for a keyed atomic execute, which answers 500 `POLICYSQL_INTERNAL` (unknown outcome) for the same reason as `maxRequestBytes` ([ADR 0007](adr/0007-transaction-retry-and-commit-check-protocol.md), #100). **Result side, counted separately:** the raw values of the database's response to one atomic envelope or one interactive statement, cumulatively over its statements: every cell (the visibility companion of each conditional column and the check column of a mutation included), every column descriptor in `cols`, and every value inside a JSON-typed cell (with its object member names). Core counts them while it validates, and stops at the first row over the limit; over it is 413 `POLICYSQL_LIMIT_EXCEEDED`, rolled back. Companions and descriptors count, so it is not a hidden limit: a result of `c` emitted columns and `n` rows has `c x (1 + n)` values (a JSON cell adds the values inside it) |
 | `maxSqlBytes` | `max_sql_bytes` | 65,536 | 1,024 to 1,048,576, and at most `maxRequestBytes` | core, UTF-8 bytes of one statement's `sql`, checked before any statement is parsed; over it is 413 `POLICYSQL_REQUEST_TOO_LARGE` with path `/statements/<i>/sql` (it was 400 `POLICYSQL_INVALID_REQUEST`) |
 | `maxBytesPerValue` | `max_bytes_per_value` | 262,144 | 1 to 1,048,576 | decoded bytes of one bytes value: core (client parameters, policy presets at activation, result cells of `SELECT` and `RETURNING`), the engine and the Turso transport (driver values, before decoding); over it is 413 `POLICYSQL_LIMIT_EXCEEDED` (malformed input stays 400 `POLICYSQL_INVALID_PARAMETER`); the smallest applicable limit governs, see "Per-value bytes" |
 | `maxParameters` | `max_parameters` | 1,024 (was 128) | 1 to 16,384 | binder: distinct client parameter names in one statement; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
@@ -86,13 +86,27 @@ limits").
 | `maxProjections` | `max_projections` | 128 | 1 to 2,000 | binder: result columns of one `SELECT` or `RETURNING` in the client's SQL; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
 | `maxJoins` | `max_joins` | 8 | 1 to 63 | binder: joins in one `FROM` of the client's SQL; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
 
+The limits checked by the compile (`maxSqlBytes`, `maxParameters`, `maxExpressionDepth`,
+`maxProjections`, `maxJoins`) answer a keyed atomic execute with 500 `POLICYSQL_INTERNAL` (the
+unknown outcome) when they fail, because the compile runs before the idempotency lookup and the
+retry may be of a write that committed under an earlier policy or deployment (ADR 0007, #85,
+#103); an unkeyed atomic execute and Explain keep the 413. `maxStatements` is checked in the same
+compile call, so a keyed atomic execute over it is 500 as well. A client bytes parameter over
+`maxBytesPerValue` is also refused at compile: 413 for an unkeyed execute and 500 for a keyed
+one, while malformed base64 stays 400 for both. A result cell over `maxBytesPerValue` is checked
+after execution, so it keeps its 413 and rollback.
+
 #### JSON nesting
 
 One depth limit applies to request JSON (the strict body check), canonical JSON (JSON-typed
 parameters and identity input), and the step command's own JSON: **64 levels**, counting the
 root container as level 1. A request body over it is 400 `POLICYSQL_JSON_TOO_DEEP` ("Request body
 nests too deeply.") rather than `POLICYSQL_INVALID_REQUEST`; a step command text over it gets
-the same code. The limit is in `crates/policysql-transaction/src/canonical.rs` (`MAX_DEPTH`) and
+the same code. A keyed atomic execute answers 500 `POLICYSQL_INTERNAL` (the unknown outcome)
+instead, because the limit tightened from 65 and a write committed before ABI 16 can still be
+retried; unkeyed requests, a malformed key, begin, and Explain keep the 400
+([ADR 0007](adr/0007-transaction-retry-and-commit-check-protocol.md), #100). The limit is in
+`crates/policysql-transaction/src/canonical.rs` (`MAX_DEPTH`) and
 re-exported by the strict body check; `deploy/cloudflare/src/request-body.ts` does not check
 depth, so there is only one client value. A fixed server envelope around a client value does not
 spend the client's levels: the compiler's typed read receives a step command wrapped in a

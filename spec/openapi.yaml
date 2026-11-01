@@ -656,13 +656,15 @@ components:
             maxRequestBytes:
               type: integer
               minimum: 1
-              description: Maximum UTF-8 bytes of a request body as received, a byte order mark included. A larger body is 413 POLICYSQL_REQUEST_TOO_LARGE.
+              description: Maximum UTF-8 bytes of a request body as received, a byte order mark included. A larger body is 413 POLICYSQL_REQUEST_TOO_LARGE; for a keyed atomic execute whose retry may predate a deployment that lowered the limit it is 500 POLICYSQL_INTERNAL (outcome unknown), with nothing looked up, executed, or consumed.
             maxJsonValues:
               type: integer
               minimum: 1
               description: >-
                 Maximum JSON values plus object member names in one request body, counted before the
-                body is parsed; a body with more is 413 POLICYSQL_REQUEST_TOO_LARGE. Counted separately on
+                body is parsed; a body with more is 413 POLICYSQL_REQUEST_TOO_LARGE, or 500
+                POLICYSQL_INTERNAL (outcome unknown) for a keyed atomic execute, as for
+                maxRequestBytes. Counted separately on
                 the result side: the raw values of the database's response to one atomic envelope or
                 interactive statement, which include every cell (visibility companion cells and the check
                 column of a mutation among them), every column descriptor, and every value inside a
@@ -680,7 +682,7 @@ components:
             maxSqlBytes:
               type: integer
               minimum: 1
-              description: Maximum UTF-8 bytes of one statement's sql. A longer statement is 413 POLICYSQL_REQUEST_TOO_LARGE with path /statements/<i>/sql, before it is parsed.
+              description: Maximum UTF-8 bytes of one statement's sql. A longer statement is 413 POLICYSQL_REQUEST_TOO_LARGE with path /statements/<i>/sql, before it is parsed; for a keyed atomic execute the compile failure is 500 POLICYSQL_INTERNAL (outcome unknown), because the compile runs before the idempotency lookup.
             maxParameters:
               type: integer
               minimum: 1

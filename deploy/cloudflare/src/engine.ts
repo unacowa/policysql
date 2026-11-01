@@ -11,7 +11,7 @@ import { AccessDeniedError, internalError, operationError, EngineError } from ".
 import type { OperationError } from "./errors.ts";
 import { readBodyText } from "./request-body.ts";
 import type { BodyText } from "./request-body.ts";
-import { requestIdentity, startDigest } from "./core-identity.ts";
+import { requestIdentity, startDigest, validIdempotencyKey } from "./core-identity.ts";
 import { authorizeSession } from "./session.ts";
 import type { RequiredAccess } from "./session.ts";
 import { capabilities as capabilitiesValue, explainResponse, parsedRuntimeCall } from "./presenters.ts";
@@ -101,6 +101,20 @@ const TRANSACTION_ID = /^tx_[a-f0-9]{32}$/u;
 const VALIDATION_ID = /^cval_[a-f0-9]{32}$/u;
 
 const invalidRequest = () => new EngineError("POLICYSQL_INVALID_REQUEST", "The request is invalid.");
+
+// The body rejections whose answer depends on the deployment, not on the request alone:
+// `maxRequestBytes` and `maxJsonValues` can be lowered by a deploy, and the depth limit tightened
+// from accepting 65 nested containers to 64 in ADR 0027 pull request 7. A keyed execute may be
+// the retry of a write that committed under the earlier limits, so the engine answers the
+// unknown outcome instead of a definite 413/400 (ADR 0007, #100). Every other body rejection
+// (syntax, a duplicate key, a lone surrogate, a missing body, a wrong content type) was invalid
+// under every deployment and stays definite.
+const deploymentDependentBodyCode = (error: unknown): string | null => {
+  if (!(error instanceof EngineError)) return null;
+  return error.code === "POLICYSQL_REQUEST_TOO_LARGE" || error.code === "POLICYSQL_JSON_TOO_DEEP"
+    ? error.code
+    : null;
+};
 
 const logRejectedField = (field: string) =>
   console.log(JSON.stringify({ event: "request_context_rejected", field }));
@@ -356,8 +370,23 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       // A misconfigured runtime fails here, before the body is read and before BEGIN.
       const maxBytes = runtimeBytesLimit(runtime);
       runtimeLimits(runtime);
-      const body = await readBody(fields.bodyText);
-      checkBody(runtime, body);
+      let body: string;
+      try {
+        body = await readBody(fields.bodyText);
+        checkBody(runtime, body);
+      } catch (error) {
+        // The body was rejected before the step machine, so nothing ran and the key is not
+        // consumed. A well-formed key can be the retry of a write that committed under an
+        // earlier deployment: answer the unknown outcome (ADR 0007, #100). A malformed key
+        // could never have committed, and an unkeyed request has no replay contract, so both
+        // keep the definite answer. The body read stays bounded by the same limit as before.
+        const rejection = validIdempotencyKey(fields.idempotencyKey) ? deploymentDependentBodyCode(error) : null;
+        if (rejection !== null) {
+          console.log(JSON.stringify({ event: "keyed_body_limit_unknown", requestId, rejection }));
+          throw internalError();
+        }
+        throw error;
+      }
       // Everything else is the step machine's `request` kind (ADR 0024 pull request 8): the
       // binding check, compile of the verified text (#70), idempotency, placement (direct, or
       // the owner of an envelope that could trigger a commit check), and the response.
