@@ -120,9 +120,11 @@ Adopt **part 1 only**, in the reference wrapper
 
 ## What this does not promise
 
-- **No advertised window.** Nothing tells a client how long a reply is replayable, and
-  `spec/openapi.yaml` and `Capabilities` are unchanged. A client that resends a keyed write
-  more than 30 days after the first send finds no row and executes it again. That was already
+- **No advertised window.** Nothing tells a client how long a reply is replayable: no property
+  is added to `Capabilities`, and `spec/openapi.yaml` only gains a sentence on the
+  `Idempotency-Key` parameter saying that a deployment may delete old rows and that no
+  retention duration is advertised. A client that resends a keyed write more than 30 days after
+  the first send finds no row and executes it again. That was already
   true of every duration: before this ADR the row would have been found only because nothing
   ever deleted it.
 - **No configured setting, no client margin `M`, no library helper.** The proposed ADR 0026's
