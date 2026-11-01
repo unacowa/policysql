@@ -160,7 +160,8 @@ best-effort ROLLBACK with the last known baton and logs `database_stream_recover
 write lock, remains until the server expires the stream — observed more than 25 minutes on real
 Turso — with no client-side recovery: the operator waits for the expiry, and nothing PolicySQL
 sends can shorten it. A cleanup rollback on a known baton whose own request fails logs `outcome`
-`failed` and has the same consequence. A BEGIN whose headers never arrive has no baton at all:
+`failed` and has the same consequence; the stale-baton `recover()` path logs `refused` when its
+own request fails before a reply. A BEGIN whose headers never arrive has no baton at all:
 no event is logged, and if the server runs BEGIN IMMEDIATE later, its transaction and write lock
 remain until the stream expires. See ADR 0027, "Baton recovery".
 

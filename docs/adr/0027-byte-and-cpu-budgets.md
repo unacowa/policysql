@@ -984,7 +984,7 @@ described as counting companion cells and column descriptors. `spec/openapi.yaml
 | Emitted SQL that fails to re-parse for any other reason | 500 `POLICYSQL_INTERNAL` | none started |
 | Bytes parameter malformed / over `maxBytesPerValue` | 400 `POLICYSQL_INVALID_PARAMETER` / 413 `POLICYSQL_LIMIT_EXCEEDED` | none started |
 | Rows, result bytes, result values, or the response's `maxResponseBytes`, checked by core after every statement in the envelope returned | 413 `POLICYSQL_LIMIT_EXCEEDED`, even when the envelope contains a later write | rolled back before COMMIT; no idempotency record. The whole reply was read and decoded, so the rollback is definite |
-| The transport's raw result bound (the reply is refused before it can be decoded), or a BLOB cell over the per-value limit while decoding it | 413 `POLICYSQL_LIMIT_EXCEEDED`; 500 `POLICYSQL_INTERNAL` (outcome unknown, not in the client's rejection table) for an **atomic execute whose envelope contains a later write** (#97) | rolled back with the recovered baton when the reply named one; an earlier error could have auto-rolled the transaction back and the later write could then commit in autocommit, so this is never a definite rejection. With no readable baton, the stream, and any write lock, remain until the server expires it (ADR 0007/0027) |
+| The transport's raw result bound (the reply is refused before it can be decoded), or a BLOB cell over the per-value limit while the streaming transport decodes it (a buffering provider's BLOB over the limit is caught by core's result encoding and stays 413) | 413 `POLICYSQL_LIMIT_EXCEEDED`; 500 `POLICYSQL_INTERNAL` (outcome unknown, not in the client's rejection table) for an **atomic execute whose envelope contains a later write** (#97) | rolled back with the recovered baton when the reply named one; an earlier error could have auto-rolled the transaction back and the later write could then commit in autocommit, so this is never a definite rejection. With no readable baton, the stream, and any write lock, remain until the server expires it (ADR 0007/0027) |
 | Interactive cumulative limits | 413 `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` (was 429, #62) | per ADR 0024 |
 | Control response or validator response over its fixed bound | 503 `POLICYSQL_DATABASE_UNAVAILABLE`, or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for COMMIT; validator: commit denied | per ADR 0007/0024 |
 | Session JSON over 65,536 | 500 `POLICYSQL_INTERNAL` (wrapper fault) | none started |
@@ -1067,8 +1067,10 @@ result-value, and response-size checks run after the full reply has been read, s
     raises the required CPU. The reference wrapper's `cpu_ms` is unchanged.
 22. **WASM ABI 17 (#97).** The snapshot changes, so open transactions from ABI 16 do not match.
     An atomic execute whose envelope contains a later write and whose reply exceeds the
-    transport's raw result bound is answered 500 `POLICYSQL_INTERNAL` (outcome unknown) instead
-    of 413 `POLICYSQL_LIMIT_EXCEEDED`; core-side limits remain 413. The client's `REJECTIONS`
+    transport's raw result bound, or whose result BLOB that the streaming transport decodes
+    exceeds the per-value limit, is answered 500 `POLICYSQL_INTERNAL` (outcome unknown) instead
+    of 413 `POLICYSQL_LIMIT_EXCEEDED`; core-side limits, including a buffering provider's
+    result encoding, remain 413. The client's `REJECTIONS`
     table is unchanged: 500 was already outcome-unknown. The transport also recovers the reply's
     baton for the rollback, including from a refused BEGIN reply, and, when none is readable,
     changes its cleanup from "send nothing" to one best-effort ROLLBACK with the stale baton

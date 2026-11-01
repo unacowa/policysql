@@ -63,13 +63,13 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_TRANSACTION_CONFLICT` | 409 | 対話型transactionのcommandが現在の状態（sequenceなど）と矛盾する |
 | `POLICYSQL_TRANSACTION_UNAVAILABLE` | 409 | transactionが存在しない、利用者に属していない、期限切れ、または失敗状態。COMMITの送信前にbindingまたは期限の確認に失敗した場合も返します（COMMITは送られておらず、rollback済みです） |
 | `POLICYSQL_COMMIT_CHECK_REJECTED` | 409 | commit checkがtransactionを拒否した、または安全に完了できない |
-| `POLICYSQL_LIMIT_EXCEEDED` | 413 | requestまたはresult limitを超えた。行数、結果bytes、結果のJSON値の数、databaseの生の応答の上限、結果のBLOB値の上限、`maxStatements`、応答全体の`maxResponseBytes`を含む。commit前に判断し、envelopeはrollbackして冪等性recordも残さない。ただしatomic executeで2文目以降にwriteを含み、databaseの生の応答または結果のBLOB値が上限を超えた場合は、後続のwriteが実行された可能性があるため500 `POLICYSQL_INTERNAL`（結果不明）になる。その例外を除き、再送しても成功しない |
+| `POLICYSQL_LIMIT_EXCEEDED` | 413 | requestまたはresult limitを超えた。行数、結果bytes、結果のJSON値の数、databaseの生の応答の上限、streaming transportが応答中にdecodeした結果のBLOB値の上限（buffering providerのBLOBはcoreがresult encodingで検出するため413のまま）、`maxStatements`、応答全体の`maxResponseBytes`を含む。commit前に判断し、envelopeはrollbackして冪等性recordも残さない。ただしatomic executeで2文目以降にwriteを含み、databaseの生の応答、またはstreaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合は、後続のwriteが実行された可能性があるため500 `POLICYSQL_INTERNAL`（結果不明）になる。その例外を除き、再送しても成功しない |
 | `POLICYSQL_REQUEST_TOO_LARGE` | 413 | HTTP body（`limits.maxRequestBytes`）、body内のJSON値の数（`limits.maxJsonValues`）、またはSQL text（`limits.maxSqlBytes`、pathは`/statements/<i>/sql`）が受付上限を超えた。再送しても成功しないため、clientは拒否（`PolicySqlRejectedError`）として扱う |
 | `POLICYSQL_UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type`が`application/json`でない |
 | `POLICYSQL_EXPECTATION_FAILED` | 422 | transaction operationの期待条件を満たさない |
 | `POLICYSQL_SCHEMA_MISMATCH` | 422 | database値がcompiled logical contractと一致しない |
 | `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` | 413 | 対話型transactionの恒久的な上限（statement数、累積result bytes）を超えた。commit checkのcallbackの行数・bytes・query数の上限でも発生し、その場合はvalidatorがこのcodeを受け取り、atomic executeや対話型commitは409 `POLICYSQL_COMMIT_CHECK_REJECTED`になる。再送しても成功しない。request rateの制限ではない |
-| `POLICYSQL_INTERNAL` | 500 | 公開できない内部エラー。ラッパーが渡したtrusted sessionや文脈の形が不正な場合、またはatomic executeで2文目以降にwriteを含むenvelopeのdatabaseの生の応答または結果のBLOB値が上限を超えた場合（結果不明）もこのcode |
+| `POLICYSQL_INTERNAL` | 500 | 公開できない内部エラー。ラッパーが渡したtrusted sessionや文脈の形が不正な場合、またはatomic executeで2文目以降にwriteを含むenvelopeのdatabaseの生の応答、streaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合（結果不明）もこのcode |
 | `POLICYSQL_DATABASE_REQUIRED` | 500 | ラッパーが必須のDB引数を渡していない |
 | `POLICYSQL_DATABASE_UNAVAILABLE` | 503 | database adapterまたはtransaction ownerを利用できない |
 | `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` | 503 | commitを送った後に結果を確定できない（transaction ownerの喪失、ownerの記録の保存失敗、COMMIT中の通信エラー）。commit済みの可能性があるため、拒否ではなく結果不明として扱う |
