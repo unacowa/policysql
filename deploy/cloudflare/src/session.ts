@@ -1,4 +1,4 @@
-import { internalError, wasmError } from "./errors.ts";
+import { AccessDeniedError, internalError, wasmError } from "./errors.ts";
 import type { AuthContext } from "./types.ts";
 
 export type RequiredAccess = "catalog" | "explain" | "execute";
@@ -43,7 +43,9 @@ export const authorizeSession = (
     if (result.error.code === "POLICYSQL_INTERNAL") {
       throw reject(typeof result.fault === "string" ? result.fault : "unknown");
     }
-    throw wasmError(result) ?? internal();
+    const denied = wasmError(result);
+    if (denied) throw new AccessDeniedError(denied.code, denied.message, denied.path);
+    throw internal();
   }
   if (!result?.auth || typeof result.auth !== "object") throw internal();
   return result.auth as AuthContext;

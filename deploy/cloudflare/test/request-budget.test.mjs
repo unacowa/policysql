@@ -295,8 +295,10 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
 
   // A policy cannot name a role this long (activation fails), so the request is answered by
   // policy: what matters is that it reaches compile and the Catalog instead of being refused as
-  // an invalid request or an internal fault by an auth bound. The step event with such an auth is
-  // covered in Rust (`a_long_selected_role_passes_every_auth_derived_bound`).
+  // an invalid request or an internal fault by an auth bound. The unkeyed call below is the
+  // proof (403 MISSING_POLICY); the keyed one is the unknown outcome of #85 path 1. The step
+  // event with such an auth is covered in Rust
+  // (`a_long_selected_role_passes_every_auth_derived_bound`).
   for (const [label, limits] of [
     ["the defaults", {}],
     ["the hard maxima", { maxRequestBytes: 2_097_152, maxJsonValues: 131_072 }],
@@ -312,8 +314,15 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
           ...init, headers: { "content-type": "application/json", "policysql-role": role, ...init.headers },
         }), { database: h.binding("a"), session }, h.background).then(async (response) => ({ status: response.status, body: await response.json() }));
         const executed = await call(EXECUTE, { method: "POST", headers: { "idempotency-key": `long-role-${hooks}-key-0001` }, body: JSON.stringify({ statements: [insert("long_role")] }) });
-        assert.equal(executed.status, 403, JSON.stringify(executed.body).slice(0, 300));
-        assert.equal(executed.body.error.code, "POLICYSQL_MISSING_POLICY");
+        // The role is valid but the policy does not grant it: a compile failure. With a key it
+        // is the unknown outcome (#85 path 1: the retry of a committed write from before a
+        // deployment changed the policy or the role), never a definite rejection.
+        assert.equal(executed.status, 500, JSON.stringify(executed.body).slice(0, 300));
+        assert.equal(executed.body.error.code, "POLICYSQL_INTERNAL");
+        // Without a key there is no replay contract, so the same compile failure is definite.
+        const unkeyed = await call(EXECUTE, { method: "POST", headers: {}, body: JSON.stringify({ statements: [insert("long_role_unkeyed")] }) });
+        assert.equal(unkeyed.status, 403, JSON.stringify(unkeyed.body).slice(0, 300));
+        assert.equal(unkeyed.body.error.code, "POLICYSQL_MISSING_POLICY");
         const explained = await call("/v1/transactions:explain", { method: "POST", headers: {}, body: JSON.stringify({ statements: [insert("long_role")] }) });
         assert.equal(explained.status, 403, JSON.stringify(explained.body).slice(0, 300));
         const catalog = await call("/v1/catalog", { method: "GET", headers: {} });

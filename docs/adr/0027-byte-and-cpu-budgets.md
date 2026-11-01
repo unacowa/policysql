@@ -1076,6 +1076,15 @@ result-value, and response-size checks run after the full reply has been read, s
     changes its cleanup from "send nothing" to one best-effort ROLLBACK with the stale baton
     (logged as `database_stream_recovery`, with `failed` for a rollback request that itself
     failed).
+23. **WASM ABI 18 (#85 path 1).** The snapshot changes, so open transactions from ABI 17 do not
+    match. A keyed execute whose compile (including the envelope's `expected` check) fails is
+    answered 500 `POLICYSQL_INTERNAL` (outcome unknown) instead of the compile error, because
+    the request may be the retry of a write that committed under the earlier deployment. The
+    request is not looked up and no row is replayed; nothing runs, and an unkeyed request keeps
+    its compile error. The wrapper's session gate changes the same way for a keyed execute
+    (403 `POLICYSQL_FORBIDDEN_ACCESS` becomes 500). No byte or CPU budget changes: the compile
+    fails at the same point it did before, and the path opens no connection and reads no
+    result.
 
 ## Implementation pull requests
 

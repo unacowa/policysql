@@ -66,6 +66,13 @@ up a transaction owner, or checks or connects to a database.
 | `PolicySQL-Role` not in `roles`, or required access missing | 403 `POLICYSQL_FORBIDDEN_ACCESS` (client-caused) |
 | Credential missing, invalid, expired, or revoked | Returned by the wrapper, typically 401 `POLICYSQL_UNAUTHENTICATED`; the library never returns 401 |
 
+For a keyed atomic execute, the engine answers the session-gate denial (the second row) with
+500 `POLICYSQL_INTERNAL`, the unknown outcome, instead of the 403: the retry may be of a write
+committed before a deploy changed the session policy, and the client takes the 403 as a
+definite rejection (ADR 0007 #85 path 1). Unkeyed execute and every interactive command keep
+the 403; the session validation itself is unchanged, and a malformed session is still a 500
+wrapper fault.
+
 Both 401 codes are wrapper-returned and built with `createErrorResponse`; the library emits
 neither. `POLICYSQL_UNAUTHENTICATED` is the wrapper's 401 for a missing or invalid
 credential, and the only 401 code the reference wrapper and the JWT adapter use.

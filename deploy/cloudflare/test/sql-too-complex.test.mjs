@@ -149,9 +149,25 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal((await post(h, { statements: [bulk(100, "a")] }, EXECUTE, "bulk-insert-key-000001")).status, 200);
     // 341 rows is 1,023 parameters; 342 rows is 1,026, over the default.
     assert.equal((await post(h, { statements: [bulk(341, "b")] }, EXECUTE, "bulk-insert-key-000002")).status, 200);
-    const refused = await post(h, { statements: [bulk(342, "c")] }, EXECUTE, "bulk-insert-key-000003");
+    const refused = await post(h, { statements: [bulk(342, "c")] }, EXECUTE);
     assert.equal(refused.status, 413);
     assert.equal(refused.body.error.code, "POLICYSQL_LIMIT_EXCEEDED");
+    // #85 path 1: with a key the over-limit envelope is a compile failure, so it is the unknown
+    // outcome (500) instead of the definite 413. Nothing runs and no idempotency row is written,
+    // so the key is not consumed: a later valid request with it executes.
+    const idempotency = () => h.databases.get("a").database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n;
+    const beforeRows = idempotency();
+    const keyed = await post(h, { statements: [bulk(342, "d")] }, EXECUTE, "bulk-insert-key-000003");
+    assert.equal(keyed.status, 500, JSON.stringify(keyed.body).slice(0, 300));
+    assert.equal(keyed.body.error.code, "POLICYSQL_INTERNAL");
+    assert.equal(keyed.body.error.message, "The request could not be completed.");
+    assert.equal(keyed.body.results, undefined, "no stored result");
+    await h.flush();
+    assert.equal(h.rows("a").filter((row) => row.id.startsWith("d")).length, 0, "the refused envelope ran nothing");
+    assert.equal(idempotency(), beforeRows, "the compile failure wrote no idempotency row");
+    const reused = await post(h, { statements: [bulk(1, "d")] }, EXECUTE, "bulk-insert-key-000003");
+    assert.equal(reused.status, 200, JSON.stringify(reused.body).slice(0, 300));
+    assert.equal(h.rows("a").filter((row) => row.id === "d0").length, 1, "the key was not consumed");
   });
 
   // ------------------------------------------------------------------------------------------
@@ -175,7 +191,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(typeof record.requestId, "string");
     assert.equal(typeof record.schemaVersion, "string");
     assert.equal(typeof record.policyVersion, "string");
-    assert.equal(record.abiVersion, 17);
+    assert.equal(record.abiVersion, 18);
     assert.deepEqual(Object.keys(record).sort(), ["abiVersion", "cause", "event", "policyVersion", "requestId", "schemaVersion", "statementIndex"]);
   });
 

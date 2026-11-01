@@ -24,6 +24,16 @@
 //! rejection (`POLICYSQL_DATABASE_TIMEOUT`, `POLICYSQL_DATABASE_UNAVAILABLE`, or
 //! `POLICYSQL_INTERNAL`) on `CommitFailed`. The owner's record only serializes work: it is
 //! never read to answer a request, so a keyed retry always starts from the lookup.
+//!
+//! A keyed execute whose compile (or `expected` check) fails after a deployment answers
+//! `POLICYSQL_INTERNAL` (500, the unknown outcome), never the compile error (#85 path 1): the
+//! compile happens before the idempotency lookup, and the request may be the retry of a write
+//! that committed under the earlier snapshot. The request is not looked up, since an absent
+//! row cannot prove that no commit happened (a concurrent earlier attempt, the #97 autocommit
+//! window, or retention expiry), and a present row must not be replayed without the
+//! authorization the compile would have given. An unkeyed request has no replay contract and
+//! keeps its definite compile error. This applies to both the engine (`request`) and the owner
+//! (`atomic`) kinds.
 
 use super::super::MAX_TIME_MS;
 use super::super::compiler::{
@@ -456,7 +466,19 @@ impl<C: Compiler> Step<'_, C> {
             Ok(compiled) => compiled,
             Err(error) => {
                 self.log_core_error(&error);
-                self.abort(core_error_reply(&error));
+                // A keyed execute may be the retry of a write that committed before a
+                // deployment changed the policy, the schema, or the snapshot: the compile
+                // error is one the client takes as a definite rejection, which ADR 0007
+                // forbids when COMMIT may have been sent (#85 path 1). Nothing is looked up
+                // or run; the answer is the unknown outcome, and a later retry under a
+                // snapshot that compiles it again replays its row. An unkeyed request has no
+                // replay contract, so its compile error stays definite.
+                let reply = if request.key.is_some() {
+                    error_reply(Code::Internal)
+                } else {
+                    core_error_reply(&error)
+                };
+                self.abort(reply);
                 return Ok(());
             }
         };
@@ -674,7 +696,17 @@ impl<C: Compiler> Step<'_, C> {
             Ok(compiled) => compiled,
             Err(error) => {
                 self.log_core_error(&error);
-                self.abort(core_error_reply(&error));
+                // As in the engine (the `request` kind): a keyed input may be the retry of a
+                // write that committed under an earlier deployment, so an owner compile
+                // failure (the Worker and this owner disagree on the policy though their
+                // snapshot strings match, or the input is retried after a policy change) is
+                // the unknown outcome, never a definite compile rejection (#85 path 1).
+                let reply = if parsed.idempotency.is_some() {
+                    error_reply(Code::Internal)
+                } else {
+                    core_error_reply(&error)
+                };
+                self.abort(reply);
                 return Ok(());
             }
         };

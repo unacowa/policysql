@@ -7,7 +7,7 @@
 // The operations match the client `PolicySqlTransport` kinds (ADR 0015): execute, explain,
 // begin, statement, commit, rollback, catalog, capabilities; plus callbackQuery for a
 // commit-check validator and health.
-import { internalError, operationError, EngineError } from "./errors.ts";
+import { AccessDeniedError, internalError, operationError, EngineError } from "./errors.ts";
 import type { OperationError } from "./errors.ts";
 import { readBodyText } from "./request-body.ts";
 import type { BodyText } from "./request-body.ts";
@@ -332,7 +332,21 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
 
     execute: (input, context, background) => run(context, background, async (checked): Promise<OperationResult> => {
       const fields = operationInput<ExecuteInput>(input, ["bodyText", "idempotencyKey", "role"]);
-      const auth = authorize(checked, fields.role, "execute");
+      let auth: AuthContext;
+      try {
+        auth = authorize(checked, fields.role, "execute");
+      } catch (error) {
+        // A keyed execute may be the retry of a write that committed before a deployment
+        // changed the wrapper's session policy (the principal lost `execute` or its role).
+        // A denial is a definite rejection (ADR 0007); nothing has run for this request and
+        // the body is not read, so the answer is the unknown outcome. A keyless request keeps
+        // the denial: it has no replay contract. A malformed role or session is not a denial
+        // (it stays a client error or a wrapper fault), and could not have committed.
+        if (fields.idempotencyKey !== undefined && error instanceof AccessDeniedError) {
+          throw internalError();
+        }
+        throw error;
+      }
       const runtime = dependencies.getRuntime();
       const { requestId } = checked;
       // ADR 0023 order: the provider decides the binding before the body is read. The step

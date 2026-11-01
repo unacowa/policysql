@@ -23,6 +23,14 @@ export class EngineError extends Error {
 }
 
 /**
+ * Core denied the trusted session's requested role or the endpoint's access. It is the
+ * caller's request, not a fault, but it is not a definite rejection for a keyed execute: the
+ * request may be the retry of a write that committed before a deployment changed the
+ * wrapper's session policy (ADR 0007, #85), so the engine answers the unknown outcome instead.
+ */
+export class AccessDeniedError extends EngineError {}
+
+/**
  * A failure that happened before any byte of COMMIT was sent (#54): the transport re-checked
  * the binding or the deadline immediately before the send and the transaction was rolled back,
  * or the deadline had passed when the send was about to start. Thrown only from there, so an

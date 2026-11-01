@@ -61,6 +61,43 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(count(h, "skew_1"), 1, "never executed twice");
   });
 
+  // The other rollout direction: the Worker is the new deployment and the owner the old one.
+  // The same snapshot mismatch must be the unknown outcome, not a conflict, and the retry must
+  // replay once they agree. (A policy version stands in for an ABI bump here: both change the
+  // snapshot string the owner compares, and the ABI is part of that string.)
+  test(`${ownerAdapter}: #85: the reverse rollout (new Worker, old owner) is skew, not a rejection, and replays after`, async (t) => {
+    const h = await ownerHarness(t);
+    const key = "owner-skew-key-reverse-01";
+    const body = { statements: [insert("skew_reverse")] };
+    const first = await h.request("a", "/v1/transactions:execute", body, key);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    assert.equal(h.ownerNames().length, 1, "the owner placement");
+    const committed = commits(h);
+
+    // Pin the owners to the first deployment, then roll the Worker forward: the owner is older.
+    const owner = h.skewOwners({ policyVersion: "policy_routing_1" });
+    const earlier = h.runtime.snapshot;
+    assert.equal(owner.snapshot, earlier);
+    h.redeploy({ policyVersion: "policy_routing_2" });
+    assert.notEqual(h.runtime.snapshot, earlier, "the Worker is the newer deployment");
+    const skewed = await h.request("a", "/v1/transactions:execute", body, key);
+    assert.equal(skewed.status, 500, JSON.stringify(skewed.body));
+    assert.equal(skewed.body.error.code, "POLICYSQL_INTERNAL");
+    const transport = async () => ({ status: skewed.status, body: skewed.body });
+    await assert.rejects(sendCommand(transport, { kind: "execute" }, {}, () => {}), PolicySqlOutcomeUnknownError);
+    assert.equal(commits(h), committed, "the owner ran nothing");
+    assert.equal(count(h, "skew_reverse"), 1);
+
+    // The workers and owners agree again: the retry replays the committed response.
+    h.skewOwners(null);
+    const retry = await h.request("a", "/v1/transactions:execute", body, key);
+    assert.equal(retry.status, 200, JSON.stringify(retry.body));
+    assert.deepEqual(retry.body.results, first.body.results);
+    assert.equal(retry.body.transactionId, first.body.transactionId);
+    assert.equal(commits(h), committed, "no second COMMIT");
+    assert.equal(count(h, "skew_reverse"), 1, "never executed twice");
+  });
+
   // The client: the skew answer is an unknown outcome for execute, as the wire-skew answer is.
   test(`${ownerAdapter}: #85: the client takes the owner's skew answer as an unknown outcome`, async (t) => {
     const h = await ownerHarness(t);

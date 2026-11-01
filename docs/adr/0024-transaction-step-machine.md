@@ -636,31 +636,53 @@ today.
   taken: the machine already decides the deadline after `Persisted(committing)` and the binding
   before it, and the wrapper's check only narrows the remaining window; it needs no new event or
   state, only a typed error at the effect boundary.
-- **Owner snapshot mismatch (#85, ABI 11).** The Worker forwards an `atomic` input with the
-  snapshot it compiled for. An owner whose own snapshot differs (a Worker and an owner of
+- **Owner snapshot mismatch (#85 path 2, ABI 11).** The Worker forwards an `atomic` input with
+  the snapshot it compiled for. An owner whose own snapshot differs (a Worker and an owner of
   different deployments, whether during a rollout or a stale object after a partial deploy)
   runs nothing and answers `POLICYSQL_INTERNAL` (500, the version-skew answer, with the fixed
   message of that code). It is never
   `POLICYSQL_TRANSACTION_CONFLICT`: the client takes that as a definite rejection of an
   execute, but the Worker may be retrying a keyed write that already committed, and ADR 0007
   forbids a definite rejection of a request whose COMMIT may have been sent. The retry replays
-  from its `policysql_idempotency` row once the snapshots agree. The limit: a committed keyed
-  write that carried `expected` (`schemaVersion` / `policyVersion`) and is retried after a
-  rollout that changed the policy is checked against `expected` before the idempotency lookup
-  and answered `POLICYSQL_STALE_OPERATION` (409), a definite rejection; that is #85 path 1,
-  not this change. No atomic path returns `POLICYSQL_TRANSACTION_CONFLICT` any more; the code
-  remains for interactive commands (a command sequence conflict) and is unchanged there, and
-  so is the Worker's `POLICYSQL_STALE_OPERATION` for a request pinned to an earlier snapshot.
-  The owner compares the input's `snapshot` before reading anything else, so a read failure of
-  an input of another deployment is the skew answer too. A `begin` whose snapshot is not the
-  owner's logs `owner_snapshot_skew` but keeps `POLICYSQL_TRANSACTION_CONFLICT`: the begin
-  response is never a COMMIT outcome, and the client takes `TRANSACTION_CONFLICT` on a begin
-  as an unknown outcome. Interactive commands were checked: a `commit` is answered
+  from its `policysql_idempotency` row once the snapshots agree. No atomic path returns
+  `POLICYSQL_TRANSACTION_CONFLICT` any more; the code remains for interactive commands (a
+  command sequence conflict) and is unchanged there, and so is the Worker's
+  `POLICYSQL_STALE_OPERATION` for a request pinned to an earlier snapshot. The owner compares
+  the input's `snapshot` before reading anything else, so a read failure of an input of another
+  deployment is the skew answer too. A `begin` whose snapshot is not the owner's logs
+  `owner_snapshot_skew` but keeps `POLICYSQL_TRANSACTION_CONFLICT`: the begin response is never
+  a COMMIT outcome, and the client takes `TRANSACTION_CONFLICT` on a begin as an unknown
+  outcome. Interactive commands were checked: a `commit` is answered
   `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` whenever COMMIT may have been sent (the `Committing` and
   `CommitUnknown` phases, before any snapshot check); while the transaction is `Active`, no
   COMMIT was sent, so the `POLICYSQL_TRANSACTION_UNAVAILABLE` of a snapshot change is a true
   rejection. This changes what `step_json` returns for existing inputs, so `ABI_VERSION` is
   11; `keyHash`, the fingerprints and every identity golden are unchanged.
+- **Keyed compile failure after a committed write (#85 path 1, ABI 18).** The machine compiles
+  (with policy authorization) before it looks up the idempotency row, and the compile can fail
+  on a retry of a write that committed under an earlier deployment: the policy removed the
+  statement, the role lost it, the schema changed, or the body's `expected` no longer matches.
+  Answering the compile error is a definite rejection of a COMMIT that may have been sent (ADR
+  0007). On the engine's `request` and the owner's `atomic` alike, a compile failure with an
+  idempotency key is therefore answered `POLICYSQL_INTERNAL` (500, the fixed message), and
+  without a key the compile error is unchanged (an unkeyed request has no replay contract).
+  Nothing is looked up and nothing runs. The lookup is not used to decide: an absent row does
+  not prove that no commit happened (a concurrent earlier attempt may still commit, a write
+  after an error can commit in autocommit (#97), and the row can expire), while replaying a
+  matching row would return a stored result that the current compile did not authorize to this
+  principal; a replay is safe only after the compile passes, so the retry compiles and then
+  replays as usual. The key is not consumed, so a later deployment that accepts the request
+  replays the row. A malformed key is not special-cased: no commit can have used an invalid
+  key, but the engine does not inspect the key to keep the answer independent of the key
+  syntax of the deployment that may have committed, and the client rejects malformed keys
+  itself. The wrapper's session gate (trusted-session `access` and role) follows the same rule:
+  a keyed execute it denies is 500, an unkeyed one stays 403 `POLICYSQL_FORBIDDEN_ACCESS`; the
+  body is not read and no database work happens either way. The request-pinned snapshot check
+  stays before the compile: a request pinned to a superseded snapshot is 409
+  `POLICYSQL_STALE_OPERATION`, which tells the caller to refresh and does not depend on policy;
+  the same key then reaches this rule. This changes what `step_json` returns for existing
+  inputs, so `ABI_VERSION` is 18; `keyHash`, the fingerprints and every identity golden are
+  unchanged.
 
 
 ## Migration

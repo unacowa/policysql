@@ -155,8 +155,9 @@ validation中は`validating`状態です。この間はcommit-check validatorの
 Atomic Executeでmutationを含むrequestと、対話型transaction開始の`Idempotency-Key`は任意です。指定したkeyはtrusted sessionのprincipal、subject、role、session、endpoint、DB識別子へ束縛し、canonical request hashにはDB binding（version、scope、ID、generation。deployごとに変わるsnapshotは含めません）も含めます。保存済みの結果がある場合、同一要求へその結果を返します。
 
 - 同じkey、同じpayload、完了済み: 保存済みstatusとbody。ABI・policy・schemaの変更でsnapshotが変わるdeployの後の再送も同じです（commit済みの書き込みを再実行せず、元の結果を返します。`meta.policyVersion`と`meta.schemaVersion`は応答したdeployの値です）。ただし、ABI 9より前のreleaseが保存した結果はsnapshotを含むhashで記録されているため、deploy後の再送は1回限りの非互換として`POLICYSQL_IDEMPOTENCY_CONFLICT`になります（再実行はしません）
+- 同じkey、同じpayload、compileが現在のdeployで通らない: HTTP 500 `POLICYSQL_INTERNAL`（結果不明）。policy変更で文が禁止された、roleが操作を失った、schemaが変わった、bodyの`expected`が一致しない、などの場合です。commit済みの可能性があるため確定的な拒否（400／403／409／422）にはせず、保存済み結果も返しません（現在の認可を通っていないため）。同じkeyのまま、compileが通るdeployでもう一度再送すると保存済み結果を返します。この場合も再実行はしません
 - 同じkey、異なるpayloadまたは経路世代: HTTP 409（Atomic Executeはcommit checkを行うDO経路を含めて`POLICYSQL_IDEMPOTENCY_CONFLICT`、対話型transaction開始は`POLICYSQL_TRANSACTION_CONFLICT`）
-- keyなしのAtomic Execute: 要求ごとに実行し、`policysql_idempotency`を参照・追記しない
+- keyなしのAtomic Execute: 要求ごとに実行し、`policysql_idempotency`を参照・追記しない。keyがないため、compileやsession認可の失敗は従来どおり確定的な拒否です
 - keyなしの対話型transaction開始: 毎回新しいtransaction ID／ownerを作る
 
 対話型transactionはDOに状態を保存し、キーの有無にかかわらず利用DBの冪等性テーブルは不要です。開始後のstatement・commit・rollbackは、同じtransaction IDとsequenceによる既存の再送規則を維持します。
