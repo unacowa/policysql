@@ -134,10 +134,80 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 }
 
 #[test]
-fn abi_17_names_the_step_machine_with_the_atomic_limit_outcome() {
+fn abi_18_names_the_step_machine_with_the_keyed_compile_outcome() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 17);
-    assert!(owner.runtime.snapshot().ends_with(":abi-17"));
+    assert_eq!(owner.runtime.abi_version(), 18);
+    assert!(owner.runtime.snapshot().ends_with(":abi-18"));
+}
+
+/// #85 path 1 with the real compiler: a keyed execute whose compile fails (here an operation
+/// the policy does not grant) is answered 500 `POLICYSQL_INTERNAL`, the unknown outcome, and an
+/// unkeyed one keeps the definite compile error. The engine's `request` event reaches the
+/// compile after its binding check; nothing is looked up or executed, and no state remains.
+#[test]
+fn a_keyed_compile_failure_is_the_unknown_outcome_with_the_real_compiler() {
+    let runtime = runtime(
+        r#"{"max_rows":100,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":8}"#,
+    )
+    .unwrap_or_else(|| unreachable!("valid runtime"));
+    let snapshot = runtime.snapshot();
+    let auth: Value = serde_json::from_str(AUTH).unwrap_or_default();
+    let body = json!({"statements": [{"sql": "DELETE FROM counters", "params": {}}]}).to_string();
+    let answer = |key: Option<&str>| {
+        let mut volatile = None;
+        let mut operation = json!({
+            "kind": "execute", "auth": auth.clone(), "databaseBinding": binding(&snapshot),
+            "snapshot": snapshot.clone(), "bodyText": body.clone(),
+        });
+        if let Some(key) = key {
+            operation["idempotencyKey"] = json!(key);
+        }
+        let output = engine_step(
+            &runtime,
+            &mut volatile,
+            &json!({"type": "request", "operation": operation}),
+            1,
+        );
+        assert_eq!(
+            output["effects"][0]["type"], "checkBinding",
+            "{}",
+            output["raw"]
+        );
+        let id = output["effects"][0]["id"].clone();
+        let checked = engine_step(
+            &runtime,
+            &mut volatile,
+            &json!({"type": "bindingChecked", "id": id, "allowed": true}),
+            1,
+        );
+        let reply = checked["effects"]
+            .as_array()
+            .and_then(|effects| {
+                effects
+                    .iter()
+                    .find(|effect| effect["type"] == "respond")
+                    .cloned()
+            })
+            .unwrap_or_default();
+        (reply, volatile, checked)
+    };
+    let (keyed, volatile, output) = answer(Some("keyed-compile-failure-0001"));
+    assert_eq!(
+        keyed["reply"]["error"]["code"], "POLICYSQL_INTERNAL",
+        "{}",
+        output["raw"]
+    );
+    assert_eq!(
+        keyed["reply"]["error"]["message"],
+        "The request could not be completed."
+    );
+    assert!(volatile.is_none(), "the failed request leaves no state");
+    let (unkeyed, _, output) = answer(None);
+    assert_eq!(
+        unkeyed["reply"]["error"]["code"], "POLICYSQL_MISSING_POLICY",
+        "{}",
+        output["raw"]
+    );
 }
 
 /// ADR 0024 pull request 5 with the real compiler: the policy's check triggers on the

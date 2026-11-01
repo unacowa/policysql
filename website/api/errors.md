@@ -49,7 +49,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_AMBIGUOUS_PARAMETER_TYPE` | 400 | Explainでparameter型を一意に証明できない |
 | `POLICYSQL_RESERVED_PARAMETER` | 400 | server用のparameter名を使用した |
 | `POLICYSQL_IDEMPOTENCY_KEY_INVALID` | 400 | `Idempotency-Key`が空または書式不正（16〜128文字のASCII英数字と`. _ : - + / =`以外を含む、長さが範囲外、header重複によるカンマ結合）。keyの省略では発生しない。DB処理の前に拒否するため、再送しても成功しない |
-| `POLICYSQL_FORBIDDEN_ACCESS` | 403 | `PolicySQL-Role`がtrusted sessionの`roles`にない、またはendpointに必要なaccessがない |
+| `POLICYSQL_FORBIDDEN_ACCESS` | 403 | `PolicySQL-Role`がtrusted sessionの`roles`にない、またはendpointに必要なaccessがない。`Idempotency-Key`付きのAtomic Executeでは500 `POLICYSQL_INTERNAL`（結果不明）になる（deployでaccessまたはroleを失った主体による、commit済みwriteの再送かもしれないため。bodyは読まず、DB処理も行わない） |
 | `POLICYSQL_MISSING_POLICY` | 403 | 適用可能なpolicyがない |
 | `POLICYSQL_FORBIDDEN_OPERATION` | 403 | operationが許可されていない |
 | `POLICYSQL_FORBIDDEN_COLUMN` | 403 | 利用できないcolumnを参照した |
@@ -69,7 +69,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_EXPECTATION_FAILED` | 422 | transaction operationの期待条件を満たさない |
 | `POLICYSQL_SCHEMA_MISMATCH` | 422 | database値がcompiled logical contractと一致しない |
 | `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` | 413 | 対話型transactionの恒久的な上限（statement数、累積result bytes）を超えた。commit checkのcallbackの行数・bytes・query数の上限でも発生し、その場合はvalidatorがこのcodeを受け取り、atomic executeや対話型commitは409 `POLICYSQL_COMMIT_CHECK_REJECTED`になる。再送しても成功しない。request rateの制限ではない |
-| `POLICYSQL_INTERNAL` | 500 | 公開できない内部エラー。ラッパーが渡したtrusted sessionや文脈の形が不正な場合、またはatomic executeで2文目以降にwriteを含むenvelopeのdatabaseの生の応答、streaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合（結果不明）もこのcode |
+| `POLICYSQL_INTERNAL` | 500 | 公開できない内部エラー。ラッパーが渡したtrusted sessionや文脈の形が不正な場合、`Idempotency-Key`付きのAtomic Executeのcompile（`expected`の照合を含む）が現在のdeployで通らない場合（policy・role・schemaの変更後など。結果不明で、保存済み結果は返さず、何も実行しない。unkeyedは従来のcompile error）、session認可で拒否される場合（keyedのみ。unkeyedは403）、またはatomic executeで2文目以降にwriteを含むenvelopeのdatabaseの生の応答、streaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合（結果不明）もこのcode |
 | `POLICYSQL_DATABASE_REQUIRED` | 500 | ラッパーが必須のDB引数を渡していない |
 | `POLICYSQL_DATABASE_UNAVAILABLE` | 503 | database adapterまたはtransaction ownerを利用できない |
 | `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` | 503 | commitを送った後に結果を確定できない（transaction ownerの喪失、ownerの記録の保存失敗、COMMIT中の通信エラー）。commit済みの可能性があるため、拒否ではなく結果不明として扱う |
@@ -147,4 +147,4 @@ return createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", 
 
 ## Retry
 
-SQL・policy・parameter errorは、同じrequestを再送しても成功しません。requestを修正してください。timeout、rate limit、一時的なadapter error、commit conflictのretryは上限とbackoffを設けます。ライブラリはどのresponseにも`Retry-After`を付けません。ラッパーが429に`Retry-After`を付けた場合は、その秒数以上待ってから再送します。初回からkeyを指定したwriteの再送には、同じidempotency keyと同じpayloadを使用し、結果が確定する前に新しいkeyで再実行しません。keyなしのwriteは重複排除を保証しないため、結果不明時に自動再送すると二重更新になり得ます。
+SQL・policy・parameter errorは、同じrequestを再送しても成功しません。requestを修正してください。timeout、rate limit、一時的なadapter error、commit conflictのretryは上限とbackoffを設けます。ライブラリはどのresponseにも`Retry-After`を付けません。ラッパーが429に`Retry-After`を付けた場合は、その秒数以上待ってから再送します。初回からkeyを指定したwriteの再送には、同じidempotency keyと同じpayloadを使用し、結果が確定する前に新しいkeyで再実行しません。keyなしのwriteは重複排除を保証しないため、結果不明時に自動再送すると二重更新になり得ます。`Idempotency-Key`付きのAtomic Executeが500 `POLICYSQL_INTERNAL`になった場合、それは結果不明です（deploy後のcompile・認可の失敗を含みます）。rollbackされたとみなさず、同じkeyと同じpayloadで再送して結果を確定してください。

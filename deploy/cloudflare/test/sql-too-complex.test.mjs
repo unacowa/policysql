@@ -149,7 +149,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal((await post(h, { statements: [bulk(100, "a")] }, EXECUTE, "bulk-insert-key-000001")).status, 200);
     // 341 rows is 1,023 parameters; 342 rows is 1,026, over the default.
     assert.equal((await post(h, { statements: [bulk(341, "b")] }, EXECUTE, "bulk-insert-key-000002")).status, 200);
-    const refused = await post(h, { statements: [bulk(342, "c")] }, EXECUTE, "bulk-insert-key-000003");
+    const refused = await post(h, { statements: [bulk(342, "c")] }, EXECUTE);
     assert.equal(refused.status, 413);
     assert.equal(refused.body.error.code, "POLICYSQL_LIMIT_EXCEEDED");
   });
@@ -175,7 +175,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(typeof record.requestId, "string");
     assert.equal(typeof record.schemaVersion, "string");
     assert.equal(typeof record.policyVersion, "string");
-    assert.equal(record.abiVersion, 17);
+    assert.equal(record.abiVersion, 18);
     assert.deepEqual(Object.keys(record).sort(), ["abiVersion", "cause", "event", "policyVersion", "requestId", "schemaVersion", "statementIndex"]);
   });
 

@@ -72,7 +72,14 @@ use wasm_bindgen::prelude::*;
 /// first is a write: Hrana runs the rest of a pipeline after an error, and a later write could
 /// have committed in autocommit after an error rolled the transaction back, so the outcome is
 /// unknown, never a definite rejection (ADR 0007). No identity value changed.
-const ABI_VERSION: u32 = 17;
+/// 18: issue #85 path 1: a keyed `request` (engine) or `atomic` input (owner) whose compile
+/// fails (including the envelope's `expected` check) is answered 500 `POLICYSQL_INTERNAL`
+/// instead of the compile error. The request may be the retry of a write that committed under
+/// an earlier policy, schema, or snapshot, so the compile error (a definite rejection) is
+/// forbidden; the request is not looked up and a matching row is not replayed without the
+/// authorization the compile would have given. An unkeyed request keeps its compile error. No
+/// identity value changed.
+const ABI_VERSION: u32 = 18;
 /// The fixed JSON levels the machine adds when it wraps an interactive command in the
 /// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
 /// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must

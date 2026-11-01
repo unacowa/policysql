@@ -89,11 +89,13 @@ export const sqlComplexitySmoke = async (context, { transport, allowlist, classi
   const tooComplex = (outcome, index = 0) => outcome.status === 400 && errorCode(outcome) === "POLICYSQL_SQL_TOO_COMPLEX"
     && outcome.body?.error?.message === FIXED_MESSAGE && outcome.body?.error?.path === `/statements/${index}` && noInternalText(outcome);
 
-  // Emit time: a bound pattern over 50,000 bytes never reaches the database.
+  // Emit time: a bound pattern over 50,000 bytes never reaches the database. The over-limit
+  // probe is unkeyed so its definite 400 is what is verified; a keyed compile failure is the
+  // unknown outcome since #85 (a key may name a write committed before a deploy).
   const like = (pattern) => [{ sql: "SELECT id FROM projects WHERE name LIKE :q", params: { q: pattern } }];
   const served = await api.execute(like("a".repeat(50_000)));
   expect(served.status === 200, "a bound LIKE pattern of 50,000 bytes is served");
-  const boundOver = await api.execute(like("a".repeat(50_001)));
+  const boundOver = await api.execute(like("a".repeat(50_001)), null);
   expect(tooComplex(boundOver), "a bound LIKE pattern of 50,001 bytes is POLICYSQL_SQL_TOO_COMPLEX");
 
   // The database refuses a computed pattern: the Hrana error is classified.

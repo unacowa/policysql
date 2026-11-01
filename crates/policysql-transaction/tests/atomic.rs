@@ -7,7 +7,7 @@ mod common;
 use common::{
     Engine, OWNER, STATEMENT_LIMITS, T0, atomic_input, code, envelope, execute_request, phase_of,
 };
-use policysql_transaction::machine::StatementLimits;
+use policysql_transaction::machine::{CoreError, StatementLimits};
 use serde_json::{Value, json};
 
 const KEY: &str = "request-key-0001";
@@ -1140,6 +1140,174 @@ fn an_owner_compares_the_snapshot_before_reading_the_rest_of_the_input() {
         );
     }
     assert_eq!(owner_engine.observed.commits_emitted, 0);
+}
+
+// ---- #85 path 1: a keyed compile failure after a committed write ------------------------------
+
+/// A keyed execute that committed, then a deployment whose compile rejects it (a policy, role,
+/// schema, or `expected` change): the retry is the unknown outcome, never the compile error.
+/// The stored result is not replayed (the current authorization did not pass), nothing is
+/// looked up, and a later deployment that compiles it again replays it.
+#[test]
+fn a_keyed_compile_failure_after_a_commit_is_the_unknown_outcome_on_both_placements() {
+    for (owner, error_code) in [
+        (false, "POLICYSQL_FORBIDDEN_OPERATION"),
+        (false, "POLICYSQL_STALE_OPERATION"),
+        (false, "POLICYSQL_SCHEMA_MISMATCH"),
+        (true, "POLICYSQL_FORBIDDEN_OPERATION"),
+        (true, "POLICYSQL_STALE_OPERATION"),
+        (true, "POLICYSQL_SCHEMA_MISMATCH"),
+    ] {
+        let mut engine = placed(owner);
+        let first = engine.run(&keyed(owner, &insert("p1")));
+        assert_eq!(first["ok"], true, "owner={owner}: {first}");
+        assert_eq!(engine.observed.envelope_executes, 1, "owner={owner}");
+        assert_eq!(engine.idempotency_rows.len(), 1, "owner={owner}");
+        let awaited = engine.observed.awaited.len();
+
+        engine.compiler.reject = Some(CoreError::new(
+            error_code,
+            "The operation is no longer permitted.",
+        ));
+        let retry = engine.run(&keyed(owner, &insert("p1")));
+        assert_eq!(
+            code(&retry),
+            Some("POLICYSQL_INTERNAL"),
+            "owner={owner}, {error_code}: {retry}"
+        );
+        assert_eq!(
+            retry["error"]["message"], "The request could not be completed.",
+            "owner={owner}, {error_code}"
+        );
+        assert_eq!(retry["error"]["path"], Value::Null);
+        assert_eq!(
+            engine.observed.awaited[awaited..].to_vec(),
+            ["checkBinding"],
+            "owner={owner}, {error_code}: no lookup, envelope, or COMMIT"
+        );
+        assert_eq!(
+            engine.observed.envelope_executes, 1,
+            "owner={owner}, {error_code}: never executes again"
+        );
+        assert_eq!(
+            engine.observed.commits_emitted, 1,
+            "owner={owner}, {error_code}: no second COMMIT"
+        );
+        assert_eq!(
+            engine.idempotency_rows.len(),
+            1,
+            "owner={owner}, {error_code}: the row is untouched"
+        );
+        assert!(
+            engine.pending_rows.is_empty(),
+            "owner={owner}, {error_code}"
+        );
+        assert_eq!(engine.compiler.live_handles(), 0, "owner={owner}");
+
+        // A deployment that compiles the request again replays the stored result: the earlier
+        // unknown answer did not consume the key.
+        engine.compiler.reject = None;
+        engine.observed.awaited.clear();
+        let replay = engine.run(&keyed(owner, &insert("p1")));
+        assert_eq!(replay["ok"], true, "owner={owner}, {error_code}: {replay}");
+        assert_eq!(
+            replay["value"]["transactionId"],
+            first["value"]["transactionId"]
+        );
+        assert_eq!(replay["value"]["results"], first["value"]["results"]);
+        assert_eq!(
+            engine.observed.envelope_executes, 1,
+            "owner={owner}, {error_code}: the replay ran nothing"
+        );
+        assert_eq!(engine.observed.commits_emitted, 1);
+        assert_eq!(engine.compiler.live_handles(), 0);
+    }
+}
+
+/// The same rule on a request that never committed: a keyed request whose compile fails before
+/// any attempt has run is still the unknown outcome, because the engine cannot tell it from a
+/// retry of one that committed under an earlier deployment (and an absent row does not prove
+/// there was no commit). The key is not inspected.
+#[test]
+fn a_keyed_compile_failure_without_a_prior_commit_is_also_the_unknown_outcome() {
+    for owner in [false, true] {
+        let mut events = vec![("valid", keyed(owner, &insert("p1")))];
+        if !owner {
+            // The engine's key is text: a malformed key that core would reject on a successful
+            // compile is not inspected here, because a deployment that accepted it earlier may
+            // have committed under it.
+            events.push(("malformed", execute_request(&insert("p1"), Some("short"))));
+        }
+        for (label, event) in events {
+            let mut engine = placed(owner);
+            engine.compiler.reject = Some(CoreError::new(
+                "POLICYSQL_INVALID_SQL",
+                "The SQL statement cannot be parsed.",
+            ));
+            let reply = engine.run(&event);
+            assert_eq!(
+                code(&reply),
+                Some("POLICYSQL_INTERNAL"),
+                "owner={owner}, {label}: {reply}"
+            );
+            assert_eq!(engine.observed.envelope_executes, 0);
+            assert_eq!(engine.observed.commits_emitted, 0);
+            assert_eq!(engine.idempotency_rows.len(), 0);
+            assert_eq!(engine.observed.awaited, ["checkBinding"]);
+        }
+    }
+}
+
+/// An unkeyed execute has no replay contract: its compile error stays definite, so a client is
+/// not told the outcome is unknown when nothing could have committed.
+#[test]
+fn an_unkeyed_compile_failure_keeps_its_definite_error_on_both_placements() {
+    for owner in [false, true] {
+        let mut engine = placed(owner);
+        engine.compiler.reject = Some(CoreError::new(
+            "POLICYSQL_INVALID_SQL",
+            "The SQL statement cannot be parsed.",
+        ));
+        let event = if owner {
+            atomic_input(&insert("p1"), None)
+        } else {
+            execute_request(&insert("p1"), None)
+        };
+        let reply = engine.run(&event);
+        assert_eq!(
+            code(&reply),
+            Some("POLICYSQL_INVALID_SQL"),
+            "owner={owner}: {reply}"
+        );
+        assert_eq!(engine.observed.envelope_executes, 0, "owner={owner}");
+        assert_eq!(engine.observed.commits_emitted, 0, "owner={owner}");
+        assert_eq!(
+            engine.observed.awaited,
+            ["checkBinding"],
+            "owner={owner}: nothing ran"
+        );
+        assert_eq!(engine.compiler.live_handles(), 0);
+    }
+}
+
+/// The snapshot check that runs before the compile (the request's pinned snapshot against the
+/// deployment's) is unchanged: it is answered before the idempotency key matters, by the
+/// engine's stale operation or the owner's version skew, and it never looks up the stored row.
+#[test]
+fn a_snapshot_mismatch_is_answered_before_the_keyed_compile_rule() {
+    let mut engine = Engine::atomic(false);
+    engine.compiler.snapshot = NEXT_SNAPSHOT.to_owned();
+    engine.compiler.reject = Some(CoreError::new(
+        "POLICYSQL_INVALID_SQL",
+        "The SQL statement cannot be parsed.",
+    ));
+    let stale = engine.run(&execute_request(&insert("p1"), Some(KEY)));
+    assert_eq!(code(&stale), Some("POLICYSQL_STALE_OPERATION"), "{stale}");
+    assert!(
+        engine.observed.awaited.is_empty(),
+        "answered before any check"
+    );
+    assert_eq!(engine.idempotency_rows.len(), 0);
 }
 
 // ---------------------------------------------------------------------------------------------

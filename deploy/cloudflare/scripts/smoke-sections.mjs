@@ -138,12 +138,15 @@ export const bytesNullSmoke = async (context, { maxBytesPerValue }) => {
   const copied = await api.execute([{ sql: INSERT_VALUE, params: { id: ids.copy, label: "copy", note: "kept", payload: readBack[2] ?? "" }, expect: { affectedRows: 1 } }]);
   expect(copied.status === 200 && copied.body?.results?.[0]?.rows?.[0]?.payload === medium, "a SELECT result is accepted unchanged as a bytes parameter");
 
+  // The definite-rejection probes below are unkeyed: since #85 a keyed execute whose compile
+  // fails is answered as an unknown outcome, because the key may name a write committed before a
+  // deploy. These are fresh probes whose rejection is what the smoke verifies.
   const oversized = await api.execute([{
     sql: INSERT_VALUE,
     params: { id: ids.oversized, label: "oversized", note: null, payload: randomBytes(maxBytesPerValue + 1).toString("base64") },
-  }]);
+  }], null);
   expect(oversized.status === 413 && errorCode(oversized) === "POLICYSQL_LIMIT_EXCEEDED", "a value over maxBytesPerValue is 413");
-  const unpadded = await api.execute([{ sql: INSERT_VALUE, params: { id: unique("sv"), label: "unpadded", note: null, payload: "AAEC/w" } }]);
+  const unpadded = await api.execute([{ sql: INSERT_VALUE, params: { id: unique("sv"), label: "unpadded", note: null, payload: "AAEC/w" } }], null);
   expect(unpadded.status === 400 && errorCode(unpadded) === "POLICYSQL_INVALID_PARAMETER", "an unpadded public bytes input is rejected");
 
   const UPDATE_NULLABLE = "UPDATE smoke_values SET note = :note, payload = :payload WHERE id = :id RETURNING id, label, note, payload";
@@ -154,9 +157,9 @@ export const bytesNullSmoke = async (context, { maxBytesPerValue }) => {
   const nulledRow = nulled.body?.results?.[0]?.rows?.[0] ?? null;
   expect(nulled.status === 200 && nulledRow?.note === null && nulledRow?.payload === null && nulledRow?.label === "small",
     "JSON null stores SQL NULL in nullable columns");
-  const labelNull = await api.execute([{ sql: "UPDATE smoke_values SET label = :label WHERE id = :id RETURNING id", params: { id: ids.small, label: null } }]);
+  const labelNull = await api.execute([{ sql: "UPDATE smoke_values SET label = :label WHERE id = :id RETURNING id", params: { id: ids.small, label: null } }], null);
   expect(labelNull.status === 400 && errorCode(labelNull) === "POLICYSQL_INVALID_PARAMETER", "NULL into a non-nullable column is rejected");
-  const compareNull = await api.execute([{ sql: "SELECT id FROM smoke_values WHERE note = :note", params: { note: null } }]);
+  const compareNull = await api.execute([{ sql: "SELECT id FROM smoke_values WHERE note = :note", params: { note: null } }], null);
   expect(compareNull.status === 400 && errorCode(compareNull) === "POLICYSQL_INVALID_PARAMETER", "NULL in a comparison is rejected");
   const explained = await api.explain([{
     sql: "UPDATE smoke_values SET label = :label, note = :note, payload = :payload WHERE id = :id RETURNING id", params: {},

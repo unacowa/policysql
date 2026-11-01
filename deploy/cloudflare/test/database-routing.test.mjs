@@ -39,16 +39,22 @@ test("wrapper-rejected JWTs and missing endpoint access never connect or check a
     assert.equal(rejected.body.error.code, "POLICYSQL_UNAUTHENTICATED");
   }
   assert.equal(h.counts().checks, 0);
-  // A verified session without the endpoint's access is a client-caused 403 from core,
-  // whether it arrives directly or through the wrapper's JWT adapter.
+  // A verified session without the endpoint's access is a client-caused 403 from core when the
+  // request carries no key, whether it arrives directly or through the wrapper's JWT adapter.
+  // With a key the execute is 500 (unknown): it may be the retry of a committed write from
+  // before a deployment changed the session policy (#85 path 1).
   for (const credential of [
     h.session("a", { access: ["catalog"] }),
     await h.token("a", { policysql: { roles: ["member"], default_role: "member", access: ["catalog"], session: { tenant_id: "tenant_a" } } }),
   ]) {
-    const denied = await h.request("a", "/v1/transactions:execute", envelope(read), undefined, credential);
+    const denied = await h.request("a", "/v1/transactions:execute", envelope(read), null, credential);
     assert.equal(denied.status, 403);
     assert.equal(denied.body.error.code, "POLICYSQL_FORBIDDEN_ACCESS");
   }
+  const keyed = await h.request("a", "/v1/transactions:execute", envelope(read), "denied-access-key-0001",
+    h.session("a", { access: ["catalog"] }));
+  assert.equal(keyed.status, 500, JSON.stringify(keyed.body));
+  assert.equal(keyed.body.error.code, "POLICYSQL_INTERNAL");
   assert.equal(h.counts().checks, 0);
   assert.equal(h.counts().connects, 0);
   assert.equal(h.events.length, 0);
@@ -124,9 +130,9 @@ test("client headers, body fields, and SQL cannot replace the wrapper-selected d
   assert.deepEqual(result.body.results[0].rows, [{ id: "seed", name: "database_a" }]);
   await h.flush();
   const before = h.counts().connects;
-  const injected = await h.request("a", "/v1/transactions:execute", { ...envelope(read), databaseBinding: { databaseId: "db_b" } });
+  const injected = await h.request("a", "/v1/transactions:execute", { ...envelope(read), databaseBinding: { databaseId: "db_b" } }, null);
   assert.equal(injected.status, 400);
-  const attach = await h.request("a", "/v1/transactions:execute", envelope({ sql: "ATTACH DATABASE :url AS other", params: { url: "https://b.test" } }));
+  const attach = await h.request("a", "/v1/transactions:execute", envelope({ sql: "ATTACH DATABASE :url AS other", params: { url: "https://b.test" } }), null);
   assert.ok(attach.status >= 400);
   assert.equal(h.counts().connects, before);
   assert.ok(h.events.every((event) => event.tenant === "a"));

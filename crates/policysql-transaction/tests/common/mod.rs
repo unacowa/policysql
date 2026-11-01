@@ -92,6 +92,9 @@ pub struct FakeCompiler {
     /// The cost catalog id every compiled statement names (`None` keeps the transcripts of
     /// pull requests 4 and 5).
     pub explain_resource: Option<u64>,
+    /// When set, every compile fails with this error (a policy, schema, or `expected` change
+    /// after a committed write, #85 path 1).
+    pub reject: Option<CoreError>,
 }
 
 impl FakeCompiler {
@@ -111,6 +114,7 @@ impl FakeCompiler {
             compiles: Cell::new(0),
             limits: None,
             explain_resource: None,
+            reject: None,
         }
     }
 
@@ -149,6 +153,9 @@ impl Compiler for FakeCompiler {
 
     fn compile(&self, auth_json: &str, envelope_json: &str) -> Result<Compiled, CoreError> {
         self.compiles.set(self.compiles.get() + 1);
+        if let Some(error) = &self.reject {
+            return Err(error.clone());
+        }
         let invalid =
             || CoreError::new("POLICYSQL_INVALID_REQUEST", "Request envelope is invalid.");
         let envelope: Value = serde_json::from_str(envelope_json).map_err(|_| invalid())?;
