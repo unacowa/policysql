@@ -49,16 +49,16 @@ Adopt **part 1 only**, in the reference wrapper
   had: a replay "while retained", with no stated duration. The 30 days is long compared with
   any real retry (seconds to minutes), so in practice no retry a client makes loses its
   replay.
-- **Mechanism: ADR 0026 sections 3, 4 and 6, unchanged.** `created_at TEXT NOT NULL DEFAULT
-  CURRENT_TIMESTAMP` filled by the database (core's `INSERT` names only its three columns, so
-  no ABI bump and no snapshot change); the lookup stays unfiltered; deletion is by age only, in
-  batches of 500 rows by `rowid`, repeated until a batch is short, capped at 128 batches per
-  run; each batch is its own short write transaction (three subrequests: BEGIN, DELETE,
-  COMMIT), so the cap fits `limits.subrequests` in `wrangler.jsonc`, which is raised to 400 for
-  it (a test checks `3 x (cap + 1) <= subrequests`, the `+ 1` being the PRAGMA's own three); the
-  table must not be `WITHOUT ROWID`.
-  128 batches is 64,000 rows an hour, above what the wrapper's 100 requests/minute rate limit
-  can add in the hour, so a steady-state run drains completely.
+- **Mechanism: the proposed ADR 0026's sections 3, 4 and 6, unchanged.**
+  `created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP` filled by the database (core's `INSERT`
+  names only its three columns, so no ABI bump and no snapshot change); the lookup stays
+  unfiltered; deletion is by age only, in batches of 500 rows by `rowid`, repeated until a batch
+  is short, capped at 128 batches per run; each batch is its own short write transaction (three
+  subrequests: BEGIN, DELETE, COMMIT), so the cap fits `limits.subrequests` in
+  `wrangler.jsonc`, which is raised to 400 for it (a test checks
+  `3 x (cap + 1) <= subrequests`, the `+ 1` being the PRAGMA's own three); the table must not be
+  `WITHOUT ROWID`. 128 batches is 64,000 rows an hour, above what the wrapper's 100
+  requests/minute rate limit can add in the hour, so a steady-state run drains completely.
 - **Schedule:** a Cloudflare Cron Trigger, hourly (`"17 * * * *"`), running the wrapper's
   `scheduled` handler. It uses the deployment's own `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`,
   never a client's, and never the public endpoint (where the table is outside the catalog and
@@ -125,12 +125,11 @@ Adopt **part 1 only**, in the reference wrapper
   more than 30 days after the first send finds no row and executes it again. That was already
   true of every duration: before this ADR the row would have been found only because nothing
   ever deleted it.
-- **No configured setting, no client margin `M`, no library helper.** ADR 0026 section 5 and
-  open questions 4 and 5 stay open. If they are later adopted, the migration order of ADR 0026
-  section 6 applies to this wrapper too ("migrate, then advertise, then enable cleanup"), and
-  the value it advertises must cover this wrapper's existing rows: the ordering rule means a
-  deployment cannot advertise a window shorter than the one it was already deleting by without
-  keeping the larger one until the old one has elapsed.
+- **No configured setting, no client margin `M`, no library helper.** The proposed ADR 0026's
+  section 5 and its open questions 4 and 5 stay open. If they are later adopted, the migration
+  order is "migrate, then advertise, then enable cleanup", and an advertised window shorter
+  than this wrapper's 30 days would need the larger one kept until the old one has elapsed: a
+  client that read a longer window must stay covered.
 - **No deletion by size, by snapshot change, or by hand.** A size cap breaks whatever floor a
   client assumed, and a row stores only hashes, with no snapshot to delete by.
 
@@ -142,14 +141,15 @@ Adopt **part 1 only**, in the reference wrapper
 - `policysql_idempotency` gains a column and an index; core's statements and the ABI are
   unchanged, so a deployment can migrate at any time.
 - A deployment that already has the table without `created_at` keeps working with no cleanup
-  until it is rebuilt; the smoke's shape check fails for the development deployment until
-  `provision-dev.mjs` recreates it, which it does with `CREATE TABLE IF NOT EXISTS`. An
-  existing development table must be rebuilt once.
+  until it is rebuilt, and the release smoke fails its shape check until then: a deployment
+  whose table is not the canonical one fails the gate rather than passing quietly. (The
+  development database already had the column; `provision-dev.mjs` keeps creating it with
+  `CREATE TABLE IF NOT EXISTS` and now also creates the index.)
 - The index is named `policysql_idempotency_created_at`, in the same namespace as the table.
 
 ## Alternatives
 
-- **Adopt ADR 0026 in full (part 2 and 3 as well).** Rejected for now by the maintainer's
+- **Adopt ADR 0026 in full (parts 2 and 3 as well).** Rejected for now by the maintainer's
   decision: it makes a required setting a breaking change and commits the library to an
   exported helper, for a benefit (clients know the window) that no current client asks for.
   Nothing here prevents adopting it later.
