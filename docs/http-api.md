@@ -288,8 +288,11 @@ rejection when COMMIT may have been sent ([ADR
 0007](adr/0007-transaction-retry-and-commit-check-protocol.md), amendment #104): the
 transaction stops without consulting the owner's commit record, and clients keep treating
 both as definite rejections. The denial does not prove that an earlier COMMIT was not
-applied; verify application data, and after access is restored a raw retry of the identical
-commit replays the recorded outcome without sending COMMIT again.
+applied; verify application data, and after access is restored, with the same principal,
+subject, role, and session values, a raw retry of the identical commit reaches the owner's
+recorded outcome (the stored reply or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`) without sending
+COMMIT again. A retry whose session value changed is a different caller to the owner and is
+answered 409 `POLICYSQL_TRANSACTION_UNAVAILABLE`.
 
 ## Catalog and capabilities
 

@@ -161,7 +161,9 @@ remove the wrapper step in code. To change limits, edit `simple.limit`/`period` 
   COMMIT.
 - Session gate denies a commit (403 `POLICYSQL_FORBIDDEN_ACCESS`, for example after a deploy
   removed the role or `execute` access): the same #104 exception. The denial is not a
-  rollback; restore access and retry the identical commit, or verify application data.
+  rollback; restore access with the same principal, subject, role, and session values and
+  retry the identical commit, or verify application data. A retry whose session value changed
+  is 409 `POLICYSQL_TRANSACTION_UNAVAILABLE`, not the recorded outcome.
 - `trusted_session_rejected` log with 500 `POLICYSQL_INTERNAL`: the wrapper passed a malformed
   session (often identity-provider claims that break the session rules). Fix the wrapper or IdP.
 - Rate limit exhausted: expect 429 `POLICYSQL_RATE_LIMITED` with `Retry-After` from the wrapper,
