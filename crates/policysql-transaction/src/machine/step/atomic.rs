@@ -338,14 +338,32 @@ const fn commit_failure(class: Class) -> Code {
 /// client's `POLICYSQL_LIMIT_EXCEEDED`; on the idempotency lookup or insert it is
 /// `POLICYSQL_INTERNAL`: the outcome of a keyed request that may have committed could not be
 /// read, which is never a rejection.
-const fn execute_failure(task: &Task, class: Class) -> Code {
+///
+/// `later_write` says a statement after the envelope's first is not a `SELECT`. Hrana keeps
+/// running the rest of a pipeline after an error, and an error can make SQLite roll the
+/// explicit transaction back; a later write would then run in autocommit and commit on its own.
+/// A reply the transport could not read at all (over the response bound, a BLOB over the value
+/// bound, a stalled body) leaves that possibility open, so an envelope with such a statement is
+/// never a definite 413 (ADR 0007, issue #97). The check is conservative: a later write that
+/// would not have committed still answers the unknown outcome.
+fn execute_failure(task: &Task, class: Class, later_write: bool) -> Code {
     match (task, class) {
         // A stored response over the lookup bound (a row written before the bounds existed, or
         // under a larger hard maximum) is the outcome of a request that may have committed, so
         // reading it failed with an unknown outcome, never a definite 413 (ADR 0007, ADR 0027).
         (Task::AtomicLookup | Task::AtomicInsert, Class::Limit | Class::Complex) => Code::Internal,
+        (Task::AtomicExecute, Class::Limit) if later_write => Code::Internal,
         _ => Code::for_class(class),
     }
+}
+
+/// Whether an envelope has a statement after its first that is not a `SELECT` (see
+/// [`execute_failure`]).
+fn has_later_write(statements: &[AtomicStatement]) -> bool {
+    statements
+        .iter()
+        .skip(1)
+        .any(|statement| statement.operation != Operation::Select)
 }
 
 fn strictest(statements: &[AtomicStatement], limit: impl Fn(&StatementLimits) -> u64) -> u64 {
@@ -973,9 +991,11 @@ impl<C: Compiler> Step<'_, C> {
                 if self.atomic_expired() {
                     return self.expire_atomic(lane);
                 }
-                let versions = self.atomic_run().ok().map(|run| run.versions.clone());
+                let (versions, later_write) = self.atomic_run().map_or((None, false), |run| {
+                    (Some(run.versions.clone()), has_later_write(&run.statements))
+                });
                 let reply = self.execute_failed_reply(
-                    execute_failure(&task, *class),
+                    execute_failure(&task, *class, later_write),
                     *class,
                     FailureDetail {
                         statement: *statement,

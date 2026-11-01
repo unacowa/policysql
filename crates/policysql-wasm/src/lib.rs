@@ -67,7 +67,12 @@ use wasm_bindgen::prelude::*;
 /// `POLICYSQL_JSON_TOO_DEEP` (a depth limit is no longer "not valid JSON"); JSON-typed
 /// parameters are read as their exact text, so their formatting is preserved. No identity
 /// value changed.
-const ABI_VERSION: u32 = 16;
+/// 17: issue #97: an atomic envelope whose response exceeds the adapter's bound (`limit`) is
+/// 500 `POLICYSQL_INTERNAL` instead of 413 `POLICYSQL_LIMIT_EXCEEDED` when a statement after the
+/// first is a write: Hrana runs the rest of a pipeline after an error, and a later write could
+/// have committed in autocommit after an error rolled the transaction back, so the outcome is
+/// unknown, never a definite rejection (ADR 0007). No identity value changed.
+const ABI_VERSION: u32 = 17;
 /// The fixed JSON levels the machine adds when it wraps an interactive command in the
 /// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
 /// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must

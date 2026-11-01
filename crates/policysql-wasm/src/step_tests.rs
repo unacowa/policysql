@@ -134,10 +134,10 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 }
 
 #[test]
-fn abi_16_names_the_step_machine_with_body_and_result_reductions() {
+fn abi_17_names_the_step_machine_with_the_atomic_limit_outcome() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 16);
-    assert!(owner.runtime.snapshot().ends_with(":abi-16"));
+    assert_eq!(owner.runtime.abi_version(), 17);
+    assert!(owner.runtime.snapshot().ends_with(":abi-17"));
 }
 
 /// ADR 0024 pull request 5 with the real compiler: the policy's check triggers on the
