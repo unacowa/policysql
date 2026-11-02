@@ -20,9 +20,9 @@
     // "Pull request 7 results").
     "cpu_ms": 500,
     // The scheduled idempotency cleanup (ADR 0028) spends three subrequests per batch (BEGIN,
-    // DELETE, COMMIT) plus one for its PRAGMA, so its batch cap must fit here;
+    // DELETE, COMMIT) plus three for its PRAGMA, so its batch cap must fit here;
     // test/idempotency-retention.test.mjs checks that arithmetic against this file and
-    // wrapper/idempotency-retention.ts. The fetch path's own use is a few subrequests, far
+    // src/idempotency-cleanup.ts. The fetch path's own use is a few subrequests, far
     // below this value.
     "subrequests": 400
   },

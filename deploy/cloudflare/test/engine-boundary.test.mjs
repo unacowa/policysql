@@ -39,7 +39,7 @@ test("engine modules contain no HTTP status, Request/Response, header name, or r
 
 const ENGINE_MODULES = ["engine.ts", "app.ts", "request-body.ts", "errors.ts", "session.ts", "core-identity.ts",
   "transaction-owner.ts", "transaction-owner-port.ts", "request-step.ts", "step-effects.ts", "database.ts",
-  "driver-values.ts", "presenters.ts"];
+  "driver-values.ts", "presenters.ts", "idempotency-cleanup.ts"];
 
 // ADR 0011 and ADR 0024 pull request 9: no TypeScript decides a transaction outcome. Core
 // (`step_json`) answers every outcome the specification determines; an engine module names
@@ -157,6 +157,12 @@ const FIXED_LITERALS = new Map([
     ["timeoutDuration:1500", [1, "JWKS timeout, in milliseconds"]],
     ["cooldownDuration:30000", [1, "JWKS cooldown, in milliseconds"]],
     ["cacheMaxAge:300000", [1, "JWKS cache age, in milliseconds"]],
+  ])],
+  // The cleanup (ADR 0028) is off the request path and its numbers are retention and batching,
+  // not request limits: the window is the reference wrapper's default, which the caller may
+  // override. The batch size (500) and batch cap (128) are under this scan's threshold.
+  ["idempotency-cleanup.ts", new Map([
+    ["IDEMPOTENCY_RETENTION_DAYS:86400", [1, "30 days in seconds: the reference wrapper's default retention window (an age, not a request limit)"]],
   ])],
   // The recording engine of the conformance suite is a test double with a limit of its own.
   ["http/conformance.ts", new Map([

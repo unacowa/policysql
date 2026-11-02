@@ -1,6 +1,8 @@
 # ADR 0028: Cleanup of `policysql_idempotency` without an advertised window
 
-- Status: accepted (maintainer decision of 2026-11-02: the narrow option, "A")
+- Status: accepted (maintainer decision of 2026-11-02: the narrow option, "A"); amended by the
+  maintainer decision of the same day below ("Amendment: the procedure is published, the
+  schedule is not")
 - Issues: #67
 - Supersedes in part: ADR 0026, "Retention and deletion of `policysql_idempotency` rows"
   (proposed, [PR #79](https://github.com/unacowa/policysql/pull/79); its sections 3, 4 and 6
@@ -41,8 +43,10 @@ growth.
 ## Decision
 
 Adopt **part 1 only**, in the reference wrapper
-(`deploy/cloudflare/wrapper/idempotency-retention.ts`, `wrapper/index.ts`,
-`wrangler.jsonc`, `scripts/provision-dev.mjs`, and the two example `idempotency.sql` files).
+(`deploy/cloudflare/src/idempotency-cleanup.ts` for the procedure,
+`deploy/cloudflare/wrapper/idempotency-retention.ts` for the transport and credentials,
+`wrapper/index.ts`, `wrangler.jsonc`, `scripts/provision-dev.mjs`, and the two example
+`idempotency.sql` files).
 
 - **Window: fixed, 30 days.** `IDEMPOTENCY_RETENTION_DAYS = 30`. It is a constant of the
   wrapper, not a setting, and it is **not advertised**. A client keeps the ADR 0007 promise it
@@ -118,6 +122,43 @@ Adopt **part 1 only**, in the reference wrapper
   the deployed Worker reports a Cron Trigger through the Cloudflare API. The probe rows use a
   `smoke_retention_` key prefix no client can produce and are removed afterwards.
 
+## Amendment: the procedure is published, the schedule is not
+
+Maintainer decision of 2026-11-02, after this ADR was merged: keep the window unadvertised and
+the deletion rule fixed, but put the **fixed procedure** in the published library and leave the
+**periodic invocation** in the deployment, because only that half depends on infrastructure.
+
+This replaces the "no library helper" part of the decision above. The rule it keeps is the one
+the decision was about: the deletion logic is not copied per deployment, and the deployment
+still decides when, where, and with whose credentials it runs.
+
+- **Published (`deploy/cloudflare/src/idempotency-cleanup.ts`, exported from
+  `package.ts`):** `cleanupIdempotency(run, options)` and the constants it needs —
+  `IDEMPOTENCY_CLEANUP_SQL`, `IDEMPOTENCY_COLUMNS_SQL`, `IDEMPOTENCY_CLEANUP_BATCH_SIZE`,
+  `IDEMPOTENCY_CLEANUP_MAX_BATCHES`, `IDEMPOTENCY_RETENTION_DAYS` /
+  `IDEMPOTENCY_RETENTION_SECONDS` — plus the `CleanupRunner` port and the option and result
+  types. It imports nothing: no driver, no `env`, no platform type. The runner is the caller's,
+  and the section above's rule (each batch its own short transaction) is stated as the runner's
+  obligation, not implemented here.
+- **Not published (`deploy/cloudflare/wrapper/idempotency-retention.ts`):**
+  `transportCleanupRunner`, which builds the library's Turso transport from the deployment's
+  own credentials, and `cleanupFromEnv`, which reads `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`
+  and reports `not_configured` when either is missing. With them stay the `scheduled` handler
+  and the Cron Trigger, which are the deployment's by nature.
+- **`retentionSeconds` stays an argument.** The procedure does not fix the window; the reference
+  wrapper passes its 30-day constant. The window is a per-deployment decision (ADR 0019: the
+  wrapper owns what only the deployment knows), and fixing it inside the procedure would make
+  every deployment that wants another window copy the loop — the thing this amendment exists to
+  prevent. `IDEMPOTENCY_RETENTION_SECONDS` is published as a documented default, not as
+  the value every caller must use.
+- **Still not advertised.** Nothing in `Capabilities`, `PolicySqlConfig`, or the request path
+  changed: publishing the procedure adds no setting, no `null` value, no range validation, and
+  no client rule, which is what separates it from ADR 0026's section 5 and its library helper.
+
+What a deployment that is not the reference wrapper does: supply a `CleanupRunner` over its own
+database driver (a function, as `test/idempotency-cleanup.test.mjs` does over `node:sqlite`),
+choose its window and its schedule, and call `cleanupIdempotency`.
+
 ## What this does not promise
 
 - **No advertised window.** Nothing tells a client how long a reply is replayable: no property
@@ -127,11 +168,13 @@ Adopt **part 1 only**, in the reference wrapper
   the first send finds no row and executes it again. That was already
   true of every duration: before this ADR the row would have been found only because nothing
   ever deleted it.
-- **No configured setting, no client margin `M`, no library helper.** The proposed ADR 0026's
-  section 5 and its open questions 4 and 5 stay open. If they are later adopted, the migration
-  order is "migrate, then advertise, then enable cleanup", and an advertised window shorter
-  than this wrapper's 30 days would need the larger one kept until the old one has elapsed: a
-  client that read a longer window must stay covered.
+- **No configured setting, no client margin `M`.** The proposed ADR 0026's section 5 and its
+  open questions 2, 3 and 5 stay open. It also does not adopt the library helper of open
+  question 4; the procedure it publishes instead is narrower, and is described in the
+  amendment below. If section 5 is later adopted, the migration order is "migrate, then
+  advertise, then enable cleanup", and an advertised window shorter than this wrapper's 30 days
+  would need the larger one kept until the old one has elapsed: a client that read a longer
+  window must stay covered.
 - **No deletion by size, by snapshot change, or by hand.** A size cap breaks whatever floor a
   client assumed, and a row stores only hashes, with no snapshot to delete by.
 
@@ -154,7 +197,8 @@ Adopt **part 1 only**, in the reference wrapper
 - **Adopt ADR 0026 in full (parts 2 and 3 as well).** Rejected for now by the maintainer's
   decision: it makes a required setting a breaking change and commits the library to an
   exported helper, for a benefit (clients know the window) that no current client asks for.
-  Nothing here prevents adopting it later.
+  Nothing here prevents adopting it later. (The amendment above publishes a narrower procedure
+  that takes the window as an argument; it is not that helper.)
 - **Bound storage by row count instead of age.** Rejected: it deletes
   rows inside whatever window a client would assume, so a committed write could execute twice
   sooner than any floor.
