@@ -8,8 +8,8 @@
 // workerd returns the 3xx response itself; browsers and some runtimes return an
 // `opaqueredirect` response with status 0 instead.
 //
-// test/worker-fetch-redirect.test.mjs enforces that this is the only Worker source
-// file that sets the redirect mode or calls the global fetch.
+// eslint.config.js (the outbound rule, issue #59) and test/boundary.test.mjs enforce that this
+// is the only Worker source file that sets the redirect mode or calls the global fetch.
 
 export type OutboundFetch = (input: string | URL, init: RequestInit) => Promise<Response>;
 export type NoFollowInit = Omit<RequestInit, "redirect">;

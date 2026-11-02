@@ -177,6 +177,29 @@ export const validateBackgroundTasks = (background: unknown): BackgroundTasks | 
   return background as BackgroundTasks;
 };
 
+/**
+ * The commit-check call the owner makes (ADR 0007, ADR 0024 step 5). The owner decides *that*
+ * a check runs and with what payload; how the request is signed and sent is the deployment's,
+ * so this is a port like the database (ADR 0019): the reference wrapper passes the adapter in
+ * `src/adapters/commit-check-hook.ts`, and the engine imports no outbound HTTP.
+ */
+export type CommitCheckCall = {
+  /** The validator endpoint, already checked by the engine. */
+  url: URL;
+  hmacSecret: string;
+  /** The deployment's public base URL; the callback URL is built under it. */
+  publicBaseUrl: URL;
+  validationId: string;
+  /** The hook body without `query`, in its wire key order. */
+  payload: Record<string, unknown>;
+  /** The opaque capability for callback queries and its expiry. */
+  capability: { token: string; expiresAtMs: number };
+  timeoutMs: number;
+};
+
+/** Sends one commit-check call: whether the reply was 2xx, and its JSON body. */
+export type CommitCheckCaller = (call: CommitCheckCall) => Promise<{ ok: boolean; decision: unknown }>;
+
 export const validateOwnerFacilities = (facilities: unknown): OwnerFacilities => {
   if (!isObject(facilities) || !hasMethods(facilities.store, ["get", "put"]) ||
     !hasMethods(facilities.timer, ["schedule"]) || !hasMethods(facilities.background, ["run"])) {

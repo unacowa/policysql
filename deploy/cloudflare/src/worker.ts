@@ -3,6 +3,7 @@
 import { createApp } from "./app.ts";
 import type { PolicySqlApp } from "./app.ts";
 import { executionContextTasks } from "./adapters/durable-objects.ts";
+import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
 import { ConfigError } from "./engine-config.ts";
 import type { PolicySqlConfig } from "./engine-config.ts";
 import { createErrorResponse } from "./http/responses.ts";
@@ -90,7 +91,7 @@ export const createWorkerEntrypoints = <Env extends object>({
    */
   const ownerDependencies = (env: Env): TransactionOwnerDependencies => {
     const { getRuntime: runtime, database, config } = build(env);
-    return { getRuntime: runtime, database, config };
+    return { getRuntime: runtime, database, config, commitCheckHook: callCommitCheckHook };
   };
   return { getRuntime, app, engine, ownerDependencies };
 };

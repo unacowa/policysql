@@ -1,0 +1,32 @@
+{
+  // The engine, type-checked without the Workers or DOM type packages (issue #59, ADR 0019).
+  //
+  // `types: []` removes `@cloudflare/workers-types`, and `lib: ["ES2022"]` has no DOM. What
+  // remains is JavaScript plus the host surface this repository declares for the engine
+  // (src/engine-globals.d.ts). So an engine module cannot name `Request`, `Response`,
+  // `Headers`, the global `fetch`, `DurableObject*`, `ExecutionContext`, or `waitUntil` and
+  // compile: no scanner has to look for them, and no spelling of them gets past the type
+  // checker.
+  //
+  // The adapters (src/http/, src/adapters/, the outbound transports) and the assembly
+  // (worker.ts, package.ts, app.ts) legitimately speak HTTP and the platform; they are
+  // checked by tsconfig.json, which has the Workers types.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [],
+    "lib": ["ES2022"]
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": [
+    "src/http/**",
+    "src/adapters/**",
+    "src/turso-http.ts",
+    "src/redirects.ts",
+    "src/bounded-body.ts",
+    "src/worker.ts",
+    "src/package.ts",
+    "src/app.ts",
+    "src/modules.d.ts",
+    "src/policy-staged.ts"
+  ]
+}

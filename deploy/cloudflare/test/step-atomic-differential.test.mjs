@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { createEngine } from "../src/engine.ts";
+import { callCommitCheckHook } from "../src/adapters/commit-check-hook.ts";
 import { EngineError } from "../src/errors.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
 import { validateConfig } from "../src/engine-config.ts";
@@ -332,7 +333,7 @@ const environment = (t, { limits = {}, trace = false, engineConfig = config, rec
         throw error;
       }
     };
-    const ownerDependencies = { getRuntime, database, config: engineConfig, fetchImpl };
+    const ownerDependencies = { getRuntime, database, config: engineConfig, commitCheckHook: (call) => callCommitCheckHook({ ...call, fetchImpl }) };
     const owners = createMemoryTransactionOwners(() => ownerDependencies, { background });
     owners.interceptPut(({ value }) => faults.put?.({ phase: typeof value === "string" ? JSON.parse(value).phase : value?.status }));
     const engine = createEngine({ getRuntime, database, config: engineConfig, transactionOwners: owners.port, ...(executionTrace ? { executionTrace } : {}) });
