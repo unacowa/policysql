@@ -47,9 +47,11 @@ import { EngineError, internalError, operationError } from "../errors.ts";
 import { stringifyExact } from "../exact-json.ts";
 import { statusFor } from "../http/status.ts";
 import { TransactionOwnerCore } from "../transaction-owner.ts";
+import type { CoreEnvelope } from "../core-wire.ts";
 import type { TransactionOwnerDependencies } from "../transaction-owner.ts";
 import type {
-  BackgroundTasks, OwnerCommandKind, OwnerFacilities, OwnerReply, TransactionOwnerHandle, TransactionOwnerPort,
+  BackgroundTasks, OwnerAtomicInput, OwnerBeginInput, OwnerCallbackInput, OwnerCommandInput, OwnerCommandKind,
+  OwnerFacilities, OwnerReply, TransactionOwnerHandle, TransactionOwnerPort,
 } from "../transaction-owner-port.ts";
 import { OWNER_NAME } from "../transaction-owner-port.ts";
 
@@ -79,11 +81,18 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
       : internalError();
     return { ok: false, error: operationError(error) };
   }
-  let parsed: any;
-  try { parsed = await response.json(); } catch { throw internalError(); }
+  let parsed: CoreEnvelope;
+  try { parsed = await response.json() as CoreEnvelope; } catch { throw internalError(); }
   if (response.ok) return { ok: true, value: parsed };
   const error = parsed?.error;
-  return { ok: false, error: { code: error?.code, message: error?.message, path: error?.path ?? null } };
+  return {
+    ok: false,
+    error: {
+      code: typeof error?.code === "string" ? error.code : "POLICYSQL_INTERNAL",
+      message: typeof error?.message === "string" ? error.message : "The request could not be completed.",
+      path: typeof error?.path === "string" ? error.path : null,
+    },
+  };
 };
 
 // Object side: a reply as the wire response.
@@ -99,7 +108,7 @@ const replyResponse = (reply: OwnerReply, path: string, requestId: string) => {
 };
 
 /** Routing over a Durable Object namespace: one object per owner name. */
-export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace): TransactionOwnerPort => {
+export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace | undefined): TransactionOwnerPort => {
   if (!namespace || typeof namespace.get !== "function" || typeof namespace.idFromName !== "function") {
     throw new TypeError("durableObjectTransactionOwners requires a Durable Object namespace binding");
   }
@@ -123,10 +132,16 @@ export const durableObjectTransactionOwners = (namespace: DurableObjectNamespace
 };
 
 /** Owner-side facilities over the object's state: storage, its single alarm, waitUntil. */
+/** The object's own name, where the platform reports one the wire accepts. */
+const objectName = (state: DurableObjectState): string | undefined => {
+  const id = (state as unknown as { id?: { name?: unknown } }).id;
+  return typeof id?.name === "string" && OWNER_NAME.test(id.name) ? id.name : undefined;
+};
+
 export const durableObjectFacilities = (state: DurableObjectState): OwnerFacilities => ({
   // The object's own name, where the platform reports it; otherwise the owner takes the name
   // each message carries.
-  ...(typeof (state as any).id?.name === "string" && OWNER_NAME.test((state as any).id.name) ? { name: (state as any).id.name } : {}),
+  ...(objectName(state) === undefined ? {} : { name: objectName(state) as string }),
   store: {
     get: (key) => state.storage.get(key),
     put: (key, value) => state.storage.put(key, value),
@@ -140,7 +155,7 @@ export const durableObjectFacilities = (state: DurableObjectState): OwnerFacilit
 const serve = async (core: TransactionOwnerCore, request: Request): Promise<Response> => {
   // The core falls back to a fresh id for an empty one; the error body uses the same rule.
   const requestId = request.headers.get(REQUEST_ID_HEADER) || crypto.randomUUID();
-  let body: any = null;
+  let body: unknown = null;
   try { body = await request.json(); } catch { body = null; }
   const path = new URL(request.url).pathname;
   let reply: OwnerReply;
@@ -150,13 +165,13 @@ const serve = async (core: TransactionOwnerCore, request: Request): Promise<Resp
     // fault. Nothing reaches the machine.
     console.log(JSON.stringify({ event: "owner_message_rejected", requestId, path }));
     reply = { ok: false, error: operationError(internalError()) };
-  } else if (path === "/begin") reply = await core.begin(body, requestId);
-  else if (path === "/atomic") reply = await core.atomic(body, requestId);
-  else if (path === "/validation-query") reply = await core.callbackQuery(body, requestId);
+  } else if (path === "/begin") reply = await core.begin(body as OwnerBeginInput, requestId);
+  else if (path === "/atomic") reply = await core.atomic(body as OwnerAtomicInput, requestId);
+  else if (path === "/validation-query") reply = await core.callbackQuery(body as OwnerCallbackInput, requestId);
   else {
     const kind = (Object.keys(COMMAND_PATHS) as OwnerCommandKind[]).find((name) => COMMAND_PATHS[name] === path);
     // An unknown path reaches the core as an unknown kind, which it rejects as invalid.
-    reply = await core.command(kind ?? (path as OwnerCommandKind), body, requestId);
+    reply = await core.command(kind ?? (path as OwnerCommandKind), body as OwnerCommandInput, requestId);
   }
   return replyResponse(reply, path, requestId);
 };

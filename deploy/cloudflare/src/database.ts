@@ -83,7 +83,7 @@ export const remainingDatabaseTime = (deadlineMs?: number) => {
 
 export const validateDatabaseProvider = (provider: unknown) => {
   if (!provider || typeof provider !== "object" ||
-    ["check", "connect"].some((key) => typeof provider[key] !== "function")) {
+    ["check", "connect"].some((key) => typeof (provider as Record<string, unknown>)[key] !== "function")) {
     throw new TypeError("database is required and must provide check and connect functions");
   }
   if (typeof (provider as { streamedReadCap?: unknown }).streamedReadCap !== "boolean") {
@@ -111,7 +111,7 @@ export const noteReadCap = (provider: DatabaseProvider, maxResultBytes: number) 
 const bounded = async <T>(operation: () => T | Promise<T>, deadlineMs?: number): Promise<T> => {
   const remaining = remainingDatabaseTime(deadlineMs);
   const providerDeadline = Date.now() + 1_000;
-  let timer: ReturnType<typeof setTimeout>;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const value = await Promise.race([
       // Normalize only provider failures; preserve our own deadline error.
@@ -123,7 +123,7 @@ const bounded = async <T>(operation: () => T | Promise<T>, deadlineMs?: number):
     remainingDatabaseTime(deadlineMs);
     if (Date.now() >= providerDeadline) throw unavailable();
     return value;
-  } finally { clearTimeout(timer); }
+  } finally { if (timer !== undefined) clearTimeout(timer); }
 };
 
 export const validateDatabaseBinding = (value: unknown, snapshot: string): DatabaseBinding => {
@@ -142,17 +142,24 @@ export const validateDatabaseBinding = (value: unknown, snapshot: string): Datab
 // Key-sorted JSON text, to compare two bindings as values. Nothing is hashed or stored, and the
 // text is never compared with a value core computed (ADR 0025), so it need not be core's
 // canonical form.
-const stableJson = (value) => {
+const stableJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
   }
-  return JSON.stringify(value);
+  return JSON.stringify(value) ?? "null";
 };
 
-export const sameDatabaseBinding = (left, right) => stableJson(left ?? null) === stableJson(right ?? null);
+export const sameDatabaseBinding = (left: unknown, right: unknown): boolean =>
+  stableJson(left ?? null) === stableJson(right ?? null);
 
-export const checkDatabaseBinding = async (provider: DatabaseProvider, binding, snapshot, deadlineMs?: number) => {
+export const checkDatabaseBinding = async (
+  provider: DatabaseProvider,
+  binding: unknown,
+  snapshot: string,
+  deadlineMs?: number,
+): Promise<DatabaseBinding> => {
   validateDatabaseProvider(provider);
   if (binding === undefined || binding === null) throw databaseRequired();
   const checked = validateDatabaseBinding(binding, snapshot);
@@ -166,7 +173,7 @@ export const databaseTransportFactory = (
   maxBytesPerValue: number,
   deadlineMs?: number,
 ) => {
-  const pinned = validateDatabaseBinding(binding, binding?.snapshot);
+  const pinned = validateDatabaseBinding(binding, binding.snapshot);
   const options: DatabaseTransportOptions = Object.freeze({ maxBytesPerValue: bytesLimit(maxBytesPerValue) });
   return async (requestId: string, executionDeadlineMs?: number): Promise<DatabaseTransport> => {
     const startedAt = Date.now();

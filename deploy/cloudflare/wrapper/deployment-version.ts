@@ -89,6 +89,14 @@ export const isOwnerVersionProbe = (request: Request): boolean =>
 
 export const ownerVersionReply = (env: VersionBindings) => json({ version: deploymentVersion(env) });
 
+/**
+ * A Durable Object class constructor: `(state, env)` and a `fetch` (the platform's shape).
+ *
+ * The rest parameter is `any[]` because TypeScript requires exactly that of a mixin base
+ * (TS2545); it is the one place in Worker source where `any` is forced by the language rather
+ * than chosen, so the lint rule is disabled for this declaration alone.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type OwnerClass = new (...args: any[]) => { fetch(request: Request): Promise<Response> };
 
 /**
@@ -98,8 +106,10 @@ type OwnerClass = new (...args: any[]) => { fetch(request: Request): Promise<Res
 export const withOwnerVersionProbe = <Base extends OwnerClass>(Library: Base) => {
   class Probed extends Library {
     versionEnv: VersionBindings;
+    // The mixin constructor takes the base's arguments as a rest parameter (TS2545).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     constructor(...args: any[]) {
-      super(args[0], args[1]);
+      super(...args);
       this.versionEnv = { CF_VERSION_METADATA: (args[1] as VersionBindings | undefined)?.CF_VERSION_METADATA };
     }
     fetch(request: Request): Promise<Response> {

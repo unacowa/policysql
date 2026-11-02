@@ -1,6 +1,6 @@
 import { CommitNotSentError, EngineError, binaryLimitExceeded } from "./errors.ts";
 import { remainingDatabaseTime } from "./database.ts";
-import type { DatabaseExecuteOptions, DatabaseTransportOptions } from "./database.ts";
+import type { DatabaseExecuteOptions, DatabaseResult, DatabaseTransportOptions, DatabaseUsage } from "./database.ts";
 import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.ts";
 import { discardBody, fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
@@ -46,7 +46,25 @@ const databaseFailure = () =>
 // `maxBytes` comes from the runtime through DatabaseTransportOptions. Without it the
 // transport validates BLOB encoding only, inside the bounded HTTP response, and
 // PolicySQL classifies size with the runtime limit before WASM (rawDriverValue).
-const encodeValue = (value, maxBytes: number) => {
+//
+// The Hrana wire shapes below are the transport's own output. They are narrow on purpose:
+// everything the server sends back is `unknown` until `decodeResult` has checked it, so the
+// emitted half can be typed and the received half cannot be trusted by construction.
+type HranaValue =
+  | { type: "null" }
+  | { type: "text"; value: string }
+  | { type: "integer"; value: string }
+  | { type: "float"; value: number }
+  | { type: "blob"; base64: string };
+
+type HranaStatement = { sql: string; args?: Record<string, unknown> };
+type PipelineRequest =
+  | { type: "execute"; stmt: { sql: string; named_args: Array<{ name: string; value: HranaValue }> } }
+  | { type: "close" };
+/** A parsed reply: its results are still unchecked, its baton is the only field read unvalidated. */
+type PipelineReply = { readonly results: unknown[]; readonly baton: string | null };
+
+const encodeValue = (value: unknown, maxBytes: number): HranaValue => {
   if (value === null) return { type: "null" };
   if (typeof value === "string") return { type: "text", value };
   if (typeof value === "boolean") return { type: "integer", value: value ? "1" : "0" };
@@ -76,11 +94,14 @@ const decodeHranaBlob = (value: string, maxBytes: number): Uint8Array => {
   return decodeBlob(value, maxBytes);
 };
 
-const decodeValue = (value, maxBytes: number) => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw databaseFailure();
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const decodeValue = (value: unknown, maxBytes: number): unknown => {
+  if (!isRecord(value)) throw databaseFailure();
   if (value.type === "null") return null;
   if (value.type === "text" && typeof value.value === "string") return value.value;
-  if (value.type === "integer" && typeof value.value === "string" && /^-?\d+$/.test(value.value)) {
+  if (value.type === "integer" && typeof value.value === "string" && /^-?\d+$/u.test(value.value)) {
     const number = Number(value.value);
     if (!Number.isSafeInteger(number)) throw databaseFailure();
     return number;
@@ -97,7 +118,7 @@ const decodeValue = (value, maxBytes: number) => {
   throw databaseFailure();
 };
 
-const executeRequest = ({ sql, args = {} }, maxBytes: number) => ({
+const executeRequest = ({ sql, args = {} }: HranaStatement, maxBytes: number): PipelineRequest => ({
   type: "execute",
   stmt: {
     sql,
@@ -105,39 +126,40 @@ const executeRequest = ({ sql, args = {} }, maxBytes: number) => ({
   },
 });
 
-const decodeResult = (entry, maxBytes: number) => {
-  if (entry?.type !== "ok" || entry.response?.type !== "execute") throw databaseFailure();
-  const result = entry.response.result;
+const decodeResult = (entry: unknown, maxBytes: number): DatabaseResult => {
+  // `entry` is the server's: `entry.response.result` is checked field by field below.
+  const reply = isRecord(entry) && entry.type === "ok" && isRecord(entry.response) ? entry.response : undefined;
+  if (reply?.type !== "execute" || !isRecord(reply.result)) throw databaseFailure();
+  const result = reply.result;
   if (
-    !result ||
     !Array.isArray(result.cols) ||
     !Array.isArray(result.rows) ||
     !Number.isSafeInteger(result.affected_row_count) ||
-    result.affected_row_count < 0 ||
+    (result.affected_row_count as number) < 0 ||
     !Number.isSafeInteger(result.rows_read) ||
-    result.rows_read < 0 ||
+    (result.rows_read as number) < 0 ||
     !Number.isSafeInteger(result.rows_written) ||
-    result.rows_written < 0 ||
+    (result.rows_written as number) < 0 ||
     typeof result.query_duration_ms !== "number" ||
     !Number.isFinite(result.query_duration_ms) ||
     result.query_duration_ms < 0
   ) throw databaseFailure();
-  const columns = result.cols.map((column) => {
-    if (!column || typeof column.name !== "string") throw databaseFailure();
+  const columns = result.cols.map((column: unknown) => {
+    if (!isRecord(column) || typeof column.name !== "string") throw databaseFailure();
     return column.name;
   });
   if (new Set(columns).size !== columns.length) throw databaseFailure();
-  const rows = result.rows.map((row) => {
+  const rows = result.rows.map((row: unknown) => {
     if (!Array.isArray(row) || row.length !== columns.length) throw databaseFailure();
-    return row.map((value) => decodeValue(value, maxBytes));
+    return row.map((value: unknown) => decodeValue(value, maxBytes));
   });
   return {
     columns,
     rows,
-    rowsAffected: result.affected_row_count,
+    rowsAffected: result.affected_row_count as number,
     usage: {
-      rowsRead: result.rows_read,
-      rowsWritten: result.rows_written,
+      rowsRead: result.rows_read as number,
+      rowsWritten: result.rows_written as number,
       queryDurationMs: result.query_duration_ms,
     },
   };
@@ -149,7 +171,7 @@ export class TursoHttpTransport {
   readonly requestId: string;
   readonly fetchImpl?: OutboundFetch;
 
-  constructor(connection: { url: string; authToken: string }, requestId, fetchImpl: OutboundFetch | undefined = undefined) {
+  constructor(connection: { url: string; authToken: string }, requestId: string, fetchImpl: OutboundFetch | undefined = undefined) {
     if (!connection?.url || !connection?.authToken) throw databaseFailure();
     const url = new URL(connection.url);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
@@ -179,10 +201,18 @@ export class TursoHttpTransport {
   // bound, so the caller can recover its baton (#97). Statement execution asks for them because
   // its over-bound class is the 413 limit; BEGIN asks explicitly because its over-bound class is
   // the 503 default, but it still needs the baton to roll back a transaction the server started.
-  async pipeline(requests, baton = undefined, timeoutMs = 1_000, oversized = databaseFailure, maxResponseBytes = CONTROL_RESPONSE_BYTES, readDeclaredPrefix = oversized !== databaseFailure) {
+  async pipeline(
+    requests: PipelineRequest[],
+    baton: string | undefined = undefined,
+    timeoutMs = 1_000,
+    oversized: () => Error = databaseFailure,
+    maxResponseBytes = CONTROL_RESPONSE_BYTES,
+    readDeclaredPrefix = oversized !== databaseFailure,
+  ): Promise<PipelineReply> {
     const signal = AbortSignal.timeout(timeoutMs);
     const timedOut = () => new EngineError("POLICYSQL_DATABASE_TIMEOUT", "The database operation timed out.");
-    const isAbort = (error) => error?.name === "TimeoutError" || error?.name === "AbortError";
+    const isAbort = (error: unknown) => (error as { name?: unknown } | null)?.name === "TimeoutError"
+      || (error as { name?: unknown } | null)?.name === "AbortError";
     // fetchNoFollow never follows a redirect (it would forward the bearer token) and
     // rejects one unread; that rejection is a 503 like any other transport failure.
     const response = await fetchNoFollow(this.url, {
@@ -210,17 +240,17 @@ export class TursoHttpTransport {
       if (isAbort(error)) throw withBaton(timedOut(), leading.text);
       throw withBaton(databaseFailure(), leading.text);
     });
-    let body;
+    let body: unknown;
     try { body = JSON.parse(text); } catch { throw withBaton(databaseFailure(), text); }
-    if (!body || !Array.isArray(body.results) || !(body.baton === null || typeof body.baton === "string")) {
+    if (!isRecord(body) || !Array.isArray(body.results) || !(body.baton === null || typeof body.baton === "string")) {
       throw withBaton(databaseFailure(), text);
     }
     // The JSON is parsed, so the baton is read from it: no pattern and no key order (#97).
     if (body.results.length !== requests.length) throw withReplyBaton(databaseFailure(), body);
-    return body;
+    return body as PipelineReply;
   }
 
-  async begin(mode, timeoutMs, deadlineMs: number | undefined, options: DatabaseTransportOptions) {
+  async begin(mode: "read" | "write", timeoutMs: number, deadlineMs: number | undefined, options: DatabaseTransportOptions) {
     // The runtime's per-value limit is required. An omitted or malformed limit fails
     // closed before any request, so a direct caller cannot disable the BLOB bound.
     const maxBytes = bytesLimit(options?.maxBytesPerValue);
@@ -244,7 +274,7 @@ export class TursoHttpTransport {
       if (validBaton(next)) await this.recoverStream(next, maxBytes, timeoutMs);
       throw error;
     }
-    let beginResult;
+    let beginResult: DatabaseResult;
     try {
       beginResult = decodeResult(body.results[0], maxBytes);
     } catch (error) {
@@ -262,9 +292,9 @@ export class TursoHttpTransport {
    * BEGIN (before a transaction object exists) and an abandoned transaction both use it. Never
    * throws: the caller's failure is already terminal. Logs only the outcome, never the baton.
    */
-  async recoverStream(baton: string, maxBytes: number, timeoutMs: number) {
+  async recoverStream(baton: string, maxBytes: number, timeoutMs: number): Promise<DatabaseUsage | null> {
     let outcome = "refused";
-    let usage: any = null;
+    let usage: DatabaseUsage | null = null;
     try {
       const body = await this.pipeline(
         [executeRequest({ sql: "ROLLBACK" }, maxBytes), { type: "close" }],
@@ -272,7 +302,10 @@ export class TursoHttpTransport {
         timeoutMs,
       );
       usage = decodeResult(body.results[0], maxBytes).usage;
-      if (body.results[1]?.type === "ok" && body.results[1].response?.type === "close") outcome = "rolled_back";
+      const close = body.results[1];
+      if (isRecord(close) && close.type === "ok" && isRecord(close.response) && close.response.type === "close") {
+        outcome = "rolled_back";
+      }
     } catch { /* best effort: the stream is abandoned either way */ }
     logStreamRecovery(this.requestId, outcome);
     return usage;
@@ -289,9 +322,16 @@ class TursoHttpTransaction {
   open: boolean;
   /** The reply to the last request on the stream was not read, so its baton is unknown (#96). */
   unusable = false;
-  readonly usage: any[];
+  readonly usage: DatabaseUsage[];
 
-  constructor(transport, baton, timeoutMs, beginUsage, deadlineMs: number | undefined, maxBytes: number) {
+  constructor(
+    transport: TursoHttpTransport,
+    baton: string,
+    timeoutMs: number,
+    beginUsage: DatabaseUsage,
+    deadlineMs: number | undefined,
+    maxBytes: number,
+  ) {
     this.transport = transport;
     this.baton = baton;
     this.timeoutMs = timeoutMs;
@@ -301,7 +341,7 @@ class TursoHttpTransaction {
     this.usage = [beginUsage];
   }
 
-  async execute(statements, options: DatabaseExecuteOptions) {
+  async execute(statements: HranaStatement[], options: DatabaseExecuteOptions): Promise<DatabaseResult[]> {
     if (!this.open) throw databaseFailure();
     // The read cap is core's. An omitted or malformed one fails closed before any request, so a
     // direct caller cannot read an unbounded reply.
@@ -310,8 +350,8 @@ class TursoHttpTransaction {
     // Nothing is sent yet: an expired deadline or an unencodable value fails here, and the stream
     // stays usable (the baton is still the server's current one).
     const timeoutMs = Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs));
-    const requests = statements.map((statement) => executeRequest(statement, this.maxBytes));
-    let body;
+    const requests = statements.map((statement): PipelineRequest => executeRequest(statement, this.maxBytes));
+    let body: PipelineReply;
     try {
       body = await this.transport.pipeline(
         requests,
@@ -339,7 +379,8 @@ class TursoHttpTransaction {
     // The Hrana error object of a refused statement is read here, and only for statement
     // requests (never BEGIN, COMMIT, or ROLLBACK): the first refused statement decides, and its
     // message is read only to classify it (src/database-complexity.ts).
-    const errors = body.results.flatMap((entry, index) => (entry?.type === "error" ? [index] : []));
+    const errors = body.results.flatMap((entry, index) =>
+      (isRecord(entry) && entry.type === "error" ? [index] : []));
     if (errors.length > 0) {
       // Hrana runs the rest of the pipeline after an error. The refusal is a complexity refusal
       // only when it is the one error and the last statement: then nothing ran after it, so no
@@ -348,18 +389,18 @@ class TursoHttpTransaction {
       // unclassified 503, whose outcome is not a definite rejection.
       const [refused] = errors;
       const alone = errors.length === 1 && refused === body.results.length - 1;
-      const failure = statementFailure(body.results[refused].error, refused);
+      const refusedEntry = body.results[refused];
+      const failure = statementFailure(isRecord(refusedEntry) ? refusedEntry.error : undefined, refused);
       // The message is dropped so that the failure cannot classify as complexity.
-      throw alone || !(failure instanceof SqlComplexityError)
-        ? failure
-        : statementFailure({ code: body.results[refused].error?.code }, refused);
+      const code = isRecord(refusedEntry) && isRecord(refusedEntry.error) ? refusedEntry.error.code : undefined;
+      throw alone || !(failure instanceof SqlComplexityError) ? failure : statementFailure({ code }, refused);
     }
     const results = body.results.map((entry) => decodeResult(entry, this.maxBytes));
     this.usage.push(...results.map((result) => result.usage));
     return results;
   }
 
-  async finish(sql) {
+  async finish(sql: "COMMIT" | "ROLLBACK"): Promise<void> {
     if (!this.open) return;
     // A stream whose last reply was never read cannot be continued with certainty: the baton
     // held here may already be stale. ROLLBACK still makes one bounded best-effort attempt with
@@ -395,7 +436,8 @@ class TursoHttpTransaction {
       );
       const terminal = decodeResult(body.results[0], this.maxBytes);
       this.usage.push(terminal.usage);
-      if (body.results[1]?.type !== "ok" || body.results[1].response?.type !== "close") {
+      const close = body.results[1];
+      if (!isRecord(close) || close.type !== "ok" || !isRecord(close.response) || close.response.type !== "close") {
         throw databaseFailure();
       }
       this.open = false;

@@ -3,7 +3,10 @@ import type { RuntimeLimits } from "../src/limits.ts";
 // The only place this deployment sets limits (ADR 0024). The engine enforces and
 // Capabilities advertises exactly these values, as the runtime reports them; the release
 // smoke (scripts/provision-dev.mjs) checks the deployed Capabilities against this object.
-export const RUNTIME_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
+// `satisfies` checks the table against `RuntimeLimits` while keeping the literal type: the
+// derived fields this wrapper sets (transaction limit, response bound, per-value bound) stay
+// `number` rather than `number | undefined`, so a reader needs no narrowing (issue #44).
+export const RUNTIME_LIMITS = Object.freeze({
   maxRows: 100,
   maxResultBytes: 64_000,
   timeoutMs: 1_000,
@@ -26,4 +29,4 @@ export const RUNTIME_LIMITS: Readonly<RuntimeLimits> = Object.freeze({
   // The whole response (ADR 0027 pull request 6): the result limit and 64 KiB for the envelope,
   // the column descriptors, and the statements' framing. The runtime's default is the same value.
   maxResponseBytes: 129_536,
-});
+} satisfies Readonly<RuntimeLimits>);

@@ -9,11 +9,12 @@ const mismatch = () => new EngineError("POLICYSQL_SCHEMA_MISMATCH", "The databas
 
 // Only LogicalValue::Bytes is emitted as an object by the private WASM ABI.
 // JSON parameters have already been validated and serialized to driver TEXT.
-const driverValue = (value, maxBytes: number) => {
+const driverValue = (value: unknown, maxBytes: number): unknown => {
   if (value === null || ["string", "boolean", "number"].includes(typeof value)) return value;
-  if (!value || Array.isArray(value) || Object.keys(value).length !== 2 ||
-      value.type !== "blob" || !Object.hasOwn(value, "base64")) throw internal();
-  try { return decodeBlob(value.base64, maxBytes); } catch { throw internal(); }
+  if (typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== 2) throw internal();
+  const tagged = value as { type?: unknown; base64?: unknown };
+  if (tagged.type !== "blob" || typeof tagged.base64 !== "string" || !Object.hasOwn(tagged, "base64")) throw internal();
+  try { return decodeBlob(tagged.base64, maxBytes); } catch { throw internal(); }
 };
 
 // An `execute` effect's arguments: core has already merged the client and server namespaces
@@ -23,7 +24,7 @@ export const driverArgs = (args: Record<string, unknown>, maxBytes: number) => {
   return Object.fromEntries(Object.entries(args).map(([name, value]) => [name, driverValue(value, maxBytes)]));
 };
 
-export const rawDriverValue = (value, maxBytes: number) => {
+export const rawDriverValue = (value: unknown, maxBytes: number): unknown => {
   bytesLimit(maxBytes);
   if (typeof value === "number" && !Number.isFinite(value)) throw mismatch();
   if (typeof value === "bigint") {
@@ -43,18 +44,18 @@ export const rawDriverValue = (value, maxBytes: number) => {
   return value;
 };
 
-export const rowValues = (columns, row) => {
+export const rowValues = (columns: string[], row: unknown): unknown[] => {
   if (Array.isArray(row)) {
     if (row.length !== columns.length) throw mismatch();
     return columns.map((_column, index) => {
-      if (!Object.hasOwn(row, index)) throw mismatch();
-      return row[index];
+      if (!Object.hasOwn(row as unknown[], index)) throw mismatch();
+      return (row as unknown[])[index];
     });
   }
   if (!row || typeof row !== "object") throw mismatch();
   return columns.map((column, index) => {
-    if (Object.hasOwn(row, index)) return row[index];
-    if (Object.hasOwn(row, column)) return row[column];
+    if (Object.hasOwn(row, index)) return (row as Record<string, unknown>)[index];
+    if (Object.hasOwn(row, column)) return (row as Record<string, unknown>)[column];
     throw mismatch();
   });
 };

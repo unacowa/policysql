@@ -29,6 +29,8 @@ import {
 } from "./transaction-owner-port.ts";
 import type { BackgroundTasks, OwnerReply, TransactionOwnerHandle } from "./transaction-owner-port.ts";
 import type { AppDependencies, AuthContext, EngineDependencies, RequestContext } from "./types.ts";
+import type { PolicySqlRuntime } from "../pkg/policysql_wasm.js";
+import type { CompiledResponse } from "./core-wire.ts";
 
 export type { BodyText } from "./request-body.ts";
 
@@ -210,7 +212,9 @@ const validatePublicConfig = (publicConfig: unknown) => {
   for (const key of Object.keys(publicConfig)) {
     if (key === "limits") throw new TypeError("publicConfig.limits was removed; limits are configured only as RuntimeLimits");
     if (key !== "schemaVersion" && key !== "policyVersion") throw new TypeError(`publicConfig.${key} is not a setting`);
-    if (typeof publicConfig[key] !== "string") throw new TypeError(`publicConfig.${key} must be a string`);
+    if (typeof (publicConfig as Record<string, unknown>)[key] !== "string") {
+      throw new TypeError(`publicConfig.${key} must be a string`);
+    }
   }
 };
 
@@ -262,7 +266,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
     }
   };
 
-  const snapshotRead = (access: RequiredAccess, present: (runtime: any, auth: AuthContext) => unknown) =>
+  const snapshotRead = (access: RequiredAccess, present: (runtime: PolicySqlRuntime, auth: AuthContext) => unknown) =>
     (input: SnapshotInput, context: RequestContext): Promise<SnapshotResult> => run(context, undefined, async (checked) => {
       const fields = operationInput<SnapshotInput>(input, ["role", "ifNoneMatch"]);
       const auth = authorize(checked, fields.role, access);
@@ -302,7 +306,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
   // A body the operation does not otherwise parse (execute, explain, and a transaction
   // command): core's strict check is the only parse here, and a body it rejects never reaches
   // a database or an owner.
-  const checkBody = (runtime: any, text: string) => {
+  const checkBody = (runtime: PolicySqlRuntime, text: string) => {
     parsedRuntimeCall(runtime.check_body_json(text));
   };
 
@@ -340,7 +344,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       await checkDatabaseBinding(dependencies.database, checked.databaseBinding, runtime.snapshot);
       const body = await readBody(fields.bodyText);
       checkBody(runtime, body);
-      const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body, "explain"));
+      const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body, "explain")) as unknown as CompiledResponse;
       return { ok: true as const, value: explainResponse(compiled, auth, checked.requestId) };
     }),
 
@@ -424,9 +428,8 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       // strict rules are the same as every other body, and the engine no longer builds a tree
       // of the whole body here (ADR 0027 pull request 7).
       const begin = parsedRuntimeCall(runtime.begin_body_json(body));
-      if (!begin || typeof begin.mode !== "string" || !["read", "write"].includes(begin.mode)) {
-        throw invalidRequest();
-      }
+      const mode = begin.mode;
+      if (mode !== "read" && mode !== "write") throw invalidRequest();
       const expected = begin.expected as { schemaVersion: unknown; policyVersion: unknown } | undefined;
       if (expected !== undefined &&
         (expected === null || typeof expected !== "object" || Array.isArray(expected) ||
@@ -451,7 +454,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       const reply: OwnerReply = await owner(transactionId).begin({
         transactionId,
         startFingerprint,
-        mode: begin.mode,
+        mode,
         auth,
         // Omitted, not undefined, when absent: the owner checks exact keys.
         ...(expected === undefined ? {} : { expected }),

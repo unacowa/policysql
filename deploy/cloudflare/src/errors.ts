@@ -59,12 +59,13 @@ export const operationError = (error: unknown): OperationError => error instance
   : { code: "POLICYSQL_INTERNAL", message: "The request could not be completed.", path: null };
 
 /** Core's `{ error: { code, message, path } }` result as an EngineError, or null for a success. */
-export const wasmError = (body: any): EngineError | null => {
-  const code = body?.error?.code;
-  if (!code) return null;
+export const wasmError = (body: unknown): EngineError | null => {
+  const envelope = (body as { error?: { code?: unknown; message?: unknown; path?: unknown } } | null)?.error;
+  const code = envelope?.code;
+  if (typeof code !== "string" || !code) return null;
   return new EngineError(
     code,
-    body.error.message ?? "The request could not be completed.",
-    typeof body.error.path === "string" ? body.error.path : null,
+    typeof envelope?.message === "string" ? envelope.message : "The request could not be completed.",
+    typeof envelope?.path === "string" ? envelope.path : null,
   );
 };

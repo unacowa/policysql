@@ -1,5 +1,6 @@
 import { AccessDeniedError, internalError, wasmError } from "./errors.ts";
 import type { AuthContext } from "./types.ts";
+import type { CoreEnvelope } from "./core-wire.ts";
 
 export type RequiredAccess = "catalog" | "explain" | "execute";
 
@@ -33,9 +34,9 @@ export const authorizeSession = (
     throw reject("shape");
   }
   if (typeof sessionJson !== "string") throw reject("shape");
-  let result: any;
+  let result: CoreEnvelope | undefined;
   try {
-    result = JSON.parse(runtime.authorize_session_json(sessionJson, role, access));
+    result = JSON.parse(runtime.authorize_session_json(sessionJson, role, access)) as CoreEnvelope;
   } catch {
     throw internal();
   }

@@ -9,13 +9,18 @@
 // request 7). A `\d{16}` run inside a string costs only the slower path.
 const MAY_HOLD_UNSAFE_INTEGER = /\d{16}/u;
 
+// `JSON.rawJSON` is in Node 21+ and workerd but not in every lib this file is compiled against.
+type JsonWithRaw = { rawJSON(text: string): unknown };
+
 /** `JSON.parse`, with every integer literal beyond 2^53 - 1 read as a BigInt. Most texts hold
  * no literal that could be unsafe, so they are parsed once without a reviver. */
-export const parseExact = (text: string): any => MAY_HOLD_UNSAFE_INTEGER.test(text)
-  ? JSON.parse(text, (_key, value, context?: { source?: string }) =>
-    typeof value === "number" && !Number.isSafeInteger(value) && /^-?\d+$/u.test(context?.source ?? "")
-      ? BigInt(context.source)
-      : value)
+export const parseExact = (text: string): unknown => MAY_HOLD_UNSAFE_INTEGER.test(text)
+  ? JSON.parse(text, (_key, value, context?: { source?: string }) => {
+    const source = context?.source;
+    return typeof value === "number" && !Number.isSafeInteger(value) && source !== undefined && /^-?\d+$/u.test(source)
+      ? BigInt(source)
+      : value;
+  })
   : JSON.parse(text);
 
 /** `JSON.stringify`, with every BigInt written as its digits. A value without a BigInt is
@@ -27,6 +32,6 @@ export const stringifyExact = (value: unknown): string => {
   } catch (error) {
     if (!(error instanceof TypeError)) throw error;
     return JSON.stringify(value, (_key, item) =>
-      typeof item === "bigint" ? (JSON as any).rawJSON(item.toString()) : item);
+      typeof item === "bigint" ? (JSON as unknown as JsonWithRaw).rawJSON(item.toString()) : item);
   }
 };

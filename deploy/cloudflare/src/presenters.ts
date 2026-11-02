@@ -2,9 +2,11 @@ import { wasmError } from "./errors.ts";
 import { POLICY_VERSION, SCHEMA_VERSION } from "./config.ts";
 import { runtimeLimits } from "./limits.ts";
 import type { AuthContext } from "./types.ts";
+import type { CompiledColumn, CompiledResource, CompiledResponse, CompiledStatement, CoreEnvelope } from "./core-wire.ts";
+import type { PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 
-export const parsedRuntimeCall = (text: string) => {
-  const result = JSON.parse(text);
+export const parsedRuntimeCall = (text: string): CoreEnvelope => {
+  const result = JSON.parse(text) as CoreEnvelope;
   const error = wasmError(result);
   if (error) throw error;
   return result;
@@ -41,7 +43,7 @@ const valueDescriptor = (name: string, value: unknown, compiledType: string | un
   return { name, type: "string", representation: "string", nullable };
 };
 
-const resultColumn = (column: any) => ({
+const resultColumn = (column: CompiledColumn) => ({
   name: column.name,
   type: column.logicalType,
   representation: column.representation === "base64"
@@ -53,14 +55,14 @@ const resultColumn = (column: any) => ({
   ...(column.jsonSchema ? { jsonSchema: column.jsonSchema } : {}),
 });
 
-export const explainResponse = (compiled: any, auth: AuthContext, id: string) => ({
-  statements: compiled.statements.map((statement: any, index: number) => ({
+export const explainResponse = (compiled: CompiledResponse, auth: AuthContext, id: string) => ({
+  statements: compiled.statements.map((statement: CompiledStatement, index: number) => ({
     index,
     operation: statement.operation,
     parameters: Object.entries(statement.clientParameters).map(([name, value]) =>
       valueDescriptor(name, value, statement.clientParameterTypes[name], statement.clientParameterNullable?.[name] === true)),
     result: { columns: statement.result.map(resultColumn) },
-    resources: statement.explain.publicResources.map((resource: any) => ({
+    resources: statement.explain.publicResources.map((resource: CompiledResource) => ({
       ...resource,
       policy: `${resource.name}.${auth.role}.${statement.operation}`,
     })),
@@ -79,7 +81,10 @@ export const explainResponse = (compiled: any, auth: AuthContext, id: string) =>
 
 // Every advertised limit is a value the runtime reports and the engine or core enforces;
 // nothing here is a constant or an override (ADR 0024, "One place for limits").
-export const capabilities = (runtime: any, publicConfig: any = {}) => {
+export const capabilities = (
+  runtime: PolicySqlRuntime,
+  publicConfig: { schemaVersion?: string; policyVersion?: string } = {},
+) => {
   const enforced = runtimeLimits(runtime);
   const limits = {
     maxRows: enforced.maxRows,
