@@ -6,23 +6,9 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { idempotencyRetentionSmoke } from "../scripts/smoke-retention.mjs";
+import { IDEMPOTENCY_TABLE, cleanupRunnerFor } from "./helpers/idempotency.mjs";
 
-const CANONICAL = `
-  CREATE TABLE policysql_idempotency (
-    key_hash TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL,
-    response_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE INDEX policysql_idempotency_created_at ON policysql_idempotency (created_at);`;
-
-const runnerFor = (database) => async (sql, args) => {
-  const statement = database.prepare(sql);
-  if (/^\s*(?:SELECT|PRAGMA)\b/iu.test(sql)) {
-    const rows = statement.all(args);
-    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
-    return { columns, rows: rows.map((row) => columns.map((name) => row[name])), rowsAffected: 0 };
-  }
-  return { columns: [], rows: [], rowsAffected: Number(statement.run(args).changes ?? 0) };
-};
+const CANONICAL = IDEMPOTENCY_TABLE;
 
 const SCHEDULE = { schedules: [{ cron: "17 * * * *" }] };
 const base = (database, overrides = {}) => ({
@@ -33,7 +19,7 @@ const base = (database, overrides = {}) => ({
   create: (connection) => {
     // The smoke must hand the runner the library's own shape, not its `{ url, token }` one.
     assert.deepEqual(connection, { url: "https://db.example.test", authToken: "admin-token" });
-    return runnerFor(database);
+    return cleanupRunnerFor(database);
   },
   ...overrides,
 });

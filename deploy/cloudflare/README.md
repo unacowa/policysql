@@ -302,7 +302,10 @@ monotonic `statements`, `commit`, or `rollback` commands within the advertised f
 The development Worker also runs an hourly Cron Trigger (`"17 * * * *"`) for the idempotency
 cleanup ([ADR 0028](../../docs/adr/0028-idempotency-cleanup-without-an-advertised-window.md)):
 keyed replies older than 30 days are deleted from `policysql_idempotency` in batches, outside
-the public endpoint, and the outcome is one `idempotency_cleanup` log line.
+the public endpoint, and the outcome is one `idempotency_cleanup` log line. The deletion
+procedure itself is published (`cleanupIdempotency` from `@unacowa/policysql/cloudflare`); this
+wrapper supplies only the Turso runner, the credentials, and the schedule, and another
+deployment supplies its own.
 
 The production-shaped deployment requires Cloudflare Workers Paid: measured Execute CPU exceeded
 the Free plan's 10 ms request CPU limit. The upload size remains within Worker limits.

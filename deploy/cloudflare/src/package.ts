@@ -41,6 +41,14 @@ export {
 export { ConfigError, validateConfig } from "./engine-config.ts";
 export type { CommitCheckEndpoint, CostCatalog, PolicySqlConfig } from "./engine-config.ts";
 export { TursoHttpTransport } from "./turso-http.ts";
+// The idempotency cleanup procedure (ADR 0028). A fixed procedure over a caller-supplied
+// statement runner: the deployment supplies the transport, the credentials and the schedule,
+// and no window is advertised. Not part of the request path.
+export {
+  IDEMPOTENCY_CLEANUP_BATCH_SIZE, IDEMPOTENCY_CLEANUP_MAX_BATCHES, IDEMPOTENCY_CLEANUP_SQL,
+  IDEMPOTENCY_COLUMNS_SQL, IDEMPOTENCY_RETENTION_DAYS, IDEMPOTENCY_RETENTION_SECONDS, cleanupIdempotency,
+} from "./idempotency-cleanup.ts";
+export type { CleanupOptions, CleanupResult, CleanupRunner } from "./idempotency-cleanup.ts";
 export { createErrorResponse } from "./http/responses.ts";
 export type { ErrorResponseOptions } from "./http/responses.ts";
 // Optional identity adapter for wrappers. The engine never imports it (ADR 0019).

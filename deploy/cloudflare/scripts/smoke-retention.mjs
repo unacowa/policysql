@@ -12,8 +12,9 @@
 // The probe rows use key hashes no client can produce (`smoke_retention_` prefix) and are
 // removed at the end, deleted or not.
 import {
-  IDEMPOTENCY_CLEANUP_MAX_BATCHES, IDEMPOTENCY_COLUMNS_SQL, cleanupIdempotency, transportCleanupRunner,
-} from "../wrapper/idempotency-retention.ts";
+  IDEMPOTENCY_CLEANUP_MAX_BATCHES, IDEMPOTENCY_COLUMNS_SQL, cleanupIdempotency,
+} from "../src/idempotency-cleanup.ts";
+import { transportCleanupRunner } from "../wrapper/idempotency-retention.ts";
 
 const PROBE_PREFIX = "smoke_retention_";
 // The stale probe names `created_at`; the fresh one omits it, so the database fills it, exactly

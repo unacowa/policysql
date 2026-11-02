@@ -17,7 +17,7 @@ import { responseBudgetSmoke } from "./smoke-response.mjs";
 import { idempotencyRetentionSmoke } from "./smoke-retention.mjs";
 import {
   IDEMPOTENCY_CLEANUP_BATCH_SIZE, IDEMPOTENCY_RETENTION_SECONDS,
-} from "../wrapper/idempotency-retention.ts";
+} from "../src/idempotency-cleanup.ts";
 import { COMPLEXITY_ALLOWLIST, SqlComplexityError } from "../src/database-complexity.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 import { SHAPE_TARGET_BYTES, cpuSmoke, referenceScenarioId } from "./smoke-cpu.mjs";
