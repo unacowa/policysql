@@ -294,10 +294,16 @@ curl -sS -X POST \
 
 `Idempotency-Key` is optional for writes and interactive transaction start. Keyed atomic
 writes require `policysql_idempotency` in the selected DB; the development provisioning
-script creates it for those examples. Without a key, direct and commit-check DO paths
+script creates it for those examples, with the `created_at` column the hourly Cron cleanup
+deletes by. Without a key, direct and commit-check DO paths
 never access the table and repeated requests can execute again. Empty or malformed keys
 are rejected. Interactive transactions use `POST /v1/transactions`, then
 monotonic `statements`, `commit`, or `rollback` commands within the advertised four-second window.
+The development Worker also runs an hourly Cron Trigger (`"17 * * * *"`) for the idempotency
+cleanup ([ADR 0028](../../docs/adr/0028-idempotency-cleanup-without-an-advertised-window.md)):
+keyed replies older than 30 days are deleted from `policysql_idempotency` in batches, outside
+the public endpoint, and the outcome is one `idempotency_cleanup` log line.
+
 The production-shaped deployment requires Cloudflare Workers Paid: measured Execute CPU exceeded
 the Free plan's 10 ms request CPU limit. The upload size remains within Worker limits.
 

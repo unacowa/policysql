@@ -239,7 +239,10 @@ selected database within the mutation transaction. `Idempotency-Key` is optional
 it, both direct and commit-check DO execution skip every access to this table, so it need
 not exist. Unkeyed requests are independent executions without request-level deduplication.
 Interactive starts also accept an optional key; their state and sequenced retries use DO
-storage and never require this DB table.
+storage and never require this DB table. Keyed replies are replayed while retained; a
+deployment may delete old rows administratively ([ADR 0028](adr/0028-idempotency-cleanup-without-an-advertised-window.md)),
+and the reference wrapper deletes rows older than 30 days on an hourly Cron Trigger. Create the
+table with the `created_at` column shown in ADR 0028, or the cleanup skips it.
 
 A deployment that lowers an input limit (`maxRequestBytes`, the body-side `maxJsonValues`, or
 the depth limit tightened in ABI 16) can refuse the body of a keyed retry that committed under

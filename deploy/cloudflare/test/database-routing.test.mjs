@@ -159,7 +159,7 @@ for (const hooks of [false, true]) {
   for (const idempotencyTable of [false, true]) {
     test(`unkeyed writes never access idempotency storage and run independently (DO=${hooks}, table=${idempotencyTable})`, async (t) => {
       const h = await harness(t, { hooks, idempotencyTable });
-      if (idempotencyTable) h.databases.get("a").database.exec("INSERT INTO policysql_idempotency VALUES ('untouched', 'fingerprint', '{}')");
+      if (idempotencyTable) h.databases.get("a").database.exec("INSERT INTO policysql_idempotency (key_hash, fingerprint, response_json) VALUES ('untouched', 'fingerprint', '{}')");
       const update = envelope({ sql: "UPDATE projects SET name = :name WHERE id = :id RETURNING id, name", params: { id: "seed", name: "changed" } });
       const first = await h.request("a", "/v1/transactions:execute", update, null);
       const second = await h.request("a", "/v1/transactions:execute", update, null);
@@ -180,8 +180,10 @@ for (const hooks of [false, true]) {
         for (const { result, status } of h.hooksSeen) assert.equal(status, 200, JSON.stringify(result));
         assert.ok(h.hooksSeen.slice(2).every(({ result }) => result.rows.some((row) => row.id === "unkeyed")));
       }
+      // `SELECT *` names every column, so the table's own `created_at` (ADR 0028) is read too.
+      // The row is untouched: the same three values it was inserted with, and no update.
       if (idempotencyTable) assert.deepEqual(
-        h.databases.get("a").database.prepare("SELECT * FROM policysql_idempotency").all().map((row) => ({ ...row })),
+        h.databases.get("a").database.prepare("SELECT key_hash, fingerprint, response_json FROM policysql_idempotency").all().map((row) => ({ ...row })),
         [{ key_hash: "untouched", fingerprint: "fingerprint", response_json: "{}" }],
       );
     });

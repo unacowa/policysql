@@ -307,7 +307,9 @@ components:
         sequence-based retry rules. Empty or malformed keys are rejected with 400
         POLICYSQL_IDEMPOTENCY_KEY_INVALID before any database work. A key is 16-128 ASCII characters
         from letters, digits and `. _ : - + / =` (base64 keys are accepted unchanged). Read-only
-        atomic execution does not use idempotency storage.
+        atomic execution does not use idempotency storage. A stored reply is replayed while
+        retained; a deployment may delete old rows administratively, and no retention duration
+        is advertised in Capabilities.
       schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._:+/=-]{16,128}$' }
     TransactionId:
       name: transactionId

@@ -10,6 +10,11 @@
   `deploy/cloudflare/wrangler.jsonc`) is 500 ms, derived from the configured limits by the
   formula of [ADR 0027](adr/0027-byte-and-cpu-budgets.md) (see "CPU budget" below).
 - Interactive transactions expire after four seconds and are owned by one Durable Object.
+- Idempotency cleanup ([ADR 0028](adr/0028-idempotency-cleanup-without-an-advertised-window.md)):
+  a Cron Trigger (`"17 * * * *"`, UTC) runs the Worker's `scheduled` handler, which deletes
+  `policysql_idempotency` rows older than 30 days in batches of 500, using the deployment's own
+  `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`, outside the public endpoint. A table that is missing,
+  or predates the `created_at` column, is skipped. The window is not advertised to clients.
 - Commit checks are supported by the adapter. The development policy defines one
   development-only check, `smoke_check`, answered by the `policysql-dev-validator` Worker
   (`deploy/cloudflare/dev-validator/`), so the development deployment reports
@@ -73,7 +78,15 @@ Configure alerts in the production account for:
 - JWKS, cost-admission, or Turso availability errors for three consecutive minutes;
 - any wrapper `rate_limiter_missing` or `rate_limiter_failed` event, and a sustained 429
   `POLICYSQL_RATE_LIMITED` rate above the seven-day baseline (separately for the client
-  and callback routes; callback 429s also surface as commit-check failures).
+  and callback routes; callback 429s also surface as commit-check failures);
+- an `idempotency_cleanup` event with `outcome` `failed` (ADR 0028): the Cron Trigger could not
+  delete expired keyed replies, so `policysql_idempotency` is growing. `reason` classifies it
+  (`database_error`, `unreadable_columns`) and never carries the database's text. `skipped` with
+  `no_created_at` on a table that should be cleaned means the table predates the `created_at`
+  column and needs the rebuild whose statements are in ADR 0028; `skipped` with `no_table` is
+  normal for a deployment that never uses idempotency keys. `deleted` with
+  `batch_budget_exhausted` means a backlog larger than one run's cap is draining over several
+  runs, not a failure.
 
 ## CPU budget
 

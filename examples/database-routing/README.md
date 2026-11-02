@@ -47,6 +47,8 @@ a transaction ([ADR 0020](../../docs/adr/0020-trusted-session-input-and-jwt-iden
    and validate their actual schema against `physical-schema.json`. Only when using keyed
    atomic mutations, also apply `idempotency.sql` to provision `policysql_idempotency`.
    Unkeyed mutations and interactive transactions do not require it. DDL is not a public API operation.
+   The table has `created_at`, which is what administrative cleanup deletes by (ADR 0028); a
+   table created without it keeps working, but no cleanup runs on it until it is rebuilt.
 2. Replace the two `.invalid` URLs in `worker.ts` with registered HTTPS origins and
    configure separate `TENANT_A_TOKEN` / `TENANT_B_TOKEN` secrets.
 3. Configure this wrapper's SQL session verifier (`auth.ts`) using `POLICYSQL_JWKS_JSON`,
@@ -159,7 +161,9 @@ Explicit keys take precedence in either mode. `role` is optional (the trusted se
 role applies); `schemaVersion` and `policyVersion` can optionally be specified together.
 Neither setting selects the database. Persist the key and payload to retry after
 an application reload, using the same authenticated context and DB binding while the
-record remains available. Do not automatically resend an unkeyed write with an unknown outcome.
+record remains available. A deployment may delete stored replies administratively once they are
+old enough (ADR 0028); retry soon after the first send, not days later. Do not automatically
+resend an unkeyed write with an unknown outcome.
 
 Standard interactive transactions need no idempotency table, including with
 `autoIdempotencyKey: true`. Start requests carry no key, and statements use the owner ID

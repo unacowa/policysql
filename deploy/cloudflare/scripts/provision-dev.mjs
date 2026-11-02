@@ -14,6 +14,10 @@ import { DEPLOYMENT_VERSION_HEADER, versionTracker, waitForRelease } from "./rel
 import { bytesNullSmoke, commitCheckSmoke, sessionGateSmoke } from "./smoke-sections.mjs";
 import { sqlComplexitySmoke } from "./smoke-complexity.mjs";
 import { responseBudgetSmoke } from "./smoke-response.mjs";
+import { idempotencyRetentionSmoke } from "./smoke-retention.mjs";
+import {
+  IDEMPOTENCY_CLEANUP_BATCH_SIZE, IDEMPOTENCY_RETENTION_SECONDS,
+} from "../wrapper/idempotency-retention.ts";
 import { COMPLEXITY_ALLOWLIST, SqlComplexityError } from "../src/database-complexity.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 import { SHAPE_TARGET_BYTES, cpuSmoke, referenceScenarioId } from "./smoke-cpu.mjs";
@@ -182,7 +186,7 @@ const commitCheckTables = () => {
   return Object.values(policy.commit_checks ?? {}).flatMap((check) => check.triggered_by ?? []);
 };
 
-const smoke = async (baseUrl, token, tracker, database, sessionTokens) => {
+const smoke = async (baseUrl, token, tracker, database, sessionTokens, schedules) => {
   const headers = { authorization: `Bearer ${token}` };
   const call = tracker.call;
   const health = await call(`${baseUrl}/healthz`).then((response) => response.json());
@@ -450,6 +454,14 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens) => {
     cpuLimitMs: configuredCpuMs(), limits: localRelease().limits, nodeReferenceMs: nodeReferenceTimes().shapes, nodeReferenceInfo: nodeReferenceTimes().info, commitCheckTables: commitCheckTables(),
     observability: { accountId: required("CLOUDFLARE_ACCOUNT_ID"), token: required("CLOUDFLARE_API_TOKEN"), service: workerName },
   });
+  // Idempotency retention (ADR 0028): the canonical table shape, the real batch DELETE by age
+  // only, and the deployed Cron Trigger. Administrative credentials, never the public endpoint.
+  const retention = await idempotencyRetentionSmoke({
+    connection: { url: database.url, token: database.token },
+    retentionSeconds: IDEMPOTENCY_RETENTION_SECONDS,
+    batchSize: IDEMPOTENCY_CLEANUP_BATCH_SIZE,
+    schedule: schedules(),
+  });
   const visibleRows = execute.results?.[0]?.rows ?? [];
   const expected = localRelease();
   if (
@@ -461,6 +473,7 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens) => {
     sqlComplexity.failures.length > 0 ||
     responseBudget.failures.length > 0 ||
     cpu.failures.length > 0 ||
+    retention.failures.length > 0 ||
     capabilities.transactions?.commitChecksConfigured !== true ||
     !health.ready ||
     // Every answer came from this release, not from the previous version still serving.
@@ -511,6 +524,7 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens) => {
       sqlComplexity,
       responseBudget,
       cpu,
+      retention,
       health,
       capabilities,
       roleCatalog,
@@ -599,6 +613,7 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens) => {
     sqlComplexity: sqlComplexity.report,
     responseBudget: responseBudget.report,
     cpu: cpu.report,
+    retention: retention.report,
   };
 };
 
@@ -705,7 +720,11 @@ async function main() {
     "CREATE TABLE IF NOT EXISTS smoke_values (id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, label TEXT NOT NULL, note TEXT, payload BLOB, doc TEXT) STRICT",
     "DELETE FROM smoke_checks",
     "DELETE FROM smoke_values",
-    "CREATE TABLE IF NOT EXISTS policysql_idempotency (key_hash TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    // ADR 0028, from ADR 0026 section 6: `created_at` is filled by the database and is what the
+    // Cron cleanup deletes by; the index bounds that scan. Not WITHOUT ROWID (the cleanup
+    // selects its batch by rowid).
+    "CREATE TABLE IF NOT EXISTS policysql_idempotency (key_hash TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+    "CREATE INDEX IF NOT EXISTS policysql_idempotency_created_at ON policysql_idempotency (created_at)",
   ], "write", { queryTimeout: 5_000 });
   // A smoke_values table created before the CPU probes (#56) has no `doc`; SQLite has no
   // ADD COLUMN IF NOT EXISTS.
@@ -792,7 +811,10 @@ async function main() {
     }));
     const tracker = versionTracker(deployed.version);
     try {
-      acceptance = await smoke(baseUrl, jwt, tracker, { url: databaseUrl, token: databaseToken }, sessionTokens);
+      acceptance = await smoke(
+        baseUrl, jwt, tracker, { url: databaseUrl, token: databaseToken }, sessionTokens,
+        () => cloudflare(`/accounts/${required("CLOUDFLARE_ACCOUNT_ID")}/workers/scripts/${workerName}/schedules`),
+      );
       break;
     } catch (error) {
       if (!error.retryable || attempt >= 3) throw error;

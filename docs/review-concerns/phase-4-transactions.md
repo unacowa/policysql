@@ -16,7 +16,7 @@
 - Turso engine variants may differ in conflict detection, transaction lifetime, and read-your-writes behavior. Each advertised adapter needs conformance tests.
 - External validation extends transaction duration and raises conflict/timeout probability. Multiple checks are serialized intentionally.
 - Commit checks do not provide serializable predicate locking or atomicity with external services. Guard rows, database constraints, and outbox patterns remain necessary.
-- Idempotency records contain request hashes and response data. Retention, encryption, tenant isolation, capacity bounds, and deletion are operational security requirements.
+- Idempotency records contain request hashes and response data. Retention, encryption, tenant isolation, capacity bounds, and deletion are operational security requirements. The reference wrapper deletes records older than 30 days on a Cron Trigger ([ADR 0028](../adr/0028-idempotency-cleanup-without-an-advertised-window.md)); encryption and tenant isolation remain per-deployment obligations, and the window is not advertised.
 - Owner loss is terminal. Edge adapters must not reconstruct a transaction on another connection.
 - A large atomic request buffers multiple results until commit. `maxStatements`, result-row, result-byte, execution-time, and transaction-duration limits must be enforced cumulatively.
 - The array-only response adds one level for a single query. Official clients hide this in scalar query APIs while retaining access to the complete transaction response.
