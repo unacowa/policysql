@@ -250,7 +250,8 @@ the earlier limits. A keyed atomic execute answers that as 500 `POLICYSQL_INTERN
 outcome), never a definite 413/400; it does not look up, replay, execute, or consume the key, and
 a later deployment that restores the limit replays the stored response (ADR 0007, #100). If such
 retries must replay rather than stay unknown, do not lower the limit below a body accepted in the
-idempotency retention window W (ADR 0026, PR #79); the depth tightening cannot preserve that window.
+idempotency retention window W (ADR 0028; 30 days in the reference wrapper); the depth
+tightening cannot preserve that window.
 
 Never repoint an existing database identity at another physical database. Provision a
 new identity, validate its actual schema (and `policysql_idempotency` if using keyed atomic mutations), retire the
