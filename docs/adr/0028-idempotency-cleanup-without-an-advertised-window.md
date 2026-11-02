@@ -159,6 +159,24 @@ What a deployment that is not the reference wrapper does: supply a `CleanupRunne
 database driver (a function, as `test/idempotency-cleanup.test.mjs` does over `node:sqlite`),
 choose its window and its schedule, and call `cleanupIdempotency`.
 
+## The window an input-limit rule refers to
+
+ADR 0007's #100 amendment, `docs/operations-runbook.md` and `docs/database-routing.md` tell an
+operator who needs a keyed retry to replay that it must not lower an input limit
+(`maxRequestBytes`, the body-side `maxJsonValues`) below a body accepted in the last `W`, the
+idempotency retention window. Those passages were written against the proposed ADR 0026, whose
+`W` was the advertised window; this ADR advertises none. The rule is unchanged, and its `W` is
+now the window the deployment deletes by:
+
+- **The reference wrapper's `W` is the fixed 30 days** (`IDEMPOTENCY_RETENTION_DAYS`), the same
+  value its cleanup deletes by. An operator of that wrapper uses 30 days.
+- **Any other deployment's `W` is the window it chooses and deletes by.** A deployment that runs
+  no cleanup never deletes a row, so no window bounds it: lowering an input limit there loses the
+  replay of every such body permanently.
+
+The rule exists because a refused body never reaches the lookup: the row is still there, but the
+retry cannot use it, and the answer is the unknown 500 rather than a replay.
+
 ## What this does not promise
 
 - **No advertised window.** Nothing tells a client how long a reply is replayable: no property
@@ -171,7 +189,7 @@ choose its window and its schedule, and call `cleanupIdempotency`.
 - **No configured setting, no client margin `M`.** The proposed ADR 0026's section 5 and its
   open questions 2, 3 and 5 stay open. It also does not adopt the library helper of open
   question 4; the procedure it publishes instead is narrower, and is described in the
-  amendment below. If section 5 is later adopted, the migration order is "migrate, then
+  amendment above. If section 5 is later adopted, the migration order is "migrate, then
   advertise, then enable cleanup", and an advertised window shorter than this wrapper's 30 days
   would need the larger one kept until the old one has elapsed: a client that read a longer
   window must stay covered.

@@ -390,7 +390,7 @@ Two consequences are stated rather than hidden:
   `response_json` was effectively unbounded
   (`maxResultBytes` up to 2^53, Turso responses up to 2 MiB), so a stored row larger than
   1,183,744 bytes can exist. A keyed retry of it within the idempotency retention window W
-  (ADR 0026, PR #79) after the upgrade finds the row (`keyHash` does not include the snapshot)
+  (ADR 0028) after the upgrade finds the row (`keyHash` does not include the snapshot)
   and the lookup's read cap rejects it before the fingerprint is compared. Nothing executes, so it
   is never misreported as success, conflict, or replay. **Amended by pull request 6:** the
   answer is 500 `POLICYSQL_INTERNAL` (an unknown outcome), not a 413: that request may have
