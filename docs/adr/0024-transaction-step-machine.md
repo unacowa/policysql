@@ -1370,7 +1370,7 @@ authoritative Rust (`policysql-transaction`), and no TypeScript decides a transa
   runtime limit of #24 test `request-step.ts` and `engine.ts`); `cost.test.mjs` tests
   `observeCost` with core's `cost_estimate_json`; `commit-checks.test.mjs` tests the hook
   adapter (the redirect regression of #36 included) and the owner's endpoint lookup by check id.
-- **Engine boundary.** `engine-boundary.test.mjs` adds the rule of this stage: an engine module
+- **Engine boundary.** `test/engine-codes.test.mjs` adds the rule of this stage: an engine module
   names no `POLICYSQL_*` code but `POLICYSQL_INTERNAL` and adapter-class codes (request framing
   before core, database adapter classes, the driver codec, and the cost observation's log
   fallback), each listed with its reason.
