@@ -5,6 +5,7 @@
 import { discardBody, fetchNoFollow } from "../redirects.ts";
 import { BodyReadError, readBoundedText } from "../bounded-body.ts";
 import type { OutboundFetch } from "../redirects.ts";
+import type { CommitCheckCall, CommitCheckCaller } from "../transaction-owner-port.ts";
 import { callbackQueryUrl } from "../http/routes.ts";
 import { stringifyExact } from "../exact-json.ts";
 
@@ -29,20 +30,8 @@ const signature = async (secret: string, timestamp: string, body: string) => {
   return `v1=${hex(await crypto.subtle.sign("HMAC", key, encoder.encode(`${timestamp}.${body}`)))}`;
 };
 
-export type CommitCheckHookCall = {
-  /** The validator endpoint, already checked by the engine. */
-  url: URL;
-  hmacSecret: string;
-  /** The deployment's public base URL; the callback URL is built under it. */
-  publicBaseUrl: URL;
-  validationId: string;
-  /** The hook body without `query`, in its wire key order. */
-  payload: Record<string, unknown>;
-  /** The opaque capability for callback queries and its expiry. */
-  capability: { token: string; expiresAtMs: number };
-  timeoutMs: number;
-  fetchImpl?: OutboundFetch;
-};
+/** The port's call, plus the transport override a test or an in-process wrapper supplies. */
+export type CommitCheckHookCall = CommitCheckCall & { fetchImpl?: OutboundFetch };
 
 /**
  * Sends the hook request. Resolves with whether the response was 2xx and its JSON body
@@ -51,7 +40,7 @@ export type CommitCheckHookCall = {
  * the reply is longer than 65,536 bytes (read as a byte stream and cancelled at the first
  * chunk over the bound, so a hostile validator cannot make the engine buffer it).
  */
-export const callCommitCheckHook = async (call: CommitCheckHookCall): Promise<{ ok: boolean; decision: unknown }> => {
+const send: (call: CommitCheckHookCall) => Promise<{ ok: boolean; decision: unknown }> = async (call) => {
   // An integer beyond 2^53 - 1 in the payload (a session value core kept) is written with its
   // digits, not rounded (ADR 0024 pull request 5 obligation).
   const body = stringifyExact({
@@ -90,3 +79,6 @@ export const callCommitCheckHook = async (call: CommitCheckHookCall): Promise<{ 
   try { decision = JSON.parse(text); } catch { decision = null; }
   return { ok: true, decision };
 };
+
+/** The port implementation: the deployment's adapter, with the host fetch as its transport. */
+export const callCommitCheckHook: CommitCheckCaller = (call) => send(call);

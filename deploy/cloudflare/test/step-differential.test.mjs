@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
+import { callCommitCheckHook } from "../src/adapters/commit-check-hook.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
 import { asRecorded, referenceTranscript } from "./helpers/reference-transcript.mjs";
 
@@ -392,7 +393,10 @@ const environment = (t, { ownerConfig = config, limits = {} } = {}) => {
     const getRuntime = () => runtimes.current;
     const fetchImpl = hookFetch(env, side);
     const makeCore = (facilities) => {
-      const core = new TransactionOwnerCore({ ...facilities, name: TX }, { getRuntime, database, config: ownerConfig, fetchImpl });
+      const core = new TransactionOwnerCore(
+        { ...facilities, name: TX },
+        { getRuntime, database, config: ownerConfig, commitCheckHook: (call) => callCommitCheckHook({ ...call, fetchImpl }) },
+      );
       core.transcript = [];
       return core;
     };

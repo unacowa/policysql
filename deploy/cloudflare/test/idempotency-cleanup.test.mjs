@@ -172,8 +172,8 @@ test("the procedure is published; the wrapper's transport, credentials and sched
 
 test("the wrapper half names no driver the procedure depends on", () => {
   // The split is real only if the procedure never reaches for the transport: no Turso import, no
-  // `env`, no Cloudflare type. The platform and env guards (platform-boundary, library-env-guard)
-  // scan this file too; this test states the reason.
+  // `env`, no Cloudflare type. The lint boundary of eslint.config.js (`src/**` is the engine)
+  // and its tsconfig.engine.json build cover this file too; this test states the reason.
   const source = readFileSync(new URL("../src/idempotency-cleanup.ts", import.meta.url), "utf8");
   assert.equal(/from "\.\.?\/(?:.*)"|from "[a-z@]/u.test(source.replace(/\/\/[^\n]*/gu, "")), false,
     "the procedure imports nothing");

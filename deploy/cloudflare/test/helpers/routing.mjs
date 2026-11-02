@@ -7,6 +7,7 @@ import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import { initSync, PolicySqlRuntime } from "../../pkg/policysql_wasm.js";
 import { createApp } from "../../src/app.ts";
 import { createWorkerEntrypoints } from "../../src/worker.ts";
+import { callCommitCheckHook } from "../../src/adapters/commit-check-hook.ts";
 import { createMemoryTransactionOwners } from "./memory-owner.mjs";
 import { createSimulatedDurableObjects } from "./durable-object-owner.mjs";
 import { TursoHttpTransport } from "../../src/turso-http.ts";
@@ -243,10 +244,15 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
   // Each new owner gets the same ports a wrapper's deployment(env) builds (ADR 0021).
   const ownerDependencies = () => ({
     getRuntime: () => ownerRuntime ?? runtime, database, config,
-    fetchImpl: async (_url, options) => {
-      const allowed = await validator(JSON.parse(options.body));
-      return validatorResponse?.({ allowed, options }) ?? Response.json({ version: "1", allowed });
-    },
+    // The deployment's half of a commit check is a port (ADR 0019): the owner asks for the
+    // call, this harness answers it with a fake transport.
+    commitCheckHook: (call) => callCommitCheckHook({
+      ...call,
+      fetchImpl: async (_url, options) => {
+        const allowed = await validator(JSON.parse(options.body));
+        return validatorResponse?.({ allowed, options }) ?? Response.json({ version: "1", allowed });
+      },
+    }),
   });
   const owners = ownerAdapter === "memory"
     ? createMemoryTransactionOwners(ownerDependencies, { background })

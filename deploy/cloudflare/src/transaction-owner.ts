@@ -28,20 +28,18 @@
 import { EngineError, operationError } from "./errors.ts";
 import { checkDatabaseBinding, databaseTransportFactory, noteReadCap, validateDatabaseProvider } from "./database.ts";
 import type { DatabaseProvider, DatabaseTransaction } from "./database.ts";
-import type { OutboundFetch } from "./redirects.ts";
 import { runtimeBytesLimit } from "./binary.ts";
 import { runtimeLimits } from "./limits.ts";
 import { validateConfig } from "./engine-config.ts";
 import type { PolicySqlConfig, ValidatedConfig } from "./engine-config.ts";
 import type { PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import type { StepOutput, WireEffect, WireStatement } from "./core-wire.ts";
-import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
 import { parseExact, stringifyExact } from "./exact-json.ts";
 import { checkBatch, decodeArgs, commitFailureClass, encodeResults, entropyHex, executeFailedEvent, failureClass, observeCost, validatorFailureClass } from "./step-effects.ts";
 import { OWNER_NAME, runInBackground, validateOwnerFacilities } from "./transaction-owner-port.ts";
 import type {
   OwnerAtomicInput, OwnerBeginInput, OwnerCallbackInput, OwnerCommandInput, OwnerCommandKind,
-  OwnerFacilities, OwnerReply, TransactionOwnerHandle,
+  CommitCheckCaller, OwnerFacilities, OwnerReply, TransactionOwnerHandle,
 } from "./transaction-owner-port.ts";
 
 /** What a transaction owner needs. It receives the same `config` as `createApp` (ADR 0021). */
@@ -49,8 +47,12 @@ export type TransactionOwnerDependencies = {
   getRuntime: () => PolicySqlRuntime;
   database: DatabaseProvider;
   config: PolicySqlConfig;
-  /** Omitted: commit-check calls use the host fetch through fetchNoFollow. */
-  fetchImpl?: OutboundFetch;
+  /**
+   * The commit-check call (ADR 0007). A deployment with commit checks supplies it; the
+   * reference wrapper passes `src/adapters/commit-check-hook.ts`, so the engine imports no
+   * outbound HTTP. Omitted, a check cannot run and its effect answers `rejected`.
+   */
+  commitCheckHook?: CommitCheckCaller;
 };
 
 export { checkBatch } from "./step-effects.ts";
@@ -111,7 +113,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   config: ValidatedConfig;
   getRuntime: () => PolicySqlRuntime;
   database: DatabaseProvider;
-  fetchImpl?: OutboundFetch;
+  commitCheckHook?: CommitCheckCaller;
   configuredChecks: string[];
   /** The owner name; fixed for the instance's lifetime once known. */
   name: string | null;
@@ -136,7 +138,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     this.facilities = validateOwnerFacilities(facilities);
     this.getRuntime = dependencies.getRuntime;
     this.database = dependencies.database;
-    this.fetchImpl = dependencies.fetchImpl;
+    this.commitCheckHook = dependencies.commitCheckHook;
     // The ids with an endpoint; none without a public base URL (ADR 0021).
     this.configuredChecks = this.config.publicBaseUrl === undefined
       ? [] : Object.keys(dependencies.config?.commitChecks ?? {}).filter((id) => this.config.commitCheck(id) !== undefined);
@@ -434,7 +436,8 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
       return { type: "validatorFailed", id, class: "rejected" };
     }
     try {
-      const reply = await callCommitCheckHook({
+      if (this.commitCheckHook === undefined) throw new TypeError("no commit-check caller configured");
+      const reply = await this.commitCheckHook({
         url,
         hmacSecret: endpoint.hmacSecret,
         publicBaseUrl,
@@ -442,7 +445,6 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
         payload: effect.payload,
         capability: effect.capability,
         timeoutMs: effect.timeoutMs,
-        fetchImpl: this.fetchImpl,
       });
       return { type: "validatorReplied", id, ok: reply.ok, decision: reply.decision ?? null };
     } catch (error) {
