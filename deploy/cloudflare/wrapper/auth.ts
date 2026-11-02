@@ -19,6 +19,12 @@ type Verifier = (request: Request) => Promise<TrustedSession>;
 const verifiers = new Map<string, Verifier>();
 
 /** One verifier per configuration, so a remote JWKS cache survives across requests. */
+const requiredText = (env: JwtBindings, key: "POLICYSQL_JWT_ISSUER" | "POLICYSQL_JWT_AUDIENCE"): string => {
+  const value = env[key];
+  if (typeof value !== "string" || !value) throw new TypeError(`Missing deployment setting: ${key}`);
+  return value;
+};
+
 const verifierFor = (env: JwtBindings): Verifier => {
   const jwks = env.POLICYSQL_JWKS_JSON || undefined;
   const jwksUrl = jwks === undefined ? env.POLICYSQL_JWKS_URL || undefined : undefined;
@@ -26,7 +32,9 @@ const verifierFor = (env: JwtBindings): Verifier => {
   let verifier = verifiers.get(key);
   if (!verifier) {
     verifier = createJwtSessionVerifier({
-      jwks, jwksUrl, issuer: env.POLICYSQL_JWT_ISSUER, audience: env.POLICYSQL_JWT_AUDIENCE,
+      jwks, jwksUrl,
+      issuer: requiredText(env, "POLICYSQL_JWT_ISSUER"),
+      audience: requiredText(env, "POLICYSQL_JWT_AUDIENCE"),
     });
     verifiers.set(key, verifier);
   }

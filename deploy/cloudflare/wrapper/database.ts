@@ -22,7 +22,8 @@ export const createDeploymentDatabase = (getSnapshot: () => string) => {
   const provider = (env: WrapperBindings): DatabaseProvider => {
     const check = (selected: DatabaseBinding) => {
       const registered = binding(env);
-      return Object.keys(registered).every((key) => registered[key] === selected[key]);
+      return Object.keys(registered).every((key) =>
+        (registered as Record<string, unknown>)[key] === (selected as Record<string, unknown>)[key]);
     };
     return {
       // `TursoHttpTransport` reads each reply as a byte stream and cancels it at the read cap.

@@ -185,12 +185,13 @@ export const runtimeLimits = (runtime: unknown): EnforcedLimits => {
   let value: unknown;
   try { value = JSON.parse(report.call(runtime)); } catch { throw invalid(); }
   if (!value || Array.isArray(value) || typeof value !== "object") throw invalid();
-  const keys = Object.keys(value);
+  const report4 = value as Record<string, unknown>;
+  const keys = Object.keys(report4);
   if (keys.length !== ENFORCED_LIMIT_KEYS.length ||
-    !ENFORCED_LIMIT_KEYS.every((key) => Number.isSafeInteger(value[key]) && value[key] > 0)) {
+    !ENFORCED_LIMIT_KEYS.every((key) => Number.isSafeInteger(report4[key]) && (report4[key] as number) > 0)) {
     throw invalid();
   }
-  const limits = Object.freeze(Object.fromEntries(ENFORCED_LIMIT_KEYS.map((key) => [key, value[key]]))) as EnforcedLimits;
+  const limits = Object.freeze(Object.fromEntries(ENFORCED_LIMIT_KEYS.map((key) => [key, report4[key]]))) as EnforcedLimits;
   cache.set(runtime, limits);
   return limits;
 };

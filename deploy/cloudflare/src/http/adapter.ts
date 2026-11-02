@@ -66,7 +66,7 @@ const sendSnapshot = (result: SnapshotResult) =>
 
 export const createHttpAdapter = (engine: PolicySqlEngine): PolicySqlHttpApp => {
   if (engine === null || typeof engine !== "object" ||
-    ENGINE_OPERATIONS.some((name) => typeof (engine as any)[name] !== "function")) {
+    ENGINE_OPERATIONS.some((name) => typeof (engine as unknown as Record<string, unknown>)[name] !== "function")) {
     throw new TypeError(`engine is required: { ${ENGINE_OPERATIONS.join(", ")} }`);
   }
   const app = new Hono<AdapterEnv>();

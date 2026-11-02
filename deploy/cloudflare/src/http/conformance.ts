@@ -23,7 +23,12 @@ export type CreateHttpMapping = (engine: PolicySqlEngine) => HttpMapping;
 export type ConformanceCase = { name: string; run(createMapping: CreateHttpMapping): Promise<void> };
 export type ConformanceResult = { name: string; ok: boolean; error?: unknown };
 
-type Call = { operation: string; input: any; context: any; background?: unknown; body?: string };
+/** A recorded call. `input` and `context` are the caller's values; the assertions narrow them. */
+type Call = { operation: string; input: unknown; context: unknown; background?: unknown; body?: string };
+/** The fields the conformance assertions read off a recorded input. */
+type CallInput = { bodyText?: unknown; ifNoneMatch?: unknown; [field: string]: unknown };
+/** A recorded call's context: `RequestContext` plus whatever the case passes. */
+type CallContext = { requestId?: string; database?: unknown; session?: unknown };
 type Answer = (call: Call) => unknown;
 
 const ORIGIN = "https://policysql.test";
@@ -60,18 +65,20 @@ const LIMITS = Object.freeze({ maxRequestBytes: 4_096 });
  */
 const recordingEngine = (answer?: Answer) => {
   const calls: Call[] = [];
-  const operation = (name: string, takesContext: boolean) => async (input: any, context?: any, background?: unknown) => {
+  const operation = (name: string, takesContext: boolean) =>
+    async (input: unknown, context?: unknown, background?: unknown) => {
     const call: Call = { operation: name, input, context, background };
     calls.push(call);
-    const requestId = context?.requestId ?? "generated";
+    const requestId = (context as { requestId?: string } | undefined)?.requestId ?? "generated";
     if (takesContext) {
       try { checkRequestContext(context, background); } catch (error) {
         return { ok: false, error: operationError(error), requestId };
       }
     }
-    if (input && Object.hasOwn(input, "bodyText")) {
-      if (typeof input.bodyText !== "function") eagerBodies.push(name);
-      try { call.body = await readBodyText(input.bodyText, LIMITS); } catch (error) {
+    const fields = input as CallInput | null;
+    if (fields && Object.hasOwn(fields, "bodyText")) {
+      if (typeof fields.bodyText !== "function") eagerBodies.push(name);
+      try { call.body = await readBodyText(fields.bodyText as Parameters<typeof readBodyText>[0], LIMITS); } catch (error) {
         return { ok: false, error: operationError(error), requestId };
       }
     }
@@ -97,13 +104,14 @@ const expectFixedHeaders = (response: Response, label: string) => {
 const expectError = async (response: Response, status: number, code: string, label: string, requestId?: string) => {
   same(response.status, status, `${label}: status`);
   expectFixedHeaders(response, label);
-  const body: any = await response.json();
-  check(body && typeof body.error === "object", `${label}: error body`);
-  same(Object.keys(body.error).sort(), ["code", "message", "path", "requestId"], `${label}: error fields`);
-  same(body.error.code, code, `${label}: code`);
-  check(typeof body.error.message === "string" && body.error.message !== "", `${label}: message`);
-  check(typeof body.error.requestId === "string" && body.error.requestId !== "", `${label}: requestId`);
-  if (requestId !== undefined) same(body.error.requestId, requestId, `${label}: requestId`);
+  const body = await response.json() as { error?: Record<string, unknown> } | null;
+  check(body !== null && typeof body.error === "object", `${label}: error body`);
+  const error = body?.error ?? {};
+  same(Object.keys(error).sort(), ["code", "message", "path", "requestId"], `${label}: error fields`);
+  same(error.code, code, `${label}: code`);
+  check(typeof error.message === "string" && error.message !== "", `${label}: message`);
+  check(typeof error.requestId === "string" && error.requestId !== "", `${label}: requestId`);
+  if (requestId !== undefined) same(error.requestId, requestId, `${label}: requestId`);
 };
 
 // Every client route: method and path, the operation, and the fields it carries.
@@ -157,9 +165,9 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
         const response = await createMapping(engine).fetch(route.request(), context(), background);
         same(calls.map((call) => call.operation), [route.operation], `${route.label}: operations`);
         same(fieldsOf(calls[0]), route.input, `${route.label}: fields`);
-        same(calls[0].context?.database, BINDING, `${route.label}: database`);
-        same(calls[0].context?.session, SESSION, `${route.label}: session`);
-        same(calls[0].context?.requestId, "req_conformance", `${route.label}: requestId`);
+        same((calls[0].context as CallContext | undefined)?.database, BINDING, `${route.label}: database`);
+        same((calls[0].context as CallContext | undefined)?.session, SESSION, `${route.label}: session`);
+        same((calls[0].context as CallContext | undefined)?.requestId, "req_conformance", `${route.label}: requestId`);
         if (route.operation === "execute") check(calls[0].background === background, "execute: background tasks are passed");
         same(response.status, route.status, `${route.label}: success status`);
         if (!["capabilities", "catalog"].includes(route.operation)) {
@@ -185,7 +193,7 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
       expectFixedHeaders(response, "callback");
       same(calls.map((call) => [call.operation, fieldsOf(call)]),
         [["callbackQuery", { validationId: CVAL, capability: "capability_1", body: '{"sequence":1}' }]], "callback: call");
-      same(calls[0].context?.requestId, "req_callback", "callback: requestId");
+      same((calls[0].context as CallContext | undefined)?.requestId, "req_callback", "callback: requestId");
       await mapping.fetchCallback(post(`/v1/commit-checks/${CVAL}/query`, "{}"));
       same(fieldsOf(calls[1]).capability, "", "callback without a bearer capability passes an empty one");
       for (const request of [
@@ -230,10 +238,11 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
         same(cached.status, 304, `${path}: not modified`);
         same(cached.headers.get("etag"), `"${SNAPSHOT}"`, `${path}: 304 etag`);
         same(await cached.text(), "", `${path}: 304 has no body`);
-        same(unchanged.calls[0].input.ifNoneMatch, SNAPSHOT, `${path}: If-None-Match names the snapshot`);
+        same((unchanged.calls[0].input as CallInput).ifNoneMatch, SNAPSHOT, `${path}: If-None-Match names the snapshot`);
         for (const header of [`W/"${SNAPSHOT}"`, SNAPSHOT, `"${SNAPSHOT}", "other"`]) {
           await mapping.fetch(get(path, { "if-none-match": header }), context());
-          same(unchanged.calls.at(-1).input.ifNoneMatch, undefined, `${path}: If-None-Match ${header} is not one strong tag`);
+          same((unchanged.calls.at(-1)?.input as CallInput | undefined)?.ifNoneMatch, undefined,
+            `${path}: If-None-Match ${header} is not one strong tag`);
         }
       }
     },
@@ -290,12 +299,17 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
   {
     name: "request ids: the wrapper's is used; without one, a fresh id is generated and passed to the operation",
     async run(createMapping) {
-      const { engine, calls } = recordingEngine((call) => ({ ok: false, error: { code: "POLICYSQL_FORBIDDEN_ACCESS", message: "m", path: null }, requestId: call.context.requestId }));
+      const { engine, calls } = recordingEngine((call) => ({
+        ok: false,
+        error: { code: "POLICYSQL_FORBIDDEN_ACCESS", message: "m", path: null },
+        requestId: (call.context as CallContext | undefined)?.requestId ?? "generated",
+      }));
       const mapping = createMapping(engine);
       const response = await mapping.fetch(get("/v1/catalog", { "cf-ray": "platform-header" }), { database: BINDING, session: SESSION });
-      const id = ((await response.json()) as any).error.requestId;
-      check(typeof calls[0].context.requestId === "string" && calls[0].context.requestId !== "", "a request id is generated");
-      same(id, calls[0].context.requestId, "the generated id is the operation's");
+      const id = ((await response.json()) as { error: { requestId: string } }).error.requestId;
+      const generated = (calls[0].context as CallContext).requestId;
+      check(typeof generated === "string" && generated !== "", "a request id is generated");
+      same(id, generated, "the generated id is the operation's");
       check(id !== "platform-header", "no platform header is read as the request id");
     },
   },

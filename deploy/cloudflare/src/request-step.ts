@@ -27,16 +27,18 @@
 import { EngineError, internalError, operationError } from "./errors.ts";
 import { checkDatabaseBinding, databaseTransportFactory, noteReadCap, sameDatabaseBinding } from "./database.ts";
 import { runtimeLimits } from "./limits.ts";
-import type { DatabaseBinding, DatabaseProvider } from "./database.ts";
+import type { DatabaseBinding, DatabaseProvider, DatabaseTransaction, DatabaseUsage } from "./database.ts";
 import { parseExact, stringifyExact } from "./exact-json.ts";
 import { checkBatch, decodeArgs, directCommitFailureClass, directFailureClass, encodeResults, entropyHex, executeFailedEvent, observeCost } from "./step-effects.ts";
 import type { CostCatalog } from "./engine-config.ts";
 import { runInBackground } from "./transaction-owner-port.ts";
-import type { BackgroundTasks, OwnerReply, TransactionOwnerHandle } from "./transaction-owner-port.ts";
-import type { ExecutionTraceSink } from "./types.ts";
+import type { BackgroundTasks, OwnerAtomicInput, OwnerReply, TransactionOwnerHandle } from "./transaction-owner-port.ts";
+import type { ExecutionTrace, ExecutionTraceSink } from "./types.ts";
+import type { StepOutput, WireEffect, WireStatement } from "./core-wire.ts";
+import type { PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 
 export type RequestStepDependencies = {
-  getRuntime: () => any;
+  getRuntime: () => PolicySqlRuntime;
   database: DatabaseProvider;
   costCatalog?: Readonly<CostCatalog>;
   /** The owner handle for a name the machine forwards to (validated by the engine). */
@@ -55,7 +57,7 @@ export type RequestStepContext = {
 
 const internalReply = (): OwnerReply => ({ ok: false, error: operationError(internalError()) });
 
-const publishTrace = async (trace: any, sink: ExecutionTraceSink | undefined) => {
+const publishTrace = async (trace: ExecutionTrace, sink: ExecutionTraceSink | undefined) => {
   if (!sink) return;
   try {
     await sink(trace);
@@ -84,7 +86,7 @@ export const runRequestStep = async (
   const { requestId, maxBytes } = context;
   const runtime = dependencies.getRuntime();
   let volatile: string | null = null;
-  let connection: any = null;
+  let connection: DatabaseTransaction | null = null;
   let checked: DatabaseBinding | null = context.checked;
   let reply: OwnerReply | null = null;
 
@@ -97,17 +99,18 @@ export const runRequestStep = async (
     if (open?.open) runInBackground(context.background, open.rollback(), requestId);
   };
 
-  const step = (event: unknown) => {
+  const step = (event: unknown): StepOutput => {
     const host = JSON.stringify({ nowMs: Date.now(), entropy: entropyHex(), requestId, owner: null });
-    const output = parseExact(runtime.step_json(undefined, volatile ?? undefined, stringifyExact(event), host));
+    const output = parseExact(runtime.step_json(undefined, volatile ?? undefined, stringifyExact(event), host)) as StepOutput;
     if (output.error) throw new EngineError(output.error.code, output.error.message);
     volatile = output.volatile;
     if (volatile === null) closeConnection();
     return output;
   };
 
-  const perform = async (effect: any) => {
-    const { id } = effect;
+  const perform = async (effect: WireEffect) => {
+    // Only awaited effects have an id, and only they reach here.
+    const id = "id" in effect ? effect.id : 0;
     switch (effect.type) {
       case "checkBinding":
         {
@@ -143,7 +146,7 @@ export const runRequestStep = async (
         try {
           if (!connection) throw new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
           if (effect.trace) await publishTrace(effect.trace, dependencies.executionTrace?.sink);
-          const results = await connection.execute(effect.statements.map((statement: any) => ({
+          const results = await connection.execute(effect.statements.map((statement: WireStatement) => ({
             sql: statement.sql,
             args: decodeArgs(statement.args, maxBytes),
           })), { maxResponseBytes: effect.maxResponseBytes });
@@ -162,7 +165,7 @@ export const runRequestStep = async (
           connection = open;
           return { type: "commitFailed", id, class: directCommitFailureClass(error) };
         }
-        const usage: any[] = Array.isArray(open.usage) ? open.usage : [];
+        const usage: DatabaseUsage[] = Array.isArray(open.usage) ? open.usage : [];
         console.log(JSON.stringify({
           event: "database_usage",
           requestId,
@@ -184,7 +187,7 @@ export const runRequestStep = async (
       case "forward":
         try {
           const handle = dependencies.owner(effect.owner);
-          return { type: "ownerReplied", id, reply: await handle.atomic(effect.input, requestId) };
+          return { type: "ownerReplied", id, reply: await handle.atomic(effect.input as OwnerAtomicInput, requestId) };
         } catch {
           return { type: "forwardFailed", id, class: "unavailable" };
         }

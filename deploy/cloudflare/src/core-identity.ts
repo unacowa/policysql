@@ -11,16 +11,32 @@ export type Idempotency = { keyHash: string; fingerprint: string };
 
 const HASH = /^[a-f0-9]{64}$/u;
 
+/**
+ * `identity_json`'s reply (ADR 0024 pull request 2, ADR 0025): one of the identity fields,
+ * an idempotency pair, or core's error envelope. `hash` is the only field reader, and it
+ * narrows, so a field core never wrote is POLICYSQL_INTERNAL rather than a value.
+ */
+type IdentityEnvelope = {
+  readonly idempotency?: { readonly keyHash?: unknown; readonly fingerprint?: unknown } | null;
+  readonly fingerprint?: unknown;
+  readonly digest?: unknown;
+  readonly error?: unknown;
+};
+
 const hash = (value: unknown): string => {
   if (typeof value !== "string" || !HASH.test(value)) throw internalError();
   return value;
 };
 
 /** Core's result for `input`, or its error thrown; anything malformed is POLICYSQL_INTERNAL. */
-const fromCore = <T>(runtime: IdentityRuntime, input: unknown, read: (result: any) => T): T => {
-  let result;
+const fromCore = <T>(
+  runtime: IdentityRuntime,
+  input: unknown,
+  read: (result: IdentityEnvelope) => T,
+): T => {
+  let result: IdentityEnvelope;
   try {
-    result = JSON.parse(runtime.identity_json(JSON.stringify(input)));
+    result = JSON.parse(runtime.identity_json(JSON.stringify(input))) as IdentityEnvelope;
   } catch {
     throw internalError();
   }

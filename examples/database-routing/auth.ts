@@ -15,6 +15,12 @@ export type JwtEnv = {
 
 export type Authenticate<Env> = (request: Request, env: Env) => Promise<TrustedSession>;
 
+/** A required deployment setting; the example fails closed when it is absent. */
+const required = (value: string | undefined): string => {
+  if (typeof value !== "string" || !value) throw new TypeError("Missing deployment setting");
+  return value;
+};
+
 /** `createJwtSessionVerifier` from `@unacowa/policysql/cloudflare`, injected for testability. */
 export const createJwtAuthentication = <Env extends JwtEnv>(
   createVerifier: typeof createJwtSessionVerifier,
@@ -26,7 +32,9 @@ export const createJwtAuthentication = <Env extends JwtEnv>(
     const key = JSON.stringify([jwks, jwksUrl, env.POLICYSQL_JWT_ISSUER, env.POLICYSQL_JWT_AUDIENCE]);
     let verify = verifiers.get(key);
     if (!verify) {
-      verify = createVerifier({ jwks, jwksUrl, issuer: env.POLICYSQL_JWT_ISSUER, audience: env.POLICYSQL_JWT_AUDIENCE });
+      verify = createVerifier({
+        jwks, jwksUrl, issuer: required(env.POLICYSQL_JWT_ISSUER), audience: required(env.POLICYSQL_JWT_AUDIENCE),
+      });
       verifiers.set(key, verify);
     }
     return verify(request);
@@ -49,8 +57,11 @@ export const authenticateRequest = async <Env>(
   try {
     return { session: await authenticate(request, env) };
   } catch (error) {
-    if (error?.name === "JwtAuthenticationError" && error.status === 401) {
-      return { response: errorResponse(401, error.code, error.message, { requestId }) };
+    const failure = error as { name?: unknown; status?: unknown; code?: unknown; message?: unknown } | null;
+    if (failure?.name === "JwtAuthenticationError" && failure.status === 401) {
+      return {
+        response: errorResponse(401, failure.code as string, failure.message as string, { requestId }),
+      };
     }
     console.log(JSON.stringify({ event: "authentication_unavailable", requestId }));
     return { response: errorResponse(500, "POLICYSQL_INTERNAL", "The request could not be completed.", { requestId }) };

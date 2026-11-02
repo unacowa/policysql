@@ -4,11 +4,13 @@
 // outcome; core judges every class, row, and estimate.
 import { CommitNotSentError, EngineError } from "./errors.ts";
 import { databaseTransportFactory } from "./database.ts";
-import type { DatabaseProvider } from "./database.ts";
+import type { DatabaseProvider, DatabaseResult, DatabaseTransaction } from "./database.ts";
 import { driverArgs, rawDriverValue, rowValues } from "./driver-values.ts";
 import { runtimeBytesLimit } from "./binary.ts";
 import { runtimeLimits } from "./limits.ts";
 import type { CostCatalog } from "./engine-config.ts";
+import type { PolicySqlRuntime } from "../pkg/policysql_wasm.js";
+import type { WireEffect } from "./core-wire.ts";
 import { stringifyExact } from "./exact-json.ts";
 import { SqlComplexityError } from "./database-complexity.ts";
 
@@ -118,7 +120,7 @@ export const decodeArgs = (args: Record<string, unknown>, maxBytes: number) => {
  * The raw results of an `executed` event: each driver value in the private ABI form, or the
  * `invalid` marker core rejects (a value the codec could not carry).
  */
-export const encodeResults = (results: any[], maxBytes: number) => results.map((result) => ({
+export const encodeResults = (results: readonly DatabaseResult[], maxBytes: number) => results.map((result) => ({
   columns: result.columns,
   rows: result.rows.map((row) => rowValues(result.columns, row).map((value) => {
     try { return rawDriverValue(value, maxBytes); } catch (error) {
@@ -136,16 +138,20 @@ export const encodeResults = (results: any[], maxBytes: number) => results.map((
  * affects a reply.
  */
 export const observeCost = async (
-  effect: { statements: Array<{ sql: string; args: Record<string, unknown> }>; context: any; maxResponseBytes: number },
-  { getRuntime, database, costCatalog }: { getRuntime: () => any; database: DatabaseProvider; costCatalog?: Readonly<CostCatalog> },
+  effect: Extract<WireEffect, { type: "observe" }>,
+  { getRuntime, database, costCatalog }: {
+    getRuntime: () => PolicySqlRuntime;
+    database: DatabaseProvider;
+    costCatalog?: Readonly<CostCatalog>;
+  },
 ) => {
   const requestId = `${effect.context.requestId}-cost`;
   const runtime = getRuntime();
   const maxBytes = runtimeBytesLimit(runtime);
   const { costTimeoutMs } = runtimeLimits(runtime);
   const catalog = costCatalog ?? null;
-  let transaction;
-  let results = [];
+  let transaction: DatabaseTransaction | undefined;
+  let results: DatabaseResult[] = [];
   try {
     if (catalog !== null && effect.statements.length > 0) {
       const factory = databaseTransportFactory(database, effect.context.binding, maxBytes);
@@ -167,8 +173,11 @@ export const observeCost = async (
   const output = JSON.parse(runtime.cost_estimate_json(stringifyExact({
     catalog,
     statements: effect.context.statements,
-    results: results.map((result) => ({ columns: result.columns, rows: result.rows.map((row) => rowValues(result.columns, row)) })),
-  })));
+    results: results.map((result) => ({
+      columns: result.columns,
+      rows: result.rows.map((row) => rowValues(result.columns, row)),
+    })),
+  }))) as { error?: { code: string }; estimates?: unknown };
   if (output.error) {
     console.log(JSON.stringify({ event: "cost_observation_failed", requestId, code: output.error.code }));
     return;

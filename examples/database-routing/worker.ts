@@ -45,10 +45,15 @@ export const TransactionOwner = durableObjectTransactionOwnerClass(worker.ownerD
 // WASM); commit-check callbacks are limited in their own bucket before fetchCallback.
 // This example wrapper chooses a fixed registered DB. A tenant-aware wrapper can supply an
 // ID from its own authorization/routing service instead of this setting.
+const required = (value: string | undefined, name: string): string => {
+  if (typeof value !== "string" || !value) throw new TypeError(`Missing deployment setting: ${name}`);
+  return value;
+};
+
 export default {
   fetch: createRateLimitedFetch<Env>(
     worker.app,
-    (env) => registry.binding(env.APPLICATION_DATABASE_ID, env),
+    (env) => registry.binding(required(env.APPLICATION_DATABASE_ID, "APPLICATION_DATABASE_ID"), env),
     createErrorResponse,
     createJwtAuthentication<Env>(createJwtSessionVerifier),
   ),

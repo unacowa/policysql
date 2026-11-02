@@ -27,12 +27,14 @@
 // `policysql_idempotency`).
 import { EngineError, operationError } from "./errors.ts";
 import { checkDatabaseBinding, databaseTransportFactory, noteReadCap, validateDatabaseProvider } from "./database.ts";
-import type { DatabaseProvider } from "./database.ts";
+import type { DatabaseProvider, DatabaseTransaction } from "./database.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { runtimeBytesLimit } from "./binary.ts";
 import { runtimeLimits } from "./limits.ts";
 import { validateConfig } from "./engine-config.ts";
 import type { PolicySqlConfig, ValidatedConfig } from "./engine-config.ts";
+import type { PolicySqlRuntime } from "../pkg/policysql_wasm.js";
+import type { StepOutput, WireEffect, WireStatement } from "./core-wire.ts";
 import { callCommitCheckHook } from "./adapters/commit-check-hook.ts";
 import { parseExact, stringifyExact } from "./exact-json.ts";
 import { checkBatch, decodeArgs, commitFailureClass, encodeResults, entropyHex, executeFailedEvent, failureClass, observeCost, validatorFailureClass } from "./step-effects.ts";
@@ -44,7 +46,7 @@ import type {
 
 /** What a transaction owner needs. It receives the same `config` as `createApp` (ADR 0021). */
 export type TransactionOwnerDependencies = {
-  getRuntime: () => any;
+  getRuntime: () => PolicySqlRuntime;
   database: DatabaseProvider;
   config: PolicySqlConfig;
   /** Omitted: commit-check calls use the host fetch through fetchNoFollow. */
@@ -107,7 +109,7 @@ const secureUrl = (raw: string) => {
 export class TransactionOwnerCore implements TransactionOwnerHandle {
   facilities: OwnerFacilities;
   config: ValidatedConfig;
-  getRuntime: () => any;
+  getRuntime: () => PolicySqlRuntime;
   database: DatabaseProvider;
   fetchImpl?: OutboundFetch;
   configuredChecks: string[];
@@ -118,7 +120,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   durable: string | null;
   volatile: string | null;
   /** The open database transaction of the machine's connection, if any. */
-  connection: any;
+  connection: DatabaseTransaction | null;
   queues: Record<Lane, Promise<unknown>>;
   waiters: Record<Lane, ((reply: OwnerReply) => void) | null>;
   /** When set to an array (tests), every step's four inputs and output text (ADR 0024 transcripts). */
@@ -210,7 +212,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
    * Runs `event` on `lane` after the lane's previous event ran all its effects, and resolves
    * with the lane's reply as soon as the machine sends it.
    */
-  lane(lane: Lane, input: unknown, event: any, rawRequestId: string): Promise<OwnerReply> {
+  lane(lane: Lane, input: unknown, event: unknown, rawRequestId: string): Promise<OwnerReply> {
     const requestId = replyRequestId(rawRequestId);
     let resolveReply: (reply: OwnerReply) => void;
     const reply = new Promise<OwnerReply>((resolve) => { resolveReply = resolve; });
@@ -253,14 +255,14 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     this.loaded = true;
   }
 
-  step(event: any, requestId: string) {
+  step(event: unknown, requestId: string): StepOutput {
     const host = JSON.stringify({
       nowMs: Date.now(), entropy: entropyHex(), requestId, owner: this.name, configuredChecks: this.configuredChecks,
     });
     const eventText = stringifyExact(event);
     const outputText: string = this.getRuntime().step_json(this.durable ?? undefined, this.volatile ?? undefined, eventText, host);
     this.transcript?.push({ durable: this.durable, volatile: this.volatile, event: eventText, host, output: outputText });
-    const output = parseExact(outputText);
+    const output = parseExact(outputText) as StepOutput;
     if (output.error) throw new EngineError(output.error.code, output.error.message);
     this.durable = output.durable;
     this.volatile = output.volatile;
@@ -269,12 +271,14 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     return output;
   }
 
-  closeConnection(requestId = this.name) {
+  closeConnection(requestId: string | null = this.name) {
     const connection = this.connection;
     this.connection = null;
     // As in request-step: a released transaction must finish rolling back after its reply, so
     // the rollback is kept alive through the owner's background tasks (#97).
-    if (connection?.open) runInBackground(this.facilities.background, connection.rollback(), requestId);
+    if (connection?.open) {
+      runInBackground(this.facilities.background, connection.rollback(), requestId ?? crypto.randomUUID());
+    }
   }
 
   /** Drops the in-memory state; the next event starts from the store, as a successor would. */
@@ -297,7 +301,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
   }
 
   /** Runs one event and every effect it leads to. */
-  async drive(event: any, requestId: string) {
+  async drive(event: unknown, requestId: string) {
     let next = event;
     while (next) {
       // A `reset` on another lane dropped the state: reload it, as a successor would.
@@ -332,8 +336,10 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     }
   }
 
-  async perform(effect: any, output: any, requestId: string) {
-    const { id } = effect;
+  async perform(effect: WireEffect, output: StepOutput, requestId: string) {
+    // Only awaited effects have an id (`Effect::id` in core), and only awaited effects reach
+    // here: the immediate ones (`respond`, `log`, `observe`, `reset`) are handled in `drive`.
+    const id = "id" in effect ? effect.id : 0;
     const runtime = this.getRuntime();
     switch (effect.type) {
       case "checkBinding":
@@ -359,7 +365,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
         try {
           if (!this.connection) throw new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
           const maxBytes = runtimeBytesLimit(runtime);
-          const results = await this.connection.execute(effect.statements.map((statement) => ({
+          const results = await this.connection.execute((effect.statements ?? []).map((statement: WireStatement) => ({
             sql: statement.sql,
             args: decodeArgs(statement.args, maxBytes),
           })), { maxResponseBytes: effect.maxResponseBytes });
@@ -411,7 +417,8 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
     }
   }
 
-  async callValidator(effect: any) {
+  async callValidator(effect: WireEffect) {
+    if (effect.type !== "callValidator") throw new Error(`not a validator effect: ${effect.type}`);
     const { id } = effect;
     // The endpoint and secret are looked up by check id; core never sees them. The hook
     // adapter adds `query` (token, callback URL, expiry) and signs.
@@ -431,7 +438,7 @@ export class TransactionOwnerCore implements TransactionOwnerHandle {
         url,
         hmacSecret: endpoint.hmacSecret,
         publicBaseUrl,
-        validationId: effect.payload.validationId,
+        validationId: String(effect.payload.validationId ?? ""),
         payload: effect.payload,
         capability: effect.capability,
         timeoutMs: effect.timeoutMs,

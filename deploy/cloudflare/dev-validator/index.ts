@@ -82,11 +82,13 @@ const check = async (request: Request, env: Env): Promise<Response> => {
   if (!await signatureValid(secret, timestamp, body, request.headers.get("policysql-hook-signature"))) {
     return reply(env, { error: "signature" }, 401);
   }
-  let payload: any;
-  try { payload = JSON.parse(body); } catch { return reply(env, { error: "json" }, 400); }
+  let payload: ValidatorPayload;
+  try { payload = JSON.parse(body) as ValidatorPayload; } catch { return reply(env, { error: "json" }, 400); }
   if (payload?.version !== "1" || payload?.check !== "smoke_check") return decision(env, false, "UNKNOWN_CHECK");
   let callback: URL;
-  try { callback = new URL(payload.query?.url); } catch { return decision(env, false, "CALLBACK_URL"); }
+  const callbackUrl = payload.query?.url;
+  if (typeof callbackUrl !== "string") return decision(env, false, "CALLBACK_URL");
+  try { callback = new URL(callbackUrl); } catch { return decision(env, false, "CALLBACK_URL"); }
   if (callback.origin !== new URL(origin).origin || !CALLBACK_PATH.test(callback.pathname) || callback.search !== "") {
     return decision(env, false, "CALLBACK_URL");
   }
@@ -102,7 +104,7 @@ const check = async (request: Request, env: Env): Promise<Response> => {
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ sequence: 1, sql: CALLBACK_SQL, params: { limit: 1 } }),
     });
-    const result = await response.json() as any;
+    const result = await response.json() as { error?: { code?: unknown }; rows?: Array<{ verdict?: unknown }> };
     if (!response.ok) {
       log({ validationId: payload.validationId, outcome: "callback_rejected", status: response.status, code: result?.error?.code ?? null, callbackMs: Date.now() - callbackStarted });
       return decision(env, false, "CALLBACK_FAILED");
@@ -119,6 +121,17 @@ const check = async (request: Request, env: Env): Promise<Response> => {
     return decision(env, true);
   }
   return decision(env, false, verdict === "deny" ? "SMOKE_DENIED" : "NO_PROBE");
+};
+
+/**
+ * The hook body this validator receives (ADR 0007): the signed payload plus the `query`
+ * block the hook adapter adds. Every field is `unknown`-checked below before it is used.
+ */
+type ValidatorPayload = {
+  version?: unknown;
+  check?: unknown;
+  validationId?: unknown;
+  query?: { url?: unknown; token?: unknown };
 };
 
 export default {
