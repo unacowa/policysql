@@ -100,18 +100,23 @@ codes appear only in `cost_observation_failed` records.) The client listed
 
 ### Guards and conformance
 
-`test/engine-boundary.test.mjs` scans every library module that is not on an explicit list of
-adapters and assembly modules (`src/http/*`, `src/adapters/*`, `turso-http.ts`, `redirects.ts`,
-`worker.ts`, `package.ts`); a new module is an engine module by default. An engine module may
-not contain `Request`, `Response`, `Headers`, `Hono`, or an import of `hono`; an HTTP header
-name of the protocol, the owner wire, or the hook; a literal containing `/v1/` or equal to
-`/healthz`; or a number from 100 to 599 used as a status (a `status` property value, compared
-with or assigned to `.status`, or an argument of a call or `new` whose callee name contains
-response, error, or status). The test also proves the scan finds each form in the adapter.
+`eslint.config.js` (issue #59) keeps the same boundary declaratively, and
+`tsconfig.engine.json` keeps it by type: the engine compiles without the Workers types, so
+`Request`, `Response`, `Headers`, `fetch`, and the Durable Object types are compile errors
+rather than scan findings. The engine is every module under `src/` that is not one of the
+adapters or the assembly (`src/http/**`, `src/adapters/**`, `turso-http.ts`, `redirects.ts`,
+`bounded-body.ts`, `worker.ts`, `package.ts`, `app.ts`); a new module is an engine module by
+default. The lint rules an engine module may not break name `Request`, `Response`, `Headers`,
+`Hono`, or an import of `hono`; an HTTP header name of the protocol, the owner wire, or the
+hook; a literal containing `/v1/` or equal to `/healthz`; or a number from 100 to 599 used as a
+status. `test/boundary.test.mjs` proves each form is caught.
 
 To satisfy it, the commit-check validator call (HMAC signing, hook headers, the callback URL)
 moved from `commit-checks.ts` into the outbound adapter `src/adapters/commit-check-hook.ts`;
-the engine still chooses the endpoint, issues the capability, and judges the decision.
+the engine still chooses the endpoint, issues the capability, and judges the decision. (Issue
+#59 made that seam a port: `TransactionOwnerCore` takes a `CommitCheckCaller`
+(`src/transaction-owner-port.ts`), so the engine imports no outbound HTTP at all and
+`tsconfig.engine.json` needs no exception for the adapter.)
 (Since ADR 0024, core issues the capability and judges the decision; the owner chooses the
 endpoint by check id. Pull request 9 deleted `commit-checks.ts`.)
 
