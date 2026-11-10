@@ -47,7 +47,7 @@ Examples:
 
 - one base resource;
 - explicit assignments using literals or named parameters only;
-- pre-state policy filter and client predicate;
+- pre-state policy filter and client predicate; the client predicate may reference only the role's regular select columns and the update's `returning.columns`;
 - server-owned presets disjoint from client assignments;
 - post-state checks over every changed row;
 - optional independently authorized `RETURNING`.
@@ -55,7 +55,7 @@ Examples:
 ### DELETE
 
 - one base resource;
-- policy and client predicates over the pre-delete row;
+- policy and client predicates over the pre-delete row; the client predicate may reference only the role's regular select columns and the delete's `returning.columns`;
 - optional independently authorized `RETURNING`.
 
 Operation checks evaluate to success only on SQL TRUE. FALSE and UNKNOWN fail. A zero-row mutation passes the row check vacuously; callers use transaction `expect.affectedRows` when cardinality is part of the invariant.

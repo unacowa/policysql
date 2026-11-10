@@ -339,6 +339,7 @@ dependencies = [
  "policysql-core",
  "policysql-execution",
  "policysql-gateway",
+ "policysql-ir",
  "policysql-parser",
  "policysql-policy",
  "policysql-sqlite",

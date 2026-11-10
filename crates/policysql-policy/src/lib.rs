@@ -787,6 +787,12 @@ impl PolicyBundle {
                         .map(|projection| &projection.expression),
                 ),
         )?;
+        if let Some(predicate) = &update.predicate {
+            validate_client_expression(
+                predicate,
+                &self.mutation_filter_columns(update.resource, session.role(), &policy.returning),
+            )?;
+        }
         let mut protected = update.clone();
         validate_returning(&protected.returning, &policy.returning)?;
         let mut server_values = BTreeMap::new();
@@ -858,6 +864,12 @@ impl PolicyBundle {
                     .map(|projection| &projection.expression),
             ),
         )?;
+        if let Some(predicate) = &delete.predicate {
+            validate_client_expression(
+                predicate,
+                &self.mutation_filter_columns(delete.resource, session.role(), &policy.returning),
+            )?;
+        }
         let mut protected = delete.clone();
         validate_returning(&protected.returning, &policy.returning)?;
         let mut server_values = BTreeMap::new();
@@ -883,6 +895,30 @@ impl PolicyBundle {
                 policy_limit: None,
             },
         })
+    }
+
+    /// Columns a client `WHERE` of an UPDATE or DELETE may reference (issue #116).
+    ///
+    /// A mutation's filter observes rows through `RETURNING` and the affected-row count, so it
+    /// is limited to columns the role can already observe: the role's regular select columns
+    /// for the resource (as in Hasura) and the operation's own `returning.columns` (a
+    /// filter-free mutation could return those values for every row it may change). Columns
+    /// the role may only write are not observable and are excluded, as are conditional
+    /// (`visible_if`) select columns, which are projection-only everywhere.
+    fn mutation_filter_columns(
+        &self,
+        resource: policysql_core::ResourceId,
+        role: &RoleName,
+        returning: &BTreeSet<ColumnId>,
+    ) -> BTreeSet<ColumnId> {
+        let mut columns = self
+            .select
+            .get(&resource)
+            .and_then(|roles| roles.get(role))
+            .map(|policy| policy.regular_columns.clone())
+            .unwrap_or_default();
+        columns.extend(returning.iter().copied());
+        columns
     }
 
     fn select_policies<'a>(
@@ -3000,5 +3036,88 @@ resources:
             bundle.compile_select(&outer, &member).map(|_| ()),
             Err(PolicyError::UnsupportedCapability)
         );
+    }
+
+    /// An UPDATE or DELETE `WHERE` may reference only columns the role can already observe:
+    /// its regular select columns and the operation's `returning.columns` (issue #116).
+    #[test]
+    fn mutation_where_is_limited_to_observable_columns() {
+        let bundle = activate(
+            r"
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns:
+            - id
+            - name
+            - name: private_note
+              visible_if: { created_by: { eq: { session: subject_id } } }
+              on_deny: null
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+        update:
+          columns: [status]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [created_by] }
+        delete:
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [created_by] }
+      writer:
+        update:
+          columns: [status]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+        delete:
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+",
+        );
+        let compile = |role: &str, sql: &str| {
+            let statement = SqliteFrontend::default()
+                .bind(sql, &catalog())
+                .unwrap_or_else(|error| unreachable!("{sql} binds: {error}"));
+            match &statement {
+                BoundStatement::Update(_) => bundle.compile_update(&statement, &session(role)),
+                BoundStatement::Delete(_) => bundle.compile_delete(&statement, &session(role)),
+                _ => unreachable!("mutation statement"),
+            }
+            .map(|_| ())
+        };
+        for (column, expected) in [
+            // A regular select column.
+            ("id", Ok(())),
+            // A `returning.columns` entry, observable without a select policy column.
+            ("created_by", Ok(())),
+            // Writable only: never observable.
+            ("status", Err(PolicyError::ForbiddenColumn)),
+            // Used by the policy filter only.
+            ("tenant_id", Err(PolicyError::ForbiddenColumn)),
+            // Conditional select columns are projection-only.
+            ("private_note", Err(PolicyError::ForbiddenColumn)),
+        ] {
+            for sql in [
+                format!("UPDATE projects SET status = 'a' WHERE {column} = 'x'"),
+                format!("DELETE FROM projects WHERE {column} = 'x'"),
+            ] {
+                assert_eq!(compile("member", &sql), expected, "{sql}");
+            }
+        }
+        // Without a select policy or `returning`, no column is observable, but a mutation
+        // without a client `WHERE` still compiles.
+        for sql in [
+            "UPDATE projects SET status = 'a' WHERE id = 'x'",
+            "DELETE FROM projects WHERE id = 'x'",
+        ] {
+            assert_eq!(
+                compile("writer", sql),
+                Err(PolicyError::ForbiddenColumn),
+                "{sql}"
+            );
+        }
+        for sql in ["UPDATE projects SET status = 'a'", "DELETE FROM projects"] {
+            assert_eq!(compile("writer", sql), Ok(()), "{sql}");
+        }
     }
 }

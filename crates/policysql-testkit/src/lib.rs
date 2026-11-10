@@ -1102,9 +1102,9 @@ pub fn write_report(report: &CoverageReport, output_root: &Path) -> Result<(), C
 mod tests {
     use super::{
         CaseManifest, ExecutionEvidence, ExpectedDisposition, FixtureExecutionEvidence, OracleRow,
-        OracleSession, OracleValue, RecordingExecutor, ReferenceSqlite, SurfaceDocument,
-        SurfaceLeaf, SurfaceStatus, TestClass, TruthValue, build_report, evaluate_select_filter,
-        evidence_path, fixture_digest, load_fixtures,
+        OracleSession, OracleValue, RecordingExecutor, ReferenceSqlite, RejectionExpectation,
+        SurfaceDocument, SurfaceLeaf, SurfaceStatus, TestClass, TruthValue, build_report,
+        evaluate_select_filter, evidence_path, fixture_digest, load_fixtures, read_yaml,
     };
     use policysql_catalog::{Catalog, ResourceDescriptor};
     use policysql_core::{
@@ -1113,6 +1113,7 @@ mod tests {
         ValueDescriptor, ValueRepresentation,
     };
     use policysql_execution::ExecutionLimits;
+    use policysql_ir::BoundStatement;
     use policysql_parser::SqliteFrontend;
     use policysql_policy::{PolicyBundle, PolicyError};
     use policysql_sqlite::{
@@ -1993,6 +1994,34 @@ resources:
         }
     }
 
+    /// Compiles `statement` with the policy entry point for its kind, requires a rejection, and
+    /// compares the public code `policysql-gateway` maps the policy error to.
+    fn assert_policy_rejection(
+        directory: &str,
+        bundle: &PolicyBundle,
+        statement: &BoundStatement,
+        session: &TrustedSession,
+        expected_code: &str,
+    ) {
+        let error = match statement {
+            BoundStatement::Insert(_) => bundle.compile_insert(statement, session),
+            BoundStatement::Update(_) => bundle.compile_update(statement, session),
+            BoundStatement::Delete(_) => bundle.compile_delete(statement, session),
+            _ => bundle.compile_select(statement, session),
+        }
+        .err()
+        .unwrap_or_else(|| unreachable!("{directory} must be denied"));
+        let code = match error {
+            PolicyError::MissingPolicy => "POLICYSQL_MISSING_POLICY",
+            PolicyError::ForbiddenColumn | PolicyError::UnknownColumn => {
+                "POLICYSQL_FORBIDDEN_COLUMN"
+            }
+            PolicyError::UnsupportedCapability => "POLICYSQL_FORBIDDEN_OPERATION",
+            other => unreachable!("{directory}: unmapped policy error {other:?}"),
+        };
+        assert_eq!(code, expected_code, "{directory}");
+    }
+
     fn verify_denied_security_fixtures() {
         let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/sqlite-turso-v1/security");
@@ -2001,6 +2030,7 @@ resources:
             "forbidden-filter-column",
             "forbidden-order-column",
             "missing-policy",
+            "mutation-forbidden-filter-column",
             "server-parameter-collision",
             "statement-smuggling",
         ] {
@@ -2073,9 +2103,22 @@ resources:
                 raw_session.values,
             )
             .unwrap_or_else(|error| unreachable!("trusted fixture session: {error}"));
-            if let Ok(statement) =
-                SqliteFrontend::default().bind(&read_fixture(&root, "input.sql"), &catalog)
-            {
+            let expectation: RejectionExpectation =
+                read_yaml(&root.join("expected/rejection.yaml"))
+                    .unwrap_or_else(|error| unreachable!("{directory} rejection: {error}"));
+            let bound = SqliteFrontend::default().bind(&read_fixture(&root, "input.sql"), &catalog);
+            if expectation.stage == "authorization" {
+                // An authorization fixture must reach the policy layer, or it tests nothing.
+                let statement =
+                    bound.unwrap_or_else(|error| unreachable!("{directory} must bind: {error}"));
+                assert_policy_rejection(
+                    directory,
+                    &bundle,
+                    &statement,
+                    &session,
+                    &expectation.code,
+                );
+            } else if let Ok(statement) = bound {
                 assert!(bundle.compile_select(&statement, &session).is_err());
             }
             let executor = RecordingExecutor::<()>::default();
