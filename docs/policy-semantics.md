@@ -134,7 +134,7 @@ delete:
 Semantics:
 
 - the policy filter is compiled into the delete predicate;
-- a caller `WHERE` may reference only the role's regular select columns for the resource and the delete's `returning.columns` (issue #116): `RETURNING` shows each deleted row as it was, so those values are observable before the delete;
+- a caller `WHERE` may reference only the role's regular select columns for the resource (issue #116), as for update; `returning.columns` do not count, since a probe with `expect.affectedRows: 0` rolls back without showing the value it filtered on;
 - `RETURNING` requires separately allowed return columns;
 - cascades and trigger-dependent side effects are outside the public mutation model.
 

@@ -1,33 +1,54 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { digestPath, sourceDigest, sourceFiles } from "../scripts/source-digest.mjs";
+import { ARTIFACTS, artifactDigest, digestPath, sourceDigest, sourceFiles } from "../scripts/source-digest.mjs";
+
+const REBUILD = "run `npm --prefix deploy/cloudflare run build:wasm` and commit pkg/";
+
+function recorded() {
+  let text;
+  try {
+    text = readFileSync(digestPath, "utf8");
+  } catch {
+    assert.fail(`pkg/source-digest.txt is missing: ${REBUILD}`);
+  }
+  return new Map(text.trim().split("\n").map((line) => {
+    const [name, digest, ...rest] = line.trim().split(/\s+/);
+    assert.equal(rest.length, 0, `malformed record line: ${line}`);
+    return [name, digest];
+  }));
+}
 
 // The committed module must be built from the Rust sources in this tree (PR #117 review).
 test("the committed WASM in pkg/ is built from the current Rust sources", () => {
-  let recorded;
-  try {
-    recorded = readFileSync(digestPath, "utf8").trim();
-  } catch {
-    assert.fail("pkg/source-digest.txt is missing: run `npm run build:wasm` and commit pkg/");
+  const record = recorded();
+  assert.equal(record.get("sources"), sourceDigest(), `pkg/ is stale for the Rust sources: ${REBUILD}`);
+  for (const name of ARTIFACTS) {
+    assert.equal(record.get(name), artifactDigest(name), `pkg/${name} is not the recorded build: ${REBUILD}`);
   }
-  assert.equal(
-    recorded,
-    sourceDigest(),
-    "pkg/ is stale for the Rust sources: run `npm --prefix deploy/cloudflare run build:wasm` and commit pkg/",
-  );
+  assert.deepEqual([...record.keys()].sort(), ["sources", ...ARTIFACTS].sort());
 });
 
-test("the source digest covers the policy compiler and the WASM crate, not test-only crates", () => {
+test("the source digest covers every non-test crate and fails closed", () => {
   const files = sourceFiles();
   for (const required of [
     "Cargo.lock",
+    "Cargo.toml",
+    "rust-toolchain.toml",
     "crates/policysql-wasm/src/lib.rs",
-    "crates/policysql-policy/src/lib.rs",
-    "crates/policysql-parser/src/lib.rs",
-    "crates/policysql-sqlite/src/lib.rs",
+    "crates/policysql-wasm/Cargo.toml",
   ]) {
     assert.ok(files.includes(required), required);
   }
-  assert.ok(!files.some((file) => file.startsWith("crates/policysql-testkit/")));
+  const crates = new Set(files.filter((file) => file.startsWith("crates/")).map((file) => file.split("/")[1]));
+  // Every crate policysql-wasm links today (`cargo tree -p policysql-wasm -e normal`).
+  for (const crate of [
+    "policysql-catalog", "policysql-core", "policysql-execution", "policysql-gateway",
+    "policysql-ir", "policysql-parser", "policysql-policy", "policysql-sqlite",
+    "policysql-transaction", "policysql-turso", "policysql-wasm",
+  ]) {
+    assert.ok(crates.has(crate), crate);
+  }
+  assert.ok(!crates.has("policysql-testkit"));
+  assert.ok(!files.some((file) => file.split("/").some((part) => part.startsWith("."))));
 });

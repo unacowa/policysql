@@ -2022,18 +2022,22 @@ resources:
         assert_eq!(code, expected_code, "{directory}");
     }
 
+    /// Denied security fixtures under `tests/fixtures/sqlite-turso-v1/security`.
+    const SECURITY_DENY_FIXTURES: &[&str] = &[
+        "exists-outside-where",
+        "forbidden-filter-column",
+        "forbidden-order-column",
+        "missing-policy",
+        "mutation-delete-forbidden-filter-column",
+        "mutation-forbidden-filter-column",
+        "server-parameter-collision",
+        "statement-smuggling",
+    ];
+
     fn verify_denied_security_fixtures() {
         let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/sqlite-turso-v1/security");
-        for directory in [
-            "exists-outside-where",
-            "forbidden-filter-column",
-            "forbidden-order-column",
-            "missing-policy",
-            "mutation-forbidden-filter-column",
-            "server-parameter-collision",
-            "statement-smuggling",
-        ] {
+        for directory in SECURITY_DENY_FIXTURES {
             let root = fixture_root.join(directory);
             let raw_catalog: FixtureCatalog =
                 serde_yaml::from_str(&read_fixture(&root, "catalog-manifest.yaml"))

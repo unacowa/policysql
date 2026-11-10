@@ -55,7 +55,7 @@ Examples:
 ### DELETE
 
 - one base resource;
-- policy and client predicates over the pre-delete row; the client predicate may reference only the role's regular select columns and the delete's `returning.columns`;
+- policy and client predicates over the pre-delete row; the client predicate may reference only the role's regular select columns;
 - optional independently authorized `RETURNING`.
 
 Operation checks evaluate to success only on SQL TRUE. FALSE and UNKNOWN fail. A zero-row mutation passes the row check vacuously; callers use transaction `expect.affectedRows` when cardinality is part of the invariant.

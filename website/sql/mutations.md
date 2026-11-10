@@ -77,7 +77,7 @@ clientの`WHERE`で参照できるのは、同じresourceのselect policyの通�
 
 DELETE policyのfilterに一致するrowだけを削除できます。
 
-clientの`WHERE`で参照できるのは、同じresourceのselect policyの通常`columns`と、このdeleteの`returning.columns`です。DELETEの`RETURNING`は削除前のrowをそのまま返すので、`returning.columns`の値は削除前から観測できます。
+clientの`WHERE`で参照できるのは、UPDATEと同じく、同じresourceのselect policyの通常`columns`だけです。`returning.columns`は含みません。`expect.affectedRows: 0`を付けると、一致する行があってもrollbackされるので、値を見せずに条件だけを確かめられてしまうためです。
 
 ```sql
 DELETE FROM posts

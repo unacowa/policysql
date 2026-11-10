@@ -790,7 +790,7 @@ impl PolicyBundle {
         if let Some(predicate) = &update.predicate {
             validate_client_expression(
                 predicate,
-                &self.mutation_filter_columns(update.resource, session.role(), &BTreeSet::new()),
+                &self.mutation_filter_columns(update.resource, session.role()),
             )?;
         }
         let mut protected = update.clone();
@@ -867,7 +867,7 @@ impl PolicyBundle {
         if let Some(predicate) = &delete.predicate {
             validate_client_expression(
                 predicate,
-                &self.mutation_filter_columns(delete.resource, session.role(), &policy.returning),
+                &self.mutation_filter_columns(delete.resource, session.role()),
             )?;
         }
         let mut protected = delete.clone();
@@ -897,32 +897,28 @@ impl PolicyBundle {
         })
     }
 
-    /// Columns a client `WHERE` of an UPDATE or DELETE may reference (issue #116).
+    /// Columns a client `WHERE` of an UPDATE or DELETE may reference (issue #116): the role's
+    /// regular select columns for the resource, as in Hasura.
     ///
-    /// A mutation's filter observes pre-state rows through `RETURNING`, the affected-row
-    /// count, and check failures, so it is limited to columns whose pre-state value the role
-    /// can already observe: its regular select columns for the resource (as in Hasura), and
-    /// `also_observable`. A DELETE passes its `returning.columns`: `RETURNING` shows the
-    /// deleted row as it was, and a filter-free delete could return those values for every
-    /// row it may delete. An UPDATE passes none: its `RETURNING` shows post-state values (a
-    /// preset or an assignment overwrites the pre-state one), and a row that fails `check` is
-    /// never returned, so a `returning` column is not observable before the update (PR #117
-    /// review). Columns the role may only write are excluded, as are conditional
-    /// (`visible_if`) select columns, which are projection-only everywhere.
+    /// A mutation's filter is evaluated on pre-state rows and observed through `RETURNING`,
+    /// the affected-row count, and check or `expect.affectedRows` failures, so it is limited to
+    /// columns whose pre-state values the role may read. `returning.columns` do not count
+    /// (PR #117 review): an UPDATE returns post-state values (a preset or an assignment
+    /// overwrites the pre-state one) and never a row that fails `check`, and a DELETE probed
+    /// with `expect.affectedRows: 0` rolls back, so neither shows the value it filtered on.
+    /// Columns the role may only write are excluded, as are conditional (`visible_if`) select
+    /// columns, which are projection-only everywhere. A role without a select policy may
+    /// reference no column.
     fn mutation_filter_columns(
         &self,
         resource: policysql_core::ResourceId,
         role: &RoleName,
-        also_observable: &BTreeSet<ColumnId>,
     ) -> BTreeSet<ColumnId> {
-        let mut columns = self
-            .select
+        self.select
             .get(&resource)
             .and_then(|roles| roles.get(role))
             .map(|policy| policy.regular_columns.clone())
-            .unwrap_or_default();
-        columns.extend(also_observable.iter().copied());
-        columns
+            .unwrap_or_default()
     }
 
     fn select_policies<'a>(
@@ -3042,9 +3038,8 @@ resources:
         );
     }
 
-    /// An UPDATE or DELETE `WHERE` may reference only columns whose pre-state value the role
-    /// can already observe (issue #116): its regular select columns, and for a DELETE also the
-    /// delete's `returning.columns`.
+    /// An UPDATE or DELETE `WHERE` may reference only the role's regular select columns
+    /// (issue #116).
     #[test]
     fn mutation_where_is_limited_to_observable_columns() {
         let bundle = activate(
@@ -3094,10 +3089,9 @@ resources:
         for (column, update, delete) in [
             // A regular select column.
             ("id", Ok(()), Ok(())),
-            // A `returning.columns` entry: a DELETE returns its pre-state value, an UPDATE
-            // returns the post-state one (a preset or an assignment may overwrite it, and a row
-            // failing `check` is never returned), so only a DELETE may filter on it.
-            ("created_by", forbidden.clone(), Ok(())),
+            // A `returning.columns` entry: an UPDATE returns post-state values and never a row
+            // failing `check`; a DELETE probed with `expect.affectedRows: 0` rolls back.
+            ("created_by", forbidden.clone(), forbidden.clone()),
             // Writable only: never observable.
             ("status", forbidden.clone(), forbidden.clone()),
             // Used by the policy filter only.
@@ -3110,8 +3104,8 @@ resources:
             let sql = format!("DELETE FROM projects WHERE {column} = 'x'");
             assert_eq!(compile("member", &sql), delete, "{sql}");
         }
-        // Without a select policy or `returning`, no column is observable, but a mutation
-        // without a client `WHERE` still compiles.
+        // Without a select policy no column may be referenced, but a mutation without a
+        // client `WHERE` still compiles.
         for sql in [
             "UPDATE projects SET status = 'a' WHERE id = 'x'",
             "DELETE FROM projects WHERE id = 'x'",
