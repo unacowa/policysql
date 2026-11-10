@@ -114,7 +114,7 @@ clientのWHERE条件とは別に、policyのrow filterが常に適用されま�
 
 ## SubqueryとCTE
 
-columnの出所とpolicy適用先を完全に解決できる、Capabilities掲載のclosed formを使用できます。SQLite profileでは、明示列だけをそのまま公開する単一base resourceのtransparent derived table、修飾済みcorrelated `EXISTS`、単一のtransparentまたはfiltered非recursive CTE（外側で通常のJOINが可能）を受け付けます。`EXISTS`の内側projectionは、許可された直接columnまたは意味を結果へ公開しない正確な`SELECT 1`だけです。複数CTE、CTE内JOIN・集約・ORDER/LIMIT、scalar subquery、compound SELECTは受け付けません。
+columnの出所とpolicy適用先を完全に解決できる、Capabilities掲載のclosed formを使用できます。SQLite profileでは、明示列だけをそのまま公開する単一base resourceのtransparent derived table、`WHERE`に置いた修飾済みcorrelated `EXISTS`（JOINの`ON`、`HAVING`、SELECT list、`ORDER BY`、`LIMIT`/`OFFSET`、INSERT/UPDATE/DELETEの`EXISTS`は拒否）、単一のtransparentまたはfiltered非recursive CTE（外側で通常のJOINが可能）を受け付けます。`EXISTS`の内側projectionは、許可された直接column（aliasは可）または意味を結果へ公開しない正確な`SELECT 1`だけです。`CASE`、関数、`COUNT(*)`などの計算式は拒否します。複数CTE、CTE内JOIN・集約・ORDER/LIMIT、scalar subquery、compound SELECTは受け付けません。
 
 ```sql
 WITH published_posts AS (

@@ -1,0 +1,6 @@
+id: sqlite.select.parent-exists
+profile: sqlite-turso-v1
+description: select policy の exists で親resourceの行を条件にし、親のselect policyなしでも子の行だけを絞る (issue #112)
+covers: [source.subquery.correlated-exists, threat.source-shadowing]
+tests: [positive, negative, bypass, differential]
+expected: allow

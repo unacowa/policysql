@@ -1,0 +1,9 @@
+resource: comments
+
+roles:
+  member:
+    update:
+      columns: [body]
+      filter:
+        exists:
+          is_null: false

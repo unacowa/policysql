@@ -74,7 +74,10 @@
       "type": "object",
       "minProperties": 1,
       "maxProperties": 1,
-      "propertyNames": { "$ref": "#/$defs/identifier" },
+      "propertyNames": {
+        "$ref": "#/$defs/identifier",
+        "not": { "enum": ["and", "or", "not", "exists"] }
+      },
       "additionalProperties": { "$ref": "#/$defs/comparison" }
     },
     "andPredicate": {
@@ -113,6 +116,65 @@
         { "$ref": "#/$defs/andPredicate" },
         { "$ref": "#/$defs/orPredicate" },
         { "$ref": "#/$defs/notPredicate" }
+      ]
+    },
+    "existsPredicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exists"],
+      "properties": {
+        "exists": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource", "on", "where"],
+          "properties": {
+            "resource": { "$ref": "#/$defs/identifier" },
+            "on": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 1,
+              "propertyNames": { "$ref": "#/$defs/identifier" },
+              "additionalProperties": { "$ref": "#/$defs/identifier" }
+            },
+            "where": { "$ref": "#/$defs/predicate" }
+          }
+        }
+      }
+    },
+    "selectFilterPredicate": {
+      "oneOf": [
+        { "$ref": "#/$defs/columnPredicate" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["and"],
+          "properties": {
+            "and": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/selectFilterPredicate" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["or"],
+          "properties": {
+            "or": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/selectFilterPredicate" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["not"],
+          "properties": { "not": { "$ref": "#/$defs/selectFilterPredicate" } }
+        },
+        { "$ref": "#/$defs/existsPredicate" }
       ]
     },
     "conditionalOutputColumn": {
@@ -164,7 +226,7 @@
       "minProperties": 1,
       "properties": {
         "columns": { "$ref": "#/$defs/outputColumnList" },
-        "filter": { "$ref": "#/$defs/predicate" },
+        "filter": { "$ref": "#/$defs/selectFilterPredicate" },
         "limit": { "type": "integer", "minimum": 1 },
         "allow_aggregations": { "type": "boolean" },
         "allow_windows": { "type": "boolean" }

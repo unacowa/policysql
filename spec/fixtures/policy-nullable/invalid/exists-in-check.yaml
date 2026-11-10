@@ -1,0 +1,14 @@
+resource: comments
+
+roles:
+  member:
+    insert:
+      columns: [id, post_id, body]
+      check:
+        exists:
+          resource: posts
+          on: { id: post_id }
+          where:
+            tenant_id:
+              eq:
+                session: tenant_id

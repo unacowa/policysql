@@ -1,0 +1,17 @@
+resource: comments
+
+roles:
+  member:
+    select:
+      columns: [id, post_id, body]
+      filter:
+        or:
+          - exists:
+              resource: posts
+              on: { id: post_id }
+              where:
+                tenant_id:
+                  eq:
+                    session: tenant_id
+          - body:
+              eq: pinned

@@ -1258,10 +1258,20 @@ impl BindState<'_> {
             } else {
                 None
             };
-            projections.push(match constant_exists_projection {
+            let projection = match constant_exists_projection {
                 Some(projection) => projection,
                 None => nested.bind_projection(column)?,
-            });
+            };
+            // The published surface (docs/sql-subset.md) allows only one permitted direct
+            // column or the exact constant `1`. A computed projection (`CASE`, a function,
+            // `COUNT(*)`) could carry a nested `EXISTS` that no row policy reaches, or an
+            // aggregate that bypasses `allow_aggregations`.
+            if projection.expression.direct_column().is_none()
+                && projection.expression != BoundExpr::Literal(LogicalValue::Int64(1))
+            {
+                return Err(BindError::Unsupported("subquery projection"));
+            }
+            projections.push(projection);
         }
         ensure_unique_result_names(&projections)?;
         let predicate = where_clause
@@ -2164,9 +2174,26 @@ mod tests {
             "SELECT p.id FROM projects p WHERE EXISTS (SELECT t.id FROM tasks t LIMIT 1)",
             "SELECT p.id FROM projects p WHERE EXISTS (SELECT 0 FROM tasks t WHERE t.project_id = p.id)",
             "SELECT p.id FROM projects p WHERE EXISTS (SELECT 1 AS value FROM tasks t WHERE t.project_id = p.id)",
+            // Computed inner projections are outside the published surface: they could hide a
+            // nested EXISTS that no row policy reaches, or an unauthorized aggregate (PR #113).
+            "SELECT p.id FROM projects p WHERE EXISTS (SELECT CASE WHEN t.id = 'x' THEN 'a' ELSE 'b' END AS x FROM tasks t)",
+            "SELECT p.id FROM projects p WHERE EXISTS (SELECT lower(t.id) AS x FROM tasks t)",
+            "SELECT p.id FROM projects p WHERE EXISTS (SELECT COUNT(*) AS n FROM tasks t)",
         ] {
-            assert!(SqliteFrontend::default().bind(sql, &catalog()).is_err());
+            assert!(
+                SqliteFrontend::default().bind(sql, &catalog()).is_err(),
+                "{sql}"
+            );
         }
+        // A permitted direct column stays accepted.
+        assert!(
+            SqliteFrontend::default()
+                .bind(
+                    "SELECT p.id FROM projects p WHERE EXISTS (SELECT t.id FROM tasks t WHERE t.project_id = p.id)",
+                    &catalog(),
+                )
+                .is_ok()
+        );
     }
 
     #[test]

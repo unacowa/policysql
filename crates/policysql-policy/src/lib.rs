@@ -2,7 +2,7 @@
 
 use policysql_catalog::{Catalog, ColumnDescriptor, ResourceDescriptor};
 use policysql_core::{
-    ColumnId, CoreError, LogicalType, LogicalValue, OperationKind, PolicyId, RoleName,
+    ColumnId, CoreError, LogicalType, LogicalValue, OperationKind, PolicyId, ResultName, RoleName,
     ServerParameterName, SessionKey, SnapshotId, TrustedSession,
 };
 use policysql_ir::{
@@ -130,6 +130,15 @@ enum PolicyPredicate {
     And(Vec<Self>),
     Or(Vec<Self>),
     Not(Box<Self>),
+    /// A row of another resource (the parent) whose `parent_column` equals this row's
+    /// `child_column` satisfies `predicate` (issue #112). Only in a select `filter`; the
+    /// parent's own select policy is not applied, and `predicate` holds no `Exists`.
+    Exists {
+        parent: policysql_core::ResourceId,
+        parent_column: BoundColumn,
+        child_column: BoundColumn,
+        predicate: Box<Self>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -353,7 +362,7 @@ impl PolicyBundle {
                     delete,
                 } = raw_role;
                 if let Some(raw_select) = raw_select {
-                    let policy = activate_select(raw_select, resource, next_policy_id)?;
+                    let policy = activate_select(raw_select, resource, catalog, next_policy_id)?;
                     next_policy_id = next_policy_id
                         .checked_add(1)
                         .ok_or(PolicyError::TooManyPolicies)?;
@@ -472,6 +481,22 @@ impl PolicyBundle {
         let BoundStatement::Select(select) = statement else {
             return Err(PolicyError::UnsupportedCapability);
         };
+        reject_unprotected_exists(
+            select
+                .joins
+                .iter()
+                .map(|join| &join.on)
+                .chain(select.having.iter())
+                .chain(
+                    select
+                        .projections
+                        .iter()
+                        .map(|projection| &projection.expression),
+                )
+                .chain(select.order_by.iter().map(|order| &order.expression))
+                .chain(select.limit.iter())
+                .chain(select.offset.iter()),
+        )?;
         let (resource_ids, selected) = self.select_policies(select, session.role())?;
         let mut protected = select.as_ref().clone();
         let mut server_values = BTreeMap::new();
@@ -618,6 +643,7 @@ impl PolicyBundle {
         if !policy.allow_aggregations || !policy.regular_columns.contains(&select.document.id) {
             return Err(PolicyError::UnsupportedCapability);
         }
+        reject_unprotected_exists(std::iter::once(&select.path).chain(select.predicate.iter()))?;
         if let Some(predicate) = &select.predicate {
             validate_client_expression(predicate, &policy.regular_columns)?;
         }
@@ -665,6 +691,19 @@ impl PolicyBundle {
             .get(&insert.resource)
             .and_then(|roles| roles.get(session.role()))
             .ok_or(PolicyError::MissingPolicy)?;
+        reject_unprotected_exists(
+            insert
+                .rows
+                .iter()
+                .flatten()
+                .map(|assignment| &assignment.value)
+                .chain(
+                    insert
+                        .returning
+                        .iter()
+                        .map(|projection| &projection.expression),
+                ),
+        )?;
         let mut protected = insert.clone();
         validate_returning(&protected.returning, &policy.returning)?;
         let mut server_values = BTreeMap::new();
@@ -735,6 +774,19 @@ impl PolicyBundle {
             .get(&update.resource)
             .and_then(|roles| roles.get(session.role()))
             .ok_or(PolicyError::MissingPolicy)?;
+        reject_unprotected_exists(
+            update
+                .assignments
+                .iter()
+                .map(|assignment| &assignment.value)
+                .chain(update.predicate.iter())
+                .chain(
+                    update
+                        .returning
+                        .iter()
+                        .map(|projection| &projection.expression),
+                ),
+        )?;
         let mut protected = update.clone();
         validate_returning(&protected.returning, &policy.returning)?;
         let mut server_values = BTreeMap::new();
@@ -798,6 +850,14 @@ impl PolicyBundle {
             .get(&delete.resource)
             .and_then(|roles| roles.get(session.role()))
             .ok_or(PolicyError::MissingPolicy)?;
+        reject_unprotected_exists(
+            delete.predicate.iter().chain(
+                delete
+                    .returning
+                    .iter()
+                    .map(|projection| &projection.expression),
+            ),
+        )?;
         let mut protected = delete.clone();
         validate_returning(&protected.returning, &policy.returning)?;
         let mut server_values = BTreeMap::new();
@@ -901,6 +961,7 @@ fn activate_commit_checks(
 fn activate_select(
     raw: RawSelect,
     resource: &ResourceDescriptor,
+    catalog: &Catalog,
     policy_id: u64,
 ) -> Result<SelectPolicy, PolicyError> {
     if raw.columns.is_empty() {
@@ -945,7 +1006,7 @@ fn activate_select(
         id: PolicyId::new(policy_id).map_err(|_| PolicyError::TooManyPolicies)?,
         regular_columns,
         conditional_columns,
-        filter: parse_predicate(&raw.filter, resource)?,
+        filter: parse_predicate_with(&raw.filter, resource, Some(catalog))?,
         limit: raw.limit,
         allow_aggregations: raw.allow_aggregations,
         allow_windows: raw.allow_windows,
@@ -1084,9 +1145,21 @@ fn validate_returning(
     Ok(())
 }
 
+/// Parses a predicate in which `exists` is not accepted.
 fn parse_predicate(
     value: &Value,
     resource: &ResourceDescriptor,
+) -> Result<PolicyPredicate, PolicyError> {
+    parse_predicate_with(value, resource, None)
+}
+
+/// Parses a predicate. `exists` is accepted only when `catalog` is given, which only a select
+/// `filter` does; everywhere else (checks, mutation filters, `visible_if`, and inside an
+/// `exists` itself) `exists` is a reserved word, never a column name.
+fn parse_predicate_with(
+    value: &Value,
+    resource: &ResourceDescriptor,
+    catalog: Option<&Catalog>,
 ) -> Result<PolicyPredicate, PolicyError> {
     let mapping = value.as_mapping().ok_or(PolicyError::InvalidPredicate)?;
     if mapping.len() != 1 {
@@ -1102,7 +1175,7 @@ fn parse_predicate(
             }
             let predicates = values
                 .iter()
-                .map(|value| parse_predicate(value, resource))
+                .map(|value| parse_predicate_with(value, resource, catalog))
                 .collect::<Result<Vec<_>, _>>()?;
             if key == "and" {
                 Ok(PolicyPredicate::And(predicates))
@@ -1110,11 +1183,76 @@ fn parse_predicate(
                 Ok(PolicyPredicate::Or(predicates))
             }
         }
-        "not" => Ok(PolicyPredicate::Not(Box::new(parse_predicate(
-            body, resource,
+        "not" => Ok(PolicyPredicate::Not(Box::new(parse_predicate_with(
+            body, resource, catalog,
         )?))),
+        "exists" => parse_exists(
+            body,
+            resource,
+            catalog.ok_or(PolicyError::UnsupportedCapability)?,
+        ),
         column_name => parse_comparison(column_name, body, resource),
     }
+}
+
+/// `exists: { resource: <parent>, on: { <parent column>: <child column> }, where: <predicate> }`.
+fn parse_exists(
+    value: &Value,
+    child: &ResourceDescriptor,
+    catalog: &Catalog,
+) -> Result<PolicyPredicate, PolicyError> {
+    let mapping = value.as_mapping().ok_or(PolicyError::InvalidPredicate)?;
+    // Exactly these three keys: with the length check, any other key is rejected.
+    if mapping.len() != 3 {
+        return Err(PolicyError::InvalidPredicate);
+    }
+    let parent_name = mapping_value(mapping, "resource")
+        .and_then(Value::as_str)
+        .ok_or(PolicyError::InvalidPredicate)?;
+    let on = mapping_value(mapping, "on")
+        .and_then(Value::as_mapping)
+        .ok_or(PolicyError::InvalidPredicate)?;
+    let condition = mapping_value(mapping, "where").ok_or(PolicyError::InvalidPredicate)?;
+    let parent = catalog
+        .resource(parent_name)
+        .ok_or(PolicyError::UnknownResource)?;
+    // The emitter names a resource by one alias, so a same-resource parent would be
+    // shadowed by its own subquery and compare the parent row with itself.
+    if parent.id == child.id {
+        return Err(PolicyError::UnsupportedCapability);
+    }
+    if on.len() != 1 {
+        return Err(PolicyError::InvalidPredicate);
+    }
+    let (parent_column, child_column) = on.iter().next().ok_or(PolicyError::InvalidPredicate)?;
+    let parent_column = policy_column(
+        parent,
+        parent_column
+            .as_str()
+            .ok_or(PolicyError::InvalidPredicate)?,
+        ColumnUsage::PolicyFilter,
+    )?;
+    let child_column = policy_column(
+        child,
+        child_column.as_str().ok_or(PolicyError::InvalidPredicate)?,
+        ColumnUsage::PolicyFilter,
+    )?;
+    if parent_column.logical_type != child_column.logical_type {
+        return Err(PolicyError::IncompatibleOperand);
+    }
+    if matches!(
+        parent_column.logical_type,
+        LogicalType::Bytes | LogicalType::Json
+    ) {
+        return Err(PolicyError::UnsupportedCapability);
+    }
+    Ok(PolicyPredicate::Exists {
+        parent: parent.id,
+        parent_column,
+        child_column,
+        // Parsed without the Catalog: a nested `exists` is rejected.
+        predicate: Box::new(parse_predicate(condition, parent)?),
+    })
 }
 
 fn parse_comparison(
@@ -1291,7 +1429,10 @@ fn collect_quoted_predicate(predicate: &PolicyPredicate, output: &mut BTreeSet<S
                 collect_quoted_predicate(value, output);
             }
         }
-        PolicyPredicate::Not(value) => collect_quoted_predicate(value, output),
+        PolicyPredicate::Not(value)
+        | PolicyPredicate::Exists {
+            predicate: value, ..
+        } => collect_quoted_predicate(value, output),
     }
 }
 
@@ -1486,6 +1627,70 @@ fn validate_client_expression(
     }
 }
 
+/// Rejects a client `EXISTS` outside a select's `WHERE`.
+///
+/// Only the `WHERE` of a select is walked by [`protect_nested_selects`] and by the resource
+/// collection in `select_policies`, and the published surface advertises correlated `EXISTS`
+/// only in the filter context. Anywhere else (a JOIN's `ON`, `HAVING`, a projection, `ORDER BY`,
+/// `LIMIT`/`OFFSET`, a JSON-collection select, a mutation) the subquery would reach the database
+/// without its resource's policy, so it is denied before any policy is composed.
+fn reject_unprotected_exists<'a>(
+    expressions: impl IntoIterator<Item = &'a BoundExpr>,
+) -> Result<(), PolicyError> {
+    if expressions.into_iter().any(contains_exists) {
+        Err(PolicyError::UnsupportedCapability)
+    } else {
+        Ok(())
+    }
+}
+
+fn contains_exists(expression: &BoundExpr) -> bool {
+    match expression {
+        BoundExpr::Exists(_) => true,
+        BoundExpr::Equal(left, right)
+        | BoundExpr::NotEqual(left, right)
+        | BoundExpr::Less(left, right)
+        | BoundExpr::LessEqual(left, right)
+        | BoundExpr::Greater(left, right)
+        | BoundExpr::GreaterEqual(left, right)
+        | BoundExpr::And(left, right)
+        | BoundExpr::Or(left, right)
+        | BoundExpr::Like(left, right)
+        | BoundExpr::Glob(left, right)
+        | BoundExpr::Least(left, right)
+        | BoundExpr::Concat(left, right)
+        | BoundExpr::ConditionalOutput {
+            value: left,
+            visible_if: right,
+        } => contains_exists(left) || contains_exists(right),
+        BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::CastText(inner) => {
+            contains_exists(inner)
+        }
+        BoundExpr::ScalarFunction { arguments, .. } => arguments.iter().any(contains_exists),
+        BoundExpr::In {
+            expression, values, ..
+        } => contains_exists(expression) || values.iter().any(contains_exists),
+        BoundExpr::Case {
+            branches,
+            else_expression,
+            ..
+        } => {
+            branches
+                .iter()
+                .any(|(condition, value)| contains_exists(condition) || contains_exists(value))
+                || else_expression.as_deref().is_some_and(contains_exists)
+        }
+        BoundExpr::RowNumber { order_by, .. } => order_by
+            .iter()
+            .any(|order| contains_exists(&order.expression)),
+        BoundExpr::Column(_)
+        | BoundExpr::ClientParameter { .. }
+        | BoundExpr::ServerParameter { .. }
+        | BoundExpr::Literal(_)
+        | BoundExpr::CountAll(_) => false,
+    }
+}
+
 fn collect_expression_resources(
     expression: &BoundExpr,
     resources: &mut Vec<policysql_core::ResourceId>,
@@ -1565,6 +1770,23 @@ fn protect_nested_selects(
 ) -> Result<(), PolicyError> {
     match expression {
         BoundExpr::Exists(select) => {
+            // As at the top level, only the nested `WHERE` is protected (issue #114).
+            reject_unprotected_exists(
+                select
+                    .joins
+                    .iter()
+                    .map(|join| &join.on)
+                    .chain(select.having.iter())
+                    .chain(
+                        select
+                            .projections
+                            .iter()
+                            .map(|projection| &projection.expression),
+                    )
+                    .chain(select.order_by.iter().map(|order| &order.expression))
+                    .chain(select.limit.iter())
+                    .chain(select.offset.iter()),
+            )?;
             if let Some(predicate) = &mut select.predicate {
                 protect_nested_selects(predicate, policies, session, server_values)?;
             }
@@ -1689,6 +1911,36 @@ fn instantiate_predicate(
             session,
             server_values,
         )?))),
+        PolicyPredicate::Exists {
+            parent,
+            parent_column,
+            child_column,
+            predicate,
+        } => {
+            let correlation = BoundExpr::Equal(
+                Box::new(BoundExpr::Column(parent_column.clone())),
+                Box::new(BoundExpr::Column(child_column.clone())),
+            );
+            let condition = instantiate_predicate(predicate, session, server_values)?;
+            Ok(BoundExpr::Exists(Box::new(BoundSelect {
+                resource: *parent,
+                alias: None,
+                joins: Vec::new(),
+                // The same constant projection the binder gives a client `EXISTS (SELECT 1 …)`.
+                projections: vec![BoundProjection {
+                    expression: BoundExpr::Literal(LogicalValue::Int64(1)),
+                    output_name: ResultName::new("exists_value").map_err(|_| {
+                        PolicyError::InvariantViolation("EXISTS projection name".to_owned())
+                    })?,
+                }],
+                predicate: Some(BoundExpr::And(Box::new(correlation), Box::new(condition))),
+                group_by: Vec::new(),
+                having: None,
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            })))
+        }
     }
 }
 
@@ -2365,6 +2617,388 @@ resources:
         assert_eq!(
             activate(policy).compile_select(&statement, &session("member")),
             Err(PolicyError::ForbiddenColumn)
+        );
+    }
+
+    /// `posts` (parent) and `comments` (child) for the select-policy `exists` (issue #112).
+    fn parent_catalog() -> Catalog {
+        let integer = ValueDescriptor {
+            logical_type: LogicalType::Int64,
+            representation: ValueRepresentation::Number,
+            ..descriptor()
+        };
+        let bytes = ValueDescriptor {
+            logical_type: LogicalType::Bytes,
+            representation: ValueRepresentation::Base64,
+            ..descriptor()
+        };
+        let resource = |id, name: &str, columns: &[(&str, ValueDescriptor)]| {
+            ResourceDescriptor::new(
+                ResourceId::new(id).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+                ResourceName::new(name).unwrap_or_else(|error| unreachable!("valid name: {error}")),
+                columns.iter().map(|(column, value)| {
+                    (
+                        ColumnName::new(*column)
+                            .unwrap_or_else(|error| unreachable!("valid column: {error}")),
+                        value.clone(),
+                    )
+                }),
+            )
+            .unwrap_or_else(|error| unreachable!("valid resource: {error}"))
+        };
+        Catalog::new(
+            SnapshotId::new("schema_parent")
+                .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
+            [
+                resource(
+                    1,
+                    "posts",
+                    &[
+                        ("id", descriptor()),
+                        ("tenant_id", descriptor()),
+                        ("rank", integer.clone()),
+                        ("blob", bytes.clone()),
+                    ],
+                ),
+                resource(
+                    2,
+                    "comments",
+                    &[
+                        ("id", descriptor()),
+                        ("post_id", descriptor()),
+                        ("body", descriptor()),
+                        ("secret", descriptor()),
+                        ("score", integer),
+                        ("blob", bytes),
+                    ],
+                ),
+                resource(
+                    3,
+                    "readers",
+                    &[("id", descriptor()), ("comment_id", descriptor())],
+                ),
+            ],
+        )
+        .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"))
+    }
+
+    fn activate_parent(yaml: &str) -> Result<PolicyBundle, PolicyError> {
+        PolicyBundle::activate(
+            yaml,
+            &parent_catalog(),
+            SnapshotId::new("policy_parent")
+                .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
+        )
+    }
+
+    /// A bundle whose `comments` member role has `rule` at `placement`.
+    fn comments_policy(placement: &str, rule: &str) -> String {
+        let rule = rule.trim();
+        let body = match placement {
+            "select" => format!(
+                "        select:\n          columns: [id, post_id, body]\n          filter: {rule}\n"
+            ),
+            "visible_if" => format!(
+                "        select:\n          columns:\n            - id\n            - name: secret\n              visible_if: {rule}\n              on_deny: null\n          filter: {{ body: {{ is_null: false }} }}\n"
+            ),
+            "insert" => format!(
+                "        insert:\n          columns: [id, post_id, body]\n          check: {rule}\n"
+            ),
+            "update" => format!(
+                "        update:\n          columns: [body]\n          filter: {rule}\n          check: {{ body: {{ is_null: false }} }}\n"
+            ),
+            "update_check" => format!(
+                "        update:\n          columns: [body]\n          filter: {{ body: {{ is_null: false }} }}\n          check: {rule}\n"
+            ),
+            "delete" => format!("        delete:\n          filter: {rule}\n"),
+            other => unreachable!("unknown placement {other}"),
+        };
+        format!("version: 1\nresources:\n  comments:\n    roles:\n      member:\n{body}")
+    }
+
+    const PARENT_TENANT: &str = "{ exists: { resource: posts, on: { id: post_id }, where: { tenant_id: { eq: { session: tenant_id } } } } }";
+
+    #[test]
+    fn parent_exists_filter_compiles_to_a_correlated_exists_without_a_parent_policy() {
+        let bundle = activate_parent(&comments_policy(
+            "select",
+            &format!("{{ or: [ {PARENT_TENANT}, {{ body: {{ eq: pinned }} }} ] }}"),
+        ))
+        .unwrap_or_else(|error| unreachable!("parent exists activates: {error}"));
+        let statement = SqliteFrontend::default()
+            .bind("SELECT id FROM comments", &parent_catalog())
+            .unwrap_or_else(|error| unreachable!("binds: {error}"));
+        let output = bundle
+            .compile_select(&statement, &session("member"))
+            .unwrap_or_else(|error| unreachable!("compiles: {error}"));
+        let BoundStatement::Select(select) = &output.plan.statement else {
+            unreachable!("compiled SELECT remains SELECT")
+        };
+        let Some(BoundExpr::Or(left, _)) = &select.predicate else {
+            unreachable!("the policy OR is the whole predicate")
+        };
+        let BoundExpr::Exists(exists) = left.as_ref() else {
+            unreachable!("the parent rule is an EXISTS")
+        };
+        assert_eq!(exists.resource.get(), 1);
+        assert_eq!(output.plan.server_values.len(), 1);
+        // Policy-internal: neither the parent nor its columns are reported to the client.
+        let parent = ResourceId::new(1).unwrap_or_else(|error| unreachable!("valid ID: {error}"));
+        assert!(!output.explain.resources.contains(&parent));
+        assert!(!output.explain.referenced_columns.contains_key(&parent));
+        assert_eq!(output.explain.applied_policies.len(), 1);
+    }
+
+    #[test]
+    fn parent_exists_where_does_not_widen_client_permissions() {
+        let bundle = activate_parent(&comments_policy("select", PARENT_TENANT))
+            .unwrap_or_else(|error| unreachable!("parent exists activates: {error}"));
+        for (sql, expected) in [
+            // The client cannot reach the parent without a parent select policy.
+            (
+                "SELECT c.id FROM comments c WHERE EXISTS (SELECT 1 FROM posts p WHERE p.id = c.post_id AND p.tenant_id = 'tenant_2')",
+                PolicyError::MissingPolicy,
+            ),
+            (
+                "SELECT c.id FROM comments c JOIN posts p ON p.id = c.post_id",
+                PolicyError::MissingPolicy,
+            ),
+            // A child column outside `columns` stays forbidden.
+            (
+                "SELECT id FROM comments WHERE secret = 'x'",
+                PolicyError::ForbiddenColumn,
+            ),
+        ] {
+            let statement = SqliteFrontend::default()
+                .bind(sql, &parent_catalog())
+                .unwrap_or_else(|error| unreachable!("binds before policy: {error}"));
+            assert_eq!(
+                bundle.compile_select(&statement, &session("member")),
+                Err(expected),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn parent_exists_activation_fails_closed() {
+        let exists = |body: &str| format!("{{ exists: {body} }}");
+        let tenant = "{ tenant_id: { eq: { session: tenant_id } } }";
+        for (rule, expected) in [
+            (
+                exists(&format!(
+                    "{{ resource: missing, on: {{ id: post_id }}, where: {tenant} }}"
+                )),
+                PolicyError::UnknownResource,
+            ),
+            (
+                exists("{ resource: comments, on: { id: post_id }, where: { body: { eq: x } } }"),
+                PolicyError::UnsupportedCapability,
+            ),
+            (
+                exists(&format!(
+                    "{{ resource: posts, on: {{ missing: post_id }}, where: {tenant} }}"
+                )),
+                PolicyError::UnknownColumn,
+            ),
+            (
+                exists(&format!(
+                    "{{ resource: posts, on: {{ id: missing }}, where: {tenant} }}"
+                )),
+                PolicyError::UnknownColumn,
+            ),
+            (
+                exists(&format!(
+                    "{{ resource: posts, on: {{ rank: post_id }}, where: {tenant} }}"
+                )),
+                PolicyError::IncompatibleOperand,
+            ),
+            (
+                exists(&format!(
+                    "{{ resource: posts, on: {{ id: post_id, rank: score }}, where: {tenant} }}"
+                )),
+                PolicyError::InvalidPredicate,
+            ),
+            (
+                exists(&format!(
+                    "{{ resource: posts, on: {{ blob: blob }}, where: {tenant} }}"
+                )),
+                PolicyError::UnsupportedCapability,
+            ),
+            (
+                exists("{ resource: posts, on: { id: post_id } }"),
+                PolicyError::InvalidPredicate,
+            ),
+            (
+                exists(&format!(
+                    "{{ resource: posts, on: {{ id: post_id }}, where: {tenant}, limit: 1 }}"
+                )),
+                PolicyError::InvalidPredicate,
+            ),
+            // The parent's `where` is resolved against the parent, not the child.
+            (
+                exists("{ resource: posts, on: { id: post_id }, where: { body: { eq: x } } }"),
+                PolicyError::UnknownColumn,
+            ),
+            // One hop only.
+            (
+                exists(&format!(
+                    "{{ resource: posts, on: {{ id: post_id }}, where: {{ exists: {{ resource: comments, on: {{ post_id: id }}, where: {tenant} }} }} }}"
+                )),
+                PolicyError::UnsupportedCapability,
+            ),
+        ] {
+            assert_eq!(
+                activate_parent(&comments_policy("select", &rule)).map(|_| ()),
+                Err(expected),
+                "{rule}"
+            );
+        }
+        for placement in ["visible_if", "insert", "update", "update_check", "delete"] {
+            assert_eq!(
+                activate_parent(&comments_policy(placement, PARENT_TENANT)).map(|_| ()),
+                Err(PolicyError::UnsupportedCapability),
+                "{placement}"
+            );
+        }
+    }
+
+    /// Policies for the `EXISTS`-position tests (issue #114).
+    fn exists_position_bundle() -> PolicyBundle {
+        activate_parent(
+            r"
+version: 1
+resources:
+  posts:
+    roles:
+      member:
+        select:
+          columns: [id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+  comments:
+    roles:
+      member:
+        select:
+          columns: [id, post_id, body]
+          filter: { body: { neq: hidden } }
+  readers:
+    roles:
+      member:
+        select:
+          columns: [id, comment_id]
+          filter: { id: { neq: none } }
+          allow_aggregations: true
+        update:
+          columns: [comment_id]
+          filter: { id: { neq: none } }
+          check: { id: { neq: none } }
+        delete:
+          filter: { id: { neq: none } }
+",
+        )
+        .unwrap_or_else(|error| unreachable!("valid policy: {error}"))
+    }
+
+    /// A client `EXISTS` is protected only in a select's `WHERE`; everywhere else it would
+    /// reach the database without its resource's policy (PR #113 review: a JOIN `ON`, `HAVING`,
+    /// and a `CASE` projection leaked row existence), so it is denied before composition.
+    #[test]
+    fn client_exists_outside_where_is_denied() {
+        let bundle = exists_position_bundle();
+        let member = session("member");
+        let compile = |sql: &str| -> Option<Result<(), PolicyError>> {
+            let statement = SqliteFrontend::default()
+                .bind(sql, &parent_catalog())
+                .ok()?;
+            Some(match &statement {
+                BoundStatement::Update(_) => bundle.compile_update(&statement, &member).map(|_| ()),
+                BoundStatement::Delete(_) => bundle.compile_delete(&statement, &member).map(|_| ()),
+                _ => bundle.compile_select(&statement, &member).map(|_| ()),
+            })
+        };
+        // Positive control: the protected position still compiles.
+        assert_eq!(
+            compile(
+                "SELECT r.id FROM readers r WHERE EXISTS (SELECT 1 FROM comments c WHERE c.id = r.comment_id)"
+            ),
+            Some(Ok(()))
+        );
+        // `true`: the binder accepts the shape today, so the policy layer must deny it.
+        for (sql, binds) in [
+            (
+                "SELECT p.id FROM posts p JOIN readers r ON EXISTS (SELECT 1 FROM comments c)",
+                true,
+            ),
+            (
+                "SELECT p.id FROM posts p JOIN readers r ON r.id = 'r1' AND EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden') WHERE EXISTS (SELECT 1 FROM comments c WHERE c.id = 'c1')",
+                true,
+            ),
+            (
+                "SELECT r.id FROM readers r LEFT JOIN posts p ON p.id = r.comment_id AND EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.id)",
+                true,
+            ),
+            (
+                "SELECT r.id, COUNT(*) AS n FROM readers r GROUP BY r.id HAVING EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden')",
+                true,
+            ),
+            (
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden') THEN 'y' ELSE 'n' END AS hit FROM readers r",
+                true,
+            ),
+            // The binder rejects this shape today; the policy layer still must if it binds.
+            (
+                "SELECT r.id FROM readers r ORDER BY CASE WHEN EXISTS (SELECT 1 FROM comments c) THEN 1 ELSE 0 END",
+                false,
+            ),
+            (
+                "UPDATE readers SET comment_id = 'c1' WHERE EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden')",
+                true,
+            ),
+            (
+                "DELETE FROM readers WHERE EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden')",
+                true,
+            ),
+        ] {
+            match compile(sql) {
+                Some(result) => {
+                    assert_eq!(result, Err(PolicyError::UnsupportedCapability), "{sql}");
+                }
+                None => assert!(!binds, "expected the binder to accept: {sql}"),
+            }
+        }
+    }
+
+    /// Inside a protected `WHERE EXISTS`, only its own `WHERE` gets the row filter (issue #114).
+    #[test]
+    fn client_exists_in_a_nested_projection_is_denied() {
+        let bundle = exists_position_bundle();
+        let member = session("member");
+        // The binder now rejects a computed inner projection, so the shape the review found
+        // (`SELECT CASE WHEN EXISTS (...) ... FROM posts p`) is built directly.
+        let bind = |sql: &str| {
+            SqliteFrontend::default()
+                .bind(sql, &parent_catalog())
+                .unwrap_or_else(|error| unreachable!("{sql} binds: {error}"))
+        };
+        let BoundStatement::Select(inner) = bind(
+            "SELECT r.id FROM readers r WHERE EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden')",
+        ) else {
+            unreachable!("bound statement is SELECT")
+        };
+        let Some(hidden_probe) = inner.predicate.clone() else {
+            unreachable!("WHERE EXISTS is the predicate")
+        };
+        let mut outer = bind("SELECT r.id FROM readers r WHERE EXISTS (SELECT p.id FROM posts p)");
+        let BoundStatement::Select(select) = &mut outer else {
+            unreachable!("bound statement is SELECT")
+        };
+        let Some(BoundExpr::Exists(nested)) = &mut select.predicate else {
+            unreachable!("WHERE EXISTS is the predicate")
+        };
+        nested.projections[0].expression = hidden_probe;
+        assert_eq!(
+            bundle.compile_select(&outer, &member).map(|_| ()),
+            Err(PolicyError::UnsupportedCapability)
         );
     }
 }

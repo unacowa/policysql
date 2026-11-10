@@ -1,0 +1,6 @@
+id: sqlite.security.exists-outside-where
+profile: sqlite-turso-v1
+description: JOINのONなどWHERE以外に置いたクライアントのEXISTSはrow policyなしで出力されるため、合成前に拒否する (PR #113 のレビュー)
+covers: [source.subquery.correlated-exists, threat.row-policy-replacement]
+tests: [negative, bypass]
+expected: deny

@@ -1,0 +1,8 @@
+version: 1
+resources:
+  posts:
+    source: { table: posts }
+    columns: { id: { type: string }, tenant_id: { type: string } }
+  comments:
+    source: { table: comments }
+    columns: { id: { type: string }, post_id: { type: string, nullable: true }, body: { type: string } }

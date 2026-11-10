@@ -1,6 +1,6 @@
 # ADR 0006: Closed policy predicate language
 
-- Status: accepted
+- Status: accepted; amended by [ADR 0029](0029-select-filter-parent-exists.md) (one-hop parent `exists` in a select `filter`)
 
 ## Context
 
