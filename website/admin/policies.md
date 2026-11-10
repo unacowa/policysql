@@ -260,6 +260,7 @@ predicateは、一つのcolumn comparison、または一つの論理operatorで�
 - `is_null`
 - `like`
 - `and`、`or`、`not`
+- `exists`（SELECTの`filter`だけ。下記）
 - session value、literal value、same-row column value
 
 未知のoperator、catalogにないcolumn、型が一致しないsession参照は、policy load時に拒否されます。
@@ -276,7 +277,51 @@ filter:
           session: subject_id
 ```
 
-literalはscalarを直接指定するか、`literal`で明示できます。`eq: null`は許可せず、NULL判定には`is_null: true`または`is_null: false`を使用します。`in`と`not_in`は空でないliteral配列です。related-row predicateはこのversionのpolicy DSLには含めず、複数resourceの検証にはcommit checkを使用します。
+literalはscalarを直接指定するか、`literal`で明示できます。`eq: null`は許可せず、NULL判定には`is_null: true`または`is_null: false`を使用します。`in`と`not_in`は空でないliteral配列です。
+
+### 親resourceの行を条件にする（`exists`）
+
+SELECTの`filter`では、`exists`で別resource（親）の行を条件にできます。次の例では、`comments`自身には`tenant_id`がありませんが、親の`posts.tenant_id`がsessionのtenantと一致するcommentだけを返します。
+
+```yaml
+# resources/comments.yaml
+select:
+  columns: [id, post_id, body]
+  filter:
+    exists:
+      resource: posts          # 親resource
+      on: { id: post_id }      # posts.id = comments.post_id
+      where:                   # 親の行に対する条件
+        tenant_id:
+          eq:
+            session: tenant_id
+```
+
+PolicySQLはこれを相関`EXISTS`に変換し、client SQLへ合成します。
+
+```sql
+-- client: SELECT id, body FROM comments
+SELECT id, body FROM comments
+WHERE EXISTS (SELECT 1 FROM posts
+              WHERE posts.id = comments.post_id
+                AND posts.tenant_id = :session_tenant_id)
+```
+
+`exists`は`and`、`or`、`not`の中にも置けます。規則は次のとおりです。
+
+- `exists`を使えるのはSELECTの`filter`だけです。`check`、UPDATEとDELETEの`filter`、`visible_if`ではpolicy load時に拒否します。
+- 親は1段だけです。`where`の中に`exists`は置けません。親と子が同じresourceの関係（`parent_id`による自己参照など）も拒否します。
+- `on`は「親のcolumn: 子のcolumn」の1組で、両方の型が一致している必要があります。`resource`、`on`、`where`はすべて必須です。
+- `where`は親resourceのcolumnで評価します。親resource自身のselect policyは適用しません。roleに親のselect policyがなくても使えます。
+- `where`で使う親のcolumnはpolicyの内部だけで使い、clientのcolumn permissionは広がりません。clientが親を直接JOINやsubqueryで参照するには、従来どおり親のselect policyが必要です。
+- 子の`on`のcolumnがNULLの行と、対応する親がない行は返しません。
+- JOINで結合したresourceに適用する場合も、同じ規則で合成します。LEFT JOINのnullable側では`ON`に入ります。
+- JSON collection SELECTの対象resourceに`exists`があると、そのSELECTは拒否します。
+- `exists`は予約語です。`exists`という名前のcolumnはpredicateで参照できません。
+
+`exists`の各行で親を引くため、**親の`on`のcolumnには索引（通常は主キー）が必要です**。Tursoは走査した行数（rows read）で課金します。索引がないと、子の1行ごとに親を全件走査します。子に非正規化したcolumnと索引を持たせ、同じ行の`filter`で絞れる場合は、その方が安くなります。
+
+2段以上の関係や、親子以外の複数resourceにまたがる検証には、commit checkを使用します。
 
 ## Limit
 

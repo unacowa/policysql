@@ -172,8 +172,21 @@ The portable policy operators are:
 - `is_null`
 - `and`, `or`, `not`
 - session value, literal value, and same-row column value where proven safe
+- `exists` (select `filter` only, one hop to a different resource)
 
-Each predicate object contains exactly one column comparison or one logical operator. `in` and `not_in` accept non-empty literal lists. SQL NULL is tested only with `is_null`; comparison to a null operand is invalid. Relationship predicates are not part of this policy format.
+Each predicate object contains exactly one column comparison or one logical operator. `in` and `not_in` accept non-empty literal lists. SQL NULL is tested only with `is_null`; comparison to a null operand is invalid.
+
+A select `filter` (and only a select `filter`) may also contain one-hop parent predicates ([ADR 0029](adr/0029-select-filter-parent-exists.md)):
+
+```yaml
+filter:
+  exists:
+    resource: posts
+    on: { id: post_id }   # parent column: child column
+    where: { tenant_id: { eq: { session: tenant_id } } }
+```
+
+It compiles to a correlated `EXISTS (SELECT 1 FROM parent WHERE parent.col = child.col AND <where>)`. The parent's own select policy is not applied, the `where` columns are policy-internal, a NULL or dangling child column never matches, nesting and same-resource parents are rejected, and `exists` is a reserved word in every predicate.
 
 Database-specific JSON, regexp, full-text, and custom-function operators should be capability-gated.
 

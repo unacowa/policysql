@@ -1,0 +1,1 @@
+SELECT "__policysql_t0"."id" AS "id", "__policysql_t0"."body" AS "body" FROM "comments" AS "__policysql_t0" WHERE EXISTS (SELECT 1 AS "exists_value" FROM "posts" AS "__policysql_t1" WHERE (("__policysql_t1"."id" = "__policysql_t0"."post_id") AND ("__policysql_t1"."tenant_id" = :__policysql_session_tenant_id))) ORDER BY "__policysql_t0"."id" ASC

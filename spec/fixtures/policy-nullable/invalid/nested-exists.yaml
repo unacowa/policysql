@@ -1,0 +1,18 @@
+resource: comments
+
+roles:
+  member:
+    select:
+      columns: [id]
+      filter:
+        exists:
+          resource: posts
+          on: { id: post_id }
+          where:
+            exists:
+              resource: blogs
+              on: { id: blog_id }
+              where:
+                tenant_id:
+                  eq:
+                    session: tenant_id

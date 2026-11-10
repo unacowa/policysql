@@ -1,0 +1,16 @@
+operation: select
+resources: [comments]
+accesses:
+  - { column: comments.id, usage: projection }
+  - { column: comments.body, usage: projection }
+  - { column: comments.id, usage: order }
+  - { column: comments.post_id, usage: policy_filter }
+  - { column: posts.id, usage: policy_filter }
+  - { column: posts.tenant_id, usage: policy_filter }
+policies: [member.comments.select]
+client_parameters: []
+server_parameters: [session.tenant_id]
+result:
+  - { name: id, type: string, nullable: false }
+  - { name: body, type: string, nullable: false }
+invariant: the parent row filter is a correlated EXISTS and posts needs no select policy

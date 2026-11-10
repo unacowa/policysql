@@ -884,6 +884,8 @@ fn aliases_for_statement(
         return BTreeMap::new();
     }
     if let BoundStatement::JsonCollectionSelect(select) = statement {
+        // A select-policy `exists` filter (issue #112) gets no alias here, so the emitter
+        // rejects it as an unknown resource: unsupported for JSON collections for now.
         return BTreeMap::from([(select.resource, TABLE_ALIAS.to_owned())]);
     }
     let BoundStatement::Select(select) = statement else {
@@ -904,6 +906,11 @@ fn aliases_for_statement(
     for (index, join) in select.joins.iter().enumerate() {
         aliases.insert(join.resource, format!("__policysql_t{}", index + 1));
         next_alias = index + 2;
+    }
+    // A LEFT JOIN's row filter is placed in its `ON`, and a select-policy `exists`
+    // filter (issue #112) makes that a subquery.
+    for join in &select.joins {
+        allocate_nested_aliases(&join.on, &mut aliases, &mut next_alias);
     }
     if let Some(predicate) = &select.predicate {
         allocate_nested_aliases(predicate, &mut aliases, &mut next_alias);

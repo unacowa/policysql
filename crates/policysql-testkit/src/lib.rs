@@ -1617,8 +1617,178 @@ mod tests {
             "order-by",
             "transparent-sources",
             "in-null-predicates",
+            "parent-exists",
         ] {
             assert_select_fixture(fixture);
+        }
+    }
+
+    /// The select-policy `exists` (issue #112) keeps its meaning wherever the child's row
+    /// filter is placed: the root `WHERE`, an INNER JOIN, a LEFT JOIN's `ON`, and inside a
+    /// client `EXISTS`. Each case is executed on SQLite and compared with hand-computed rows.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn parent_exists_filter_holds_in_every_placement() {
+        let snapshot = SnapshotId::new("parent_exists_placements")
+            .unwrap_or_else(|error| unreachable!("valid snapshot: {error}"));
+        let value = |nullable| ValueDescriptor {
+            logical_type: LogicalType::String,
+            representation: ValueRepresentation::String,
+            nullable,
+            format: None,
+            storage: None,
+            constraints: None,
+            json_schema: None,
+        };
+        let resource = |id, name: &str, columns: &[(&str, bool)]| {
+            ResourceDescriptor::new(
+                ResourceId::new(id).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+                ResourceName::new(name)
+                    .unwrap_or_else(|error| unreachable!("valid resource: {error}")),
+                columns.iter().map(|(column, nullable)| {
+                    (
+                        ColumnName::new(*column)
+                            .unwrap_or_else(|error| unreachable!("valid column: {error}")),
+                        value(*nullable),
+                    )
+                }),
+            )
+            .unwrap_or_else(|error| unreachable!("valid resource: {error}"))
+        };
+        let catalog = Catalog::new(
+            snapshot.clone(),
+            [
+                resource(
+                    1,
+                    "posts",
+                    &[("id", false), ("tenant_id", false), ("title", false)],
+                ),
+                resource(
+                    2,
+                    "comments",
+                    &[("id", false), ("post_id", true), ("body", false)],
+                ),
+                resource(3, "readers", &[("id", false), ("comment_id", false)]),
+            ],
+        )
+        .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"));
+        // `posts` has its own (narrower) policy here, so the client may join it; the
+        // `comments` rule still reads `posts` without that policy.
+        let bundle = PolicyBundle::activate(
+            r"
+version: 1
+resources:
+  posts:
+    roles:
+      member:
+        select:
+          columns: [id, title]
+          filter: { title: { neq: hidden } }
+  comments:
+    roles:
+      member:
+        select:
+          columns: [id, post_id, body]
+          filter:
+            exists:
+              resource: posts
+              on: { id: post_id }
+              where: { tenant_id: { eq: { session: tenant_id } } }
+  readers:
+    roles:
+      member:
+        select:
+          columns: [id, comment_id]
+          filter: { id: { neq: none } }
+",
+            &catalog,
+            snapshot.clone(),
+        )
+        .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+        let session = TrustedSession::new(
+            RoleName::new("member").unwrap_or_else(|error| unreachable!("valid role: {error}")),
+            "user_1",
+            BTreeMap::from([("tenant_id".to_owned(), "tenant_1".to_owned())]),
+        )
+        .unwrap_or_else(|error| unreachable!("valid session: {error}"));
+        let database = ReferenceSqlite::new(
+            "CREATE TABLE posts (id TEXT NOT NULL PRIMARY KEY, tenant_id TEXT NOT NULL, title TEXT NOT NULL) STRICT;
+             CREATE TABLE comments (id TEXT NOT NULL, post_id TEXT, body TEXT NOT NULL) STRICT;
+             CREATE TABLE readers (id TEXT NOT NULL, comment_id TEXT NOT NULL) STRICT;",
+            // p2 is another tenant's; p4 is ours but has no comment; p5 is ours but hidden by
+            // the posts policy, so its comment c5 is visible alone but never joined to it.
+            "INSERT INTO posts VALUES ('p1','tenant_1','a'), ('p2','tenant_2','b'), ('p4','tenant_1','d'), ('p5','tenant_1','hidden');
+             INSERT INTO comments VALUES ('c1','p1','x'), ('c2','p2','y'), ('c3',NULL,'z'), ('c5','p5','w');
+             INSERT INTO readers VALUES ('r1','c1'), ('r2','c2'), ('r3','c3');",
+        )
+        .unwrap_or_else(|error| unreachable!("reference database: {error}"));
+        let text = |value: &str| LogicalValue::String(value.to_owned());
+        let cases: [(&str, Vec<Vec<LogicalValue>>); 6] = [
+            (
+                "SELECT c.id FROM comments c ORDER BY c.id",
+                vec![vec![text("c1")], vec![text("c5")]],
+            ),
+            (
+                "SELECT c.id, p.title FROM comments c JOIN posts p ON p.id = c.post_id ORDER BY c.id",
+                vec![vec![text("c1"), text("a")]],
+            ),
+            // The nullable side's rule sits in `ON`: p4 keeps its row with no comment, and
+            // p2's comment (another tenant) is not attached to it.
+            (
+                "SELECT p.id, c.id AS comment_id FROM posts p LEFT JOIN comments c ON c.post_id = p.id ORDER BY p.id",
+                vec![
+                    vec![text("p1"), text("c1")],
+                    vec![text("p2"), LogicalValue::Null],
+                    vec![text("p4"), LogicalValue::Null],
+                ],
+            ),
+            (
+                "SELECT c.id, p.id AS post_id FROM comments c LEFT JOIN posts p ON p.id = c.post_id ORDER BY c.id",
+                vec![
+                    vec![text("c1"), text("p1")],
+                    vec![text("c5"), LogicalValue::Null],
+                ],
+            ),
+            // `posts` appears nowhere else, so the subquery in `ON` needs its own alias.
+            (
+                "SELECT r.id, c.id AS comment_id FROM readers r LEFT JOIN comments c ON c.id = r.comment_id ORDER BY r.id",
+                vec![
+                    vec![text("r1"), text("c1")],
+                    vec![text("r2"), LogicalValue::Null],
+                    vec![text("r3"), LogicalValue::Null],
+                ],
+            ),
+            // Inside a client EXISTS over the child: the policy's `posts` subquery shadows
+            // the outer `posts` alias and still correlates with the middle `comments` row.
+            (
+                "SELECT p.id FROM posts p WHERE EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.id) ORDER BY p.id",
+                vec![vec![text("p1")]],
+            ),
+        ];
+        for (sql, expected) in cases {
+            let statement = SqliteFrontend::default()
+                .bind(sql, &catalog)
+                .unwrap_or_else(|error| unreachable!("{sql} binds: {error}"));
+            let protected = bundle
+                .compile_select(&statement, &session)
+                .unwrap_or_else(|error| unreachable!("{sql} compiles: {error}"));
+            let verified = compile_verified_select(
+                &protected.plan,
+                &catalog,
+                BTreeMap::new(),
+                ExecutionLimits {
+                    max_rows: 100,
+                    max_result_bytes: 10_000,
+                    timeout_ms: 1_000,
+                    max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
+                },
+                snapshot.clone(),
+            )
+            .unwrap_or_else(|error| unreachable!("{sql} verifies: {error}"));
+            let actual = database
+                .execute(&verified)
+                .unwrap_or_else(|error| unreachable!("{sql} executes: {error}"));
+            assert_eq!(actual.rows, expected, "{sql}\n{}", verified.protected_sql());
         }
     }
 
