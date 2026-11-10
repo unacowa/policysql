@@ -311,10 +311,10 @@ WHERE EXISTS (SELECT 1 FROM posts
 
 - `exists`を使えるのはSELECTの`filter`だけです。`check`、UPDATEとDELETEの`filter`、`visible_if`ではpolicy load時に拒否します。
 - 親は1段だけです。`where`の中に`exists`は置けません。親と子が同じresourceの関係（`parent_id`による自己参照など）も拒否します。
-- `on`は「親のcolumn: 子のcolumn」の1組で、両方の型が一致している必要があります。`resource`、`on`、`where`はすべて必須です。
+- `on`は「親のcolumn: 子のcolumn」の1組で、両方の型が一致している必要があります。bytesとJSONのcolumnは使えません。`resource`、`on`、`where`はすべて必須です。
 - `where`は親resourceのcolumnで評価します。親resource自身のselect policyは適用しません。roleに親のselect policyがなくても使えます。
 - `where`で使う親のcolumnはpolicyの内部だけで使い、clientのcolumn permissionは広がりません。clientが親を直接JOINやsubqueryで参照するには、従来どおり親のselect policyが必要です。
-- 子の`on`のcolumnがNULLの行と、対応する親がない行は`exists`に一致しません。`not`の中に置くと、そうした行は逆に一致します（SQLの`NOT EXISTS`がTRUEになるため）。隠したい行は`exists`を肯定形で書いて絞ります。
+- 子の`on`のcolumnがNULLの行と、対応する親がない行は`exists`に一致しません。`not`の中に置くと、そうした行は逆に一致します（SQLの`NOT EXISTS`がTRUEになるため）。親の`where`がUNKNOWNになる行（親のcolumnがNULLで`neq`を使う場合など）も、`exists`には一致せず、`not`の中では一致します。隠したい行は`exists`を肯定形で書いて絞ります。
 - JOINで結合したresourceに適用する場合も、同じ規則で合成します。LEFT JOINのnullable側では`ON`に入ります。
 - JSON collection SELECTの対象resourceに`exists`があると、そのSELECTは拒否します。
 - `exists`は予約語です。`exists`という名前のcolumnはpredicateで参照できません。

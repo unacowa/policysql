@@ -78,7 +78,8 @@ the filter context, with an inner projection of one permitted direct column or t
   projections, `ORDER BY`, `LIMIT`/`OFFSET`, JSON-collection selects, mutations, and the same
   positions of a nested `EXISTS`) before any policy is composed;
 - the binder rejects a computed inner projection of an `EXISTS` (`CASE`, a function,
-  `COUNT(*)`), which also closes an aggregate that bypassed `allow_aggregations`.
+  `COUNT(*)`), which also closes that path for an aggregate that bypassed `allow_aggregations`
+  (other top-level aggregate positions are tracked in #115).
 
 ## Consequences
 

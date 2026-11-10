@@ -8,7 +8,7 @@ PolicySQL accepts a strict, capability-gated SQLite subset. A deployment adverti
 - base resources and aliases that resolve unambiguously;
 - `INNER JOIN` and `LEFT JOIN` only when every base resource has its own select policy and every referenced column is allowed;
 - boolean predicates using registered operators and named parameters;
-- provenance-preserving qualified correlated `EXISTS` in a SELECT's `WHERE` only (an `EXISTS` in a JOIN `ON`, `HAVING`, a projection, `ORDER BY`, `LIMIT`/`OFFSET`, or a mutation is rejected), whose inner projection is one permitted direct column or the exact constant `1`, transparent single-resource derived tables, and one transparent/filtered non-recursive CTE that may feed an outer JOIN;
+- provenance-preserving qualified correlated `EXISTS` in a SELECT's `WHERE` only (an `EXISTS` in a JOIN `ON`, `HAVING`, a projection, `ORDER BY`, `LIMIT`/`OFFSET`, or a mutation is rejected), whose inner projection is the exact constant `1` or permitted direct columns (optionally aliased; computed expressions such as `CASE`, functions, and `COUNT(*)` are rejected), transparent single-resource derived tables, and one transparent/filtered non-recursive CTE that may feed an outer JOIN;
 - `ORDER BY` over permitted direct columns or resolved projection aliases, plus non-negative integer literal/named-parameter `LIMIT` and `OFFSET`;
 - `COUNT(*)` with direct `GROUP BY`/closed `HAVING` only when deployment capability and `allow_aggregations` permit it and every referenced column is allowed;
 - inline `ROW_NUMBER` only when deployment capability and `allow_windows` permit it and every referenced column is allowed;
