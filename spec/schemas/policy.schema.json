@@ -74,7 +74,10 @@
       "type": "object",
       "minProperties": 1,
       "maxProperties": 1,
-      "propertyNames": { "$ref": "#/$defs/identifier" },
+      "propertyNames": {
+        "$ref": "#/$defs/identifier",
+        "not": { "enum": ["and", "or", "not", "exists"] }
+      },
       "additionalProperties": { "$ref": "#/$defs/comparison" }
     },
     "andPredicate": {

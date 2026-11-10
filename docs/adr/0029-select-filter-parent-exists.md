@@ -55,10 +55,18 @@ Semantics:
 - The `where` columns are policy-internal. They do not extend the client's column permissions
   and do not appear in explain `resources` or `referenced_columns`. A client that references
   the parent directly still needs a parent select policy.
-- A child row whose `on` column is NULL, or has no parent, does not match.
+- A child row whose `on` column is NULL, or has no parent, does not match the `exists`. Under
+  `not`, the same row therefore matches (SQL `NOT EXISTS` is TRUE there); a policy that must
+  hide such rows uses `exists` positively.
 
 The emitter now also allocates aliases for subqueries in a JOIN's `ON`, where a LEFT JOIN's
-row filter is placed. A JSON-collection select gets no such allocation, so an `exists` filter
+row filter is placed. That made a client-written `EXISTS` in an `ON` reach the database
+without its resource's policy (PR #113 review), and the same was already true on `main` for a
+client `EXISTS` in `HAVING` or a projection whose resource also appeared in the `WHERE`. Only a
+select's `WHERE` was ever protected, and the published surface advertises correlated `EXISTS`
+only in the filter context, so the policy compiler now rejects a client `EXISTS` in every other
+position (JOIN `ON`, `HAVING`, projections, `ORDER BY`, `LIMIT`/`OFFSET`, JSON-collection
+selects, and mutations) before any policy is composed. A JSON-collection select gets no such allocation, so an `exists` filter
 on its resource is rejected by the emitter; that combination is unsupported for now.
 
 ## Consequences

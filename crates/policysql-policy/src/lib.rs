@@ -481,6 +481,22 @@ impl PolicyBundle {
         let BoundStatement::Select(select) = statement else {
             return Err(PolicyError::UnsupportedCapability);
         };
+        reject_unprotected_exists(
+            select
+                .joins
+                .iter()
+                .map(|join| &join.on)
+                .chain(select.having.iter())
+                .chain(
+                    select
+                        .projections
+                        .iter()
+                        .map(|projection| &projection.expression),
+                )
+                .chain(select.order_by.iter().map(|order| &order.expression))
+                .chain(select.limit.iter())
+                .chain(select.offset.iter()),
+        )?;
         let (resource_ids, selected) = self.select_policies(select, session.role())?;
         let mut protected = select.as_ref().clone();
         let mut server_values = BTreeMap::new();
@@ -627,6 +643,7 @@ impl PolicyBundle {
         if !policy.allow_aggregations || !policy.regular_columns.contains(&select.document.id) {
             return Err(PolicyError::UnsupportedCapability);
         }
+        reject_unprotected_exists(std::iter::once(&select.path).chain(select.predicate.iter()))?;
         if let Some(predicate) = &select.predicate {
             validate_client_expression(predicate, &policy.regular_columns)?;
         }
@@ -674,6 +691,19 @@ impl PolicyBundle {
             .get(&insert.resource)
             .and_then(|roles| roles.get(session.role()))
             .ok_or(PolicyError::MissingPolicy)?;
+        reject_unprotected_exists(
+            insert
+                .rows
+                .iter()
+                .flatten()
+                .map(|assignment| &assignment.value)
+                .chain(
+                    insert
+                        .returning
+                        .iter()
+                        .map(|projection| &projection.expression),
+                ),
+        )?;
         let mut protected = insert.clone();
         validate_returning(&protected.returning, &policy.returning)?;
         let mut server_values = BTreeMap::new();
@@ -744,6 +774,19 @@ impl PolicyBundle {
             .get(&update.resource)
             .and_then(|roles| roles.get(session.role()))
             .ok_or(PolicyError::MissingPolicy)?;
+        reject_unprotected_exists(
+            update
+                .assignments
+                .iter()
+                .map(|assignment| &assignment.value)
+                .chain(update.predicate.iter())
+                .chain(
+                    update
+                        .returning
+                        .iter()
+                        .map(|projection| &projection.expression),
+                ),
+        )?;
         let mut protected = update.clone();
         validate_returning(&protected.returning, &policy.returning)?;
         let mut server_values = BTreeMap::new();
@@ -807,6 +850,14 @@ impl PolicyBundle {
             .get(&delete.resource)
             .and_then(|roles| roles.get(session.role()))
             .ok_or(PolicyError::MissingPolicy)?;
+        reject_unprotected_exists(
+            delete.predicate.iter().chain(
+                delete
+                    .returning
+                    .iter()
+                    .map(|projection| &projection.expression),
+            ),
+        )?;
         let mut protected = delete.clone();
         validate_returning(&protected.returning, &policy.returning)?;
         let mut server_values = BTreeMap::new();
@@ -1573,6 +1624,70 @@ fn validate_client_expression(
             }
             Ok(())
         }
+    }
+}
+
+/// Rejects a client `EXISTS` outside a select's `WHERE`.
+///
+/// Only the `WHERE` of a select is walked by [`protect_nested_selects`] and by the resource
+/// collection in `select_policies`, and the published surface advertises correlated `EXISTS`
+/// only in the filter context. Anywhere else (a JOIN's `ON`, `HAVING`, a projection, `ORDER BY`,
+/// `LIMIT`/`OFFSET`, a JSON-collection select, a mutation) the subquery would reach the database
+/// without its resource's policy, so it is denied before any policy is composed.
+fn reject_unprotected_exists<'a>(
+    expressions: impl IntoIterator<Item = &'a BoundExpr>,
+) -> Result<(), PolicyError> {
+    if expressions.into_iter().any(contains_exists) {
+        Err(PolicyError::UnsupportedCapability)
+    } else {
+        Ok(())
+    }
+}
+
+fn contains_exists(expression: &BoundExpr) -> bool {
+    match expression {
+        BoundExpr::Exists(_) => true,
+        BoundExpr::Equal(left, right)
+        | BoundExpr::NotEqual(left, right)
+        | BoundExpr::Less(left, right)
+        | BoundExpr::LessEqual(left, right)
+        | BoundExpr::Greater(left, right)
+        | BoundExpr::GreaterEqual(left, right)
+        | BoundExpr::And(left, right)
+        | BoundExpr::Or(left, right)
+        | BoundExpr::Like(left, right)
+        | BoundExpr::Glob(left, right)
+        | BoundExpr::Least(left, right)
+        | BoundExpr::Concat(left, right)
+        | BoundExpr::ConditionalOutput {
+            value: left,
+            visible_if: right,
+        } => contains_exists(left) || contains_exists(right),
+        BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::CastText(inner) => {
+            contains_exists(inner)
+        }
+        BoundExpr::ScalarFunction { arguments, .. } => arguments.iter().any(contains_exists),
+        BoundExpr::In {
+            expression, values, ..
+        } => contains_exists(expression) || values.iter().any(contains_exists),
+        BoundExpr::Case {
+            branches,
+            else_expression,
+            ..
+        } => {
+            branches
+                .iter()
+                .any(|(condition, value)| contains_exists(condition) || contains_exists(value))
+                || else_expression.as_deref().is_some_and(contains_exists)
+        }
+        BoundExpr::RowNumber { order_by, .. } => order_by
+            .iter()
+            .any(|order| contains_exists(&order.expression)),
+        BoundExpr::Column(_)
+        | BoundExpr::ClientParameter { .. }
+        | BoundExpr::ServerParameter { .. }
+        | BoundExpr::Literal(_)
+        | BoundExpr::CountAll(_) => false,
     }
 }
 
@@ -2495,6 +2610,11 @@ resources:
             representation: ValueRepresentation::Number,
             ..descriptor()
         };
+        let bytes = ValueDescriptor {
+            logical_type: LogicalType::Bytes,
+            representation: ValueRepresentation::Base64,
+            ..descriptor()
+        };
         let resource = |id, name: &str, columns: &[(&str, ValueDescriptor)]| {
             ResourceDescriptor::new(
                 ResourceId::new(id).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
@@ -2520,6 +2640,7 @@ resources:
                         ("id", descriptor()),
                         ("tenant_id", descriptor()),
                         ("rank", integer.clone()),
+                        ("blob", bytes.clone()),
                     ],
                 ),
                 resource(
@@ -2531,7 +2652,13 @@ resources:
                         ("body", descriptor()),
                         ("secret", descriptor()),
                         ("score", integer),
+                        ("blob", bytes),
                     ],
+                ),
+                resource(
+                    3,
+                    "readers",
+                    &[("id", descriptor()), ("comment_id", descriptor())],
                 ),
             ],
         )
@@ -2676,6 +2803,12 @@ resources:
                 PolicyError::InvalidPredicate,
             ),
             (
+                exists(&format!(
+                    "{{ resource: posts, on: {{ blob: blob }}, where: {tenant} }}"
+                )),
+                PolicyError::UnsupportedCapability,
+            ),
+            (
                 exists("{ resource: posts, on: { id: post_id } }"),
                 PolicyError::InvalidPredicate,
             ),
@@ -2710,6 +2843,105 @@ resources:
                 Err(PolicyError::UnsupportedCapability),
                 "{placement}"
             );
+        }
+    }
+
+    /// A client `EXISTS` is protected only in a select's `WHERE`; everywhere else it would
+    /// reach the database without its resource's policy (PR #113 review: a JOIN `ON`, `HAVING`,
+    /// and a `CASE` projection leaked row existence), so it is denied before composition.
+    #[test]
+    fn client_exists_outside_where_is_denied() {
+        let bundle = activate_parent(
+            r"
+version: 1
+resources:
+  posts:
+    roles:
+      member:
+        select:
+          columns: [id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+  comments:
+    roles:
+      member:
+        select:
+          columns: [id, post_id, body]
+          filter: { body: { neq: hidden } }
+  readers:
+    roles:
+      member:
+        select:
+          columns: [id, comment_id]
+          filter: { id: { neq: none } }
+          allow_aggregations: true
+        update:
+          columns: [comment_id]
+          filter: { id: { neq: none } }
+          check: { id: { neq: none } }
+        delete:
+          filter: { id: { neq: none } }
+",
+        )
+        .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+        let member = session("member");
+        let compile = |sql: &str| -> Option<Result<(), PolicyError>> {
+            let statement = SqliteFrontend::default()
+                .bind(sql, &parent_catalog())
+                .ok()?;
+            Some(match &statement {
+                BoundStatement::Update(_) => bundle.compile_update(&statement, &member).map(|_| ()),
+                BoundStatement::Delete(_) => bundle.compile_delete(&statement, &member).map(|_| ()),
+                _ => bundle.compile_select(&statement, &member).map(|_| ()),
+            })
+        };
+        // Positive control: the protected position still compiles.
+        assert_eq!(
+            compile(
+                "SELECT r.id FROM readers r WHERE EXISTS (SELECT 1 FROM comments c WHERE c.id = r.comment_id)"
+            ),
+            Some(Ok(()))
+        );
+        // `true`: the binder accepts the shape today, so the policy layer must deny it.
+        for (sql, binds) in [
+            (
+                "SELECT p.id FROM posts p JOIN readers r ON EXISTS (SELECT 1 FROM comments c)",
+                true,
+            ),
+            (
+                "SELECT p.id FROM posts p JOIN readers r ON r.id = 'r1' AND EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden') WHERE EXISTS (SELECT 1 FROM comments c WHERE c.id = 'c1')",
+                true,
+            ),
+            (
+                "SELECT r.id FROM readers r LEFT JOIN posts p ON p.id = r.comment_id AND EXISTS (SELECT 1 FROM comments c WHERE c.post_id = p.id)",
+                true,
+            ),
+            (
+                "SELECT r.id, COUNT(*) AS n FROM readers r GROUP BY r.id HAVING EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden')",
+                true,
+            ),
+            (
+                "SELECT CASE WHEN EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden') THEN 'y' ELSE 'n' END AS hit FROM readers r",
+                true,
+            ),
+            (
+                "SELECT r.id FROM readers r ORDER BY CASE WHEN EXISTS (SELECT 1 FROM comments c) THEN 1 ELSE 0 END",
+                false,
+            ),
+            (
+                "UPDATE readers SET comment_id = 'c1' WHERE EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden')",
+                false,
+            ),
+            (
+                "DELETE FROM readers WHERE EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden')",
+                false,
+            ),
+        ] {
+            match compile(sql) {
+                Some(result) => {
+                    assert_eq!(result, Err(PolicyError::UnsupportedCapability), "{sql}");
+                }
+                None => assert!(!binds, "expected the binder to accept: {sql}"),
+            }
         }
     }
 }

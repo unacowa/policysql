@@ -186,7 +186,7 @@ filter:
     where: { tenant_id: { eq: { session: tenant_id } } }
 ```
 
-It compiles to a correlated `EXISTS (SELECT 1 FROM parent WHERE parent.col = child.col AND <where>)`. The parent's own select policy is not applied, the `where` columns are policy-internal, a NULL or dangling child column never matches, nesting and same-resource parents are rejected, and `exists` is a reserved word in every predicate.
+It compiles to a correlated `EXISTS (SELECT 1 FROM parent WHERE parent.col = child.col AND <where>)`. The parent's own select policy is not applied, the `where` columns are policy-internal, a NULL or dangling child column never matches the `exists` (so it does match under `not`), nesting and same-resource parents are rejected, and `exists` is a reserved word in every predicate.
 
 Database-specific JSON, regexp, full-text, and custom-function operators should be capability-gated.
 

@@ -1,0 +1,11 @@
+version: 1
+resources:
+  posts:
+    source: { table: posts }
+    columns: { id: { type: string }, tenant_id: { type: string } }
+  readers:
+    source: { table: readers }
+    columns: { id: { type: string } }
+  comments:
+    source: { table: comments }
+    columns: { id: { type: string }, tenant_id: { type: string }, body: { type: string } }
