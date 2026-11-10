@@ -1,7 +1,7 @@
 # ADR 0029: One-hop parent `exists` in a select filter
 
 - Status: accepted
-- Issues: #112
+- Issues: #112, #114
 - Amends: [ADR 0006](0006-closed-policy-predicate-language.md) ("Relationship predicates … are
   not embedded in policy YAML")
 - Related: [ADR 0004](0004-policy-nullable-and-result-column-identity.md),
@@ -60,14 +60,25 @@ Semantics:
   hide such rows uses `exists` positively.
 
 The emitter now also allocates aliases for subqueries in a JOIN's `ON`, where a LEFT JOIN's
-row filter is placed. That made a client-written `EXISTS` in an `ON` reach the database
-without its resource's policy (PR #113 review), and the same was already true on `main` for a
-client `EXISTS` in `HAVING` or a projection whose resource also appeared in the `WHERE`. Only a
-select's `WHERE` was ever protected, and the published surface advertises correlated `EXISTS`
-only in the filter context, so the policy compiler now rejects a client `EXISTS` in every other
-position (JOIN `ON`, `HAVING`, projections, `ORDER BY`, `LIMIT`/`OFFSET`, JSON-collection
-selects, and mutations) before any policy is composed. A JSON-collection select gets no such allocation, so an `exists` filter
+row filter is placed. A JSON-collection select gets no such allocation, so an `exists` filter
 on its resource is rejected by the emitter; that combination is unsupported for now.
+
+### Client `EXISTS` outside a `WHERE` (issue #114)
+
+The `ON` allocation made a client-written `EXISTS` in an `ON` reach the database without its
+resource's policy (PR #113 review). The same was already true on `main` for a client `EXISTS`
+in `HAVING` or a projection, and for one in the projection of a `WHERE EXISTS`, whenever its
+resource also appeared in a `WHERE`: only a select's `WHERE` (and the `WHERE` of an `EXISTS`
+inside it) was ever protected, and the other positions were refused only because the emitter
+happened to allocate no alias. The published surface advertises correlated `EXISTS` only in
+the filter context, with an inner projection of one permitted direct column or the constant
+`1`, so:
+
+- the policy compiler rejects a client `EXISTS` in every other position (JOIN `ON`, `HAVING`,
+  projections, `ORDER BY`, `LIMIT`/`OFFSET`, JSON-collection selects, mutations, and the same
+  positions of a nested `EXISTS`) before any policy is composed;
+- the binder rejects a computed inner projection of an `EXISTS` (`CASE`, a function,
+  `COUNT(*)`), which also closes an aggregate that bypassed `allow_aggregations`.
 
 ## Consequences
 

@@ -1770,6 +1770,23 @@ fn protect_nested_selects(
 ) -> Result<(), PolicyError> {
     match expression {
         BoundExpr::Exists(select) => {
+            // As at the top level, only the nested `WHERE` is protected (issue #114).
+            reject_unprotected_exists(
+                select
+                    .joins
+                    .iter()
+                    .map(|join| &join.on)
+                    .chain(select.having.iter())
+                    .chain(
+                        select
+                            .projections
+                            .iter()
+                            .map(|projection| &projection.expression),
+                    )
+                    .chain(select.order_by.iter().map(|order| &order.expression))
+                    .chain(select.limit.iter())
+                    .chain(select.offset.iter()),
+            )?;
             if let Some(predicate) = &mut select.predicate {
                 protect_nested_selects(predicate, policies, session, server_values)?;
             }
@@ -2846,12 +2863,9 @@ resources:
         }
     }
 
-    /// A client `EXISTS` is protected only in a select's `WHERE`; everywhere else it would
-    /// reach the database without its resource's policy (PR #113 review: a JOIN `ON`, `HAVING`,
-    /// and a `CASE` projection leaked row existence), so it is denied before composition.
-    #[test]
-    fn client_exists_outside_where_is_denied() {
-        let bundle = activate_parent(
+    /// Policies for the `EXISTS`-position tests (issue #114).
+    fn exists_position_bundle() -> PolicyBundle {
+        activate_parent(
             r"
 version: 1
 resources:
@@ -2882,7 +2896,15 @@ resources:
           filter: { id: { neq: none } }
 ",
         )
-        .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+        .unwrap_or_else(|error| unreachable!("valid policy: {error}"))
+    }
+
+    /// A client `EXISTS` is protected only in a select's `WHERE`; everywhere else it would
+    /// reach the database without its resource's policy (PR #113 review: a JOIN `ON`, `HAVING`,
+    /// and a `CASE` projection leaked row existence), so it is denied before composition.
+    #[test]
+    fn client_exists_outside_where_is_denied() {
+        let bundle = exists_position_bundle();
         let member = session("member");
         let compile = |sql: &str| -> Option<Result<(), PolicyError>> {
             let statement = SqliteFrontend::default()
@@ -2923,17 +2945,18 @@ resources:
                 "SELECT CASE WHEN EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden') THEN 'y' ELSE 'n' END AS hit FROM readers r",
                 true,
             ),
+            // The binder rejects this shape today; the policy layer still must if it binds.
             (
                 "SELECT r.id FROM readers r ORDER BY CASE WHEN EXISTS (SELECT 1 FROM comments c) THEN 1 ELSE 0 END",
                 false,
             ),
             (
                 "UPDATE readers SET comment_id = 'c1' WHERE EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden')",
-                false,
+                true,
             ),
             (
                 "DELETE FROM readers WHERE EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden')",
-                false,
+                true,
             ),
         ] {
             match compile(sql) {
@@ -2943,5 +2966,39 @@ resources:
                 None => assert!(!binds, "expected the binder to accept: {sql}"),
             }
         }
+    }
+
+    /// Inside a protected `WHERE EXISTS`, only its own `WHERE` gets the row filter (issue #114).
+    #[test]
+    fn client_exists_in_a_nested_projection_is_denied() {
+        let bundle = exists_position_bundle();
+        let member = session("member");
+        // The binder now rejects a computed inner projection, so the shape the review found
+        // (`SELECT CASE WHEN EXISTS (...) ... FROM posts p`) is built directly.
+        let bind = |sql: &str| {
+            SqliteFrontend::default()
+                .bind(sql, &parent_catalog())
+                .unwrap_or_else(|error| unreachable!("{sql} binds: {error}"))
+        };
+        let BoundStatement::Select(inner) = bind(
+            "SELECT r.id FROM readers r WHERE EXISTS (SELECT 1 FROM comments c WHERE c.body = 'hidden')",
+        ) else {
+            unreachable!("bound statement is SELECT")
+        };
+        let Some(hidden_probe) = inner.predicate.clone() else {
+            unreachable!("WHERE EXISTS is the predicate")
+        };
+        let mut outer = bind("SELECT r.id FROM readers r WHERE EXISTS (SELECT p.id FROM posts p)");
+        let BoundStatement::Select(select) = &mut outer else {
+            unreachable!("bound statement is SELECT")
+        };
+        let Some(BoundExpr::Exists(nested)) = &mut select.predicate else {
+            unreachable!("WHERE EXISTS is the predicate")
+        };
+        nested.projections[0].expression = hidden_probe;
+        assert_eq!(
+            bundle.compile_select(&outer, &member).map(|_| ()),
+            Err(PolicyError::UnsupportedCapability)
+        );
     }
 }
