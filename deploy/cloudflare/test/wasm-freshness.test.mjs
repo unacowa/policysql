@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { ARTIFACTS, artifactDigest, digestPath, sourceDigest, sourceFiles } from "../scripts/source-digest.mjs";
+import {
+  ARTIFACTS, artifactDigest, digestPath, sourceDigest, sourceFiles, workspaceLayoutProblems,
+} from "../scripts/source-digest.mjs";
 
 const REBUILD = "run `npm --prefix deploy/cloudflare run build:wasm` and commit pkg/";
 
@@ -30,6 +32,8 @@ test("the committed WASM in pkg/ is built from the current Rust sources", () => 
 });
 
 test("the source digest covers every non-test crate and fails closed", () => {
+  // Every input of the build must be inside the scanned set (PR #117 review).
+  assert.deepEqual(workspaceLayoutProblems(), []);
   const files = sourceFiles();
   for (const required of [
     "Cargo.lock",

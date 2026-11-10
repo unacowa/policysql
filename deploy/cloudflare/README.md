@@ -65,8 +65,10 @@ npm --prefix deploy/cloudflare run deploy:dry
 rebuilding it. After any change to the Rust sources under `crates/` (except `policysql-testkit`),
 `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, or `.cargo/`, run
 `build:wasm` and commit `pkg/`, including `pkg/source-digest.txt`, which `build:wasm` writes
-after a successful build: the digest of every non-test crate's sources and the sha256 of the
-built `.wasm` and `.js`. `test/wasm-freshness.test.mjs` fails while either differs
+after a successful build: the digest of every non-test crate's sources and the sha256 of each
+built file (`.wasm`, `.js`, both `.d.ts`, and `package.json`). Every workspace member must
+live in `crates/`, with no `[patch]` table and no symlinks under a scanned `src/`; the test
+fails otherwise, because the digest would not see such an input. `test/wasm-freshness.test.mjs` fails while either differs
 (`scripts/source-digest.mjs`). wasm-pack writes a `pkg/.gitignore`
 of `*`, so add a new file in `pkg/` with `git add -f`.
 

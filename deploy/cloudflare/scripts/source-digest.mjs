@@ -26,7 +26,14 @@ const repositoryRoot = path.resolve(deploymentRoot, "../..");
 const packageRoot = path.join(deploymentRoot, "pkg");
 export const digestPath = path.join(packageRoot, "source-digest.txt");
 /** Built files whose content the record pins. */
-export const ARTIFACTS = ["policysql_wasm_bg.wasm", "policysql_wasm.js"];
+export const ARTIFACTS = [
+  "policysql_wasm_bg.wasm",
+  "policysql_wasm.js",
+  // `tsc` checks `src/` against these declarations.
+  "policysql_wasm.d.ts",
+  "policysql_wasm_bg.wasm.d.ts",
+  "package.json",
+];
 /** Crates that the WASM module never links (test helpers). */
 const EXCLUDED_CRATES = new Set(["policysql-testkit"]);
 
@@ -35,8 +42,30 @@ function filesUnder(directory) {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     if (entry.name.startsWith(".")) return [];
     const full = path.join(directory, entry.name);
-    return entry.isDirectory() ? filesUnder(full) : entry.isFile() ? [full] : [];
+    if (entry.isDirectory()) return filesUnder(full);
+    if (entry.isFile()) return [full];
+    // A symlink (or anything else) could point outside the scanned set: fail closed.
+    throw new Error(`source-digest: unsupported entry ${full}`);
   });
+}
+
+/**
+ * The scanned set is complete only while every workspace member lives in `crates/` and no
+ * `[patch]` redirects a dependency elsewhere; checked by `test/wasm-freshness.test.mjs`.
+ */
+export function workspaceLayoutProblems(root = repositoryRoot) {
+  const manifest = fs.readFileSync(path.join(root, "Cargo.toml"), "utf8");
+  const problems = [];
+  if (/^\s*\[patch[.\]]/m.test(manifest)) problems.push("a [patch] table");
+  const members = manifest.match(/^\s*members\s*=\s*\[([^\]]*)\]/m);
+  if (!members) {
+    problems.push("no workspace members list");
+  } else {
+    for (const member of members[1].matchAll(/"([^"]+)"/g)) {
+      if (!member[1].startsWith("crates/")) problems.push(`member ${member[1]} outside crates/`);
+    }
+  }
+  return problems;
 }
 
 export function sourceFiles(root = repositoryRoot) {
