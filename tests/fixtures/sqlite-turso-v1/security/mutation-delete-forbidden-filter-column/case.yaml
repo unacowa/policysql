@@ -1,0 +1,6 @@
+id: sqlite.security.mutation-delete-forbidden-filter-column
+profile: sqlite-turso-v1
+description: DELETEのWHEREでselectの通常列にない列 (returning列であっても) を参照し、expect.affectedRows や影響行数から値を推測する攻撃をauthorization stageで拒否する (issue #116)
+covers: [statement.delete.filtered, policy.select.forbidden-column, threat.forbidden-column-inference]
+tests: [negative, bypass]
+expected: deny

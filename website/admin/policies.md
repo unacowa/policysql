@@ -184,6 +184,8 @@ policyに使う内部columnをclientへ公開する必要はありません。�
 
 INSERTとUPDATEの入力`columns`は文字列だけを受け付けます。mutationの`returning.columns`は独立した出力許可一覧です。変更可能なcolumnでも、`returning`に含まれなければ返却できません。
 
+UPDATEとDELETEのclient `WHERE`で参照できるのは、select policyの通常`columns`だけです（`returning.columns`も含みません）。`update.columns`にあるだけの列は条件に使えません。select policyのないroleは、UPDATEやDELETEの`WHERE`で列を参照できません。詳しくは[データの追加・更新・削除](../sql/mutations#update)を参照してください。
+
 ## 条件付き出力列
 
 rowとtrusted sessionに応じて値を表示または`null`化するcolumnは、通常列と同じ`columns`へ`name`付きobjectとして記述します。

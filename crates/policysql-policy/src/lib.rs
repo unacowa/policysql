@@ -787,6 +787,12 @@ impl PolicyBundle {
                         .map(|projection| &projection.expression),
                 ),
         )?;
+        if let Some(predicate) = &update.predicate {
+            validate_client_expression(
+                predicate,
+                &self.mutation_filter_columns(update.resource, session.role()),
+            )?;
+        }
         let mut protected = update.clone();
         validate_returning(&protected.returning, &policy.returning)?;
         let mut server_values = BTreeMap::new();
@@ -858,6 +864,12 @@ impl PolicyBundle {
                     .map(|projection| &projection.expression),
             ),
         )?;
+        if let Some(predicate) = &delete.predicate {
+            validate_client_expression(
+                predicate,
+                &self.mutation_filter_columns(delete.resource, session.role()),
+            )?;
+        }
         let mut protected = delete.clone();
         validate_returning(&protected.returning, &policy.returning)?;
         let mut server_values = BTreeMap::new();
@@ -883,6 +895,30 @@ impl PolicyBundle {
                 policy_limit: None,
             },
         })
+    }
+
+    /// Columns a client `WHERE` of an UPDATE or DELETE may reference (issue #116): the role's
+    /// regular select columns for the resource, as in Hasura.
+    ///
+    /// A mutation's filter is evaluated on pre-state rows and observed through `RETURNING`,
+    /// the affected-row count, and check or `expect.affectedRows` failures, so it is limited to
+    /// columns whose pre-state values the role may read. `returning.columns` do not count
+    /// (PR #117 review): an UPDATE returns post-state values (a preset or an assignment
+    /// overwrites the pre-state one) and never a row that fails `check`, and a DELETE probed
+    /// with `expect.affectedRows: 0` rolls back, so neither shows the value it filtered on.
+    /// Columns the role may only write are excluded, as are conditional (`visible_if`) select
+    /// columns, which are projection-only everywhere. A role without a select policy may
+    /// reference no column.
+    fn mutation_filter_columns(
+        &self,
+        resource: policysql_core::ResourceId,
+        role: &RoleName,
+    ) -> BTreeSet<ColumnId> {
+        self.select
+            .get(&resource)
+            .and_then(|roles| roles.get(role))
+            .map(|policy| policy.regular_columns.clone())
+            .unwrap_or_default()
     }
 
     fn select_policies<'a>(
@@ -3000,5 +3036,88 @@ resources:
             bundle.compile_select(&outer, &member).map(|_| ()),
             Err(PolicyError::UnsupportedCapability)
         );
+    }
+
+    /// An UPDATE or DELETE `WHERE` may reference only the role's regular select columns
+    /// (issue #116).
+    #[test]
+    fn mutation_where_is_limited_to_observable_columns() {
+        let bundle = activate(
+            r"
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns:
+            - id
+            - name
+            - name: private_note
+              visible_if: { created_by: { eq: { session: subject_id } } }
+              on_deny: null
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+        update:
+          columns: [status]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [created_by] }
+        delete:
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [created_by] }
+      writer:
+        update:
+          columns: [status]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+        delete:
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+",
+        );
+        let compile = |role: &str, sql: &str| {
+            let statement = SqliteFrontend::default()
+                .bind(sql, &catalog())
+                .unwrap_or_else(|error| unreachable!("{sql} binds: {error}"));
+            match &statement {
+                BoundStatement::Update(_) => bundle.compile_update(&statement, &session(role)),
+                BoundStatement::Delete(_) => bundle.compile_delete(&statement, &session(role)),
+                _ => unreachable!("mutation statement"),
+            }
+            .map(|_| ())
+        };
+        let forbidden = Err(PolicyError::ForbiddenColumn);
+        for (column, update, delete) in [
+            // A regular select column.
+            ("id", Ok(()), Ok(())),
+            // A `returning.columns` entry: an UPDATE returns post-state values and never a row
+            // failing `check`; a DELETE probed with `expect.affectedRows: 0` rolls back.
+            ("created_by", forbidden.clone(), forbidden.clone()),
+            // Writable only: never observable.
+            ("status", forbidden.clone(), forbidden.clone()),
+            // Used by the policy filter only.
+            ("tenant_id", forbidden.clone(), forbidden.clone()),
+            // Conditional select columns are projection-only.
+            ("private_note", forbidden.clone(), forbidden.clone()),
+        ] {
+            let sql = format!("UPDATE projects SET status = 'a' WHERE {column} = 'x'");
+            assert_eq!(compile("member", &sql), update, "{sql}");
+            let sql = format!("DELETE FROM projects WHERE {column} = 'x'");
+            assert_eq!(compile("member", &sql), delete, "{sql}");
+        }
+        // Without a select policy no column may be referenced, but a mutation without a
+        // client `WHERE` still compiles.
+        for sql in [
+            "UPDATE projects SET status = 'a' WHERE id = 'x'",
+            "DELETE FROM projects WHERE id = 'x'",
+        ] {
+            assert_eq!(
+                compile("writer", sql),
+                Err(PolicyError::ForbiddenColumn),
+                "{sql}"
+            );
+        }
+        for sql in ["UPDATE projects SET status = 'a'", "DELETE FROM projects"] {
+            assert_eq!(compile("writer", sql), Ok(()), "{sql}");
+        }
     }
 }

@@ -3,6 +3,10 @@ resources:
   projects:
     roles:
       member:
+        # The client `WHERE id = :id` needs `id` as a select column (issue #116).
+        select:
+          columns: [id, name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
         delete:
           filter: { tenant_id: { eq: { session: tenant_id } } }
           returning: { columns: [id] }

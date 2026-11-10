@@ -63,15 +63,21 @@ update:
     author_id:
       eq:
         session: subject_id
+  returning:
+    columns: [id, title, status]
 ```
 
 `filter`は変更前のrowを制限し、`check`は変更後のrowが満たす条件を定義します。変更とcheckはatomicに実行され、checkに失敗した場合は変更全体がrollbackされます。
+
+clientの`WHERE`で参照できるのは、同じresourceのselect policyの通常`columns`だけです。`update.columns`にあるだけの書込み専用column、policyのfilterでだけ使うcolumn、条件付き出力列（`visible_if`）は参照できず、`POLICYSQL_FORBIDDEN_COLUMN`になります。`RETURNING`、更新件数、checkの失敗から、見えないcolumnの値を推測させないためです。`returning.columns`は含みません。UPDATEの`RETURNING`は更新後の値を返し（presetや代入で上書きされた列の更新前の値は見えません）、checkに失敗する行は返さないためです。上の例の`WHERE id = :id`は、select policyの`columns`に`id`があるときに使えます。
 
 複数rowを更新した場合は変更された全rowへcheckを適用し、FALSEまたはUNKNOWNが一つでもあれば全体をrollbackします。0 row更新はcheck成功として扱うため、更新件数も保証する場合はTransaction APIの`expect.affectedRows`を指定します。
 
 ## DELETE
 
 DELETE policyのfilterに一致するrowだけを削除できます。
+
+clientの`WHERE`で参照できるのは、UPDATEと同じく、同じresourceのselect policyの通常`columns`だけです。`returning.columns`は含みません。`expect.affectedRows: 0`を付けると、一致する行があってもrollbackされるので、値を見せずに条件だけを確かめられてしまうためです。
 
 ```sql
 DELETE FROM posts

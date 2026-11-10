@@ -1,0 +1,6 @@
+id: sqlite.security.mutation-forbidden-filter-column
+profile: sqlite-turso-v1
+description: UPDATEのWHEREで観測できない列 (selectの通常列でもreturning列でもない) を参照し、RETURNINGや影響行数から値を推測する攻撃をauthorization stageで拒否する (issue #116)
+covers: [statement.update.direct, policy.select.forbidden-column, threat.forbidden-column-inference]
+tests: [negative, bypass]
+expected: deny
