@@ -3,6 +3,10 @@ resources:
   projects:
     roles:
       member:
+        # The client `WHERE id ...` needs `id` as an observable (select) column (issue #116).
+        select:
+          columns: [id, name, status]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
         update:
           columns: [name, status]
           filter: { tenant_id: { eq: { session: tenant_id } } }

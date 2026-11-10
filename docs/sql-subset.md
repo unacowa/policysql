@@ -47,7 +47,7 @@ Examples:
 
 - one base resource;
 - explicit assignments using literals or named parameters only;
-- pre-state policy filter and client predicate; the client predicate may reference only the role's regular select columns and the update's `returning.columns`;
+- pre-state policy filter and client predicate; the client predicate may reference only the role's regular select columns;
 - server-owned presets disjoint from client assignments;
 - post-state checks over every changed row;
 - optional independently authorized `RETURNING`.

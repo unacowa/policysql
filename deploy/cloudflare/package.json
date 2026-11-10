@@ -5,7 +5,7 @@
   "scripts": {
     "stage:policy": "node scripts/stage-policy.mjs",
     "catalog:build": "node scripts/catalog-build.mjs",
-    "build:wasm": "npm run stage:policy && wasm-pack build ../../crates/policysql-wasm --release --target web --out-dir ../../deploy/cloudflare/pkg",
+    "build:wasm": "npm run stage:policy && wasm-pack build ../../crates/policysql-wasm --release --target web --out-dir ../../deploy/cloudflare/pkg && node scripts/source-digest.mjs --write",
     "check": "tsc --noEmit && tsc -p tsconfig.engine.json",
     "lint": "eslint .",
     "verify": "npm run check && npm run lint && npm test && npm run test:memory-owner && npm --prefix ../.. run check:package",

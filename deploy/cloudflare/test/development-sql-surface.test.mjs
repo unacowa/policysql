@@ -168,6 +168,27 @@ test("development smoke resources reject NULL outside a nullable assignment and 
   assert.equal(typeof code("UPDATE smoke_checks SET verdict = :verdict WHERE id = :id", { id: "x", verdict: "deny" }), "string");
 });
 
+// Regressions that must hold in the shipped WASM, not only in the Rust tests (PR #117 review:
+// the committed module had missed #113 and #116).
+test("the shipped WASM rejects unprotected EXISTS and unobservable mutation filter columns", () => {
+  const code = (sql) => JSON.parse(runtime.compile_json(
+    auth, JSON.stringify({ statements: [{ sql, params: {} }] }), "execute",
+  )).error?.code;
+  // #114: a client EXISTS outside a SELECT's WHERE reached the database without its policy.
+  assert.equal(
+    code("SELECT p.id FROM posts AS p JOIN authors AS a ON a.id = p.author_id AND EXISTS (SELECT 1 FROM comments AS c WHERE c.body = 'x')"),
+    "POLICYSQL_FORBIDDEN_OPERATION",
+  );
+  // #114 follow-up: a computed inner projection of an EXISTS is outside the surface.
+  assert.equal(
+    code("SELECT p.id FROM posts AS p WHERE EXISTS (SELECT LOWER(c.body) AS x FROM comments AS c WHERE c.post_id = p.id)"),
+    "POLICYSQL_UNSUPPORTED_SQL",
+  );
+  // #116: a mutation WHERE may reference only observable columns.
+  assert.equal(code("UPDATE posts SET title = 'x' WHERE internal_notes = 'x' RETURNING id"), "POLICYSQL_FORBIDDEN_COLUMN");
+  assert.equal(code("DELETE FROM posts WHERE internal_notes = 'x' RETURNING id"), "POLICYSQL_FORBIDDEN_COLUMN");
+});
+
 test("development Catalog and policy compile every advertised SQL family", () => {
   for (const fixture of accepted) {
     const compiled = JSON.parse(runtime.compile_json(

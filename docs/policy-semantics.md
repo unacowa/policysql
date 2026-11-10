@@ -112,7 +112,7 @@ update:
 Semantics:
 
 - `filter` constrains rows eligible before the update;
-- a caller `WHERE` may reference only columns the role can already observe: its regular select columns for the resource and the operation's `returning.columns` (issue #116). Columns that are only writable, used only by policy filters, or conditional (`visible_if`) are rejected, and a role with neither a select policy nor `returning` may not reference any column;
+- a caller `WHERE` may reference only the role's regular select columns for the resource (issue #116). `returning.columns` do not count: `RETURNING` shows post-update values (a preset or an assignment overwrites the pre-state one) and never a row that fails `check`. Columns that are only writable, used only by policy filters, or conditional (`visible_if`) are rejected, and a role without a select policy may not reference any column;
 - `columns` constrains assignments;
 - `presets` add or replace server-owned assignments according to configured conflict behavior;
 - `check` constrains resulting rows.
@@ -134,7 +134,7 @@ delete:
 Semantics:
 
 - the policy filter is compiled into the delete predicate;
-- a caller `WHERE` may reference only columns the role can already observe: its regular select columns for the resource and the operation's `returning.columns` (issue #116), as for update.;
+- a caller `WHERE` may reference only the role's regular select columns for the resource and the delete's `returning.columns` (issue #116): `RETURNING` shows each deleted row as it was, so those values are observable before the delete;
 - `RETURNING` requires separately allowed return columns;
 - cascades and trigger-dependent side effects are outside the public mutation model.
 

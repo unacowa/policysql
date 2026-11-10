@@ -61,6 +61,14 @@ npm --prefix deploy/cloudflare run check
 npm --prefix deploy/cloudflare run deploy:dry
 ```
 
+`pkg/` is committed, and `verify`, the deploy tests, and CI run the committed module without
+rebuilding it. After any change to the Rust sources the module is built from (`policysql-wasm`
+and the crates it depends on, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`), run
+`build:wasm` and commit `pkg/`, including `pkg/source-digest.txt`, which `build:wasm` writes
+after a successful build. `test/wasm-freshness.test.mjs` fails while the committed digest
+differs from the sources (`scripts/source-digest.mjs`). wasm-pack writes a `pkg/.gitignore`
+of `*`, so add a new file in `pkg/` with `git add -f`.
+
 The persistent development deployment is:
 
 ```text
