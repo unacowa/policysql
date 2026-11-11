@@ -157,7 +157,6 @@ fn text(name: &'static str, class: ColumnClass) -> ColumnSpec {
 
 /// The full alphabet (layers 2 and 3): every column of every resource, 13 text literals that all
 /// occur in the data, and three integers.
-#[allow(dead_code)] // used from step 6 (layers 2 and 3)
 pub fn full_alphabet() -> Alphabet {
     use ColumnClass::{Conditional, Forbidden, Regular};
     Alphabet {

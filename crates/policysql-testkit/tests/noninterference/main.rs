@@ -5,9 +5,6 @@
 //! assert only that observations agree across variants and that disabled gates reject. They never
 //! hold hand-written expectations. See `docs/test-plan.md` (L8) for what is and is not generated.
 
-// TEMPORARY(#125 step 3-12): removed once every helper is used.
-#![allow(dead_code)]
-
 mod oracle;
 mod pipeline;
 mod planted;

@@ -109,7 +109,7 @@ pub fn process(
     world: &World,
     case: &CaseWorld,
     alphabet: &Alphabet,
-    generated: &Generated<'_>,
+    generated: &Generated,
     tally: &mut Tally,
     identity: &dyn Fn() -> Identity,
     cell: Option<&str>,
@@ -188,7 +188,7 @@ pub fn process(
 
 fn detail(
     identity: &Identity,
-    generated: &Generated<'_>,
+    generated: &Generated,
     outcome: &Outcome,
     violation: &Violation,
     tally: &Tally,

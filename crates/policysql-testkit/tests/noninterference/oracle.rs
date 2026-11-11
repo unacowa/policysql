@@ -76,7 +76,7 @@ pub fn known_issue(stage: Stage, reason: &str) -> Option<u32> {
 /// Noninterference: for an executed statement, every low-equivalent variant must show the client
 /// exactly what the base database shows. Rejections are not violations: bind, policy and verify
 /// never look at data.
-pub fn noninterference(generated: &Generated<'_>, outcome: &Outcome) -> Vec<Violation> {
+pub fn noninterference(generated: &Generated, outcome: &Outcome) -> Vec<Violation> {
     let Outcome::Executed { observations, .. } = outcome else {
         return Vec::new();
     };

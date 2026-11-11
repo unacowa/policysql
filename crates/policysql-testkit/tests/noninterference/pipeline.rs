@@ -26,15 +26,14 @@ use std::collections::BTreeMap;
 
 /// A statement together with everything derived from it.
 #[derive(Debug)]
-pub struct Generated<'a> {
-    pub statement: &'a Statement,
+pub struct Generated {
     pub sql: String,
     pub params: BTreeMap<ClientParameterName, LogicalValue>,
     pub meta: StatementMeta,
 }
 
-impl<'a> Generated<'a> {
-    pub fn new(statement: &'a Statement, alphabet: &Alphabet) -> Self {
+impl Generated {
+    pub fn new(statement: &Statement, alphabet: &Alphabet) -> Self {
         let (sql, parameters) = render::render(statement, alphabet);
         let params = parameters
             .into_iter()
@@ -50,7 +49,6 @@ impl<'a> Generated<'a> {
             })
             .collect();
         Self {
-            statement,
             sql,
             params,
             meta: meta(statement, alphabet),
@@ -198,7 +196,7 @@ pub fn run(
     world: &World,
     case: &CaseWorld,
     bundle: &PolicyBundle,
-    generated: &Generated<'_>,
+    generated: &Generated,
     tamper: Tamper<'_>,
 ) -> (Option<BoundStatement>, Outcome) {
     let bound = match SqliteFrontend::default().bind(&generated.sql, &world.catalog) {
