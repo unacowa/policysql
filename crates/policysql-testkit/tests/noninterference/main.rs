@@ -227,12 +227,13 @@ fn layer1_mutation_expect(case: &str) -> Expect {
 
 /// Layer 2 reaches a share of its statements that depends on `t` (an `on` predicate other than
 /// `plain` never executes, and so on). Measured shares, per mille of the statements generated:
-/// all-ok 312 / 99 / 34 and gate-effective 135 / 64 / 27 for t = 1 / 2 / 3.
+/// all-ok 312 / 99 / 34 and gate-effective 135 / 64 / 27 for t = 1 / 2 / 3 (t = 3 with 20 seeds
+/// and 5 rounds, the nightly setting: 34 and 27).
 fn layer2_expect(t: usize) -> Expect {
     let (all_ok, gate) = match t {
         1 => (250, 100),
         2 => (90, 50),
-        _ => (30, 20),
+        _ => (25, 20),
     };
     Expect {
         all_ok: Floor::PerMille(all_ok),
@@ -612,9 +613,21 @@ const SAMPLE_MUTATION_CASES: u64 = 200;
 /// for a single one without anything being wrong.
 const SAMPLE_CALIBRATED_SEEDS: usize = 5;
 
-/// Floors for layer 3, per mille of the statements generated, from the measured rates (SELECT
-/// about 530, mutation about 560 and, in `parent`, about 270 statements per thousand succeeded on
-/// all four databases; the gate was effective for about 230 per thousand SELECTs).
+/// Floors for layer 3, per mille of the statements generated: the rate of statements that
+/// succeeded on all four databases (no error, no failed operation check), measured on the sample
+/// (5 seeds, 200 mutations) and on the nightly volume (4 seeds, 200,000 mutations; the share falls
+/// as the volume grows, because duplicates, which are the simple statements that succeed, leave
+/// `generated`). Each floor is 70 to 100 per mille below the lower of the two, so a small change
+/// to the generator does not turn a nightly run red with no violation:
+///
+/// | mutation case | sample | nightly | floor |
+/// |---|---|---|---|
+/// | `base`, `limited` | 521 | 455 | 380 |
+/// | `logic` (a failed operation check is not counted) | 479 | 413 | 330 |
+/// | `parent` | 249 | 229 | 150 |
+///
+/// SELECT: 466 on the sample and 447 nightly (4 seeds, 1,000,000 statements; floor 350); the gate
+/// was effective for about 230 per thousand on the sample and 288 nightly (floor 150).
 ///
 /// The sample is also run with `PSQL_FUZZ_SEEDS` set to replay a seed. With fewer seeds than
 /// it was measured with, the rates are noisier (measured over single seeds: down to 166 per
@@ -625,8 +638,9 @@ const SAMPLE_CALIBRATED_SEEDS: usize = 5;
 fn layer3_expect(case: &str, mutation: bool, volume: Volume, seeds: usize) -> Expect {
     let all_ok = match (mutation, case) {
         (true, "parent") => 150,
-        (true, _) => 450,
-        (false, _) => 400,
+        (true, "logic") => 330,
+        (true, _) => 380,
+        (false, _) => 350,
     };
     let gate = if mutation { 0 } else { 150 };
     let calibrated = !matches!(volume, Volume::Sample) || seeds >= SAMPLE_CALIBRATED_SEEDS;
