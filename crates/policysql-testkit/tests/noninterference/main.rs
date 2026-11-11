@@ -5,6 +5,10 @@
 //! assert only that observations agree across variants and that disabled gates reject. They never
 //! hold hand-written expectations. See `docs/test-plan.md` (L8) for what is and is not generated.
 
+// TEMPORARY(#125 step 3-12): removed once every helper is used.
+#![allow(dead_code)]
+
+mod policies;
 mod world;
 
 use policysql_testkit::fuzz::layer1;
@@ -81,4 +85,34 @@ fn layer1_counts_match_reference() {
             );
         }
     }
+}
+
+#[test]
+fn every_policy_case_activates_with_every_gate_variant() {
+    use policies::{GateFlags, GateOff, all_cases, gate_variants, render_yaml};
+    use policysql_policy::PolicyBundle;
+    let world = world::World::new();
+    let mut activated = 0;
+    for case in all_cases() {
+        let mut bundles = vec![("main".to_owned(), GateFlags::uniform(true))];
+        bundles.extend(
+            gate_variants()
+                .into_iter()
+                .map(|off: GateOff| (off.name(), off.flags())),
+        );
+        assert_eq!(bundles.len(), 8);
+        for (name, flags) in bundles {
+            let yaml = render_yaml(&case, flags, &[]);
+            PolicyBundle::activate(&yaml, &world.catalog, world.snapshot.clone()).unwrap_or_else(
+                |error| {
+                    unreachable!(
+                        "case {} / gate {name} does not activate: {error:?}\n{yaml}",
+                        case.name
+                    )
+                },
+            );
+            activated += 1;
+        }
+    }
+    assert_eq!(activated, 32);
 }
