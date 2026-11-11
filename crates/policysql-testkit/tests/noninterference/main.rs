@@ -18,6 +18,8 @@ mod variants;
 mod world;
 
 use pipeline::{CaseWorld, Generated};
+use policysql_testkit::fuzz::layer3::{self, LAYER3_TAG};
+use policysql_testkit::fuzz::rng::mix;
 use policysql_testkit::fuzz::rng::{XorShift64, splitmix64};
 use policysql_testkit::fuzz::{layer1, layer2};
 use report::{Identity, Tally, finish, process};
@@ -251,6 +253,19 @@ macro_rules! per_case {
     };
 }
 
+/// Like `per_case!`, for the nightly tests that `cargo test` skips.
+macro_rules! per_case_nightly {
+    ($run:ident: $($name:ident => $case:literal),+ $(,)?) => {
+        $(
+            #[test]
+            #[ignore = "nightly: millions of statements; see docs/test-plan.md (L8)"]
+            fn $name() {
+                $run($case);
+            }
+        )+
+    };
+}
+
 per_case!(run_layer1_select:
     layer1_select_base => "base",
     layer1_select_logic => "logic",
@@ -407,4 +422,75 @@ per_case!(run_layer2_select:
     layer2_select_logic => "logic",
     layer2_select_parent => "parent",
     layer2_select_limited => "limited",
+);
+
+fn run_layer3(case_name: &str, mutation: bool) {
+    let config = Config::from_env();
+    let world = World::new();
+    let case_world = CaseWorld::new(&world, policies::case_named(case_name));
+    let alphabet = world::full_alphabet();
+    let layer3_config = world::layer3_config();
+    let cases = if mutation {
+        config.mutation_cases
+    } else {
+        config.cases
+    };
+    let name = if mutation {
+        "layer3-mutation"
+    } else {
+        "layer3-select"
+    };
+    let mut tally = Tally::new(
+        name,
+        case_name,
+        format!("cases={cases} seeds={}", config.seeds.len()),
+    );
+    let started = Instant::now();
+    for seed in &config.seeds {
+        for index in 0..cases {
+            let mut rng = XorShift64::new(mix(&[*seed, LAYER3_TAG, index]));
+            let statement = if mutation {
+                layer3::random_mutation(&alphabet, &mut rng, &layer3_config)
+            } else {
+                layer3::random_select(&alphabet, &mut rng, &layer3_config)
+            };
+            let generated = Generated::new(&statement, &alphabet);
+            process(
+                &world,
+                &case_world,
+                &alphabet,
+                &generated,
+                &mut tally,
+                &|| Identity {
+                    label: format!("seed={seed:#x} index={index}"),
+                    seed_key: format!("{seed:#x}"),
+                    position: format!("{seed:#x}/{index}"),
+                },
+                None,
+            );
+        }
+    }
+    finish(&tally, started.elapsed().as_secs_f64());
+}
+
+fn run_layer3_select(case_name: &str) {
+    run_layer3(case_name, false);
+}
+
+fn run_layer3_mutation(case_name: &str) {
+    run_layer3(case_name, true);
+}
+
+per_case_nightly!(run_layer3_select:
+    layer3_select_base => "base",
+    layer3_select_logic => "logic",
+    layer3_select_parent => "parent",
+    layer3_select_limited => "limited",
+);
+
+per_case_nightly!(run_layer3_mutation:
+    layer3_mutation_base => "base",
+    layer3_mutation_logic => "logic",
+    layer3_mutation_parent => "parent",
+    layer3_mutation_limited => "limited",
 );

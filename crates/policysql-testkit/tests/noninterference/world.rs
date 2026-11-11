@@ -6,6 +6,7 @@ use policysql_core::{
     ValueDescriptor, ValueRepresentation,
 };
 use policysql_execution::ExecutionLimits;
+use policysql_testkit::fuzz::layer3::Layer3Config;
 use policysql_testkit::fuzz::{Alphabet, ColumnClass, ColumnSpec, ResourceSpec, ValueType};
 use std::collections::BTreeMap;
 
@@ -242,5 +243,14 @@ pub fn reduced_alphabet() -> Alphabet {
         ],
         text_literals: vec!["a", "x"],
         int_literals: vec![],
+    }
+}
+
+/// Layer-3 settings: depth 3, one literal in five becomes a parameter, and the columns the case
+/// policies let a client write (`posts.title`, `posts.status`, `comments.body`).
+pub fn layer3_config() -> Layer3Config {
+    Layer3Config {
+        preferred_writes: vec![(0, 1), (0, 2), (1, 2)],
+        ..Layer3Config::default()
     }
 }
