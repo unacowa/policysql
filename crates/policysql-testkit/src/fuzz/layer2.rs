@@ -309,8 +309,8 @@ impl Builder<'_> {
     fn atom_on_class(&mut self, scope: &[ResourceIdx], class: ColumnClass) -> Pred {
         match self.column_of(scope, class) {
             Some((resource, column)) => self.atom(Self::outer(resource, column)),
-            // Cannot happen with the standing alphabets; keep generating something valid.
-            None => Pred::CountGt(0),
+            // A silent fallback would let a cell stop meaning what its name says.
+            None => unreachable!("no column of class {class:?} in scope {scope:?}"),
         }
     }
 
@@ -323,7 +323,11 @@ impl Builder<'_> {
         let free: Vec<ResourceIdx> = (0..self.alphabet.resources.len())
             .filter(|resource| !scope.contains(resource))
             .collect();
-        let target = self.rng.pick(&free).copied().unwrap_or(self.root);
+        let target = self
+            .rng
+            .pick(&free)
+            .copied()
+            .unwrap_or_else(|| unreachable!("every resource is in scope {scope:?}"));
         if self.first_target.is_none() {
             self.first_target = Some(target);
         }
@@ -392,7 +396,7 @@ impl Builder<'_> {
     fn regular_column(&mut self, scope: &[ResourceIdx]) -> ColRef {
         let (resource, column) = self
             .column_of(scope, ColumnClass::Regular)
-            .unwrap_or((self.root, 0));
+            .unwrap_or_else(|| unreachable!("no regular column in scope {scope:?}"));
         Self::outer(resource, column)
     }
 
@@ -438,7 +442,11 @@ impl Builder<'_> {
                     .map(|column| (*resource, column))
             })
             .collect();
-        let (resource, column) = self.rng.pick(&all).copied().unwrap_or((self.root, 0));
+        let (resource, column) = self
+            .rng
+            .pick(&all)
+            .copied()
+            .unwrap_or_else(|| unreachable!("no text column in scope {scope:?}"));
         Self::outer(resource, column)
     }
 }
@@ -471,7 +479,13 @@ pub fn instantiate(
         let others: Vec<ResourceIdx> = (0..alphabet.resources.len())
             .filter(|resource| *resource != root)
             .collect();
-        builder.partner = builder.rng.pick(&others).copied();
+        builder.partner = Some(
+            builder
+                .rng
+                .pick(&others)
+                .copied()
+                .unwrap_or_else(|| unreachable!("a JOIN needs a second resource")),
+        );
         Some(if builder.rng.coin() {
             JoinKind::Inner
         } else {
@@ -506,7 +520,8 @@ pub fn instantiate(
                 on,
             })
         }
-        _ => None,
+        (None, None) => None,
+        (partner, kind) => unreachable!("partner {partner:?} without kind {kind:?} or vice versa"),
     };
     // 4. GROUP BY / HAVING.
     let having_shape = level_of(FactorSlot::Having);

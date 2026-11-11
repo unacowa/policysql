@@ -16,10 +16,13 @@ mod world;
 
 use pipeline::{CaseWorld, Generated};
 use policysql_testkit::fuzz::layer3::{self, LAYER3_TAG};
+use policysql_testkit::fuzz::meta::{NodeKind, Slot, StatementMeta};
 use policysql_testkit::fuzz::rng::mix;
 use policysql_testkit::fuzz::rng::{XorShift64, splitmix64};
+use policysql_testkit::fuzz::to_sql;
 use policysql_testkit::fuzz::{layer1, layer2};
 use report::{Expect, Floor, Identity, Tally, finish, process};
+use std::collections::BTreeSet;
 use std::env;
 use std::time::Instant;
 use world::World;
@@ -111,19 +114,39 @@ fn layer1_counts_match_reference() {
     let max_size = config.max_size.clamp(4, 5);
     let mut by_size = vec![0_u64; max_size + 1];
     let mut expected_ordinal = 0_u64;
+    // Up to size 4 every statement renders to its own SQL. (At size 5 `x || y || z` can be built
+    // two ways that print the same, so size 5 is left out of the distinctness check.)
+    let mut distinct = BTreeSet::new();
     layer1::for_each_select(&alphabet, max_size, &mut |item| {
         assert_eq!(item.ordinal, expected_ordinal);
         expected_ordinal += 1;
         by_size[item.size] += 1;
+        if item.size <= 4 {
+            distinct.insert(to_sql(item.statement, &alphabet));
+        }
     });
+    assert_eq!(
+        u64::try_from(distinct.len()).unwrap_or(u64::MAX),
+        by_size[1..=4].iter().sum::<u64>(),
+        "two SELECTs of size 4 or less render to the same SQL, or one is missing"
+    );
     println!("select counts by size: {:?}", &by_size[1..]);
     assert_eq!(by_size[1..], SELECT_COUNTS_BY_SIZE[..max_size]);
 
     let mutation_max = config.mutation_max_size.clamp(3, 4);
     let mut by_predicate = vec![0_u64; mutation_max + 1];
+    let mut distinct_mutations = BTreeSet::new();
     layer1::for_each_mutation(&alphabet, mutation_max, &mut |item| {
         by_predicate[item.size] += 1;
+        if item.size <= 3 {
+            distinct_mutations.insert(to_sql(item.statement, &alphabet));
+        }
     });
+    assert_eq!(
+        u64::try_from(distinct_mutations.len()).unwrap_or(u64::MAX),
+        by_predicate[..=3].iter().sum::<u64>(),
+        "two mutations of predicate size 3 or less render to the same SQL, or one is missing"
+    );
     let mut running = 0_u64;
     for (size, count) in by_predicate.iter().enumerate() {
         running += count;
@@ -349,37 +372,52 @@ fn render_shapes_bind() {
 /// The hand-written SQL twin of every policy predicate agrees with what the compiler produces for
 /// the same policy. This pins `filter_sql` / `visible_if_sql` to the YAML; the low-equivalence
 /// check itself never uses the compiler.
+///
+/// The policy limit would cut the comparison to the first rows (2 of 4 posts in `limited`), so the
+/// predicates are compared on every visible row with the limit removed, and the limit is checked
+/// on its own: with it, the compiler returns exactly the first `limit` of those rows.
 #[test]
 fn policy_mirror_matches_compiler() {
     let world = World::new();
     let alphabet = world::full_alphabet();
     for case in policies::all_cases() {
-        let case_world = CaseWorld::new(&world, case);
+        let mut unlimited = case.clone();
+        for policy in &mut unlimited.resources {
+            policy.limit = None;
+        }
+        let unlimited = CaseWorld::new(&world, unlimited);
+        let limited = CaseWorld::new(&world, case);
         for db in variants::DBS {
-            for (index, policy) in case_world.case.resources.iter().enumerate() {
-                let limit = policy
-                    .limit
-                    .map_or(String::new(), |n| format!(" LIMIT {n}"));
-                let expected = variants::query_rows(
-                    &case_world.mutation_dbs[db.index()],
-                    &format!("{}{limit}", variants::view_sql(index, policy, "id")),
-                );
-                let actual = pipeline::compiler_view(&world, &case_world, db, &alphabet, index)
-                    .unwrap_or_else(|error| {
-                        unreachable!(
-                            "{} {} {}: {error}",
-                            case_world.case.name,
-                            db.name(),
-                            policy.resource
-                        )
-                    });
-                assert_eq!(
-                    actual,
-                    expected,
-                    "case {} db {} resource {}: compiler and hand-written view differ",
-                    case_world.case.name,
+            for (index, policy) in unlimited.case.resources.iter().enumerate() {
+                let context = format!(
+                    "case {} db {} resource {}",
+                    limited.case.name,
                     db.name(),
                     policy.resource
+                );
+                let expected = variants::query_rows(
+                    &unlimited.mutation_dbs[db.index()],
+                    &variants::view_sql(index, policy, "id"),
+                );
+                let actual = pipeline::compiler_view(&world, &unlimited, db, &alphabet, index)
+                    .unwrap_or_else(|error| unreachable!("{context}: {error}"));
+                assert_eq!(
+                    actual, expected,
+                    "{context}: compiler and hand-written view differ"
+                );
+                let kept = limited.case.resources[index]
+                    .limit
+                    .map_or(expected.len(), |limit| {
+                        expected
+                            .len()
+                            .min(usize::try_from(limit).unwrap_or(usize::MAX))
+                    });
+                let with_limit = pipeline::compiler_view(&world, &limited, db, &alphabet, index)
+                    .unwrap_or_else(|error| unreachable!("{context}: {error}"));
+                assert_eq!(
+                    with_limit,
+                    expected[..kept],
+                    "{context}: the policy limit does not keep exactly the first {kept} rows"
                 );
             }
         }
@@ -414,6 +452,81 @@ fn assert_exactly_once(pairs: &[(usize, usize)], cells: usize, roots: &[usize]) 
     assert_eq!(pairs.len(), cells * roots.len());
 }
 
+/// The statement really has what its cell says: every assigned level puts its shape in its slot,
+/// and a slot without a level holds no EXISTS, `COUNT(*) >` or protected column. The generator
+/// builds each statement from the cell, so a factor it forgot to read (or a level it replaced by
+/// something else) would otherwise go unnoticed: the cell count and the round check only look at
+/// the table of cells, never at the statements.
+fn assert_cell_instantiated(cell: &layer2::Cell, meta: &StatementMeta, context: &str) {
+    use layer2::{FACTORS, FactorSlot, LEVELS, PredicateShape};
+    let guarded = [
+        NodeKind::Exists,
+        NodeKind::CountGt,
+        NodeKind::ForbiddenColumn,
+        NodeKind::ConditionalColumn,
+    ];
+    for (index, factor) in FACTORS.iter().enumerate() {
+        let slot = match factor.slot {
+            FactorSlot::ProjectionCase => Slot::Projection,
+            FactorSlot::JoinOn => Slot::JoinOn,
+            FactorSlot::Where => Slot::Where,
+            FactorSlot::Having => Slot::Having,
+        };
+        let count = |node| meta.slot_nodes.get(&(slot, node)).copied().unwrap_or(0);
+        let shape = cell
+            .assignments
+            .iter()
+            .find(|(assigned, _)| *assigned == index)
+            .map(|(_, level)| LEVELS[*level].shape);
+        let (required, allowed): (&[NodeKind], &[NodeKind]) = match shape {
+            None => (&[], &[]),
+            Some(PredicateShape::Plain) => (&[NodeKind::RegularColumn], &[]),
+            Some(
+                PredicateShape::ExistsCorrelated
+                | PredicateShape::ExistsUncorrelated
+                | PredicateShape::ExistsOuterOnly,
+            ) => (&[NodeKind::Exists], &[NodeKind::Exists]),
+            Some(PredicateShape::NotExistsCorrelated) => {
+                (&[NodeKind::Exists, NodeKind::Not], &[NodeKind::Exists])
+            }
+            Some(PredicateShape::Count) => (&[NodeKind::CountGt], &[NodeKind::CountGt]),
+            Some(PredicateShape::Forbidden) => {
+                (&[NodeKind::ForbiddenColumn], &[NodeKind::ForbiddenColumn])
+            }
+            Some(PredicateShape::Conditional) => (
+                &[NodeKind::ConditionalColumn],
+                &[NodeKind::ConditionalColumn],
+            ),
+        };
+        for node in required {
+            assert!(
+                count(*node) > 0,
+                "{context}: factor {} level {shape:?} has no {node:?} in {slot:?}: {:?}",
+                factor.name,
+                meta.slot_nodes
+            );
+        }
+        for node in guarded {
+            assert!(
+                allowed.contains(&node) || count(node) == 0,
+                "{context}: factor {} level {shape:?} has {node:?} in {slot:?}: {:?}",
+                factor.name,
+                meta.slot_nodes
+            );
+        }
+        if matches!(
+            shape,
+            Some(PredicateShape::ExistsCorrelated | PredicateShape::NotExistsCorrelated)
+        ) {
+            assert!(
+                meta.correlated_exists,
+                "{context}: factor {} asks for a correlated EXISTS and gets none",
+                factor.name
+            );
+        }
+    }
+}
+
 fn run_layer2_select(case_name: &str) {
     let config = Config::from_env();
     let world = World::new();
@@ -445,6 +558,11 @@ fn run_layer2_select(case_name: &str) {
                 let mut rng = XorShift64::new(layer2::statement_seed(*seed, round, index));
                 let statement = layer2::instantiate(&cells[*cell], *root, &alphabet, &mut rng);
                 let generated = Generated::new(&statement, &alphabet);
+                assert_cell_instantiated(
+                    &cells[*cell],
+                    &generated.meta,
+                    &format!("seed={seed:#x} round={round} index={index} root={root}"),
+                );
                 process(
                     &world,
                     &case_world,
