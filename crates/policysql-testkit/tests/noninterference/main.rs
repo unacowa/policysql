@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 mod policies;
+mod variants;
 mod world;
 
 use policysql_testkit::fuzz::layer1;
@@ -115,4 +116,12 @@ fn every_policy_case_activates_with_every_gate_variant() {
         }
     }
     assert_eq!(activated, 32);
+}
+
+#[test]
+fn variants_are_low_equivalent() {
+    for case in policies::all_cases() {
+        let conns = variants::connections(&case);
+        variants::assert_variants_low_equivalent(&case, &conns);
+    }
 }
