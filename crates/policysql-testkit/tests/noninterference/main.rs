@@ -19,7 +19,7 @@ use policysql_testkit::fuzz::layer3::{self, LAYER3_TAG};
 use policysql_testkit::fuzz::rng::mix;
 use policysql_testkit::fuzz::rng::{XorShift64, splitmix64};
 use policysql_testkit::fuzz::{layer1, layer2};
-use report::{Identity, Tally, finish, process};
+use report::{Expect, Floor, Identity, Tally, finish, process};
 use std::env;
 use std::time::Instant;
 use world::World;
@@ -181,6 +181,51 @@ fn select_size(_case: &str, config: &Config) -> usize {
     config.max_size
 }
 
+/// What each layer-1 test must have reached. Layer 1 is exact, so the floors are the measured
+/// counts rounded down a little (a bigger configuration only enumerates more statements, so
+/// they hold for every allowed configuration). Measured on the default configuration:
+/// SELECT 28,654 to 28,656 statements ran on all four databases without an error and the gate was
+/// effective for 26,192; mutations 2,124 (`parent`: 1,062).
+fn layer1_select_expect(_case: &str) -> Expect {
+    Expect {
+        all_ok: Floor::Count(28_000),
+        gate_effective: Floor::Count(26_000),
+        features: &[],
+    }
+}
+
+fn layer1_mutation_expect(case: &str) -> Expect {
+    Expect {
+        all_ok: Floor::Count(if case == "parent" { 1_000 } else { 2_000 }),
+        gate_effective: Floor::Count(0),
+        features: &[],
+    }
+}
+
+/// Layer 2 reaches a share of its statements that depends on `t` (an `on` predicate other than
+/// `plain` never executes, and so on). Measured shares, per mille of the statements generated:
+/// all-ok 312 / 99 / 34 and gate-effective 135 / 64 / 27 for t = 1 / 2 / 3.
+fn layer2_expect(t: usize) -> Expect {
+    let (all_ok, gate) = match t {
+        1 => (250, 100),
+        2 => (90, 50),
+        _ => (30, 20),
+    };
+    Expect {
+        all_ok: Floor::PerMille(all_ok),
+        gate_effective: Floor::PerMille(gate),
+        features: &[],
+    }
+}
+
+fn layer3_expect(_case: &str, mutation: bool) -> Expect {
+    Expect {
+        all_ok: Floor::Count(1),
+        gate_effective: Floor::Count(u64::from(!mutation)),
+        features: &[],
+    }
+}
+
 fn run_layer1_select(case_name: &str) {
     let config = Config::from_env();
     let world = World::new();
@@ -205,7 +250,11 @@ fn run_layer1_select(case_name: &str) {
             None,
         );
     });
-    finish(&tally, started.elapsed().as_secs_f64());
+    finish(
+        &tally,
+        started.elapsed().as_secs_f64(),
+        &layer1_select_expect(case_name),
+    );
 }
 
 fn run_layer1_mutation(case_name: &str) {
@@ -236,7 +285,11 @@ fn run_layer1_mutation(case_name: &str) {
             None,
         );
     });
-    finish(&tally, started.elapsed().as_secs_f64());
+    finish(
+        &tally,
+        started.elapsed().as_secs_f64(),
+        &layer1_mutation_expect(case_name),
+    );
 }
 
 macro_rules! per_case {
@@ -411,7 +464,11 @@ fn run_layer2_select(case_name: &str) {
             }
         }
     }
-    finish(&tally, started.elapsed().as_secs_f64());
+    finish(
+        &tally,
+        started.elapsed().as_secs_f64(),
+        &layer2_expect(config.t),
+    );
 }
 
 per_case!(run_layer2_select:
@@ -467,7 +524,11 @@ fn run_layer3(case_name: &str, mutation: bool) {
             );
         }
     }
-    finish(&tally, started.elapsed().as_secs_f64());
+    finish(
+        &tally,
+        started.elapsed().as_secs_f64(),
+        &layer3_expect(case_name, mutation),
+    );
 }
 
 fn run_layer3_select(case_name: &str) {

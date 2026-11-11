@@ -5,10 +5,10 @@
 //! (only the `[timing]` line varies between runs).
 
 use crate::oracle::{self, Check, Violation};
-use crate::pipeline::{CaseWorld, Generated, Observation, Outcome, Stage, run};
+use crate::pipeline::{CaseWorld, Generated, Obs, Observation, Outcome, Rejection, Stage, run};
 use crate::variants::Db;
 use crate::world::World;
-use policysql_testkit::fuzz::meta::{NodeKind, Slot};
+use policysql_testkit::fuzz::meta::{NodeKind, Slot, SourceKind};
 use policysql_testkit::fuzz::{Alphabet, ColumnClass};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -31,11 +31,30 @@ pub struct Tally {
     pub generated: u64,
     pub rejections: BTreeMap<String, u64>,
     pub known: BTreeMap<u32, u64>,
+    /// Statements that went through every stage and ran on the four databases.
     pub executed: u64,
+    /// Of those, the statements for which no database returned an error.
+    pub all_ok: u64,
+    /// Of those, the statements for which at least one database returned an error.
+    pub errored: u64,
+    /// Gate bundles compiled for statements that depend on a gate.
+    pub gate_checked: u64,
+    /// Statements the main bundle accepted at the policy stage and at least one bundle with the
+    /// gate switched off rejected: the gate demonstrably did work.
+    pub gate_effective: u64,
+    /// Of the executed mutations, those whose operation check failed in the base database (in
+    /// production they fail and roll back).
+    pub check_failed: u64,
+    /// Statements skipped because the same SQL and parameters had been run already.
+    pub duplicates: u64,
+    /// How many statements with a feature reached `all_ok`.
+    pub features: BTreeMap<&'static str, u64>,
     pub violations: BTreeMap<&'static str, u64>,
     pub slot_nodes: BTreeMap<(Slot, NodeKind), u64>,
     pub first: BTreeMap<String, String>,
     pub details: Vec<String>,
+    /// How many details were kept per check.
+    pub details_per_check: BTreeMap<&'static str, usize>,
     pub cells: BTreeMap<String, CellTally>,
     pub rounds: Vec<String>,
     /// Mutation violations by the roles of the columns the statement mentions.
@@ -55,10 +74,18 @@ impl Tally {
                 .map(|issue| (issue, 0))
                 .collect(),
             executed: 0,
+            all_ok: 0,
+            errored: 0,
+            gate_checked: 0,
+            gate_effective: 0,
+            check_failed: 0,
+            duplicates: 0,
+            features: BTreeMap::new(),
             violations: BTreeMap::new(),
             slot_nodes: BTreeMap::new(),
             first: BTreeMap::new(),
             details: Vec::new(),
+            details_per_check: BTreeMap::new(),
             cells: BTreeMap::new(),
             rounds: Vec::new(),
             mutation_classes: BTreeMap::new(),
@@ -79,6 +106,35 @@ pub struct Identity {
     pub seed_key: String,
     /// The number reported as the first violation (ordinal, `seed/round/index`, `seed/index`).
     pub position: String,
+}
+
+/// Details printed at the end of a test, per check. The first violation of every check and seed
+/// is also printed the moment it is found.
+const DETAILS_PER_CHECK: usize = 3;
+
+/// Constructs worth showing in a report because generation is meant to reach them.
+fn features(generated: &Generated) -> Vec<&'static str> {
+    let meta = &generated.meta;
+    let mut out = Vec::new();
+    if meta
+        .slot_nodes
+        .keys()
+        .any(|(_, node)| *node == NodeKind::Or)
+    {
+        out.push("or");
+    }
+    if !generated.params.is_empty() {
+        out.push("parameter");
+    }
+    match meta.source {
+        SourceKind::Table => {}
+        SourceKind::DerivedTable => out.push("derived-table"),
+        SourceKind::Cte => out.push("cte"),
+    }
+    if meta.correlated_exists {
+        out.push("correlated-exists");
+    }
+    out
 }
 
 fn describe(observation: &Observation) -> String {
@@ -117,14 +173,19 @@ pub fn process(
     tally.generated += 1;
     let (bound, outcome) = run(world, case, &case.main, generated, None);
     let mut violations = oracle::noninterference(generated, &outcome);
+    let main_passed_policy = matches!(
+        &outcome,
+        Outcome::Executed { .. }
+            | Outcome::Rejected(Rejection {
+                stage: Stage::Verify,
+                ..
+            })
+    );
     if let Some(bound) = &bound {
-        violations.extend(oracle::gates(
-            world,
-            &case.gates,
-            bound,
-            &generated.meta,
-            alphabet,
-        ));
+        let report = oracle::gates(world, &case.gates, bound, &generated.meta, alphabet);
+        tally.gate_checked += report.checked;
+        tally.gate_effective += u64::from(main_passed_policy && report.rejected > 0);
+        violations.extend(report.violations);
     }
     let (bind_ok, policy_ok, executed) = match &outcome {
         Outcome::Rejected(rejection) => {
@@ -143,8 +204,24 @@ pub fn process(
                 false,
             )
         }
-        Outcome::Executed { known, .. } => {
+        Outcome::Executed {
+            known,
+            observations,
+            ..
+        } => {
             tally.executed += 1;
+            tally.check_failed += u64::from(matches!(
+                observations[Db::Base.index()],
+                Ok(Obs::CheckFailed)
+            ));
+            if observations.iter().all(Result::is_ok) {
+                tally.all_ok += 1;
+                for name in features(generated) {
+                    *tally.features.entry(name).or_insert(0) += 1;
+                }
+            } else {
+                tally.errored += 1;
+            }
             if let Some(issue) = known {
                 *tally.known.entry(*issue).or_insert(0) += 1;
             }
@@ -167,20 +244,31 @@ pub fn process(
     }
     let identity = identity();
     for violation in &violations {
-        *tally.violations.entry(violation.check.name()).or_insert(0) += 1;
-        tally
-            .first
-            .entry(format!("{} {}", violation.check.name(), identity.seed_key))
-            .or_insert_with(|| identity.position.clone());
+        let name = violation.check.name();
+        *tally.violations.entry(name).or_insert(0) += 1;
+        let key = format!("{name} {}", identity.seed_key);
+        let is_first = !tally.first.contains_key(&key);
+        if is_first {
+            tally.first.insert(key, identity.position.clone());
+        }
         if violation.check == Check::MutationNoninterference {
             *tally
                 .mutation_classes
                 .entry(class_label(violation))
                 .or_insert(0) += 1;
         }
-        if tally.details.len() < 10 {
+        let kept = tally.details_per_check.get(name).copied().unwrap_or(0);
+        if is_first || kept < DETAILS_PER_CHECK {
             let text = detail(&identity, generated, &outcome, violation, tally, cell);
-            tally.details.push(text);
+            if is_first {
+                // Printed at once: a run that dies later (a panic, a timeout) still leaves the
+                // first violation of every check and seed in the log.
+                eprintln!("{text}");
+            }
+            if kept < DETAILS_PER_CHECK {
+                *tally.details_per_check.entry(name).or_insert(0) += 1;
+                tally.details.push(text);
+            }
         }
     }
     u64::try_from(violations.len()).unwrap_or(u64::MAX)
@@ -247,7 +335,29 @@ pub fn summary(tally: &Tally, seconds: f64) -> String {
     for (reason, count) in &tally.rejections {
         let _ = writeln!(out, "  rejected {reason}: {count}");
     }
-    let _ = writeln!(out, "executed: {}", tally.executed);
+    let _ = writeln!(
+        out,
+        "executed: {} (all four databases ok: {}, at least one error: {})",
+        tally.executed, tally.all_ok, tally.errored
+    );
+    if tally.check_failed > 0 {
+        let _ = writeln!(
+            out,
+            "operation check failed (rolled back in production): {}",
+            tally.check_failed
+        );
+    }
+    if tally.duplicates > 0 {
+        let _ = writeln!(out, "skipped as duplicates: {}", tally.duplicates);
+    }
+    let _ = writeln!(
+        out,
+        "gate: {} bundle compilations, effective for {} statements",
+        tally.gate_checked, tally.gate_effective
+    );
+    if !tally.features.is_empty() {
+        let _ = writeln!(out, "all-ok statements with: {:?}", tally.features);
+    }
     for (issue, count) in &tally.known {
         let _ = writeln!(out, "  known #{issue}: {count}");
     }
@@ -308,9 +418,57 @@ pub fn summary(tally: &Tally, seconds: f64) -> String {
     out
 }
 
-/// Prints the summary once and fails if anything was violated.
-pub fn finish(tally: &Tally, seconds: f64) {
+/// A lower bound on a count, fixed or relative to the number of generated statements.
+#[derive(Clone, Copy, Debug)]
+pub enum Floor {
+    Count(u64),
+    /// Parts per thousand of the statements generated.
+    PerMille(u64),
+}
+
+impl Floor {
+    fn of(self, generated: u64) -> u64 {
+        match self {
+            Self::Count(count) => count,
+            Self::PerMille(per_mille) => generated.saturating_mul(per_mille) / 1000,
+        }
+    }
+}
+
+/// What a test must have reached, not only what it must not have found. A test that reaches
+/// nothing is not a test: a change that makes every statement fail at bind or policy would
+/// otherwise leave every layer green.
+#[derive(Clone, Copy, Debug)]
+pub struct Expect {
+    /// Statements run on all four databases without an error (at least 1).
+    pub all_ok: Floor,
+    /// Statements for which a gate demonstrably did work (SELECT layers).
+    pub gate_effective: Floor,
+    /// Features that must occur among the all-ok statements.
+    pub features: &'static [&'static str],
+}
+
+/// Prints the summary once and fails if anything was violated or too little was reached.
+pub fn finish(tally: &Tally, seconds: f64, expect: &Expect) {
     let text = summary(tally, seconds);
     println!("{text}");
     assert!(tally.total_violations() == 0, "{text}");
+    let all_ok_floor = expect.all_ok.of(tally.generated).max(1);
+    assert!(
+        tally.all_ok >= all_ok_floor,
+        "only {} statements ran on all four databases without an error, expected at least {all_ok_floor}\n{text}",
+        tally.all_ok
+    );
+    let gate_floor = expect.gate_effective.of(tally.generated);
+    assert!(
+        tally.gate_effective >= gate_floor,
+        "the gate was effective for {} statements, expected at least {gate_floor}\n{text}",
+        tally.gate_effective
+    );
+    for feature in expect.features {
+        assert!(
+            tally.features.get(feature).copied().unwrap_or(0) > 0,
+            "no all-ok statement with {feature}\n{text}"
+        );
+    }
 }

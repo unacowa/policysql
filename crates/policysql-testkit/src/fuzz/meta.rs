@@ -64,6 +64,15 @@ pub enum NodeKind {
     RowNumber,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SourceKind {
+    Table,
+    DerivedTable,
+    Cte,
+}
+
+/// Independent facts about a statement, not the states of one machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatementMeta {
     pub kind: StatementKind,
@@ -74,6 +83,13 @@ pub struct StatementMeta {
     pub aggregation: bool,
     /// `ROW_NUMBER() OVER (...)` anywhere.
     pub window: bool,
+    /// The SELECT has a GROUP BY.
+    pub grouped: bool,
+    /// What the FROM source of a SELECT is (`Table` for every other statement).
+    pub source: SourceKind,
+    /// Some EXISTS compares one of its own columns with a column of an enclosing query (`=`, at
+    /// the top of its predicate or under `AND`).
+    pub correlated_exists: bool,
     /// Rows must be compared in order: a top-level ORDER BY without a window function.
     pub ordered: bool,
     /// The roles of every column the statement mentions.
@@ -91,11 +107,21 @@ pub fn meta(statement: &Statement, alphabet: &Alphabet) -> StatementMeta {
         resources_read: BTreeSet::new(),
         aggregation: false,
         window: false,
+        correlated_exists: false,
         column_classes: BTreeSet::new(),
         slot_nodes: BTreeMap::new(),
     };
+    let (mut grouped, mut source_kind) = (false, SourceKind::Table);
     let (kind, ordered) = match statement {
         Statement::Select(select) => {
+            grouped = select.group_by.is_some();
+            if let Source::Derived { as_cte, .. } = &select.source {
+                source_kind = if *as_cte {
+                    SourceKind::Cte
+                } else {
+                    SourceKind::DerivedTable
+                };
+            }
             walker.select(select);
             (
                 StatementKind::Select,
@@ -131,9 +157,36 @@ pub fn meta(statement: &Statement, alphabet: &Alphabet) -> StatementMeta {
         resources_read: walker.resources_read,
         aggregation: walker.aggregation,
         window: walker.window,
+        grouped,
+        source: source_kind,
+        correlated_exists: walker.correlated_exists,
         ordered,
         column_classes: walker.column_classes,
         slot_nodes: walker.slot_nodes,
+    }
+}
+
+/// Whether a predicate compares a column of the EXISTS itself with a column of an enclosing
+/// query, by `=`, directly or under `AND`.
+fn correlates(pred: &Pred) -> bool {
+    let inner = |scalar: &Scalar| {
+        matches!(
+            scalar,
+            Scalar::Column(ColRef {
+                qualifier: super::ast::Qualifier::Exists { .. },
+                ..
+            })
+        )
+    };
+    let outer = |scalar: &Scalar| matches!(scalar, Scalar::Column(column) if !matches!(column.qualifier, super::ast::Qualifier::Exists { .. }));
+    match pred {
+        Pred::Cmp {
+            op: CmpOp::Eq,
+            left,
+            right,
+        } => (inner(left) && outer(right)) || (outer(left) && inner(right)),
+        Pred::And(left, right) => correlates(left) || correlates(right),
+        _ => false,
     }
 }
 
@@ -143,6 +196,7 @@ struct Walker<'a> {
     resources_read: BTreeSet<ResourceIdx>,
     aggregation: bool,
     window: bool,
+    correlated_exists: bool,
     column_classes: BTreeSet<ColumnClass>,
     slot_nodes: BTreeMap<(Slot, NodeKind), u32>,
 }
@@ -276,6 +330,7 @@ impl Walker<'_> {
     fn exists(&mut self, query: &ExistsQuery) {
         self.count(NodeKind::Exists);
         self.resources_read.insert(query.resource);
+        self.correlated_exists |= correlates(&query.predicate);
         self.pred(&query.predicate);
     }
 

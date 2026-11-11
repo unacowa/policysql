@@ -183,6 +183,89 @@ pub fn views(conn: &Connection, case: &PolicyCase) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The visible view of the resources whose view is comparable after a write (`stable`), and an
+/// empty list for the others (see the module comment of `policies`).
+pub fn stable_views(conn: &Connection, case: &PolicyCase, stable: [bool; 3]) -> Vec<Vec<String>> {
+    case.resources
+        .iter()
+        .enumerate()
+        .map(|(index, policy)| {
+            if stable[index] {
+                query_rows(conn, &view_sql(index, policy, "rowid"))
+            } else {
+                Vec::new()
+            }
+        })
+        .collect()
+}
+
+/// The rows each resource shows before a write, as `(rowid, conditional column visible)`.
+pub type Snapshot = Vec<Vec<(i64, bool)>>;
+
+fn rowids(conn: &Connection, sql: &str) -> Vec<(i64, bool)> {
+    let mut statement = conn
+        .prepare(sql)
+        .unwrap_or_else(|error| unreachable!("prepare {sql}: {error}"));
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? != 0))
+        })
+        .unwrap_or_else(|error| unreachable!("query {sql}: {error}"));
+    rows.map(|row| row.unwrap_or_else(|error| unreachable!("step {sql}: {error}")))
+        .collect()
+}
+
+/// Which rows each resource shows right now, and for which of them the conditional column is
+/// visible.
+pub fn visible_snapshot(conn: &Connection, case: &PolicyCase) -> Snapshot {
+    case.resources
+        .iter()
+        .map(|policy| {
+            rowids(
+                conn,
+                &format!(
+                    "SELECT rowid, {} FROM {} WHERE {} ORDER BY rowid",
+                    truthy(policy.visible_if_sql),
+                    policy.resource,
+                    truthy(policy.filter_sql)
+                ),
+            )
+        })
+        .collect()
+}
+
+/// What a write left of the rows that were visible before it: for each of them the regular
+/// columns, the conditional column only where it was visible before (a value the client could not
+/// see is not something the write may be observed to have changed), or `gone`. Rows that were
+/// invisible before, and rows the write made visible, are not part of it.
+pub fn state_of_visible(
+    conn: &Connection,
+    case: &PolicyCase,
+    before: &Snapshot,
+) -> Vec<Vec<String>> {
+    case.resources
+        .iter()
+        .enumerate()
+        .map(|(index, policy)| {
+            let regular = regular_columns(index).join(", ");
+            let conditional = conditional_column(index);
+            before[index]
+                .iter()
+                .map(|(rowid, was_visible)| {
+                    let shown = if *was_visible { conditional } else { "'-'" };
+                    let sql = format!(
+                        "SELECT {regular}, {shown} FROM {} WHERE rowid = {rowid}",
+                        policy.resource
+                    );
+                    query_rows(conn, &sql)
+                        .pop()
+                        .unwrap_or_else(|| "gone".to_owned())
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn count(conn: &Connection, sql: &str) -> i64 {
     conn.query_row(sql, [], |row| row.get(0))
         .unwrap_or_else(|error| unreachable!("count {sql}: {error}"))

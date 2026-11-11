@@ -5,7 +5,8 @@
 
 use crate::policies::{GateFlags, GateOff, PolicyCase, gate_variants, render_yaml};
 use crate::variants::{
-    DBS, Db, assert_variants_low_equivalent, connections, format_value, setup_sql, views,
+    DBS, Db, assert_variants_low_equivalent, connections, format_value, setup_sql, stable_views,
+    state_of_visible, visible_snapshot,
 };
 use crate::world::{SCHEMA, World};
 use policysql_core::{ClientParameterName, LogicalValue};
@@ -21,8 +22,11 @@ use policysql_testkit::fuzz::ast::{Lit, Statement};
 use policysql_testkit::fuzz::meta::{StatementKind, StatementMeta, meta};
 use policysql_testkit::fuzz::{Alphabet, render};
 use rusqlite::Connection;
-use rusqlite::types::Value as SqlValue;
+use rusqlite::types::{Value as SqlValue, ValueRef};
 use std::collections::BTreeMap;
+
+/// The column the protected UPDATE appends to carry the operation check.
+const CHECK_COLUMN: &str = "__policysql_check";
 
 /// A statement together with everything derived from it.
 #[derive(Debug)]
@@ -89,11 +93,18 @@ pub enum Obs {
         columns: Vec<String>,
         rows: Vec<String>,
     },
+    /// A statement that ran. `kept` is what is left of the rows that were visible before the write
+    /// (always compared); `post_view` is the visible view afterwards, filled in only for the
+    /// resources whose view cannot change as a side effect of a legitimate write (see `policies`).
     Mutation {
         changes: u64,
         returning: Vec<String>,
+        kept: Vec<Vec<String>>,
         post_view: Vec<Vec<String>>,
     },
+    /// The operation check (`__policysql_check`) was false for some row. In production the whole
+    /// statement fails and rolls back, so the client sees the failure and no state.
+    CheckFailed,
 }
 
 pub type Observation = Result<Obs, String>;
@@ -104,7 +115,10 @@ pub enum Outcome {
     Executed {
         protected_sql: String,
         observations: Box<[Observation; 4]>,
+        /// The known issue behind an execution error, if one accounts for it.
         known: Option<u32>,
+        /// Databases whose execution failed with an error no known issue accounts for.
+        unexpected_errors: Vec<Db>,
     },
 }
 
@@ -114,6 +128,9 @@ pub type Tamper<'a> = Option<&'a dyn Fn(&BoundStatement, &mut ProtectedPlan)>;
 /// Everything one policy case needs: bundles and the four databases.
 pub struct CaseWorld {
     pub case: PolicyCase,
+    /// Which resources' views are compared after a write. Starts as `case.stable_views`;
+    /// only a test that documents a known gap changes it.
+    pub stable_views: [bool; 3],
     pub main: PolicyBundle,
     pub gates: Vec<(GateOff, PolicyBundle)>,
     pub select_dbs: [ReferenceSqlite; 4],
@@ -158,11 +175,34 @@ impl CaseWorld {
         case: PolicyCase,
         extra_regular: &[(&str, &str)],
     ) -> Self {
+        let compiled = case.clone();
+        Self::build(world, case, &compiled, extra_regular)
+    }
+
+    /// Like [`CaseWorld::new`], but the bundles are compiled from `compiled` while the databases
+    /// keep `case`'s own meaning. Only the planted-defect tests use this: it makes the compiled
+    /// policy differ from what the databases assume (a `visible_if` that is always true, say).
+    pub fn with_compiled_policy(world: &World, case: PolicyCase, compiled: &PolicyCase) -> Self {
+        Self::build(world, case, compiled, &[])
+    }
+
+    fn build(
+        world: &World,
+        case: PolicyCase,
+        compiled: &PolicyCase,
+        extra_regular: &[(&str, &str)],
+    ) -> Self {
+        assert_eq!(
+            case.stable_views,
+            case.computed_stable_views(),
+            "case {}: `stable_views` does not match what the SQL twins say",
+            case.name
+        );
         let mutation_dbs = connections(&case);
         assert_variants_low_equivalent(&case, &mutation_dbs);
         let main = activate(
             world,
-            &case,
+            compiled,
             GateFlags::uniform(true),
             extra_regular,
             "main",
@@ -172,7 +212,7 @@ impl CaseWorld {
             .map(|off| {
                 (
                     off,
-                    activate(world, &case, off.flags(), extra_regular, &off.name()),
+                    activate(world, compiled, off.flags(), extra_regular, &off.name()),
                 )
             })
             .collect();
@@ -181,6 +221,7 @@ impl CaseWorld {
                 .unwrap_or_else(|error| unreachable!("reference database: {error}"))
         });
         Self {
+            stable_views: case.stable_views,
             case,
             main,
             gates,
@@ -247,7 +288,7 @@ pub fn run(
         Ok(verified) => verified,
         Err(error) => {
             let reason = error.to_string();
-            let known = crate::oracle::known_issue(Stage::Verify, &reason);
+            let known = crate::oracle::known_issue(Stage::Verify, &reason, &generated.meta);
             let outcome = Outcome::Rejected(Rejection {
                 stage: Stage::Verify,
                 reason,
@@ -262,14 +303,21 @@ pub fn run(
             DBS.map(|db| observe_mutation(case, db, &verified))
         }
     };
-    let known = observations
-        .iter()
-        .filter_map(|observation| observation.as_ref().err())
-        .find_map(|error| crate::oracle::known_issue(Stage::Execute, error));
+    let mut known = None;
+    let mut unexpected_errors = Vec::new();
+    for db in DBS {
+        if let Err(error) = &observations[db.index()] {
+            match crate::oracle::known_issue(Stage::Execute, error, &generated.meta) {
+                Some(issue) => known = known.or(Some(issue)),
+                None => unexpected_errors.push(db),
+            }
+        }
+    }
     let outcome = Outcome::Executed {
         protected_sql: verified.protected_sql().to_owned(),
         observations: Box::new(observations),
         known,
+        unexpected_errors,
     };
     (Some(bound), outcome)
 }
@@ -347,30 +395,43 @@ fn observe_mutation(
     let conn = &case.mutation_dbs[db.index()];
     conn.execute_batch("SAVEPOINT fuzz")
         .unwrap_or_else(|error| unreachable!("savepoint: {error}"));
+    let before = visible_snapshot(conn, &case.case);
     let observed = (|| {
-        let returning = {
+        let (returning, check_failed) = {
             let mut statement = conn
                 .prepare(verified.protected_sql())
                 .map_err(|error| error.to_string())?;
             bind_all(&mut statement, verified)?;
             let columns = statement.column_count();
+            let check_column = statement
+                .column_names()
+                .iter()
+                .position(|name| *name == CHECK_COLUMN);
             let mut rows = statement.raw_query();
             let mut out = Vec::new();
+            let mut check_failed = false;
             while let Some(row) = rows.next().map_err(|error| error.to_string())? {
                 let mut cells = Vec::with_capacity(columns);
                 for index in 0..columns {
                     let value = row.get_ref(index).map_err(|error| error.to_string())?;
+                    if check_column == Some(index) && value == ValueRef::Integer(0) {
+                        check_failed = true;
+                    }
                     cells.push(format_value(value));
                 }
                 out.push(cells.join("|"));
             }
             out.sort();
-            out
+            (out, check_failed)
         };
+        if check_failed {
+            return Ok(Obs::CheckFailed);
+        }
         Ok(Obs::Mutation {
             changes: conn.changes(),
             returning,
-            post_view: views(conn, &case.case),
+            kept: state_of_visible(conn, &case.case, &before),
+            post_view: stable_views(conn, &case.case, case.stable_views),
         })
     })();
     conn.execute_batch("ROLLBACK TO fuzz; RELEASE fuzz")

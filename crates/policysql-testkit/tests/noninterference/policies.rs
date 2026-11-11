@@ -2,13 +2,21 @@
 //! hand-written SQL twin of every predicate (used to compute the visible view without the
 //! compiler) and the description of the low-equivalent database variants.
 //!
-//! Invariant every case keeps (the mutation observation includes the view after the write, so it
-//! matters): no column a client may write (`posts.title`, `posts.status`, `comments.body`) feeds a
-//! `visible_if`, and no mutable resource is the target of another resource's `exists` filter.
-//! Otherwise a legitimate write can unlock a hidden value or a hidden row (for example deleting a
-//! parent makes the children of a `not exists` filter visible), and two low-equivalent databases
-//! would diverge after the write by design of the policy rather than by a compiler defect.
+//! What a mutation lets the client observe is split in two (see `pipeline::Obs`):
+//!
+//! - everything about the rows visible before the write (affected rows, `RETURNING`, the state of
+//!   those rows afterwards, conditional values only where they were visible before), compared in
+//!   every case;
+//! - the whole visible view afterwards, compared only for a resource whose view cannot change as a
+//!   side effect of a legitimate write: its `visible_if` does not read a column the client may
+//!   write, and no `exists` it uses targets a resource the client can change. Elsewhere a
+//!   legitimate write unlocks a hidden value or a hidden row by design of the policy (issue #140),
+//!   and two low-equivalent databases diverge afterwards without a compiler defect.
+//!
+//! `PolicyCase::stable_views` declares which resources qualify, and `CaseWorld::new` checks the
+//! declaration against the hand-written SQL twins.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 pub const RESOURCES: [&str; 3] = ["posts", "comments", "tags"];
@@ -18,7 +26,7 @@ pub const RESOURCES: [&str; 3] = ["posts", "comments", "tags"];
 struct Shape {
     regular: &'static [&'static str],
     conditional: &'static str,
-    update_columns: &'static str,
+    update_columns: &'static [&'static str],
     update_returning: &'static str,
 }
 
@@ -26,19 +34,19 @@ const SHAPES: [Shape; 3] = [
     Shape {
         regular: &["id", "title", "status"],
         conditional: "note",
-        update_columns: "[title, status]",
+        update_columns: &["title", "status"],
         update_returning: "[id, title]",
     },
     Shape {
         regular: &["id", "post_id", "body"],
         conditional: "memo",
-        update_columns: "[body]",
+        update_columns: &["body"],
         update_returning: "[id, body]",
     },
     Shape {
         regular: &["id", "post_id", "label", "rank"],
         conditional: "memo",
-        update_columns: "[]",
+        update_columns: &[],
         update_returning: "[]",
     },
 ];
@@ -98,6 +106,54 @@ pub struct PolicyCase {
     pub variant: VariantSpec,
     /// Every mutation filter equals the select filter (so #118 is out of scope for the case).
     pub mutation_filter_is_select_filter: bool,
+    /// Per resource: whether its visible view after a write is comparable across low-equivalent
+    /// databases (see the module comment). Checked against [`PolicyCase::computed_stable_views`].
+    pub stable_views: [bool; 3],
+}
+
+fn words(sql: &str) -> Vec<&str> {
+    sql.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// The tables a predicate selects from (`FROM <table>`).
+fn tables_read(sql: &str) -> Vec<&str> {
+    let words = words(sql);
+    words
+        .windows(2)
+        .filter(|pair| pair[0].eq_ignore_ascii_case("from"))
+        .map(|pair| pair[1])
+        .collect()
+}
+
+impl PolicyCase {
+    /// [`PolicyCase::stable_views`] derived from the SQL twins instead of declared: a resource is
+    /// stable when its `visible_if` reads none of the columns the client may write, and no
+    /// `exists` in its filter or `visible_if` selects from a resource the client can change.
+    pub fn computed_stable_views(&self) -> [bool; 3] {
+        let mutable: BTreeSet<&str> = self
+            .resources
+            .iter()
+            .filter(|policy| policy.mutation)
+            .map(|policy| policy.resource)
+            .collect();
+        std::array::from_fn(|index| {
+            let policy = &self.resources[index];
+            let written: &[&str] = if policy.mutation {
+                SHAPES[index].update_columns
+            } else {
+                &[]
+            };
+            let reads_written = words(policy.visible_if_sql)
+                .iter()
+                .any(|word| written.contains(word));
+            let reads_mutable = [policy.filter_sql, policy.visible_if_sql]
+                .iter()
+                .any(|sql| tables_read(sql).iter().any(|table| mutable.contains(table)));
+            !reads_written && !reads_mutable
+        })
+    }
 }
 
 const TENANT_YAML: &str = "{ tenant_id: { eq: { session: tenant_id } } }";
@@ -161,7 +217,7 @@ INSERT INTO tags VALUES ('t7','p3','x',1,'pub','a','x');
 
 const LIMITED_VARIANT: VariantSpec = VariantSpec {
     free: [
-        &["title", "note", "secret"],
+        &["owner_id", "title", "note", "secret"],
         &["author_id", "body", "memo", "secret"],
         &["rank", "flag", "memo", "secret"],
     ],
@@ -232,6 +288,7 @@ pub fn base_case() -> PolicyCase {
         ],
         variant: BASE_VARIANT,
         mutation_filter_is_select_filter: true,
+        stable_views: [true, true, true],
     }
 }
 
@@ -252,8 +309,8 @@ fn logic_case() -> PolicyCase {
                 "comments",
                 "{ hidden: { in: ['no', maybe] } }",
                 "hidden IN ('no', 'maybe')",
-                "{ or: [ { author_id: { eq: { session: subject_id } } }, { post_id: { eq: p1 } } ] }",
-                "author_id = 'user_1' OR post_id = 'p1'",
+                "{ or: [ { author_id: { eq: { session: subject_id } } }, { body: { eq: a } } ] }",
+                "author_id = 'user_1' OR body = 'a'",
                 None,
                 true,
             ),
@@ -269,6 +326,7 @@ fn logic_case() -> PolicyCase {
         ],
         variant: LOGIC_VARIANT,
         mutation_filter_is_select_filter: true,
+        stable_views: [true, false, true],
     }
 }
 
@@ -283,7 +341,7 @@ fn parent_case() -> PolicyCase {
                 OWNER_YAML,
                 OWNER_SQL,
                 None,
-                false,
+                true,
             ),
             resource(
                 "comments",
@@ -306,6 +364,7 @@ fn parent_case() -> PolicyCase {
         ],
         variant: PARENT_VARIANT,
         mutation_filter_is_select_filter: true,
+        stable_views: [true, false, false],
     }
 }
 
@@ -317,8 +376,8 @@ fn limited_case() -> PolicyCase {
                 "posts",
                 TENANT_YAML,
                 TENANT_SQL,
-                OWNER_YAML,
-                OWNER_SQL,
+                "{ status: { eq: open } }",
+                "status = 'open'",
                 Some(2),
                 true,
             ),
@@ -343,6 +402,7 @@ fn limited_case() -> PolicyCase {
         ],
         variant: LIMITED_VARIANT,
         mutation_filter_is_select_filter: true,
+        stable_views: [false, true, true],
     }
 }
 
@@ -482,8 +542,9 @@ pub fn render_yaml(case: &PolicyCase, gates: GateFlags, extra_regular: &[(&str, 
             let filter = policy.mutation_filter_yaml();
             let _ = writeln!(
                 out,
-                "        update: {{ columns: {}, filter: {filter}, check: {filter}, returning: {{ columns: {} }} }}",
-                shape.update_columns, shape.update_returning
+                "        update: {{ columns: [{}], filter: {filter}, check: {filter}, returning: {{ columns: {} }} }}",
+                shape.update_columns.join(", "),
+                shape.update_returning
             );
             let _ = writeln!(
                 out,
