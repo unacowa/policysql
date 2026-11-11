@@ -10,6 +10,7 @@
 
 mod oracle;
 mod pipeline;
+mod planted;
 mod policies;
 mod report;
 mod shapes;

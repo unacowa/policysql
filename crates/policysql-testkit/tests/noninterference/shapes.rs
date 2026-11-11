@@ -9,11 +9,11 @@ use policysql_testkit::fuzz::ast::{
     Value,
 };
 
-const POSTS: usize = 0;
-const COMMENTS: usize = 1;
-const TAGS: usize = 2;
+pub const POSTS: usize = 0;
+pub const COMMENTS: usize = 1;
+pub const TAGS: usize = 2;
 
-fn outer(resource: usize, column: usize) -> ColRef {
+pub fn outer(resource: usize, column: usize) -> ColRef {
     ColRef {
         qualifier: Qualifier::Outer(resource),
         resource,
@@ -21,27 +21,27 @@ fn outer(resource: usize, column: usize) -> ColRef {
     }
 }
 
-fn col(resource: usize, column: usize) -> Scalar {
+pub fn col(resource: usize, column: usize) -> Scalar {
     Scalar::Column(outer(resource, column))
 }
 
-fn text(value: &'static str) -> Scalar {
+pub fn text(value: &'static str) -> Scalar {
     Scalar::Value(Value::Lit(Lit::Text(value)))
 }
 
-fn int(value: i64) -> Scalar {
+pub fn int(value: i64) -> Scalar {
     Scalar::Value(Value::Lit(Lit::Int(value)))
 }
 
-fn param(index: u16, value: Lit) -> Scalar {
+pub fn param(index: u16, value: Lit) -> Scalar {
     Scalar::Value(Value::Param { index, value })
 }
 
-fn cmp(op: CmpOp, left: Scalar, right: Scalar) -> Pred {
+pub fn cmp(op: CmpOp, left: Scalar, right: Scalar) -> Pred {
     Pred::Cmp { op, left, right }
 }
 
-fn select(source: Source, projections: Vec<Projection>) -> Select {
+pub fn select(source: Source, projections: Vec<Projection>) -> Select {
     Select {
         source,
         join: None,
@@ -54,18 +54,18 @@ fn select(source: Source, projections: Vec<Projection>) -> Select {
     }
 }
 
-fn posts_where(predicate: Pred) -> Statement {
+pub fn posts_where(predicate: Pred) -> Statement {
     Statement::Select(Box::new(Select {
         predicate: Some(predicate),
         ..select(Source::Table(POSTS), vec![Projection::Expr(col(POSTS, 0))])
     }))
 }
 
-fn projecting(projection: Projection) -> Statement {
+pub fn projecting(projection: Projection) -> Statement {
     Statement::Select(Box::new(select(Source::Table(POSTS), vec![projection])))
 }
 
-fn exists(resource: usize, projection: ExistsProjection, predicate: Pred) -> Pred {
+pub fn exists(resource: usize, projection: ExistsProjection, predicate: Pred) -> Pred {
     Pred::Exists(Box::new(ExistsQuery {
         resource,
         depth: 1,
@@ -74,7 +74,7 @@ fn exists(resource: usize, projection: ExistsProjection, predicate: Pred) -> Pre
     }))
 }
 
-fn inner(resource: usize, column: usize) -> Scalar {
+pub fn inner(resource: usize, column: usize) -> Scalar {
     Scalar::Column(ColRef {
         qualifier: Qualifier::Exists { depth: 1 },
         resource,
@@ -82,7 +82,7 @@ fn inner(resource: usize, column: usize) -> Scalar {
     })
 }
 
-fn table(resource: usize, column: usize) -> Scalar {
+pub fn table(resource: usize, column: usize) -> Scalar {
     Scalar::Column(ColRef {
         qualifier: Qualifier::Table(resource),
         resource,

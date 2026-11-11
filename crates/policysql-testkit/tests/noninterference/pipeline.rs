@@ -130,8 +130,14 @@ impl std::fmt::Debug for CaseWorld {
     }
 }
 
-fn activate(world: &World, case: &PolicyCase, flags: GateFlags, name: &str) -> PolicyBundle {
-    let yaml = render_yaml(case, flags, &[]);
+pub fn activate(
+    world: &World,
+    case: &PolicyCase,
+    flags: GateFlags,
+    extra_regular: &[(&str, &str)],
+    name: &str,
+) -> PolicyBundle {
+    let yaml = render_yaml(case, flags, extra_regular);
     PolicyBundle::activate(&yaml, &world.catalog, world.snapshot.clone()).unwrap_or_else(|error| {
         unreachable!(
             "case {} gate {name} does not activate: {error:?}",
@@ -143,12 +149,34 @@ fn activate(world: &World, case: &PolicyCase, flags: GateFlags, name: &str) -> P
 impl CaseWorld {
     /// Builds the bundles and databases, and asserts the variants are low-equivalent (spec 6.3).
     pub fn new(world: &World, case: PolicyCase) -> Self {
+        Self::with_extra_regular(world, case, &[])
+    }
+
+    /// Like [`CaseWorld::new`], but the compiled policy lists extra `(resource, column)` pairs as
+    /// plain columns while the databases keep the case's own meaning. Only the planted-defect
+    /// test uses this: it makes the policy leak a column on purpose.
+    pub fn with_extra_regular(
+        world: &World,
+        case: PolicyCase,
+        extra_regular: &[(&str, &str)],
+    ) -> Self {
         let mutation_dbs = connections(&case);
         assert_variants_low_equivalent(&case, &mutation_dbs);
-        let main = activate(world, &case, GateFlags::uniform(true), "main");
+        let main = activate(
+            world,
+            &case,
+            GateFlags::uniform(true),
+            extra_regular,
+            "main",
+        );
         let gates = gate_variants()
             .into_iter()
-            .map(|off| (off, activate(world, &case, off.flags(), &off.name())))
+            .map(|off| {
+                (
+                    off,
+                    activate(world, &case, off.flags(), extra_regular, &off.name()),
+                )
+            })
             .collect();
         let select_dbs = DBS.map(|db| {
             ReferenceSqlite::new(SCHEMA, &setup_sql(&case, db))
