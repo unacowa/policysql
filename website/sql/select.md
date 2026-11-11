@@ -259,7 +259,7 @@ LIMIT :limit;
 
 ## 集約とGROUP BY
 
-policyで`allow_aggregations: true`が設定され、使用するcolumnとfunctionが許可されている場合に利用できます。省略時と`false`では、aggregate function、`GROUP BY`、`HAVING`を使用できません。
+policyで`allow_aggregations: true`が設定され、使用するcolumnとfunctionが許可されている場合に利用できます。省略時と`false`では、aggregate function、`GROUP BY`、`HAVING`を使用できません。`CASE`の中など、どこに置いたaggregateも対象です。JOINするときは、rootとJOIN先のすべてのresourceに`allow_aggregations: true`が必要です。`COUNT(*)`はSELECT list、`HAVING`、`ORDER BY`でだけ使えます。
 
 ```sql
 SELECT status, COUNT(*) AS post_count

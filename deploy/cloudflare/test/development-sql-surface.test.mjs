@@ -169,8 +169,8 @@ test("development smoke resources reject NULL outside a nullable assignment and 
 });
 
 // Regressions that must hold in the shipped WASM, not only in the Rust tests (PR #117 review:
-// the committed module had missed #113 and #116).
-test("the shipped WASM rejects unprotected EXISTS and unobservable mutation filter columns", () => {
+// the committed module had missed #113 and #116; #115 since).
+test("the shipped WASM rejects unprotected EXISTS, unobservable mutation filter columns, and ungated aggregates", () => {
   const code = (sql) => JSON.parse(runtime.compile_json(
     auth, JSON.stringify({ statements: [{ sql, params: {} }] }), "execute",
   )).error?.code;
@@ -187,6 +187,16 @@ test("the shipped WASM rejects unprotected EXISTS and unobservable mutation filt
   // #116: a mutation WHERE may reference only observable columns.
   assert.equal(code("UPDATE posts SET title = 'x' WHERE internal_notes = 'x' RETURNING id"), "POLICYSQL_FORBIDDEN_COLUMN");
   assert.equal(code("DELETE FROM posts WHERE internal_notes = 'x' RETURNING id"), "POLICYSQL_FORBIDDEN_COLUMN");
+  // #115: `allow_aggregations` applies to an aggregate anywhere and to every joined resource
+  // (`authors` does not allow it; `posts` does).
+  assert.equal(
+    code("SELECT CASE WHEN COUNT(*) > 2 THEN 'many' ELSE 'few' END AS n FROM authors"),
+    "POLICYSQL_FORBIDDEN_OPERATION",
+  );
+  assert.equal(
+    code("SELECT COUNT(*) AS n FROM authors AS a JOIN posts AS p ON p.author_id = a.id"),
+    "POLICYSQL_FORBIDDEN_OPERATION",
+  );
 });
 
 test("development Catalog and policy compile every advertised SQL family", () => {

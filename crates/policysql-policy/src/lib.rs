@@ -498,6 +498,7 @@ impl PolicyBundle {
                 .chain(select.offset.iter()),
         )?;
         let (resource_ids, selected) = self.select_policies(select, session.role())?;
+        authorize_aggregates_and_windows(select, &selected)?;
         let mut protected = select.as_ref().clone();
         let mut server_values = BTreeMap::new();
         apply_projection_permissions(
@@ -542,22 +543,14 @@ impl PolicyBundle {
         }
         for projection in &protected.projections {
             match &projection.expression {
-                BoundExpr::CountAll(resource) => {
-                    let policy = selected.get(resource).ok_or(PolicyError::MissingPolicy)?;
-                    if !policy.allow_aggregations {
-                        return Err(PolicyError::UnsupportedCapability);
-                    }
-                }
                 BoundExpr::RowNumber {
-                    resource,
                     partition_by,
                     order_by,
+                    ..
                 } => {
-                    let policy = selected.get(resource).ok_or(PolicyError::MissingPolicy)?;
-                    if !policy.allow_windows
-                        || partition_by
-                            .iter()
-                            .any(|column| !regular_columns.contains(&column.id))
+                    if partition_by
+                        .iter()
+                        .any(|column| !regular_columns.contains(&column.id))
                         || order_by.iter().any(|order| {
                             validate_client_expression(&order.expression, &regular_columns).is_err()
                         })
@@ -643,7 +636,9 @@ impl PolicyBundle {
         if !policy.allow_aggregations || !policy.regular_columns.contains(&select.document.id) {
             return Err(PolicyError::UnsupportedCapability);
         }
-        reject_unprotected_exists(std::iter::once(&select.path).chain(select.predicate.iter()))?;
+        reject_select_only_constructs(
+            std::iter::once(&select.path).chain(select.predicate.iter()),
+        )?;
         if let Some(predicate) = &select.predicate {
             validate_client_expression(predicate, &policy.regular_columns)?;
         }
@@ -691,7 +686,7 @@ impl PolicyBundle {
             .get(&insert.resource)
             .and_then(|roles| roles.get(session.role()))
             .ok_or(PolicyError::MissingPolicy)?;
-        reject_unprotected_exists(
+        reject_select_only_constructs(
             insert
                 .rows
                 .iter()
@@ -774,7 +769,7 @@ impl PolicyBundle {
             .get(&update.resource)
             .and_then(|roles| roles.get(session.role()))
             .ok_or(PolicyError::MissingPolicy)?;
-        reject_unprotected_exists(
+        reject_select_only_constructs(
             update
                 .assignments
                 .iter()
@@ -856,7 +851,7 @@ impl PolicyBundle {
             .get(&delete.resource)
             .and_then(|roles| roles.get(session.role()))
             .ok_or(PolicyError::MissingPolicy)?;
-        reject_unprotected_exists(
+        reject_select_only_constructs(
             delete.predicate.iter().chain(
                 delete
                     .returning
@@ -1668,8 +1663,9 @@ fn validate_client_expression(
 /// Only the `WHERE` of a select is walked by [`protect_nested_selects`] and by the resource
 /// collection in `select_policies`, and the published surface advertises correlated `EXISTS`
 /// only in the filter context. Anywhere else (a JOIN's `ON`, `HAVING`, a projection, `ORDER BY`,
-/// `LIMIT`/`OFFSET`, a JSON-collection select, a mutation) the subquery would reach the database
-/// without its resource's policy, so it is denied before any policy is composed.
+/// `LIMIT`/`OFFSET`) the subquery would reach the database without its resource's policy, so it
+/// is denied before any policy is composed. A JSON-collection select and a mutation reject it
+/// through [`reject_select_only_constructs`].
 fn reject_unprotected_exists<'a>(
     expressions: impl IntoIterator<Item = &'a BoundExpr>,
 ) -> Result<(), PolicyError> {
@@ -1681,8 +1677,134 @@ fn reject_unprotected_exists<'a>(
 }
 
 fn contains_exists(expression: &BoundExpr) -> bool {
+    any_subexpression(expression, &|node| matches!(node, BoundExpr::Exists(_)))
+}
+
+const fn is_count(expression: &BoundExpr) -> bool {
+    matches!(expression, BoundExpr::CountAll(_))
+}
+
+const fn is_window(expression: &BoundExpr) -> bool {
+    matches!(expression, BoundExpr::RowNumber { .. })
+}
+
+/// Rejects the constructs that only a select's own policy gates can authorize: `EXISTS`,
+/// `COUNT(*)`, and `ROW_NUMBER()`. A mutation or a JSON-collection select has no such gate,
+/// so the construct would reach the database unchecked (issues #114 and #115).
+fn reject_select_only_constructs<'a>(
+    expressions: impl IntoIterator<Item = &'a BoundExpr>,
+) -> Result<(), PolicyError> {
+    let select_only = |node: &BoundExpr| {
+        matches!(
+            node,
+            BoundExpr::Exists(_) | BoundExpr::CountAll(_) | BoundExpr::RowNumber { .. }
+        )
+    };
+    if expressions
+        .into_iter()
+        .any(|expression| any_subexpression(expression, &select_only))
+    {
+        Err(PolicyError::UnsupportedCapability)
+    } else {
+        Ok(())
+    }
+}
+
+/// Applies `allow_aggregations` and `allow_windows` to a select (issue #115).
+///
+/// The gate is decided by where the construct appears anywhere in the statement, not only at
+/// the top of the SELECT list: an aggregate inside `CASE`, `HAVING`, or `ORDER BY` counts the
+/// visible rows just as a projected `COUNT(*)` does. Aggregates and windows run over the rows
+/// of the root and every joined resource, so each of their policies must allow it. A nested
+/// `EXISTS` resource only decides whether a row is counted, and its rows are not aggregated.
+///
+/// `COUNT(*)` is accepted only in the SELECT list, `HAVING`, and `ORDER BY`, and
+/// `ROW_NUMBER()` only as a direct projection; anywhere else SQLite either rejects it or it
+/// lies outside the published surface, so it is denied before execution.
+fn authorize_aggregates_and_windows(
+    select: &BoundSelect,
+    selected: &BTreeMap<policysql_core::ResourceId, &SelectPolicy>,
+) -> Result<(), PolicyError> {
+    let outside_output = select
+        .joins
+        .iter()
+        .map(|join| &join.on)
+        .chain(select.predicate.iter())
+        .chain(select.limit.iter())
+        .chain(select.offset.iter());
+    let is_count_or_window = |node: &BoundExpr| is_count(node) || is_window(node);
+    let misplaced_count_or_window = outside_output
+        .into_iter()
+        .any(|expression| any_subexpression(expression, &is_count_or_window));
+    let nested_window = select
+        .having
+        .iter()
+        .chain(select.order_by.iter().map(|order| &order.expression))
+        .any(|expression| any_subexpression(expression, &is_window))
+        || select
+            .projections
+            .iter()
+            .any(|projection| match &projection.expression {
+                BoundExpr::RowNumber { order_by, .. } => order_by
+                    .iter()
+                    .any(|order| any_subexpression(&order.expression, &is_window)),
+                expression => any_subexpression(expression, &is_window),
+            });
+    if misplaced_count_or_window || nested_window {
+        return Err(PolicyError::UnsupportedCapability);
+    }
+    let aggregates = !select.group_by.is_empty()
+        || select.having.is_some()
+        || select
+            .projections
+            .iter()
+            .map(|projection| &projection.expression)
+            .chain(select.order_by.iter().map(|order| &order.expression))
+            .any(|expression| any_subexpression(expression, &is_count));
+    let windows = select
+        .projections
+        .iter()
+        .any(|projection| is_window(&projection.expression));
+    let row_sources = std::iter::once(select.resource)
+        .chain(select.joins.iter().map(|join| join.resource))
+        .map(|resource| selected.get(&resource).ok_or(PolicyError::MissingPolicy))
+        .collect::<Result<Vec<_>, _>>()?;
+    if (aggregates && !row_sources.iter().all(|policy| policy.allow_aggregations))
+        || (windows && !row_sources.iter().all(|policy| policy.allow_windows))
+    {
+        return Err(PolicyError::UnsupportedCapability);
+    }
+    Ok(())
+}
+
+/// Every expression slot of a select, including its `JOIN ... ON` conditions.
+fn select_expressions(select: &BoundSelect) -> impl Iterator<Item = &BoundExpr> {
+    select
+        .joins
+        .iter()
+        .map(|join| &join.on)
+        .chain(
+            select
+                .projections
+                .iter()
+                .map(|projection| &projection.expression),
+        )
+        .chain(select.predicate.iter())
+        .chain(select.having.iter())
+        .chain(select.order_by.iter().map(|order| &order.expression))
+        .chain(select.limit.iter())
+        .chain(select.offset.iter())
+}
+
+/// Whether `predicate` holds for `expression` or for any expression inside it, including every
+/// clause of a nested `EXISTS`.
+fn any_subexpression(expression: &BoundExpr, predicate: &impl Fn(&BoundExpr) -> bool) -> bool {
+    if predicate(expression) {
+        return true;
+    }
+    let recurse = |inner: &BoundExpr| any_subexpression(inner, predicate);
     match expression {
-        BoundExpr::Exists(_) => true,
+        BoundExpr::Exists(select) => select_expressions(select).any(recurse),
         BoundExpr::Equal(left, right)
         | BoundExpr::NotEqual(left, right)
         | BoundExpr::Less(left, right)
@@ -1698,14 +1820,14 @@ fn contains_exists(expression: &BoundExpr) -> bool {
         | BoundExpr::ConditionalOutput {
             value: left,
             visible_if: right,
-        } => contains_exists(left) || contains_exists(right),
+        } => recurse(left) || recurse(right),
         BoundExpr::Not(inner) | BoundExpr::IsNull(inner) | BoundExpr::CastText(inner) => {
-            contains_exists(inner)
+            recurse(inner)
         }
-        BoundExpr::ScalarFunction { arguments, .. } => arguments.iter().any(contains_exists),
+        BoundExpr::ScalarFunction { arguments, .. } => arguments.iter().any(recurse),
         BoundExpr::In {
             expression, values, ..
-        } => contains_exists(expression) || values.iter().any(contains_exists),
+        } => recurse(expression) || values.iter().any(recurse),
         BoundExpr::Case {
             branches,
             else_expression,
@@ -1713,12 +1835,12 @@ fn contains_exists(expression: &BoundExpr) -> bool {
         } => {
             branches
                 .iter()
-                .any(|(condition, value)| contains_exists(condition) || contains_exists(value))
-                || else_expression.as_deref().is_some_and(contains_exists)
+                .any(|(condition, value)| recurse(condition) || recurse(value))
+                || else_expression.as_deref().is_some_and(recurse)
         }
-        BoundExpr::RowNumber { order_by, .. } => order_by
-            .iter()
-            .any(|order| contains_exists(&order.expression)),
+        BoundExpr::RowNumber { order_by, .. } => {
+            order_by.iter().any(|order| recurse(&order.expression))
+        }
         BoundExpr::Column(_)
         | BoundExpr::ClientParameter { .. }
         | BoundExpr::ServerParameter { .. }
@@ -3118,6 +3240,125 @@ resources:
         }
         for sql in ["UPDATE projects SET status = 'a'", "DELETE FROM projects"] {
             assert_eq!(compile("writer", sql), Ok(()), "{sql}");
+        }
+    }
+
+    /// `allow_aggregations` and `allow_windows` apply wherever the construct appears and to
+    /// every resource whose rows it runs over (issue #115).
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn aggregate_and_window_gates_cover_every_position_and_joined_resource() {
+        let bundle = activate_parent(
+            r"
+version: 1
+resources:
+  posts:
+    roles:
+      member:
+        select:
+          columns: [id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+  comments:
+    roles:
+      member:
+        select:
+          columns: [id, post_id]
+          filter: { body: { neq: hidden } }
+          allow_aggregations: true
+          allow_windows: true
+  readers:
+    roles:
+      member:
+        select:
+          columns: [id, comment_id]
+          filter: { id: { neq: none } }
+          allow_aggregations: true
+          allow_windows: true
+        update:
+          columns: [comment_id]
+          filter: { id: { neq: none } }
+          check: { id: { neq: none } }
+        delete:
+          filter: { id: { neq: none } }
+",
+        )
+        .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+        let member = session("member");
+        let compile = |sql: &str| -> Option<Result<(), PolicyError>> {
+            let statement = SqliteFrontend::default()
+                .bind(sql, &parent_catalog())
+                .ok()?;
+            Some(
+                match &statement {
+                    BoundStatement::Update(_) => bundle.compile_update(&statement, &member),
+                    BoundStatement::Delete(_) => bundle.compile_delete(&statement, &member),
+                    _ => bundle.compile_select(&statement, &member),
+                }
+                .map(|_| ()),
+            )
+        };
+        for sql in [
+            "SELECT COUNT(*) AS n FROM readers r",
+            "SELECT CASE WHEN COUNT(*) > 2 THEN 'many' ELSE 'few' END AS n FROM readers r",
+            "SELECT r.id FROM readers r GROUP BY r.id HAVING COUNT(*) > 0",
+            "SELECT r.id, COUNT(*) AS n FROM readers r JOIN comments c ON c.id = r.comment_id GROUP BY r.id",
+            // The rows of a nested `EXISTS` resource are not aggregated.
+            "SELECT COUNT(*) AS n FROM readers r WHERE EXISTS (SELECT 1 FROM posts p WHERE p.id = r.comment_id)",
+            "SELECT r.id, ROW_NUMBER() OVER (ORDER BY r.id) AS position FROM readers r",
+        ] {
+            assert_eq!(compile(sql), Some(Ok(())), "{sql}");
+        }
+        // `true`: the binder accepts the shape today, so the policy layer must deny it.
+        for (sql, binds) in [
+            // `posts` does not allow aggregation, wherever the aggregate is.
+            ("SELECT COUNT(*) AS n FROM posts p", true),
+            (
+                "SELECT CASE WHEN COUNT(*) > 2 THEN 'many' ELSE 'few' END AS n FROM posts p",
+                true,
+            ),
+            (
+                "SELECT p.id FROM posts p GROUP BY p.id HAVING COUNT(*) > 0",
+                true,
+            ),
+            ("SELECT p.id FROM posts p GROUP BY p.id", true),
+            ("SELECT p.id FROM posts p ORDER BY COUNT(*)", false),
+            // A joined resource's rows are aggregated too; `COUNT(*)` used to be attributed
+            // to the last joined resource only.
+            (
+                "SELECT COUNT(*) AS n FROM posts p JOIN readers r ON r.id = 'r1'",
+                true,
+            ),
+            (
+                "SELECT COUNT(*) AS n FROM readers r JOIN posts p ON p.id = r.comment_id",
+                true,
+            ),
+            (
+                "SELECT p.id, ROW_NUMBER() OVER (ORDER BY p.id) AS position FROM posts p JOIN readers r ON r.id = 'r1'",
+                true,
+            ),
+            // Outside the SELECT list, `HAVING`, and `ORDER BY`, even where allowed.
+            ("SELECT r.id FROM readers r WHERE COUNT(*) > 0", true),
+            (
+                "SELECT r.id FROM readers r JOIN comments c ON COUNT(*) > 0",
+                true,
+            ),
+            (
+                "SELECT r.id FROM readers r WHERE EXISTS (SELECT 1 FROM comments c WHERE COUNT(*) > 0)",
+                true,
+            ),
+            ("SELECT r.id FROM readers r LIMIT COUNT(*)", false),
+            (
+                "UPDATE readers SET comment_id = 'c1' WHERE COUNT(*) > 0",
+                true,
+            ),
+            ("DELETE FROM readers WHERE COUNT(*) > 0", true),
+        ] {
+            match compile(sql) {
+                Some(result) => {
+                    assert_eq!(result, Err(PolicyError::UnsupportedCapability), "{sql}");
+                }
+                None => assert!(!binds, "expected the binder to accept: {sql}"),
+            }
         }
     }
 }

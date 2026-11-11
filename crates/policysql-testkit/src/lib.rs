@@ -2024,6 +2024,8 @@ resources:
 
     /// Denied security fixtures under `tests/fixtures/sqlite-turso-v1/security`.
     const SECURITY_DENY_FIXTURES: &[&str] = &[
+        "aggregate-joined-resource",
+        "aggregate-outside-select-list",
         "exists-outside-where",
         "forbidden-filter-column",
         "forbidden-order-column",
