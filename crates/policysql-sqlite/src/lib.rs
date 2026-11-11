@@ -2758,6 +2758,30 @@ resources:
         .unwrap_or_else(|error| unreachable!("window verifies: {error}"));
         assert!(verified.protected_sql().contains("ROW_NUMBER () OVER"));
         assert_eq!(verified.result()[1].value.logical_type, LogicalType::Int64);
+        // `ORDER BY` a window alias binds to the window itself (PR #119 review).
+        let ordered = SqliteFrontend::default()
+            .bind(
+                "SELECT id, ROW_NUMBER() OVER (ORDER BY name DESC) AS position FROM projects ORDER BY position DESC LIMIT 2",
+                &catalog,
+            )
+            .unwrap_or_else(|error| unreachable!("ordered window binds: {error}"));
+        assert!(denied.compile_select(&ordered, &session).is_err());
+        let protected = allowed
+            .compile_select(&ordered, &session)
+            .unwrap_or_else(|error| unreachable!("ordered window authorizes: {error}"));
+        let verified = compile_verified_select(
+            &protected.plan,
+            &catalog,
+            BTreeMap::new(),
+            limits(),
+            snapshot(),
+        )
+        .unwrap_or_else(|error| unreachable!("ordered window verifies: {error}"));
+        assert!(
+            verified
+                .protected_sql()
+                .contains(" ORDER BY ROW_NUMBER () OVER")
+        );
     }
 
     #[test]

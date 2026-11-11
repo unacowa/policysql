@@ -1,0 +1,15 @@
+version: 1
+resources:
+  posts:
+    roles:
+      member:
+        select:
+          columns: [id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+  readers:
+    roles:
+      member:
+        select:
+          columns: [id]
+          filter: { id: { neq: none } }
+          allow_windows: true

@@ -343,7 +343,7 @@ allow_aggregations: true
 
 `allow_aggregations`はbooleanです。省略時と`false`では、aggregate function、`GROUP BY`、`HAVING`を拒否します。`true`の場合だけ、SELECT policyで許可されたcolumnに対する集約を利用できます。
 
-SELECT list直下だけでなく、`CASE`の中、`HAVING`、`ORDER BY`に置いたaggregateも同じ扱いです。JOINするときは、rootとJOIN先のすべてのresourceのpolicyに`allow_aggregations: true`が必要です。集約されるのは、それらを結合したrowだからです。`WHERE EXISTS`で参照するだけのresourceには不要です。`allow_windows`も同じく、rootとJOIN先のすべてに必要です。
+SELECT list直下だけでなく、`CASE`の中、`HAVING`、`ORDER BY`（projection alias経由）に置いたaggregateも同じ扱いです。JOINや`WHERE EXISTS`を使うときは、文が参照するすべてのresource（root、JOIN先、`EXISTS`の参照先）のpolicyに`allow_aggregations: true`が必要です。一意なkeyで相関した`EXISTS`は、JOINと同じく参照先の見える行数を数えられるためです。`allow_windows`も同じく、文が参照するすべてのresourceに必要です。
 
 ```yaml
 select:

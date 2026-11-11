@@ -47,7 +47,7 @@ Semantics:
 - every JOIN resource must have its own select policy for the caller role, and every JOIN expression column must be present in the corresponding policy's regular `columns` list;
 - `allow_aggregations` is a default-false gate for aggregate functions, `GROUP BY`, and `HAVING`; every referenced column still requires regular column permission;
 - `allow_windows` is a default-false gate for window functions; every partition/order column still requires regular column permission;
-- both gates apply wherever the construct appears (an aggregate inside `CASE`, `HAVING`, or `ORDER BY` counts as one) and to every resource whose rows are aggregated or windowed: the root and every joined resource each need the gate. A nested `EXISTS` resource only decides which rows are counted and does not need it. `COUNT(*)` is accepted only in the SELECT list, `HAVING`, and `ORDER BY`, and `ROW_NUMBER` only as a direct projection; elsewhere, and in any mutation, they are rejected (issue #115);
+- both gates apply wherever the construct appears (an aggregate inside `CASE`, `HAVING`, or an `ORDER BY` projection alias counts as one) and to every resource the statement reads: the root, every joined resource, and every nested `EXISTS` resource each need the gate. A semi-join on a unique key counts the `EXISTS` resource's visible rows exactly as a JOIN would. `COUNT(*)` is accepted only in the SELECT list, `HAVING`, and `ORDER BY` (through a projection alias), and `ROW_NUMBER` only as a whole projection or an `ORDER BY` projection alias; elsewhere, and in any mutation, they are rejected (issue #115);
 - deployment capabilities describe the maximum SQL surface the runtime can safely execute, but they do not grant resource access by themselves.
 
 ## Insert policy

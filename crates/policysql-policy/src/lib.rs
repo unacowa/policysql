@@ -1713,64 +1713,58 @@ fn reject_select_only_constructs<'a>(
 /// Applies `allow_aggregations` and `allow_windows` to a select (issue #115).
 ///
 /// The gate is decided by where the construct appears anywhere in the statement, not only at
-/// the top of the SELECT list: an aggregate inside `CASE`, `HAVING`, or `ORDER BY` counts the
-/// visible rows just as a projected `COUNT(*)` does. Aggregates and windows run over the rows
-/// of the root and every joined resource, so each of their policies must allow it. A nested
-/// `EXISTS` resource only decides whether a row is counted, and its rows are not aggregated.
+/// the top of the SELECT list: an aggregate inside `CASE`, `HAVING`, or an `ORDER BY` alias
+/// counts the visible rows just as a projected `COUNT(*)` does. Every resource the statement
+/// reads must allow it: the root and every joined resource, whose rows are aggregated, and
+/// every nested `EXISTS` resource, because a semi-join on a unique key counts that
+/// resource's visible rows exactly as a JOIN would (PR #119 review).
 ///
 /// `COUNT(*)` is accepted only in the SELECT list, `HAVING`, and `ORDER BY`, and
-/// `ROW_NUMBER()` only as a direct projection; anywhere else SQLite either rejects it or it
-/// lies outside the published surface, so it is denied before execution.
+/// `ROW_NUMBER()` only as a whole projection or `ORDER BY` expression (a projection alias);
+/// anywhere else SQLite either rejects it or it lies outside the published surface, so it is
+/// denied before execution.
 fn authorize_aggregates_and_windows(
     select: &BoundSelect,
     selected: &BTreeMap<policysql_core::ResourceId, &SelectPolicy>,
 ) -> Result<(), PolicyError> {
-    let outside_output = select
+    let is_count_or_window = |node: &BoundExpr| is_count(node) || is_window(node);
+    let misplaced_count_or_window = select
         .joins
         .iter()
         .map(|join| &join.on)
         .chain(select.predicate.iter())
         .chain(select.limit.iter())
-        .chain(select.offset.iter());
-    let is_count_or_window = |node: &BoundExpr| is_count(node) || is_window(node);
-    let misplaced_count_or_window = outside_output
-        .into_iter()
+        .chain(select.offset.iter())
         .any(|expression| any_subexpression(expression, &is_count_or_window));
-    let nested_window = select
-        .having
-        .iter()
-        .chain(select.order_by.iter().map(|order| &order.expression))
-        .any(|expression| any_subexpression(expression, &is_window))
-        || select
-            .projections
+    // A window is allowed as a whole output or ordering expression, never inside another one.
+    let nested_window = |expression: &BoundExpr| match expression {
+        BoundExpr::RowNumber { order_by, .. } => order_by
             .iter()
-            .any(|projection| match &projection.expression {
-                BoundExpr::RowNumber { order_by, .. } => order_by
-                    .iter()
-                    .any(|order| any_subexpression(&order.expression, &is_window)),
-                expression => any_subexpression(expression, &is_window),
-            });
-    if misplaced_count_or_window || nested_window {
-        return Err(PolicyError::UnsupportedCapability);
-    }
-    let aggregates = !select.group_by.is_empty()
-        || select.having.is_some()
-        || select
+            .any(|order| any_subexpression(&order.expression, &is_window)),
+        expression => any_subexpression(expression, &is_window),
+    };
+    let outputs = || {
+        select
             .projections
             .iter()
             .map(|projection| &projection.expression)
             .chain(select.order_by.iter().map(|order| &order.expression))
-            .any(|expression| any_subexpression(expression, &is_count));
-    let windows = select
-        .projections
-        .iter()
-        .any(|projection| is_window(&projection.expression));
-    let row_sources = std::iter::once(select.resource)
-        .chain(select.joins.iter().map(|join| join.resource))
-        .map(|resource| selected.get(&resource).ok_or(PolicyError::MissingPolicy))
-        .collect::<Result<Vec<_>, _>>()?;
-    if (aggregates && !row_sources.iter().all(|policy| policy.allow_aggregations))
-        || (windows && !row_sources.iter().all(|policy| policy.allow_windows))
+    };
+    if misplaced_count_or_window
+        || select
+            .having
+            .iter()
+            .any(|expression| any_subexpression(expression, &is_window))
+        || outputs().any(nested_window)
+    {
+        return Err(PolicyError::UnsupportedCapability);
+    }
+    let aggregates = !select.group_by.is_empty()
+        || select.having.is_some()
+        || outputs().any(|expression| any_subexpression(expression, &is_count));
+    let windows = outputs().any(is_window);
+    if (aggregates && !selected.values().all(|policy| policy.allow_aggregations))
+        || (windows && !selected.values().all(|policy| policy.allow_windows))
     {
         return Err(PolicyError::UnsupportedCapability);
     }
@@ -3274,6 +3268,9 @@ resources:
           filter: { id: { neq: none } }
           allow_aggregations: true
           allow_windows: true
+        insert:
+          columns: [id, comment_id]
+          check: { id: { neq: none } }
         update:
           columns: [comment_id]
           filter: { id: { neq: none } }
@@ -3290,6 +3287,7 @@ resources:
                 .ok()?;
             Some(
                 match &statement {
+                    BoundStatement::Insert(_) => bundle.compile_insert(&statement, &member),
                     BoundStatement::Update(_) => bundle.compile_update(&statement, &member),
                     BoundStatement::Delete(_) => bundle.compile_delete(&statement, &member),
                     _ => bundle.compile_select(&statement, &member),
@@ -3302,9 +3300,13 @@ resources:
             "SELECT CASE WHEN COUNT(*) > 2 THEN 'many' ELSE 'few' END AS n FROM readers r",
             "SELECT r.id FROM readers r GROUP BY r.id HAVING COUNT(*) > 0",
             "SELECT r.id, COUNT(*) AS n FROM readers r JOIN comments c ON c.id = r.comment_id GROUP BY r.id",
-            // The rows of a nested `EXISTS` resource are not aggregated.
-            "SELECT COUNT(*) AS n FROM readers r WHERE EXISTS (SELECT 1 FROM posts p WHERE p.id = r.comment_id)",
+            "SELECT COUNT(*) AS n FROM readers r LEFT JOIN comments c ON c.id = r.comment_id",
+            "SELECT COUNT(*) AS n FROM readers r WHERE EXISTS (SELECT 1 FROM comments c WHERE c.id = r.comment_id)",
+            "SELECT r.id, COUNT(*) AS n FROM readers r GROUP BY r.id ORDER BY n",
             "SELECT r.id, ROW_NUMBER() OVER (ORDER BY r.id) AS position FROM readers r",
+            // `ORDER BY` a window alias binds to the window itself (PR #119 review).
+            "SELECT r.id, ROW_NUMBER() OVER (ORDER BY r.id) AS position FROM readers r ORDER BY position",
+            "SELECT r.id, ROW_NUMBER() OVER (ORDER BY r.id DESC) AS position FROM readers r ORDER BY position DESC LIMIT 2",
         ] {
             assert_eq!(compile(sql), Some(Ok(())), "{sql}");
         }
@@ -3322,6 +3324,28 @@ resources:
             ),
             ("SELECT p.id FROM posts p GROUP BY p.id", true),
             ("SELECT p.id FROM posts p ORDER BY COUNT(*)", false),
+            ("SELECT CAST(COUNT(*) AS TEXT) AS n FROM posts p", true),
+            (
+                "SELECT lower(CAST(COUNT(*) AS TEXT)) AS n FROM posts p",
+                true,
+            ),
+            (
+                "SELECT CASE WHEN CAST(COUNT(*) AS TEXT) IN ('1', '2') THEN 'y' ELSE 'n' END AS n FROM posts p",
+                true,
+            ),
+            (
+                "SELECT p.id, ROW_NUMBER() OVER (ORDER BY p.id) AS position FROM posts p ORDER BY position",
+                true,
+            ),
+            // A transparent CTE or derived table is flattened onto its source.
+            (
+                "WITH d AS (SELECT id FROM posts) SELECT CASE WHEN COUNT(*) > 1 THEN 'many' ELSE 'few' END AS n FROM d",
+                true,
+            ),
+            (
+                "SELECT d.id FROM (SELECT id FROM posts) d GROUP BY d.id",
+                true,
+            ),
             // A joined resource's rows are aggregated too; `COUNT(*)` used to be attributed
             // to the last joined resource only.
             (
@@ -3334,6 +3358,28 @@ resources:
             ),
             (
                 "SELECT p.id, ROW_NUMBER() OVER (ORDER BY p.id) AS position FROM posts p JOIN readers r ON r.id = 'r1'",
+                true,
+            ),
+            (
+                "SELECT COUNT(*) AS n FROM readers r LEFT JOIN posts p ON p.id = r.comment_id",
+                true,
+            ),
+            (
+                "SELECT COUNT(*) AS n FROM posts p LEFT JOIN readers r ON r.comment_id = p.id",
+                true,
+            ),
+            (
+                "SELECT r.id FROM readers r JOIN posts p ON p.id = r.comment_id GROUP BY r.id",
+                true,
+            ),
+            // A semi-join on a unique key counts the `EXISTS` resource's visible rows exactly
+            // as a JOIN does (PR #119 review), so it needs the gate too.
+            (
+                "SELECT COUNT(*) AS n FROM readers r WHERE EXISTS (SELECT 1 FROM posts p WHERE p.id = r.comment_id)",
+                true,
+            ),
+            (
+                "SELECT r.id, ROW_NUMBER() OVER (ORDER BY r.id) AS position FROM readers r WHERE EXISTS (SELECT 1 FROM posts p WHERE p.id = r.comment_id)",
                 true,
             ),
             // Outside the SELECT list, `HAVING`, and `ORDER BY`, even where allowed.
@@ -3352,6 +3398,10 @@ resources:
                 true,
             ),
             ("DELETE FROM readers WHERE COUNT(*) > 0", true),
+            (
+                "INSERT INTO readers (id, comment_id) VALUES ('r9', CAST(COUNT(*) AS TEXT))",
+                false,
+            ),
         ] {
             match compile(sql) {
                 Some(result) => {

@@ -57,6 +57,11 @@ const accepted = [
     params: {},
   },
   {
+    name: "row number window ordered by its alias",
+    sql: "SELECT id, ROW_NUMBER() OVER (ORDER BY published_at DESC) AS position FROM posts ORDER BY position DESC",
+    params: {},
+  },
+  {
     name: "documented searched case concat and cast",
     sql: "SELECT CASE WHEN status = :status THEN CAST(title AS TEXT) ELSE title || :suffix END AS display_title FROM posts",
     params: { status: "published", suffix: "-other" },
@@ -195,6 +200,11 @@ test("the shipped WASM rejects unprotected EXISTS, unobservable mutation filter 
   );
   assert.equal(
     code("SELECT COUNT(*) AS n FROM authors AS a JOIN posts AS p ON p.author_id = a.id"),
+    "POLICYSQL_FORBIDDEN_OPERATION",
+  );
+  // PR #119 review: a semi-join on a unique key counts the EXISTS resource's rows too.
+  assert.equal(
+    code("SELECT COUNT(*) AS n FROM posts AS p WHERE EXISTS (SELECT 1 FROM authors AS a WHERE a.id = p.author_id)"),
     "POLICYSQL_FORBIDDEN_OPERATION",
   );
 });
