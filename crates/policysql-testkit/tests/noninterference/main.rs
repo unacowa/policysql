@@ -8,12 +8,20 @@
 // TEMPORARY(#125 step 3-12): removed once every helper is used.
 #![allow(dead_code)]
 
+mod oracle;
+mod pipeline;
 mod policies;
+mod report;
+mod shapes;
 mod variants;
 mod world;
 
+use pipeline::{CaseWorld, Generated};
 use policysql_testkit::fuzz::layer1;
+use report::{Identity, Tally, finish, process};
 use std::env;
+use std::time::Instant;
+use world::World;
 
 /// Settings read from the environment. An invalid value fails the test; it never silently falls
 /// back to a default.
@@ -123,5 +131,150 @@ fn variants_are_low_equivalent() {
     for case in policies::all_cases() {
         let conns = variants::connections(&case);
         variants::assert_variants_low_equivalent(&case, &conns);
+    }
+}
+
+/// The SELECT size bound for layer 1 in a case (spec 14.3 lets the cheaper cases shrink if the
+/// time budget requires it; the defaults keep every case at the configured size).
+fn select_size(_case: &str, config: &Config) -> usize {
+    config.max_size
+}
+
+fn run_layer1_select(case_name: &str) {
+    let config = Config::from_env();
+    let world = World::new();
+    let case_world = CaseWorld::new(&world, policies::case_named(case_name));
+    let alphabet = world::reduced_alphabet();
+    let size = select_size(case_name, &config);
+    let mut tally = Tally::new("layer1-select", case_name, format!("max_size={size}"));
+    let started = Instant::now();
+    layer1::for_each_select(&alphabet, size, &mut |item| {
+        let generated = Generated::new(item.statement, &alphabet);
+        process(
+            &world,
+            &case_world,
+            &alphabet,
+            &generated,
+            &mut tally,
+            &|| Identity {
+                label: format!("ordinal={} size={}", item.ordinal, item.size),
+                seed_key: String::new(),
+                position: item.ordinal.to_string(),
+            },
+            None,
+        );
+    });
+    finish(&tally, started.elapsed().as_secs_f64());
+}
+
+fn run_layer1_mutation(case_name: &str) {
+    let config = Config::from_env();
+    let world = World::new();
+    let case_world = CaseWorld::new(&world, policies::case_named(case_name));
+    let alphabet = world::reduced_alphabet();
+    let size = config.mutation_max_size;
+    let mut tally = Tally::new(
+        "layer1-mutation",
+        case_name,
+        format!("max_predicate_size={size}"),
+    );
+    let started = Instant::now();
+    layer1::for_each_mutation(&alphabet, size, &mut |item| {
+        let generated = Generated::new(item.statement, &alphabet);
+        process(
+            &world,
+            &case_world,
+            &alphabet,
+            &generated,
+            &mut tally,
+            &|| Identity {
+                label: format!("ordinal={} predicate_size={}", item.ordinal, item.size),
+                seed_key: String::new(),
+                position: item.ordinal.to_string(),
+            },
+            None,
+        );
+    });
+    finish(&tally, started.elapsed().as_secs_f64());
+}
+
+macro_rules! per_case {
+    ($run:ident: $($name:ident => $case:literal),+ $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                $run($case);
+            }
+        )+
+    };
+}
+
+per_case!(run_layer1_select:
+    layer1_select_base => "base",
+    layer1_select_logic => "logic",
+    layer1_select_parent => "parent",
+    layer1_select_limited => "limited",
+);
+
+per_case!(run_layer1_mutation:
+    layer1_mutation_base => "base",
+    layer1_mutation_logic => "logic",
+    layer1_mutation_parent => "parent",
+    layer1_mutation_limited => "limited",
+);
+
+/// The renderer produces exactly the SQL the binder is known to accept (spec 7.3).
+#[test]
+fn render_shapes_bind() {
+    use policysql_parser::SqliteFrontend;
+    use policysql_testkit::fuzz::to_sql;
+    let world = World::new();
+    let alphabet = world::full_alphabet();
+    for (statement, expected) in shapes::shapes() {
+        let sql = to_sql(&statement, &alphabet);
+        assert_eq!(sql, expected);
+        SqliteFrontend::default()
+            .bind(&sql, &world.catalog)
+            .unwrap_or_else(|error| unreachable!("`{sql}` no longer binds: {error}"));
+    }
+}
+
+/// The hand-written SQL twin of every policy predicate agrees with what the compiler produces for
+/// the same policy. This pins `filter_sql` / `visible_if_sql` to the YAML; the low-equivalence
+/// check itself never uses the compiler.
+#[test]
+fn policy_mirror_matches_compiler() {
+    let world = World::new();
+    let alphabet = world::full_alphabet();
+    for case in policies::all_cases() {
+        let case_world = CaseWorld::new(&world, case);
+        for db in variants::DBS {
+            for (index, policy) in case_world.case.resources.iter().enumerate() {
+                let limit = policy
+                    .limit
+                    .map_or(String::new(), |n| format!(" LIMIT {n}"));
+                let expected = variants::query_rows(
+                    &case_world.mutation_dbs[db.index()],
+                    &format!("{}{limit}", variants::view_sql(index, policy, "id")),
+                );
+                let actual = pipeline::compiler_view(&world, &case_world, db, &alphabet, index)
+                    .unwrap_or_else(|error| {
+                        unreachable!(
+                            "{} {} {}: {error}",
+                            case_world.case.name,
+                            db.name(),
+                            policy.resource
+                        )
+                    });
+                assert_eq!(
+                    actual,
+                    expected,
+                    "case {} db {} resource {}: compiler and hand-written view differ",
+                    case_world.case.name,
+                    db.name(),
+                    policy.resource
+                );
+            }
+        }
     }
 }

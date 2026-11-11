@@ -1,6 +1,13 @@
 //! The policy cases: select / update / delete policies as data, rendered to YAML, each with a
 //! hand-written SQL twin of every predicate (used to compute the visible view without the
 //! compiler) and the description of the low-equivalent database variants.
+//!
+//! Invariant every case keeps (the mutation observation includes the view after the write, so it
+//! matters): no column a client may write (`posts.title`, `posts.status`, `comments.body`) feeds a
+//! `visible_if`, and no mutable resource is the target of another resource's `exists` filter.
+//! Otherwise a legitimate write can unlock a hidden value or a hidden row (for example deleting a
+//! parent makes the children of a `not exists` filter visible), and two low-equivalent databases
+//! would diverge after the write by design of the policy rather than by a compiler defect.
 
 use std::fmt::Write as _;
 
@@ -154,7 +161,7 @@ INSERT INTO tags VALUES ('t7','p3','x',1,'pub','a','x');
 
 const LIMITED_VARIANT: VariantSpec = VariantSpec {
     free: [
-        &["owner_id", "title", "note", "secret"],
+        &["title", "note", "secret"],
         &["author_id", "body", "memo", "secret"],
         &["rank", "flag", "memo", "secret"],
     ],
@@ -245,8 +252,8 @@ fn logic_case() -> PolicyCase {
                 "comments",
                 "{ hidden: { in: ['no', maybe] } }",
                 "hidden IN ('no', 'maybe')",
-                "{ or: [ { author_id: { eq: { session: subject_id } } }, { body: { eq: a } } ] }",
-                "author_id = 'user_1' OR body = 'a'",
+                "{ or: [ { author_id: { eq: { session: subject_id } } }, { post_id: { eq: p1 } } ] }",
+                "author_id = 'user_1' OR post_id = 'p1'",
                 None,
                 true,
             ),
@@ -276,7 +283,7 @@ fn parent_case() -> PolicyCase {
                 OWNER_YAML,
                 OWNER_SQL,
                 None,
-                true,
+                false,
             ),
             resource(
                 "comments",
@@ -310,8 +317,8 @@ fn limited_case() -> PolicyCase {
                 "posts",
                 TENANT_YAML,
                 TENANT_SQL,
-                "{ status: { eq: open } }",
-                "status = 'open'",
+                OWNER_YAML,
+                OWNER_SQL,
                 Some(2),
                 true,
             ),
