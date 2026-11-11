@@ -77,27 +77,27 @@ fn small(name: &str, default: usize, range: std::ops::RangeInclusive<usize>) -> 
 
 impl Config {
     fn from_env() -> Self {
-        let seeds = if let Some(list) = env_raw("POLICYSQL_FUZZ_SEEDS") {
+        let seeds = if let Some(list) = env_raw("PSQL_FUZZ_SEEDS") {
             let seeds: Vec<u64> = list
                 .split(',')
-                .map(|item| parse_number("POLICYSQL_FUZZ_SEEDS", item))
+                .map(|item| parse_number("PSQL_FUZZ_SEEDS", item))
                 .collect();
-            assert!(!seeds.is_empty(), "POLICYSQL_FUZZ_SEEDS is empty");
+            assert!(!seeds.is_empty(), "PSQL_FUZZ_SEEDS is empty");
             seeds
         } else {
-            let count = env_number("POLICYSQL_FUZZ_SEED_COUNT", 5, 1..=10_000);
+            let count = env_number("PSQL_FUZZ_SEED_COUNT", 5, 1..=10_000);
             (0..count)
                 .map(|index| splitmix64(0x0125_0000 + index))
                 .collect()
         };
         Self {
-            max_size: small("POLICYSQL_FUZZ_MAX_SIZE", 4, 4..=5),
-            mutation_max_size: small("POLICYSQL_FUZZ_MUTATION_MAX_SIZE", 3, 3..=4),
-            t: small("POLICYSQL_FUZZ_T", 2, 1..=3),
-            rounds: u32::try_from(env_number("POLICYSQL_FUZZ_ROUNDS", 2, 1..=1000)).unwrap_or(2),
+            max_size: small("PSQL_FUZZ_MAX_SIZE", 4, 4..=5),
+            mutation_max_size: small("PSQL_FUZZ_MUTATION_MAX_SIZE", 3, 3..=4),
+            t: small("PSQL_FUZZ_T", 2, 1..=3),
+            rounds: u32::try_from(env_number("PSQL_FUZZ_ROUNDS", 2, 1..=1000)).unwrap_or(2),
             seeds,
-            cases: env_number("POLICYSQL_FUZZ_CASES", 20_000, 1..=100_000_000),
-            mutation_cases: env_number("POLICYSQL_FUZZ_MUTATION_CASES", 5_000, 1..=100_000_000),
+            cases: env_number("PSQL_FUZZ_CASES", 20_000, 1..=100_000_000),
+            mutation_cases: env_number("PSQL_FUZZ_MUTATION_CASES", 5_000, 1..=100_000_000),
         }
     }
 }
@@ -616,7 +616,7 @@ const SAMPLE_CALIBRATED_SEEDS: usize = 5;
 /// about 530, mutation about 560 and, in `parent`, about 270 statements per thousand succeeded on
 /// all four databases; the gate was effective for about 230 per thousand SELECTs).
 ///
-/// The sample is also run with `POLICYSQL_FUZZ_SEEDS` set to replay a seed. With fewer seeds than
+/// The sample is also run with `PSQL_FUZZ_SEEDS` set to replay a seed. With fewer seeds than
 /// it was measured with, the rates are noisier (measured over single seeds: down to 166 per
 /// thousand in `parent` mutation, and `OR` appears twice in a seed's `parent` mutations) so the
 /// floors are a quarter of the calibrated ones and the feature assertions, which count a handful

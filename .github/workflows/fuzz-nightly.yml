@@ -34,11 +34,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      POLICYSQL_FUZZ_MAX_SIZE: ${{ inputs.max_size || '5' }}
-      POLICYSQL_FUZZ_MUTATION_MAX_SIZE: "4"
-      POLICYSQL_FUZZ_T: ${{ inputs.t || '3' }}
-      POLICYSQL_FUZZ_ROUNDS: ${{ inputs.rounds || '5' }}
-      POLICYSQL_FUZZ_SEED_COUNT: ${{ inputs.seed_count || '20' }}
+      PSQL_FUZZ_MAX_SIZE: ${{ inputs.max_size || '5' }}
+      PSQL_FUZZ_MUTATION_MAX_SIZE: "4"
+      PSQL_FUZZ_T: ${{ inputs.t || '3' }}
+      PSQL_FUZZ_ROUNDS: ${{ inputs.rounds || '5' }}
+      PSQL_FUZZ_SEED_COUNT: ${{ inputs.seed_count || '20' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -49,9 +49,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      POLICYSQL_FUZZ_SEED_COUNT: "4"
-      POLICYSQL_FUZZ_CASES: ${{ inputs.cases || '1000000' }}
-      POLICYSQL_FUZZ_MUTATION_CASES: "200000"
+      PSQL_FUZZ_SEED_COUNT: "4"
+      PSQL_FUZZ_CASES: ${{ inputs.cases || '1000000' }}
+      PSQL_FUZZ_MUTATION_CASES: "200000"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
