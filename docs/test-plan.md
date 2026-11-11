@@ -386,12 +386,15 @@ JOIN、GROUP/HAVING、windowをadvertisedへ移す前に、deployment capability
 - forbidden column追加、policy predicate削除、parameter renameによる必須拒否;
 - parserとreference SQLiteのdifferential;
 - timeout、depth、expression sizeを含むresource exhaustion。
+- 反証する性質は[security-model.mdのSecurity properties](security-model.md#security-properties)のP1（系としての非干渉）、P3、P4とする（#125）。現状、compilerについてのproperty / fuzz testは無い（proptestはwasmとtransaction crateだけ）。
 
 ## 9. 独立oracle
 
 compiler自身を期待値生成器にしない。`policysql-testkit`に小さなreference policy evaluatorを実装し、fixtureのseed rowに対して閉じたpolicy predicateを直接評価する。
 
 oracleはSQLを生成せず、SQLのTRUE / FALSE / UNKNOWNを明示的にモデル化する。SELECTの期待row、conditional outputのredaction、mutation post-state checkを計算し、DBで実行したprotected SQLの結果と比較する。
+
+oracleが計算する期待値は、[security-model.mdのSecurity properties](security-model.md#security-properties)のP1（`View(D, σ)`上の結果）とP2（書込みの閉じ込め）の定義に従う。現状のtestkitの`evaluate_select_filter`はselect `filter`の1 rowの真偽だけを返し、`exists`、`visible_if`、mutationの`filter`／`check`、column permissionは扱わず、DBの実行結果とも比較しない（#131）。
 
 oracleが対応しないpolicy operatorは、そのoperatorをadvertiseできない。
 
