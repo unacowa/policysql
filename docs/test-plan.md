@@ -408,6 +408,7 @@ JOIN、GROUP/HAVING、windowをadvertisedへ移す前に、deployment capability
 - 層3: 全アルファベット（3リソース、int64、CTE、派生テーブル、クライアントパラメータ、GLOB）の乱択。夜間は大量に（SELECT 100万件 × シード）、通常の`cargo test`は先頭の標本（SELECT 600件・mutation 200件 × 5シード、`layer3_sample_*`）を回す。標本は夜間と同じ乱数列の先頭なので、`OR`、パラメータ、CTE、派生テーブル、相関EXISTS（層1・2には無い）を毎回のCIで通す。EXISTSはキー同士の`=`で確率0.45で相関させる。UPDATE / DELETEの述語のEXISTSはpolicy段で拒否されるので、mutationの標本には期待しない。同じSQLとパラメータは2回流さず、集計に`skipped as duplicates`として出す。
 - 到達数の下限: どのテストも、全DBで成功した文（エラー無し、operation check失敗も無し。check失敗は失敗の有無しか比べないので数えない）の数に下限を持つ（層1は件数が決まっているので絶対値、層2は`t`ごと、層3は生成数の割合）。層3の標本は、既定より少ないシード（`POLICYSQL_FUZZ_SEEDS`で1つだけ渡して再現するときなど）では標本が小さく割合が振れるので、割合の下限を4分の1にし、特徴の確認は外す。SELECTの層は、ゲートを外したbundleが拒否した文（main bundleは受理）の数にも下限を持つ。層3の標本は、`OR`、パラメータ、CTE、派生テーブル、相関EXISTSが実行まで届くことも確かめる。検査が何も届かないテストは失敗する。
 - 層2は、各文がcellの水準をslotにその形で持つこと（水準のノードがslotにあり、割り当ての無いslotにEXISTS・`COUNT(*) >`・保護された列が無いこと）を、文の`meta`から確かめる。
+- スタック: パイプラインを回すテストは、すべて256 MiBのスタックのスレッドで走らせる（`pipeline.rs`の`on_large_stack`）。出力SQLの再parse（`turso_parser`の`parse_expr`の再帰）が、深い文で既定の2 MiBを超えてデバッグビルドでスタックオーバーフローするため（#142。`POLICYSQL_FUZZ_SEEDS=294096041695`、`732797941314`、`266424751947`の`layer3_sample_select_parent`）。これは製品側の問題で、テストは異常終了を避けるだけ。#142が直ったら、このスレッドを外せるかを確かめる。
 - 検査そのものが働くことは、わざと壊したコンパイラ（SELECT / DELETEの行フィルタ欠落、禁止列の公開、条件付き列を常に見せる`visible_if`、ゲートが効かないbundle）で確かめる（`planted_*`）。
 - `stable_views`: ポリシーケースがresourceごとに宣言する。そのresourceの`visible_if`が書ける列を読まず、`exists`の対象に変更できるresourceが無いとき、書き込み後の可視ビュー全体を比べる。宣言は手書きSQLから導いた値と`CaseWorld::new`が突き合わせる。
 

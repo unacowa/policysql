@@ -25,6 +25,22 @@ use rusqlite::Connection;
 use rusqlite::types::{Value as SqlValue, ValueRef};
 use std::collections::BTreeMap;
 
+/// Runs a test that goes through the pipeline on a thread with a large stack, and passes its
+/// panic on, so the test fails the way it would have on the test thread itself.
+///
+/// Parsing the emitted SQL again recurses in `turso_parser`'s `parse_expr`, and a deep generated
+/// statement overflows the default 2 MiB test stack in a debug build (issue #142; seeds
+/// 294096041695, 732797941314 and 266424751947 in `layer3_sample_select_parent`). That is a
+/// defect of the product, not of the test: this only keeps it from aborting the whole run.
+pub fn on_large_stack<F: FnOnce() + Send + 'static>(test: F) {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(test)
+        .unwrap_or_else(|error| unreachable!("cannot start the test thread: {error}"))
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
+
 /// The column the protected UPDATE appends to carry the operation check.
 const CHECK_COLUMN: &str = "__policysql_check";
 

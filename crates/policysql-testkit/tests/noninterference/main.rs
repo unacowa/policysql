@@ -14,7 +14,7 @@ mod shapes;
 mod variants;
 mod world;
 
-use pipeline::{CaseWorld, Generated};
+use pipeline::{CaseWorld, Generated, on_large_stack};
 use policysql_testkit::fuzz::layer3::{self, LAYER3_TAG};
 use policysql_testkit::fuzz::meta::{NodeKind, Slot, StatementMeta};
 use policysql_testkit::fuzz::rng::mix;
@@ -312,7 +312,7 @@ macro_rules! per_case {
         $(
             #[test]
             fn $name() {
-                $run($case);
+                on_large_stack(|| $run($case));
             }
         )+
     };
@@ -325,7 +325,7 @@ macro_rules! per_case_nightly {
             #[test]
             #[ignore = "nightly: millions of statements; see docs/test-plan.md (L8)"]
             fn $name() {
-                $run($case);
+                on_large_stack(|| $run($case));
             }
         )+
     };
@@ -370,6 +370,10 @@ fn render_shapes_bind() {
 /// on its own: with it, the compiler returns exactly the first `limit` of those rows.
 #[test]
 fn policy_mirror_matches_compiler() {
+    on_large_stack(policy_mirror_body);
+}
+
+fn policy_mirror_body() {
     let world = World::new();
     let alphabet = world::full_alphabet();
     for case in policies::all_cases() {
