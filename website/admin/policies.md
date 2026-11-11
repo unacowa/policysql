@@ -281,6 +281,23 @@ filter:
 
 literalはscalarを直接指定するか、`literal`で明示できます。`eq: null`は許可せず、NULL判定には`is_null: true`または`is_null: false`を使用します。`in`と`not_in`は空でないliteral配列です。
 
+### operationごとのfilterの広さ
+
+`filter`はoperationごとに独立して適用されます。UPDATEとDELETEの対象rowはupdate／delete policyの`filter`だけで決まり、select policyの`filter`は合成されません（Hasuraと同じ挙動です）。
+
+そのため、update／delete policyの`filter`がselect policyの`filter`より広いと、その差のrow（UPDATE／DELETEはできるがSELECTでは見えないrow）について、select policyの通常`columns`の値を推測できます。clientの`WHERE`にその列の条件を書くと、`RETURNING`、更新・削除件数、`expect.affectedRows`によるrollbackから、条件に一致したかどうかが分かるためです。
+
+```yaml
+select:
+  columns: [id, title, body]
+  filter: { owner_id: { eq: { session: subject_id } } }
+update:
+  columns: [status]
+  filter: { tenant_id: { eq: { session: tenant_id } } }
+```
+
+この例では、同じtenantの他人のrowは、SELECTでは見えませんが、`UPDATE docs SET status = 'x' WHERE body GLOB 'secret*' RETURNING id`の結果から`body`の内容を推測できます。差のrowの値を隠したい場合は、update／delete policyの`filter`をselect policyの`filter`と同じか、より狭くしてください（例: 上のupdateの`filter`に`owner_id`の条件を`and`で加える）。
+
 ### 親resourceの行を条件にする（`exists`）
 
 SELECTの`filter`では、`exists`で別resource（親）の行を条件にできます。次の例では、`comments`自身には`tenant_id`がありませんが、親の`posts.tenant_id`がsessionのtenantと一致するcommentだけを返します。
