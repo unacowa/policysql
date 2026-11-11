@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod fuzz;
+
 use policysql_core::LogicalValue;
 use policysql_execution::VerifiedExecutionPlan;
 use policysql_sqlite::SqliteProfile;
