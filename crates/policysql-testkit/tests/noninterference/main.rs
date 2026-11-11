@@ -241,14 +241,6 @@ fn layer2_expect(t: usize) -> Expect {
     }
 }
 
-fn layer3_expect(_case: &str, mutation: bool) -> Expect {
-    Expect {
-        all_ok: Floor::Count(1),
-        gate_effective: Floor::Count(u64::from(!mutation)),
-        features: &[],
-    }
-}
-
 fn run_layer1_select(case_name: &str) {
     let config = Config::from_env();
     let world = World::new();
@@ -596,21 +588,78 @@ per_case!(run_layer2_select:
     layer2_select_limited => "limited",
 );
 
-fn run_layer3(case_name: &str, mutation: bool) {
+/// How many statements per seed layer 3 draws, and whether the run is the small sample that every
+/// `cargo test` takes or the nightly volume.
+#[derive(Clone, Copy, Debug)]
+enum Volume {
+    /// A prefix of the nightly stream (statement `i` of a seed is the same either way), small
+    /// enough to run on every pull request: it reaches `OR`, parameters, CTEs, derived tables and
+    /// correlated EXISTS, which layers 1 and 2 cannot (their predicates have no `OR`, and no
+    /// parameters or derived sources).
+    Sample,
+    Nightly,
+}
+
+const SAMPLE_SELECT_CASES: u64 = 600;
+const SAMPLE_MUTATION_CASES: u64 = 200;
+
+/// Floors for layer 3, per mille of the statements generated, from the measured rates (SELECT
+/// about 530, mutation about 560 and, in `parent`, about 270 statements per thousand ran on all
+/// four databases without an error; the gate was effective for about 230 per thousand SELECTs).
+fn layer3_expect(case: &str, mutation: bool) -> Expect {
+    let all_ok = match (mutation, case) {
+        (true, "parent") => 200,
+        (true, _) => 450,
+        (false, _) => 400,
+    };
+    Expect {
+        all_ok: Floor::PerMille(all_ok),
+        gate_effective: Floor::PerMille(if mutation { 0 } else { 150 }),
+        features: if mutation {
+            // An EXISTS in an UPDATE / DELETE predicate never gets past the policy stage.
+            &["or", "parameter"]
+        } else {
+            &[
+                "or",
+                "parameter",
+                "cte",
+                "derived-table",
+                "correlated-exists",
+            ]
+        },
+    }
+}
+
+/// A 64-bit fingerprint of a statement (FNV-1a over the SQL and the parameters), to skip a
+/// statement the generator drew twice. A collision would skip a distinct statement, which costs a
+/// little coverage and nothing else.
+fn fingerprint(generated: &Generated) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let text = format!("{}\u{0}{:?}", generated.sql, generated.params);
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+fn run_layer3(case_name: &str, mutation: bool, volume: Volume) {
     let config = Config::from_env();
     let world = World::new();
     let case_world = CaseWorld::new(&world, policies::case_named(case_name));
     let alphabet = world::full_alphabet();
     let layer3_config = world::layer3_config();
-    let cases = if mutation {
-        config.mutation_cases
-    } else {
-        config.cases
+    let cases = match (volume, mutation) {
+        (Volume::Sample, false) => SAMPLE_SELECT_CASES,
+        (Volume::Sample, true) => SAMPLE_MUTATION_CASES,
+        (Volume::Nightly, false) => config.cases,
+        (Volume::Nightly, true) => config.mutation_cases,
     };
-    let name = if mutation {
-        "layer3-mutation"
-    } else {
-        "layer3-select"
+    let name = match (volume, mutation) {
+        (Volume::Sample, false) => "layer3-sample-select",
+        (Volume::Sample, true) => "layer3-sample-mutation",
+        (Volume::Nightly, false) => "layer3-select",
+        (Volume::Nightly, true) => "layer3-mutation",
     };
     let mut tally = Tally::new(
         name,
@@ -619,6 +668,7 @@ fn run_layer3(case_name: &str, mutation: bool) {
     );
     let started = Instant::now();
     for seed in &config.seeds {
+        let mut seen = BTreeSet::new();
         for index in 0..cases {
             let mut rng = XorShift64::new(mix(&[*seed, LAYER3_TAG, index]));
             let statement = if mutation {
@@ -627,6 +677,10 @@ fn run_layer3(case_name: &str, mutation: bool) {
                 layer3::random_select(&alphabet, &mut rng, &layer3_config)
             };
             let generated = Generated::new(&statement, &alphabet);
+            if !seen.insert(fingerprint(&generated)) {
+                tally.duplicates += 1;
+                continue;
+            }
             process(
                 &world,
                 &case_world,
@@ -649,13 +703,35 @@ fn run_layer3(case_name: &str, mutation: bool) {
     );
 }
 
+fn run_layer3_sample_select(case_name: &str) {
+    run_layer3(case_name, false, Volume::Sample);
+}
+
+fn run_layer3_sample_mutation(case_name: &str) {
+    run_layer3(case_name, true, Volume::Sample);
+}
+
 fn run_layer3_select(case_name: &str) {
-    run_layer3(case_name, false);
+    run_layer3(case_name, false, Volume::Nightly);
 }
 
 fn run_layer3_mutation(case_name: &str) {
-    run_layer3(case_name, true);
+    run_layer3(case_name, true, Volume::Nightly);
 }
+
+per_case!(run_layer3_sample_select:
+    layer3_sample_select_base => "base",
+    layer3_sample_select_logic => "logic",
+    layer3_sample_select_parent => "parent",
+    layer3_sample_select_limited => "limited",
+);
+
+per_case!(run_layer3_sample_mutation:
+    layer3_sample_mutation_base => "base",
+    layer3_sample_mutation_logic => "logic",
+    layer3_sample_mutation_parent => "parent",
+    layer3_sample_mutation_limited => "limited",
+);
 
 per_case_nightly!(run_layer3_select:
     layer3_select_base => "base",

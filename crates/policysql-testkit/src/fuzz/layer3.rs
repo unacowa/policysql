@@ -4,7 +4,8 @@
 //! percent) and, for every column reference, picks a forbidden or conditional column with that
 //! probability, so the same run covers statements that are almost always acceptable and statements
 //! that touch protected columns everywhere. Types are respected, except with probability 0.02, to
-//! reach the binder's rejection path. The statement `i` of a seed is reproduced from
+//! reach the binder's rejection path. An EXISTS correlates on the keys of the inner and an outer
+//! resource with probability 0.45. The statement `i` of a seed is reproduced from
 //! `XorShift64::new(mix(&[seed, LAYER3_TAG, i]))`.
 
 use super::alphabet::{Alphabet, ColumnClass, ColumnIdx, Lit, ResourceIdx, ValueType};
@@ -99,9 +100,26 @@ impl Gen<'_> {
         })
     }
 
-    /// A column reference from `scope`, of type `ty` (unless the 2% type-ignoring roll hits).
+    /// A column reference from `scope`, of type `ty` (unless the 2% type-ignoring roll hits). The
+    /// entry is chosen among those that have a column of that type, so a predicate on integers
+    /// does not land on a text column just because the entry that was drawn first has none.
     fn column(&mut self, scope: &[Entry], ty: ValueType) -> Option<ColRef> {
-        let entry = self.rng.pick(scope)?.clone();
+        let ignore_types = self.rng.percent(2);
+        let typed: Vec<&Entry> = scope
+            .iter()
+            .filter(|entry| {
+                entry.columns.iter().any(|column| {
+                    self.alphabet
+                        .column(entry.resource, *column)
+                        .is_some_and(|c| c.ty == ty)
+                })
+            })
+            .collect();
+        let entry = if ignore_types || typed.is_empty() {
+            self.rng.pick(scope)?.clone()
+        } else {
+            (*self.rng.pick(&typed)?).clone()
+        };
         let class = if self.rng.percent(self.bad) {
             if self.rng.coin() {
                 ColumnClass::Forbidden
@@ -111,7 +129,6 @@ impl Gen<'_> {
         } else {
             ColumnClass::Regular
         };
-        let ignore_types = self.rng.percent(2);
         let candidates = |class: Option<ColumnClass>, typed: bool| -> Vec<ColumnIdx> {
             entry
                 .columns
@@ -245,7 +262,19 @@ impl Gen<'_> {
         let inner_depth = exists_depth + 1;
         let mut inner_scope = scope.to_vec();
         inner_scope.push(self.new_entry(resource, Qualifier::Exists { depth: inner_depth }));
-        let predicate = self.pred(&inner_scope, depth.saturating_sub(1), false, inner_depth);
+        let mut predicate = self.pred(&inner_scope, depth.saturating_sub(1), false, inner_depth);
+        // Most EXISTS in the wild correlate on a key. A uniform draw of the inner predicate makes
+        // that almost never happen (and when it does, the columns rarely agree on the data), so
+        // correlate explicitly with probability 0.45, alone or with the drawn predicate.
+        if self.rng.percent(45) {
+            if let Some(key) = self.correlation(scope, resource, inner_depth) {
+                predicate = if self.rng.percent(60) {
+                    Pred::And(Box::new(key), Box::new(predicate))
+                } else {
+                    key
+                };
+            }
+        }
         Pred::Exists(Box::new(ExistsQuery {
             resource,
             depth: inner_depth,
@@ -256,6 +285,34 @@ impl Gen<'_> {
             },
             predicate,
         }))
+    }
+
+    /// `e<depth>.<key of the inner resource> = <outer>.<key of the outer resource>`, with the
+    /// outer entry drawn from those that expose their key (a derived table exposes only what its
+    /// inner SELECT chose).
+    fn correlation(&mut self, outer: &[Entry], inner: ResourceIdx, depth: u8) -> Option<Pred> {
+        let keyed: Vec<ColRef> = outer
+            .iter()
+            .filter_map(|entry| {
+                let key = self.alphabet.resource(entry.resource)?.key;
+                entry.columns.contains(&key).then_some(ColRef {
+                    qualifier: entry.qualifier,
+                    resource: entry.resource,
+                    column: key,
+                })
+            })
+            .collect();
+        let outer_key = *self.rng.pick(&keyed)?;
+        let inner_key = self.alphabet.resource(inner)?.key;
+        Some(Pred::Cmp {
+            op: CmpOp::Eq,
+            left: Scalar::Column(ColRef {
+                qualifier: Qualifier::Exists { depth },
+                resource: inner,
+                column: inner_key,
+            }),
+            right: Scalar::Column(outer_key),
+        })
     }
 
     fn any_column(&mut self, scope: &[Entry]) -> Option<ColRef> {
