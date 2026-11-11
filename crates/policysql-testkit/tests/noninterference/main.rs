@@ -603,30 +603,46 @@ enum Volume {
 const SAMPLE_SELECT_CASES: u64 = 600;
 const SAMPLE_MUTATION_CASES: u64 = 200;
 
+/// The number of seeds the sample's floors were measured with (the default). Statements of one
+/// seed are not independent (they share a stream), so a floor that holds for five seeds can fail
+/// for a single one without anything being wrong.
+const SAMPLE_CALIBRATED_SEEDS: usize = 5;
+
 /// Floors for layer 3, per mille of the statements generated, from the measured rates (SELECT
-/// about 530, mutation about 560 and, in `parent`, about 270 statements per thousand ran on all
-/// four databases without an error; the gate was effective for about 230 per thousand SELECTs).
-fn layer3_expect(case: &str, mutation: bool) -> Expect {
+/// about 530, mutation about 560 and, in `parent`, about 270 statements per thousand succeeded on
+/// all four databases; the gate was effective for about 230 per thousand SELECTs).
+///
+/// The sample is also run with `POLICYSQL_FUZZ_SEEDS` set to replay a seed. With fewer seeds than
+/// it was measured with, the rates are noisier (measured over single seeds: down to 166 per
+/// thousand in `parent` mutation, and `OR` appears twice in a seed's `parent` mutations) so the
+/// floors are a quarter of the calibrated ones and the feature assertions, which count a handful
+/// of statements, are left to the calibrated run. What stays is the point of the floors: a layer
+/// that reached next to nothing fails.
+fn layer3_expect(case: &str, mutation: bool, volume: Volume, seeds: usize) -> Expect {
     let all_ok = match (mutation, case) {
-        (true, "parent") => 200,
+        (true, "parent") => 150,
         (true, _) => 450,
         (false, _) => 400,
     };
+    let gate = if mutation { 0 } else { 150 };
+    let calibrated = !matches!(volume, Volume::Sample) || seeds >= SAMPLE_CALIBRATED_SEEDS;
+    let scale = |per_mille: u64| if calibrated { per_mille } else { per_mille / 4 };
+    let features: &'static [&'static str] = match (calibrated, mutation) {
+        (false, _) => &[],
+        // An EXISTS in an UPDATE / DELETE predicate never gets past the policy stage.
+        (true, true) => &["or", "parameter"],
+        (true, false) => &[
+            "or",
+            "parameter",
+            "cte",
+            "derived-table",
+            "correlated-exists",
+        ],
+    };
     Expect {
-        all_ok: Floor::PerMille(all_ok),
-        gate_effective: Floor::PerMille(if mutation { 0 } else { 150 }),
-        features: if mutation {
-            // An EXISTS in an UPDATE / DELETE predicate never gets past the policy stage.
-            &["or", "parameter"]
-        } else {
-            &[
-                "or",
-                "parameter",
-                "cte",
-                "derived-table",
-                "correlated-exists",
-            ]
-        },
+        all_ok: Floor::PerMille(scale(all_ok)),
+        gate_effective: Floor::PerMille(scale(gate)),
+        features,
     }
 }
 
@@ -699,7 +715,7 @@ fn run_layer3(case_name: &str, mutation: bool, volume: Volume) {
     finish(
         &tally,
         started.elapsed().as_secs_f64(),
-        &layer3_expect(case_name, mutation),
+        &layer3_expect(case_name, mutation, volume, config.seeds.len()),
     );
 }
 

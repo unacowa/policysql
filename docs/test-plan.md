@@ -406,7 +406,7 @@ JOIN、GROUP/HAVING、windowをadvertisedへ移す前に、deployment capability
 - 層1: 縮約アルファベット（posts / commentsの2リソース、各4列、リテラル2個）の有界全列挙。SELECTはサイズ4以下で152,294件、UPDATE / DELETEは述語サイズ3以下で15,732件。件数は独立した数え上げの値と一致することを`layer1_counts_match_reference`で確かめる。
 - 層2: 因子（`proj`、`on`、`where`、`having`）と水準（`plain`、EXISTS系4形、`count`、`forbidden`、`conditional`）の表（`layer2.rs`の`FACTORS` / `LEVELS`）から、t = 2で416セル × root 3つ = 1巡1,248件を、巡ごとに全セルをちょうど1回ずつ生成する。
 - 層3: 全アルファベット（3リソース、int64、CTE、派生テーブル、クライアントパラメータ、GLOB）の乱択。夜間は大量に（SELECT 100万件 × シード）、通常の`cargo test`は先頭の標本（SELECT 600件・mutation 200件 × 5シード、`layer3_sample_*`）を回す。標本は夜間と同じ乱数列の先頭なので、`OR`、パラメータ、CTE、派生テーブル、相関EXISTS（層1・2には無い）を毎回のCIで通す。EXISTSはキー同士の`=`で確率0.45で相関させる。UPDATE / DELETEの述語のEXISTSはpolicy段で拒否されるので、mutationの標本には期待しない。同じSQLとパラメータは2回流さず、集計に`skipped as duplicates`として出す。
-- 到達数の下限: どのテストも、全DBがエラー無しで実行まで届いた文の数に下限を持つ（層1は件数が決まっているので絶対値、層2は`t`ごと、層3は生成数の割合）。SELECTの層は、ゲートを外したbundleが拒否した文（main bundleは受理）の数にも下限を持つ。層3の標本は、`OR`、パラメータ、CTE、派生テーブル、相関EXISTSが実行まで届くことも確かめる。検査が何も届かないテストは失敗する。
+- 到達数の下限: どのテストも、全DBで成功した文（エラー無し、operation check失敗も無し。check失敗は失敗の有無しか比べないので数えない）の数に下限を持つ（層1は件数が決まっているので絶対値、層2は`t`ごと、層3は生成数の割合）。層3の標本は、既定より少ないシード（`POLICYSQL_FUZZ_SEEDS`で1つだけ渡して再現するときなど）では標本が小さく割合が振れるので、割合の下限を4分の1にし、特徴の確認は外す。SELECTの層は、ゲートを外したbundleが拒否した文（main bundleは受理）の数にも下限を持つ。層3の標本は、`OR`、パラメータ、CTE、派生テーブル、相関EXISTSが実行まで届くことも確かめる。検査が何も届かないテストは失敗する。
 - 層2は、各文がcellの水準をslotにその形で持つこと（水準のノードがslotにあり、割り当ての無いslotにEXISTS・`COUNT(*) >`・保護された列が無いこと）を、文の`meta`から確かめる。
 - 検査そのものが働くことは、わざと壊したコンパイラ（SELECT / DELETEの行フィルタ欠落、禁止列の公開、条件付き列を常に見せる`visible_if`、ゲートが効かないbundle）で確かめる（`planted_*`）。
 - `stable_views`: ポリシーケースがresourceごとに宣言する。そのresourceの`visible_if`が書ける列を読まず、`exists`の対象に変更できるresourceが無いとき、書き込み後の可視ビュー全体を比べる。宣言は手書きSQLから導いた値と`CaseWorld::new`が突き合わせる。

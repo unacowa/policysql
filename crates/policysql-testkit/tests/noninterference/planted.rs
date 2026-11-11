@@ -191,6 +191,16 @@ fn drop_delete_row_filter(bound: &BoundStatement, plan: &mut ProtectedPlan) {
     }
 }
 
+/// The UPDATE counterpart. The operation check is the same filter on the new row, so it stays
+/// (and so do the server parameters it uses): the statement is still emitted and verified.
+fn drop_update_row_filter(bound: &BoundStatement, plan: &mut ProtectedPlan) {
+    if let (BoundStatement::Update(original), BoundStatement::Update(protected)) =
+        (bound, &mut plan.statement)
+    {
+        protected.predicate.clone_from(&original.predicate);
+    }
+}
+
 fn assert_mutation_violation(outcome: &Outcome, generated: &Generated, variant: Db, what: &str) {
     assert!(
         matches!(outcome, Outcome::Executed { .. }),
@@ -205,9 +215,7 @@ fn assert_mutation_violation(outcome: &Outcome, generated: &Generated, variant: 
     );
 }
 
-/// A compiler whose DELETE forgot the row filter deletes rows the client cannot see. (An UPDATE
-/// that forgot it is stopped by the operation check, which is the same filter on the new row, so
-/// every database reports the failure and nothing is observable.)
+/// A compiler whose DELETE forgot the row filter deletes rows the client cannot see.
 #[test]
 fn planted_mutation_missing_row_filter_is_detected() {
     let world = World::new();
@@ -227,6 +235,49 @@ fn planted_mutation_missing_row_filter_is_detected() {
         Some(&drop_delete_row_filter),
     );
     assert_mutation_violation(&outcome, &generated, Db::Row, "delete");
+    // The same statement without the defect is clean.
+    let (_, honest) = run(&world, &case, &case.main, &generated, None);
+    assert!(oracle::noninterference(&generated, &honest).is_empty());
+}
+
+/// A compiler whose UPDATE forgot the row filter reaches rows the client cannot see, and the
+/// operation check (the same filter on the new row) turns that into a failure. Where the client's
+/// predicate hits a row that every database hides, every database fails and nothing differs. Where
+/// it hits a row only the `row` variant hides (`h2`), `row` fails while the others succeed:
+/// whether the statement succeeds leaks one bit about a row the client cannot see.
+#[test]
+fn planted_update_missing_row_filter_is_detected() {
+    let world = World::new();
+    let alphabet = world::full_alphabet();
+    let case = CaseWorld::new(&world, policies::case_named("base"));
+    let statement = Statement::Update(Update {
+        resource: POSTS,
+        assignments: vec![(2, Value::Lit(Lit::Text("z")))],
+        predicate: Some(cmp(CmpOp::Eq, table(POSTS, 0), text("h2"))),
+        returning: Returning::Id,
+    });
+    let generated = Generated::new(&statement, &alphabet);
+    let (_, outcome) = run(
+        &world,
+        &case,
+        &case.main,
+        &generated,
+        Some(&drop_update_row_filter),
+    );
+    assert_mutation_violation(&outcome, &generated, Db::Row, "update");
+    // Only `row` differs: the failure is what tells.
+    let Outcome::Executed { observations, .. } = &outcome else {
+        unreachable!("{outcome:?}")
+    };
+    for db in DBS {
+        assert_eq!(
+            matches!(observations[db.index()], Ok(Obs::CheckFailed)),
+            db == Db::Row,
+            "{}: {:?}",
+            db.name(),
+            observations[db.index()]
+        );
+    }
     // The same statement without the defect is clean.
     let (_, honest) = run(&world, &case, &case.main, &generated, None);
     assert!(oracle::noninterference(&generated, &honest).is_empty());

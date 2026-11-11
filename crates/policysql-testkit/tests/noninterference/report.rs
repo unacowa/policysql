@@ -33,7 +33,9 @@ pub struct Tally {
     pub known: BTreeMap<u32, u64>,
     /// Statements that went through every stage and ran on the four databases.
     pub executed: u64,
-    /// Of those, the statements for which no database returned an error.
+    /// Of those, the statements that succeeded on all four databases: no error and no failed
+    /// operation check (a statement that fails the check is observed as a failure and nothing
+    /// else, so it does not count as reached).
     pub all_ok: u64,
     /// Of those, the statements for which at least one database returned an error.
     pub errored: u64,
@@ -42,8 +44,8 @@ pub struct Tally {
     /// Statements the main bundle accepted at the policy stage and at least one bundle with the
     /// gate switched off rejected: the gate demonstrably did work.
     pub gate_effective: u64,
-    /// Of the executed mutations, those whose operation check failed in the base database (in
-    /// production they fail and roll back).
+    /// Of the executed mutations, those whose operation check failed in at least one database (in
+    /// production they fail and roll back). Not counted in `all_ok`.
     pub check_failed: u64,
     /// Statements skipped because the same SQL and parameters had been run already.
     pub duplicates: u64,
@@ -210,17 +212,19 @@ pub fn process(
             ..
         } => {
             tally.executed += 1;
-            tally.check_failed += u64::from(matches!(
-                observations[Db::Base.index()],
-                Ok(Obs::CheckFailed)
-            ));
-            if observations.iter().all(Result::is_ok) {
+            let any_check_failed = observations
+                .iter()
+                .any(|observation| matches!(observation, Ok(Obs::CheckFailed)));
+            tally.check_failed += u64::from(any_check_failed);
+            if observations.iter().any(Result::is_err) {
+                tally.errored += 1;
+            } else if !any_check_failed {
+                // A write whose operation check fails compares nothing but the failure, so it
+                // is not a statement that "reached" the comparison.
                 tally.all_ok += 1;
                 for name in features(generated) {
                     *tally.features.entry(name).or_insert(0) += 1;
                 }
-            } else {
-                tally.errored += 1;
             }
             if let Some(issue) = known {
                 *tally.known.entry(*issue).or_insert(0) += 1;
@@ -343,7 +347,7 @@ pub fn summary(tally: &Tally, seconds: f64) -> String {
     if tally.check_failed > 0 {
         let _ = writeln!(
             out,
-            "operation check failed (rolled back in production): {}",
+            "operation check failed on some database (rolled back in production, not counted as ok): {}",
             tally.check_failed
         );
     }
@@ -440,7 +444,8 @@ impl Floor {
 /// otherwise leave every layer green.
 #[derive(Clone, Copy, Debug)]
 pub struct Expect {
-    /// Statements run on all four databases without an error (at least 1).
+    /// Statements that succeeded on all four databases, without an error or a failed operation
+    /// check (at least 1).
     pub all_ok: Floor,
     /// Statements for which a gate demonstrably did work (SELECT layers).
     pub gate_effective: Floor,
@@ -463,7 +468,7 @@ pub fn finish(tally: &Tally, seconds: f64, expect: &Expect) {
     let all_ok_floor = expect.all_ok.of(tally.generated).max(1);
     assert!(
         tally.all_ok >= all_ok_floor,
-        "only {} statements ran on all four databases without an error, expected at least {all_ok_floor} (summary above)",
+        "only {} statements succeeded on all four databases (no error, no failed operation check), expected at least {all_ok_floor} (summary above)",
         tally.all_ok
     );
     let gate_floor = expect.gate_effective.of(tally.generated);
