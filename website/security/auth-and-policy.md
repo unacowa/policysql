@@ -73,6 +73,28 @@ limit: 100
 
 拒否エラーは、非公開column名、policy条件、他の利用者のdataを明らかにしない形式で返します。認証・認可の詳細は、client responseではなく、アクセス制限されたaudit logへ記録します。
 
+## 保証の範囲
+
+PolicySQLが保証する性質（P1〜P5）の定義は[security model](https://github.com/unacowa/policysql/blob/main/docs/security-model.md#security-properties)にあります。概要は次のとおりです。
+
+- SELECTの結果は、policyで見えるrowとcolumnだけから成るdatabaseに同じSQLを実行した結果と一致します（policy limitによる行数の上限を除きます）。
+- INSERT／UPDATE／DELETEが変更するのは、policyの`filter`とclientの`WHERE`を満たすrowと、許可されたcolumnだけです。presetの値はclientのSQLや値では変わりません。
+- mutationの結果（`RETURNING`、件数、checkの成否）から分かるのは、見えるrowの内容と、policyが公開を決めた範囲（`returning.columns`、`filter`と`check`の成否）だけです。ただし、update／delete policyの`filter`がselect policyの`filter`より広いと、その差のrowの値を推測できます（[operationごとのfilterの広さ](../admin/policies#operationごとのfilterの広さ)）。
+- 集約とwindow関数は、文が読むすべてのresourceのselect policyが許可したときだけ使えます。
+
+### 保証しないこと
+
+次は保証の範囲外です。必要な場合は、PolicySQLの外で対策してください。
+
+1. 応答時間、資源消費、応答サイズからの推測。
+2. UNIQUE制約や外部キー制約のエラーからの、見えないrowの存在の推測。
+3. clientの条件が見えないrowに対しても評価されることによる、エラーや時間差（SQLiteは`clientの条件 AND policyの条件`の評価順を保証しません）。
+4. 許可された集約（`COUNT(*)`など）の結果からの推論。
+5. policyの記述の誤り。policyは信頼された入力として扱います。
+6. SQLiteとTursoの実装差や、PolicySQLが使うparserと実際のengineの構文解釈の差。
+7. trigger、cascade、生成列、DEFAULTやrowidの採番など、PolicySQLのモデルの外にある副作用。
+8. PolicySQL自身のテストや検査器の誤り。
+
 ## Defense in depth
 
 PolicySQL以外にも次の対策を使用してください。

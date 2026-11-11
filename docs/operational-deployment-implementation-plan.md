@@ -35,7 +35,7 @@ Workersと実Turso Databaseへ安全に接続し、認証されたクライア�
 | 領域 | 現在地 | 運用デプロイに必要な残作業 |
 | --- | --- | --- |
 | Parser / binder / policy compiler | 実装済み | Wasm ABIと実リクエストconformance |
-| SQLite emitter / independent verifier | 実装済み | deployment snapshotとのversion binding |
+| SQLite emitter / sealing verifier（自己比較。policyは検査しない、#127） | 実装済み | deployment snapshotとのversion binding |
 | Gateway orchestration | Rust libraryとして実装済み | HTTP listener、request codec、response codec |
 | JWT | traitと契約のみ | JWKS取得、署名検証、cache、claim canonicalization |
 | Turso | typed traitと結果検証のみ | concrete SQL over HTTP transport、timeout、metrics |
@@ -53,7 +53,7 @@ Workersと実Turso Databaseへ安全に接続し、認証されたクライア�
 - request envelopeの意味検証;
 - trusted sessionとrole/accessのcanonicalization;
 - Catalog / Policyのschema・semantic validationとsnapshot activation;
-- SQL parse、binding、policy compile、typed emission、reparse、independent verification;
+- SQL parse、binding、policy compile、typed emission、reparse、sealing verification（同じemitとの自己比較。policyは検査しない、#127）;
 - sealed execution planとexpected result descriptor;
 - client/server parameter namespace;
 - Turso response value、column、row、byte、cardinality、redaction validation;

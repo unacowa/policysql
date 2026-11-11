@@ -67,7 +67,7 @@ docs/
   codex-handoff.md      Recommended implementation sequence for Codex
   vision.md             Product and architectural intent
   architecture.md       Components and data flow
-  security-model.md     Threat model and mandatory invariants
+  security-model.md     Threat model, invariants, properties P1-P5, residual risks
   policy-semantics.md   Hasura-inspired policy semantics
   sql-subset.md         Initial accepted/rejected SQL forms
   http-api.md           External HTTP API contract

@@ -47,10 +47,10 @@
 
 ### Invariant verifier
 
-- re-parses emitted SQL and compares the resulting statement AST structurally;
-- confirms all base-table accesses are protected;
-- confirms no forbidden operation or column was introduced;
-- confirms client values cannot bind server-only parameters;
+- re-parses emitted SQL, which must be exactly one ordinary statement of the expected operation;
+- checks that the supplied client parameter names match an analysis of the protected plan and that string literals round-trip;
+- compares the statement syntax tree, server parameter set, and result descriptors with expectations taken from the same emission, which detects only a change between emission and sealing;
+- does not know the policy, Catalog, or role, and does not check row filters or column permissions; a policy-aware verifier is planned (#127, invariant 11 in [the security model](security-model.md));
 - fails closed.
 
 ### Turso adapter

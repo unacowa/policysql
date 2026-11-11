@@ -69,7 +69,7 @@ update:
 
 `filter`は変更前のrowを制限し、`check`は変更後のrowが満たす条件を定義します。変更とcheckはatomicに実行され、checkに失敗した場合は変更全体がrollbackされます。
 
-clientの`WHERE`で参照できるのは、同じresourceのselect policyの通常`columns`だけです。`update.columns`にあるだけの書込み専用column、policyのfilterでだけ使うcolumn、条件付き出力列（`visible_if`）は参照できず、`POLICYSQL_FORBIDDEN_COLUMN`になります。`RETURNING`、更新件数、checkの失敗から、見えないcolumnの値を推測させないためです。`returning.columns`は含みません。UPDATEの`RETURNING`は更新後の値を返し（presetや代入で上書きされた列の更新前の値は見えません）、checkに失敗する行は返さないためです。上の例の`WHERE id = :id`は、select policyの`columns`に`id`があるときに使えます。対象rowはupdate policyの`filter`だけで決まり、select policyの`filter`は合成しません。update policyの`filter`がselect policyの`filter`より広い場合の注意は[ポリシー管理](../admin/policies#operationごとのfilterの広さ)を参照してください。
+clientの`WHERE`で参照できるのは、同じresourceのselect policyの通常`columns`だけです。`update.columns`にあるだけの書込み専用column、policyのfilterでだけ使うcolumn、条件付き出力列（`visible_if`）は参照できず、`POLICYSQL_FORBIDDEN_COLUMN`になります。`RETURNING`、更新件数、checkの失敗から、見えないcolumnの値を推測させないためです。`returning.columns`は含みません。UPDATEの`RETURNING`は更新後の値を返し（presetや代入で上書きされた列の更新前の値は見えません）、checkに失敗する行は返さないためです。上の例の`WHERE id = :id`は、select policyの`columns`に`id`があるときに使えます。対象rowはupdate policyの`filter`だけで決まり、select policyの`filter`は合成しません。update policyの`filter`がselect policyの`filter`より広い場合の注意は[ポリシー管理](../admin/policies#operationごとのfilterの広さ)を参照してください。
 
 複数rowを更新した場合は変更された全rowへcheckを適用し、FALSEまたはUNKNOWNが一つでもあれば全体をrollbackします。0 row更新はcheck成功として扱うため、更新件数も保証する場合はTransaction APIの`expect.affectedRows`を指定します。
 

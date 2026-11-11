@@ -102,4 +102,4 @@ regression, bypass, protected-egress, and differential evidence before advertisi
 - The production emitter constructs only `turso_parser::ast` nodes; identifier quoting and SQL token layout are delegated to the pinned parser library.
 - Emitted SQL is parsed again and must be exactly one ordinary statement of the expected operation before the candidate can be sealed.
 - The verifier compares the reparsed statement with the protected statement structurally, then checks operation, profile, snapshot, exact parameter ownership sets, mutation invariants, and result descriptors.
-- Negative controls for statement addition, projected-column replacement, parameter replacement, and policy weakening all fail verification.
+- Negative controls for statement addition, projected-column replacement, parameter replacement, and policy weakening all fail verification. These controls alter the candidate SQL after emission. The verifier's expectations come from the same emission, so it does not detect a policy the compiler failed to apply (invariant 11 in [security-model.md](security-model.md)).

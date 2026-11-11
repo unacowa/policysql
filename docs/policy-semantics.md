@@ -2,6 +2,8 @@
 
 PolicySQL borrows concepts from Hasura v2 but is not metadata-format compatible by default.
 
+The security properties these semantics must satisfy (P1–P5) and the risks they leave open are defined in [security-model.md](security-model.md#security-properties).
+
 ## Policy selection
 
 A policy is selected by:
@@ -42,7 +44,7 @@ Semantics:
 - the same column name cannot appear more than once in the list;
 - a conditional value is visible only when `visible_if` is SQL TRUE; FALSE and UNKNOWN return JSON `null` with a redaction entry;
 - the row filter is combined with the caller predicate;
-- the effective result limit is the stricter of caller limit and policy limit;
+- the effective result limit is the stricter of caller limit and policy limit (a negative caller `LIMIT` parameter currently defeats this; see [Verification status](security-model.md#verification-status));
 - deployment capabilities describe the maximum SQL surface the runtime can safely execute, but they do not grant access by themselves;
 - every JOIN resource must have its own select policy for the caller role, and every JOIN expression column must be present in the corresponding policy's regular `columns` list;
 - `allow_aggregations` is a default-false gate for aggregate functions, `GROUP BY`, and `HAVING`; every referenced column still requires regular column permission;
@@ -113,6 +115,7 @@ update:
 Semantics:
 
 - `filter` constrains rows eligible before the update;
+- `filter` is not composed with the select `filter` (issue #118). If it admits rows the select `filter` hides, the regular select columns of those rows can be inferred through the caller `WHERE`, so P3 in [security-model.md](security-model.md#security-properties) holds only when every row the update `filter` admits is also admitted by the select `filter`;
 - a caller `WHERE` may reference only the role's regular select columns for the resource (issue #116). `returning.columns` do not count: `RETURNING` shows post-update values (a preset or an assignment overwrites the pre-state one) and never a row that fails `check`. Columns that are only writable, used only by policy filters, or conditional (`visible_if`) are rejected, and a role without a select policy may not reference any column;
 - `columns` constrains assignments;
 - `presets` add or replace server-owned assignments according to configured conflict behavior;
@@ -135,6 +138,7 @@ delete:
 Semantics:
 
 - the policy filter is compiled into the delete predicate;
+- as for update, the select `filter` is not composed into the delete predicate (issue #118);
 - a caller `WHERE` may reference only the role's regular select columns for the resource (issue #116), as for update; `returning.columns` do not count, since a probe with `expect.affectedRows: 0` rolls back without showing the value it filtered on;
 - `RETURNING` requires separately allowed return columns;
 - cascades and trigger-dependent side effects are outside the public mutation model.

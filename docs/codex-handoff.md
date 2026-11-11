@@ -14,7 +14,7 @@ The SQLite/Turso v1 compiler profile is implemented through its profile-typed tr
 
 - the SQLite parser/binder produces project-owned IR with stable Catalog provenance;
 - SELECT and INSERT/UPDATE/DELETE policies compile to typed protected plans;
-- an independent canonical renderer, emitted-SQL reparse, and invariant verifier seal execution plans;
+- emitted SQL is re-parsed and a sealing verifier compares it with the same emission; it does not check policy (invariant 11 in `security-model.md`, #127);
 - gateway compilation, owned transaction coordination, TRUE-only mutation checks, cardinality expectations, and Turso result validation are implemented;
 - advertised SQL leaves are backed by positive, negative, bypass, differential fixtures and reference SQLite execution.
 
