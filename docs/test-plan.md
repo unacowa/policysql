@@ -387,6 +387,55 @@ JOIN、GROUP/HAVING、windowをadvertisedへ移す前に、deployment capability
 - parserとreference SQLiteのdifferential;
 - timeout、depth、expression sizeを含むresource exhaustion。
 
+#### L8の実装済み部分: 非干渉とゲートの性質ベースファジング（#125）
+
+`crates/policysql-testkit/src/fuzz/`（生成器）と`crates/policysql-testkit/tests/noninterference/`（テスト）。`cargo test -p policysql-testkit --test noninterference`で走る。
+
+生成したSQLを本番と同じ公開API（bind、policy compile、検証つきemit、実行）へ通し、次の3つだけを判定する。期待結果は手で書かない。
+
+| 検査 | 内容 |
+|---|---|
+| SELECTの非干渉（P1の系） | 受理されたSELECTの観測（列名、行、redaction印、エラー）が、可視ビューの等しい2つのDBで等しい |
+| mutationの非干渉（P3） | 受理されたUPDATE / DELETEの観測（影響行数、RETURNING、mutation後の可視ビュー、エラー）が、可視ビューの等しい2つのDBで等しい |
+| ゲート（P4） | 文が読む全resourceの`allow_aggregations`（`COUNT(*)`、GROUP BY、HAVING）または`allow_windows`（`ROW_NUMBER`）をfalseにしたpolicyで、その文が受理されない |
+
+構成:
+
+- ポリシーケース4つ（`base`、`logic`、`parent`、`limited`）× DB 4つ（base、`col`、`row`、`cond`）。`col`は禁止列の値、`row`は見えない行、`cond`は見えるが`visible_if`が偽の行の条件付き列だけを変える。可視ビューが等しいこと（低等価）は、コンパイラを通さない手書きSQLで毎回確かめる（`variants_are_low_equivalent`）。手書きSQLとYAMLが同じ意味であることは別に確かめる（`policy_mirror_matches_compiler`）。
+- 層1: 縮約アルファベット（posts / commentsの2リソース、各4列、リテラル2個）の有界全列挙。SELECTはサイズ4以下で152,294件、UPDATE / DELETEは述語サイズ3以下で15,732件。件数は独立した数え上げの値と一致することを`layer1_counts_match_reference`で確かめる。
+- 層2: 因子（`proj`、`on`、`where`、`having`）と水準（`plain`、EXISTS系4形、`count`、`forbidden`、`conditional`）の表（`layer2.rs`の`FACTORS` / `LEVELS`）から、t = 2で416セル × root 3つ = 1巡1,248件を、巡ごとに全セルをちょうど1回ずつ生成する。
+- 層3: 全アルファベット（3リソース、int64、CTE、派生テーブル、クライアントパラメータ、GLOB）の乱択。夜間だけ。
+- 検査そのものが働くことは、わざと壊したコンパイラ（行フィルタ欠落、禁止列の公開、ゲートが効かないbundle）で確かめる（`planted_*`）。
+
+環境変数（不正な値はテストを失敗させる。黙って既定に戻さない）:
+
+| 変数 | 既定 | 意味 |
+|---|---|---|
+| `POLICYSQL_FUZZ_MAX_SIZE` | 4 | 層1のSELECTのサイズ上限（4または5） |
+| `POLICYSQL_FUZZ_MUTATION_MAX_SIZE` | 3 | 層1のmutationの述語のサイズ上限（3または4） |
+| `POLICYSQL_FUZZ_T` | 2 | 層2のt（1〜3） |
+| `POLICYSQL_FUZZ_ROUNDS` | 2 | 層2のシードごとの巡数 |
+| `POLICYSQL_FUZZ_SEED_COUNT` | 5 | シードの数。i番目のシードは`splitmix64(0x0125_0000 + i)` |
+| `POLICYSQL_FUZZ_SEEDS` | なし | シードの明示的な一覧（`,`区切り、10進か`0x`）。あれば`SEED_COUNT`より優先 |
+| `POLICYSQL_FUZZ_CASES` | 20,000 | 層3のSELECTのシードごとの件数（`#[ignore]`のテストだけが読む） |
+| `POLICYSQL_FUZZ_MUTATION_CASES` | 5,000 | 層3のmutationのシードごとの件数（同上） |
+
+夜間（`.github/workflows/fuzz-nightly.yml`、releaseビルド）は層1をSELECT 5以下・mutation 4以下、層2をt = 3・5巡・シード20個、層3をシード4個 × SELECT 100万件・mutation 20万件で回す。手元では`cargo test -p policysql-testkit --release --test noninterference -- --ignored --nocapture layer3`で層3を走らせる。失敗は層・ケース・シード・番号とSQLで再現できる（出力の`label`）。
+
+生成しない範囲:
+
+- INSERT（`statement.insert.values`。P2として別に扱う）。
+- JSON collection（`source.json-table.collection`、`expression.aggregate.json-group-array`、`result.json-array-schema`）。
+- preset列を持つポリシー（`policy.mutation.preset`）、実行器のトランザクションのロールバック（`execution.transaction.rollback`）、operation check失敗時のロールバック。
+- 負のLIMIT / OFFSET（#136）。policy limitが効くことの主張の違反で、非干渉の違反ではないため、このテストの検査では原理的に見えない。
+- UPDATE / DELETEのfilterがselectのfilterより広いポリシー（#118）。P3の範囲外。常設のポリシーケースは両者を同じにし、#118の現状は`known_gap_118_wider_mutation_filter`が期待値つきで記録する。
+- 書ける列が`visible_if`に入るポリシー、変更できるresourceが他のresourceの`exists`の対象になるポリシー。mutation後の可視ビューがポリシー自身の意味で変わり（書き込みで隠れていた値や行が見える）、2つの低等価なDBが書き込みの後で分かれるため。ポリシーケースはこの両方を避ける（`policies.rs`の冒頭）。
+
+既知の除外（`oracle.rs`の`KNOWN_ISSUES`）。比較は通常どおり行い、集計で`known #N`として別に数える。直ったら表の行を消す:
+
+- #121: 実行時の`InvalidResult`。
+- #122: verifyの`registered function argument`（`CAST(COUNT(*) AS TEXT)`）。
+
 ## 9. 独立oracle
 
 compiler自身を期待値生成器にしない。`policysql-testkit`に小さなreference policy evaluatorを実装し、fixtureのseed rowに対して閉じたpolicy predicateを直接評価する。
