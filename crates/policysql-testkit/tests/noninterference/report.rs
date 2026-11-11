@@ -452,23 +452,30 @@ pub struct Expect {
 pub fn finish(tally: &Tally, seconds: f64, expect: &Expect) {
     let text = summary(tally, seconds);
     println!("{text}");
-    assert!(tally.total_violations() == 0, "{text}");
+    // The summary above is printed once (a failing test shows it with the failure), so the
+    // messages below only say what failed.
+    assert!(
+        tally.total_violations() == 0,
+        "{} violations {:?}: details above",
+        tally.total_violations(),
+        tally.violations
+    );
     let all_ok_floor = expect.all_ok.of(tally.generated).max(1);
     assert!(
         tally.all_ok >= all_ok_floor,
-        "only {} statements ran on all four databases without an error, expected at least {all_ok_floor}\n{text}",
+        "only {} statements ran on all four databases without an error, expected at least {all_ok_floor} (summary above)",
         tally.all_ok
     );
     let gate_floor = expect.gate_effective.of(tally.generated);
     assert!(
         tally.gate_effective >= gate_floor,
-        "the gate was effective for {} statements, expected at least {gate_floor}\n{text}",
+        "the gate was effective for {} statements, expected at least {gate_floor} (summary above)",
         tally.gate_effective
     );
     for feature in expect.features {
         assert!(
             tally.features.get(feature).copied().unwrap_or(0) > 0,
-            "no all-ok statement with {feature}\n{text}"
+            "no all-ok statement with {feature} (summary above)"
         );
     }
 }
