@@ -79,7 +79,7 @@ PolicySQLが保証する性質（P1〜P5）の定義は[security model](https://
 
 - SELECTの結果は、policyで見えるrowとcolumnだけから成るdatabaseに同じSQLを実行した結果と一致します（policy limitによる行数の上限を除きます）。
 - INSERT／UPDATE／DELETEが変更するのは、policyの`filter`とclientの`WHERE`を満たすrowと、許可されたcolumnだけです。presetの値はclientのSQLや値では変わりません。
-- mutationの結果（`RETURNING`、件数、checkの成否）から分かるのは、見えるrowの内容と、policyが公開を決めた範囲（`returning.columns`、`filter`と`check`の成否）だけです。ただし、update／delete policyの`filter`がselect policyの`filter`より広いと、その差のrowの値を推測できます（[operationごとのfilterの広さ](../admin/policies#operationごとのfilterの広さ)）。
+- mutationの結果（`RETURNING`、件数、checkの成否）から分かるのは、見えるrowの内容と、policyが公開を決めた範囲（`returning.columns`、`filter`と`check`の成否）だけです。ただし、update／delete policyの`filter`がselect policyの`filter`より広いと、その差のrowの値を推測できます（[operationごとのfilterの広さ](../admin/policies#operationごとのfilterの広さ)）。
 - 集約とwindow関数は、文が読むすべてのresourceのselect policyが許可したときだけ使えます。
 
 ### 保証しないこと

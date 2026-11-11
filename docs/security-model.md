@@ -26,7 +26,7 @@ Untrusted:
 2. **Single statement per SQL item** — every `statements[].sql`, interactive step, and callback query contains exactly one statement; atomic requests may contain multiple separately validated items.
 3. **Bound authorization** — policies are applied to resolved resources and columns, never text patterns alone.
 4. **Complete coverage** — every base-table access has an applicable operation policy.
-5. **Column non-interference** — forbidden columns cannot influence projection, filtering, joins, grouping, ordering, aggregates, windows, subqueries, or `RETURNING`. P1 and P3 under [Security properties](#security-properties) define what "influence" means.
+5. **Column non-interference** — forbidden columns cannot influence projection, filtering, joins, grouping, ordering, aggregates, windows, subqueries, or `RETURNING`. P1 and P3 under [Security properties](#security-properties) define what "influence" means. For `RETURNING`, the permitted columns are the mutation policy's `returning.columns`, which may include columns that are forbidden for SELECT (P3 exposure 1); policy-owned `filter`, `check`, and `visible_if` may read forbidden columns (see Terms and P1; for mutations, P3 exposures 2-3).
 6. **Row-policy composition** — client predicates cannot replace, weaken, negate, or shadow policy predicates. P1, P2, and P3 under [Security properties](#security-properties) state the consequence.
 7. **Server namespace integrity** — clients cannot define, override, or bind server-owned parameters.
 8. **Preset integrity** — clients cannot override policy-owned mutation columns.
@@ -97,7 +97,9 @@ A SELECT that contains an aggregate (an aggregate function, `GROUP BY`, or `HAVI
 
 ### P5: server ownership
 
-The values of session-derived server parameters (`__policysql_session_*`) and of preset columns are determined by the policy and the trusted session alone; they do not depend on the client's SQL or parameter values. The client can neither define nor bind a name in the `__policysql_` namespace: client parameter names and result column names with that prefix are rejected. Server literal parameters (`__policysql_literal_*`) re-bind literals that appear in the client's SQL, so their values come from the client by design and are outside P5; invariant 11 covers their round trip.
+The values of session-derived server parameters (`__policysql_session_*`) and of preset columns are determined by the policy and the trusted session alone; they do not depend on the client's SQL or parameter values. The client can neither define nor bind a parameter in the `__policysql_` namespace: client parameter names with that prefix are rejected. Result column names with that prefix are rejected for SELECT, constant SELECT, client `EXISTS` projections, and `RETURNING`. Known gap: the output alias of a JSON collection SELECT is not checked for the prefix (#137; see [Verification status](#verification-status)).
+
+Server literal parameters (`__policysql_literal_*`) carry string, bytes, and JSON literals from two sources: the client's SQL and the policy (filters, checks, presets). The name does not tell them apart. A literal from the client's SQL is client-chosen by design and outside P5; a literal from the policy is covered by P5. Invariant 11 checks the round trip of client string literals only.
 
 ### Relation to the mandatory invariants
 
@@ -105,7 +107,7 @@ The values of session-derived server parameters (`__policysql_session_*`) and of
 | --- | --- | --- |
 | 3 Bound authorization | P1–P4 | The properties are stated over resolved resources and columns. |
 | 4 Complete coverage | P1, P2, P4 | A resource without a select policy is absent from the view; a mutation needs its own policy; every resource read is gated. |
-| 5 Column non-interference | P1, P3 | Forbidden columns are absent from the view; a mutation `WHERE` may use only regular select columns. |
+| 5 Column non-interference | P1, P3 | Forbidden columns are absent from the view; a mutation `WHERE` may use only regular select columns. `RETURNING` is governed by `returning.columns`, not by the select columns (P3 exposure 1). |
 | 6 Row-policy composition | P1, P2, P3 | |
 | 7 Server namespace integrity | P5 | |
 | 8 Preset integrity | P2, P5 | |
@@ -134,9 +136,10 @@ Update this table whenever a child issue of #120 lands. Today every property is 
 
 Known gaps:
 
-- P1, JSON collection: the policy layer does not check the columns in the JSON path argument (#123). Execution is blocked today only because the result descriptor cannot be computed for a non-literal path.
+- P1, JSON collection: the policy layer does not check the columns in the JSON path argument (#123). Execution is blocked today only because the result descriptor cannot be computed for a path that is neither a string literal nor a client parameter.
 - P1, policy `limit`: a negative client `LIMIT` parameter removes the cap (see P1; #136).
 - P3: the #118 scope above is a property of the specification.
+- P5, JSON collection: the output alias is not checked against the `__policysql_` prefix (#137). Whether a client can exploit this is unverified.
 
 ## Residual risks
 
