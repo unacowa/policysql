@@ -17,6 +17,7 @@
 pub mod alphabet;
 pub mod ast;
 pub mod layer1;
+pub mod layer2;
 pub mod meta;
 pub mod render;
 pub mod rng;

@@ -17,7 +17,8 @@ mod variants;
 mod world;
 
 use pipeline::{CaseWorld, Generated};
-use policysql_testkit::fuzz::layer1;
+use policysql_testkit::fuzz::rng::{XorShift64, splitmix64};
+use policysql_testkit::fuzz::{layer1, layer2};
 use report::{Identity, Tally, finish, process};
 use std::env;
 use std::time::Instant;
@@ -29,31 +30,71 @@ use world::World;
 struct Config {
     max_size: usize,
     mutation_max_size: usize,
+    t: usize,
+    rounds: u32,
+    seeds: Vec<u64>,
+    cases: u64,
+    mutation_cases: u64,
 }
 
-fn env_number(name: &str, default: usize, range: std::ops::RangeInclusive<usize>) -> usize {
+fn env_raw(name: &str) -> Option<String> {
     match env::var(name) {
-        Err(env::VarError::NotPresent) => default,
+        Err(env::VarError::NotPresent) => None,
         Err(error) => unreachable!("{name} is not valid unicode: {error}"),
-        Ok(raw) => {
-            let value: usize = raw
-                .trim()
-                .parse()
-                .unwrap_or_else(|error| unreachable!("{name}={raw:?} is not a number: {error}"));
-            assert!(
-                range.contains(&value),
-                "{name}={value} is outside {range:?}"
-            );
-            value
-        }
+        Ok(raw) => Some(raw),
     }
+}
+
+fn env_number(name: &str, default: u64, range: std::ops::RangeInclusive<u64>) -> u64 {
+    let Some(raw) = env_raw(name) else {
+        return default;
+    };
+    let value = parse_number(name, &raw);
+    assert!(
+        range.contains(&value),
+        "{name}={value} is outside {range:?}"
+    );
+    value
+}
+
+fn parse_number(name: &str, raw: &str) -> u64 {
+    let raw = raw.trim();
+    let parsed = match raw.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => raw.parse(),
+    };
+    parsed.unwrap_or_else(|error| unreachable!("{name}={raw:?} is not a number: {error}"))
+}
+
+fn small(name: &str, default: usize, range: std::ops::RangeInclusive<usize>) -> usize {
+    let range =
+        u64::try_from(*range.start()).unwrap_or(0)..=u64::try_from(*range.end()).unwrap_or(0);
+    usize::try_from(env_number(name, u64::try_from(default).unwrap_or(0), range)).unwrap_or(default)
 }
 
 impl Config {
     fn from_env() -> Self {
+        let seeds = if let Some(list) = env_raw("POLICYSQL_FUZZ_SEEDS") {
+            let seeds: Vec<u64> = list
+                .split(',')
+                .map(|item| parse_number("POLICYSQL_FUZZ_SEEDS", item))
+                .collect();
+            assert!(!seeds.is_empty(), "POLICYSQL_FUZZ_SEEDS is empty");
+            seeds
+        } else {
+            let count = env_number("POLICYSQL_FUZZ_SEED_COUNT", 5, 1..=10_000);
+            (0..count)
+                .map(|index| splitmix64(0x0125_0000 + index))
+                .collect()
+        };
         Self {
-            max_size: env_number("POLICYSQL_FUZZ_MAX_SIZE", 4, 4..=5),
-            mutation_max_size: env_number("POLICYSQL_FUZZ_MUTATION_MAX_SIZE", 3, 3..=4),
+            max_size: small("POLICYSQL_FUZZ_MAX_SIZE", 4, 4..=5),
+            mutation_max_size: small("POLICYSQL_FUZZ_MUTATION_MAX_SIZE", 3, 3..=4),
+            t: small("POLICYSQL_FUZZ_T", 2, 1..=3),
+            rounds: u32::try_from(env_number("POLICYSQL_FUZZ_ROUNDS", 2, 1..=1000)).unwrap_or(2),
+            seeds,
+            cases: env_number("POLICYSQL_FUZZ_CASES", 20_000, 1..=100_000_000),
+            mutation_cases: env_number("POLICYSQL_FUZZ_MUTATION_CASES", 5_000, 1..=100_000_000),
         }
     }
 }
@@ -278,3 +319,91 @@ fn policy_mirror_matches_compiler() {
         }
     }
 }
+
+/// `round` must contain every (cell, root) pair exactly once, for every strength.
+#[test]
+fn layer2_round_covers_every_cell_once() {
+    let roots = [0, 1, 2];
+    for (t, expected) in [(1, 96), (2, 1_248), (3, 7_392)] {
+        let cells = layer2::cells(t);
+        let pairs = layer2::round(&cells, &roots, 0x0125, 0);
+        assert_eq!(pairs.len(), expected, "t={t}");
+        assert_exactly_once(&pairs, cells.len(), &roots);
+    }
+}
+
+fn assert_exactly_once(pairs: &[(usize, usize)], cells: usize, roots: &[usize]) {
+    let mut seen = vec![0_u32; cells * roots.len()];
+    for (cell, root) in pairs {
+        let root_index = roots
+            .iter()
+            .position(|candidate| candidate == root)
+            .unwrap_or_else(|| unreachable!("root {root} is not in the round"));
+        seen[cell * roots.len() + root_index] += 1;
+    }
+    assert!(
+        seen.iter().all(|count| *count == 1),
+        "a (cell, root) pair is missing or repeated in the round"
+    );
+    assert_eq!(pairs.len(), cells * roots.len());
+}
+
+fn run_layer2_select(case_name: &str) {
+    let config = Config::from_env();
+    let world = World::new();
+    let case_world = CaseWorld::new(&world, policies::case_named(case_name));
+    let alphabet = world::full_alphabet();
+    let cells = layer2::cells(config.t);
+    let names: Vec<String> = cells.iter().map(layer2::cell_name).collect();
+    let roots: Vec<usize> = (0..alphabet.resources.len()).collect();
+    let mut tally = Tally::new(
+        "layer2-select",
+        case_name,
+        format!(
+            "t={} rounds={} seeds={}",
+            config.t,
+            config.rounds,
+            config.seeds.len()
+        ),
+    );
+    let started = Instant::now();
+    for seed in &config.seeds {
+        for round in 0..config.rounds {
+            let pairs = layer2::round(&cells, &roots, *seed, round);
+            assert_exactly_once(&pairs, cells.len(), &roots);
+            tally.rounds.push(format!(
+                "round {seed:#x}/{round}: {} items, every (cell, root) exactly once",
+                pairs.len()
+            ));
+            for (index, (cell, root)) in pairs.iter().enumerate() {
+                let mut rng = XorShift64::new(layer2::statement_seed(*seed, round, index));
+                let statement = layer2::instantiate(&cells[*cell], *root, &alphabet, &mut rng);
+                let generated = Generated::new(&statement, &alphabet);
+                process(
+                    &world,
+                    &case_world,
+                    &alphabet,
+                    &generated,
+                    &mut tally,
+                    &|| Identity {
+                        label: format!(
+                            "seed={seed:#x} round={round} index={index} cell={} root={root}",
+                            names[*cell]
+                        ),
+                        seed_key: format!("{seed:#x}"),
+                        position: format!("{seed:#x}/{round}/{index}"),
+                    },
+                    Some(&names[*cell]),
+                );
+            }
+        }
+    }
+    finish(&tally, started.elapsed().as_secs_f64());
+}
+
+per_case!(run_layer2_select:
+    layer2_select_base => "base",
+    layer2_select_logic => "logic",
+    layer2_select_parent => "parent",
+    layer2_select_limited => "limited",
+);
