@@ -1,0 +1,5 @@
+version: 1
+resources:
+  posts:
+    source: { table: posts }
+    columns: { id: { type: string }, tenant_id: { type: string }, title: { type: string } }

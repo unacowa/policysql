@@ -1,0 +1,6 @@
+id: sqlite.security.aggregate-exists-resource
+profile: sqlite-turso-v1
+description: allow_aggregationsを持つresourceから、一意キーで相関したWHERE EXISTSにより、集計を許可しないresourceの可視行数を数える攻撃をauthorization stageで拒否する (PR #119 のレビュー)
+covers: [expression.aggregate.count-all, source.subquery.correlated-exists, threat.aggregate-gate-bypass]
+tests: [negative, bypass]
+expected: deny

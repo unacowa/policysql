@@ -1,0 +1,6 @@
+id: sqlite.security.aggregate-outside-select-list
+profile: sqlite-turso-v1
+description: allow_aggregationsのないresourceで、CASEの中に置いたCOUNT(*)によりlimitを超えて見える行数を数える攻撃をauthorization stageで拒否する (issue #115)
+covers: [expression.aggregate.count-all, policy.select.limit, threat.aggregate-gate-bypass]
+tests: [negative, bypass]
+expected: deny

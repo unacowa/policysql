@@ -1,0 +1,9 @@
+version: 1
+resources:
+  posts:
+    roles:
+      member:
+        select:
+          columns: [id, title]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          limit: 1

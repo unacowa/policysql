@@ -1,0 +1,6 @@
+id: sqlite.security.window-joined-resource
+profile: sqlite-turso-v1
+description: JOIN先だけがallow_windowsを持つとき、ROW_NUMBERでwindowを許可しないrootの行に連番を振る攻撃をauthorization stageで拒否する (issue #115)
+covers: [expression.window.row-number, source.join.inner, threat.aggregate-gate-bypass]
+tests: [negative, bypass]
+expected: deny

@@ -1,0 +1,6 @@
+id: sqlite.security.aggregate-joined-resource
+profile: sqlite-turso-v1
+description: JOIN先だけがallow_aggregationsを持つとき、COUNT(*)で集計を許可しないrootの行数を数える攻撃をauthorization stageで拒否する (issue #115)
+covers: [expression.aggregate.count-all, source.join.inner, threat.aggregate-gate-bypass]
+tests: [negative, bypass]
+expected: deny

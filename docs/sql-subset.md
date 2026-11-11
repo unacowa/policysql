@@ -31,7 +31,9 @@ Examples:
 - if `joins` capability is disabled, every client-authored JOIN is rejected before execution, regardless of policy;
 - if `joins` capability is enabled but any referenced resource lacks a select policy or a JOIN column is not in regular `columns`, the JOIN is rejected before execution;
 - if aggregate capability is enabled but `allow_aggregations` is false, aggregate, `GROUP BY`, and `HAVING` are rejected before execution;
-- if window capability is enabled but `allow_windows` is false, window expressions are rejected before execution.
+- if window capability is enabled but `allow_windows` is false, window expressions are rejected before execution;
+- the aggregate and window gates are checked for every resource the statement reads (the root, every joined resource, and every nested `EXISTS` resource), and for an aggregate anywhere in the statement (inside `CASE`, `HAVING`, or an `ORDER BY` projection alias), not only for a projected `COUNT(*)`;
+- `COUNT(*)` in `WHERE`, `JOIN ... ON`, `LIMIT`/`OFFSET`, a nested `EXISTS`, or a mutation, and `ROW_NUMBER` other than as a whole projection or an `ORDER BY` projection alias, are rejected.
 
 ## Mutations
 

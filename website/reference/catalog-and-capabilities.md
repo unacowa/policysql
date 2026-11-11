@@ -72,7 +72,7 @@ PolicySQL-Role: author
 
 `nullable`はlogical schema上で元の値が`null`になりうることを示します。`nullableOnDenied`は、選択中のroleではcolumn visibilityがrowごとにdenyされ、結果が`null`になりうることを示します。どちらかが`true`なら、生成されるTypeScriptの読み取り型は`T | null`になります。
 
-`usage`はclient SQLでcolumnを使用できるcontextです。文字列形式の`columns` itemはpolicyとCapabilitiesで実際に利用可能なcontextを持ちます。`allowAggregations: false`なら`group`と`aggregate`、`allowWindows: false`なら`window`を含めません。条件付きobjectは`["projection"]`だけを持ちます。Catalogは開発支援であり、最終的なcontext permissionはrequestごとにgatewayが再検証します。
+`usage`はclient SQLでcolumnを使用できるcontextです。文字列形式の`columns` itemはpolicyとCapabilitiesで実際に利用可能なcontextを持ちます。`allowAggregations: false`なら`group`と`aggregate`、`allowWindows: false`なら`window`を含めません。`usage`はresourceごとの値です。JOINや`WHERE EXISTS`で複数のresourceを参照するSQLでは、参照するすべてのresourceが`allowAggregations`／`allowWindows`を持つ場合だけ集約／windowを使えます。条件付きobjectは`["projection"]`だけを持ちます。Catalogは開発支援であり、最終的なcontext permissionはrequestごとにgatewayが再検証します。
 
 `operations.insert.columns`と`operations.update.columns`はroleが書き込める入力contractです。insertの`required`は、presetやdatabase defaultでは補われず、client入力が必要なcolumnを示します。preset-only、policy内部、非公開columnは列挙しません。各mutationの`returning.columns`は独立した出力contractです。operation自体がない場合、そのoperationはdenyです。
 

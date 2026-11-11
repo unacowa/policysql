@@ -1,0 +1,1 @@
+CREATE TABLE posts (id TEXT NOT NULL, tenant_id TEXT NOT NULL, title TEXT NOT NULL) STRICT;

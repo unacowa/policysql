@@ -1,0 +1,1 @@
+SELECT CASE WHEN COUNT(*) > 2 THEN 'gt2' ELSE 'le2' END AS n FROM posts p;

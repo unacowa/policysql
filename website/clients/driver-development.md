@@ -127,7 +127,7 @@ export interface OperationCatalog {
 }
 ```
 
-各fieldの意味と推論規則は[型・フォーマット・制約](../data-validity/types-and-formats)を参照してください。
+各fieldの意味と推論規則は[型・フォーマット・制約](../data-validity/types-and-formats)を参照してください。`allowAggregations`と`allowWindows`はresourceごとの値です。JOINや`WHERE EXISTS`で複数のresourceを参照するSQLでは、参照するすべてのresourceで`true`の場合だけ、gatewayは集約／windowを受け付けます。
 
 Catalog columnはbase columnの契約です。result columnはalias、JOIN、式、function、aggregate、policy projectionを適用した後、実行成功responseへ付与されるclient metadataです。driverはresult columnの型をCatalogだけから再構築せず、responseの`meta.result.columns`を使用します。`type`が配列なら、値は列挙されたlogical typeの有限unionです。
 

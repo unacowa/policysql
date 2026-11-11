@@ -57,6 +57,11 @@ const accepted = [
     params: {},
   },
   {
+    name: "row number window ordered by its alias",
+    sql: "SELECT id, ROW_NUMBER() OVER (ORDER BY published_at DESC) AS position FROM posts ORDER BY position DESC",
+    params: {},
+  },
+  {
     name: "documented searched case concat and cast",
     sql: "SELECT CASE WHEN status = :status THEN CAST(title AS TEXT) ELSE title || :suffix END AS display_title FROM posts",
     params: { status: "published", suffix: "-other" },
@@ -169,8 +174,8 @@ test("development smoke resources reject NULL outside a nullable assignment and 
 });
 
 // Regressions that must hold in the shipped WASM, not only in the Rust tests (PR #117 review:
-// the committed module had missed #113 and #116).
-test("the shipped WASM rejects unprotected EXISTS and unobservable mutation filter columns", () => {
+// the committed module had missed #113 and #116; #115 since).
+test("the shipped WASM rejects unprotected EXISTS, unobservable mutation filter columns, and ungated aggregates", () => {
   const code = (sql) => JSON.parse(runtime.compile_json(
     auth, JSON.stringify({ statements: [{ sql, params: {} }] }), "execute",
   )).error?.code;
@@ -187,6 +192,21 @@ test("the shipped WASM rejects unprotected EXISTS and unobservable mutation filt
   // #116: a mutation WHERE may reference only observable columns.
   assert.equal(code("UPDATE posts SET title = 'x' WHERE internal_notes = 'x' RETURNING id"), "POLICYSQL_FORBIDDEN_COLUMN");
   assert.equal(code("DELETE FROM posts WHERE internal_notes = 'x' RETURNING id"), "POLICYSQL_FORBIDDEN_COLUMN");
+  // #115: `allow_aggregations` applies to an aggregate anywhere and to every joined resource
+  // (`authors` does not allow it; `posts` does).
+  assert.equal(
+    code("SELECT CASE WHEN COUNT(*) > 2 THEN 'many' ELSE 'few' END AS n FROM authors"),
+    "POLICYSQL_FORBIDDEN_OPERATION",
+  );
+  assert.equal(
+    code("SELECT COUNT(*) AS n FROM authors AS a JOIN posts AS p ON p.author_id = a.id"),
+    "POLICYSQL_FORBIDDEN_OPERATION",
+  );
+  // PR #119 review: a semi-join on a unique key counts the EXISTS resource's rows too.
+  assert.equal(
+    code("SELECT COUNT(*) AS n FROM posts AS p WHERE EXISTS (SELECT 1 FROM authors AS a WHERE a.id = p.author_id)"),
+    "POLICYSQL_FORBIDDEN_OPERATION",
+  );
 });
 
 test("development Catalog and policy compile every advertised SQL family", () => {
