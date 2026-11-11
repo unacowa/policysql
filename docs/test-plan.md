@@ -396,16 +396,20 @@ JOIN、GROUP/HAVING、windowをadvertisedへ移す前に、deployment capability
 | 検査 | 内容 |
 |---|---|
 | SELECTの非干渉（P1の系） | 受理されたSELECTの観測（列名、行、redaction印、エラー）が、可視ビューの等しい2つのDBで等しい |
-| mutationの非干渉（P3） | 受理されたUPDATE / DELETEの観測（影響行数、RETURNING、mutation後の可視ビュー、エラー）が、可視ビューの等しい2つのDBで等しい |
+| mutationの非干渉（P3） | 受理されたUPDATE / DELETEの観測が、可視ビューの等しい2つのDBで等しい。観測は2つに分ける。(a) 影響行数、RETURNING、書き込み前に見えていた行について書き込み後に残った状態（条件付き列は書き込み前に見えていた行だけ）は全ケースで比べる。(b) 書き込み後の可視ビュー全体は、書き込みでビューが変わらないresourceだけで比べる（下の`stable_views`）。operation checkがfalseになる書き込みは、本番と同じく失敗として観測する（状態は取らない） |
 | ゲート（P4） | 文が読む全resourceの`allow_aggregations`（`COUNT(*)`、GROUP BY、HAVING）または`allow_windows`（`ROW_NUMBER`）をfalseにしたpolicyで、その文が受理されない |
 
 構成:
 
 - ポリシーケース4つ（`base`、`logic`、`parent`、`limited`）× DB 4つ（base、`col`、`row`、`cond`）。`col`は禁止列の値、`row`は見えない行、`cond`は見えるが`visible_if`が偽の行の条件付き列だけを変える。可視ビューが等しいこと（低等価）は、コンパイラを通さない手書きSQLで毎回確かめる（`variants_are_low_equivalent`）。手書きSQLとYAMLが同じ意味であることは別に確かめる（`policy_mirror_matches_compiler`）。
+- 実行エラー: 既知の除外（下）に当たらない実行時エラーは、全DBで同じでも`ExecutionError`の違反にする。#121の除外は文の形（GROUP BYの無い集約）にも限る。
 - 層1: 縮約アルファベット（posts / commentsの2リソース、各4列、リテラル2個）の有界全列挙。SELECTはサイズ4以下で152,294件、UPDATE / DELETEは述語サイズ3以下で15,732件。件数は独立した数え上げの値と一致することを`layer1_counts_match_reference`で確かめる。
 - 層2: 因子（`proj`、`on`、`where`、`having`）と水準（`plain`、EXISTS系4形、`count`、`forbidden`、`conditional`）の表（`layer2.rs`の`FACTORS` / `LEVELS`）から、t = 2で416セル × root 3つ = 1巡1,248件を、巡ごとに全セルをちょうど1回ずつ生成する。
-- 層3: 全アルファベット（3リソース、int64、CTE、派生テーブル、クライアントパラメータ、GLOB）の乱択。夜間だけ。
-- 検査そのものが働くことは、わざと壊したコンパイラ（行フィルタ欠落、禁止列の公開、ゲートが効かないbundle）で確かめる（`planted_*`）。
+- 層3: 全アルファベット（3リソース、int64、CTE、派生テーブル、クライアントパラメータ、GLOB）の乱択。夜間は大量に（SELECT 100万件 × シード）、通常の`cargo test`は先頭の標本（SELECT 600件・mutation 200件 × 5シード、`layer3_sample_*`）を回す。標本は夜間と同じ乱数列の先頭なので、`OR`、パラメータ、CTE、派生テーブル、相関EXISTS（層1・2には無い）を毎回のCIで通す。EXISTSはキー同士の`=`で確率0.45で相関させる。UPDATE / DELETEの述語のEXISTSはpolicy段で拒否されるので、mutationの標本には期待しない。同じSQLとパラメータは2回流さず、集計に`skipped as duplicates`として出す。
+- 到達数の下限: どのテストも、全DBがエラー無しで実行まで届いた文の数に下限を持つ（層1は件数が決まっているので絶対値、層2は`t`ごと、層3は生成数の割合）。SELECTの層は、ゲートを外したbundleが拒否した文（main bundleは受理）の数にも下限を持つ。層3の標本は、`OR`、パラメータ、CTE、派生テーブル、相関EXISTSが実行まで届くことも確かめる。検査が何も届かないテストは失敗する。
+- 層2は、各文がcellの水準をslotにその形で持つこと（水準のノードがslotにあり、割り当ての無いslotにEXISTS・`COUNT(*) >`・保護された列が無いこと）を、文の`meta`から確かめる。
+- 検査そのものが働くことは、わざと壊したコンパイラ（SELECT / DELETEの行フィルタ欠落、禁止列の公開、条件付き列を常に見せる`visible_if`、ゲートが効かないbundle）で確かめる（`planted_*`）。
+- `stable_views`: ポリシーケースがresourceごとに宣言する。そのresourceの`visible_if`が書ける列を読まず、`exists`の対象に変更できるresourceが無いとき、書き込み後の可視ビュー全体を比べる。宣言は手書きSQLから導いた値と`CaseWorld::new`が突き合わせる。
 
 環境変数（不正な値はテストを失敗させる。黙って既定に戻さない）:
 
@@ -426,11 +430,10 @@ JOIN、GROUP/HAVING、windowをadvertisedへ移す前に、deployment capability
 
 - INSERT（`statement.insert.values`。P2として別に扱う）。
 - JSON collection（`source.json-table.collection`、`expression.aggregate.json-group-array`、`result.json-array-schema`）。
-- preset列を持つポリシー（`policy.mutation.preset`）、実行器のトランザクションのロールバック（`execution.transaction.rollback`）、operation check失敗時のロールバック。
+- preset列を持つポリシー（`policy.mutation.preset`）、実行器のトランザクションのロールバック（`execution.transaction.rollback`）、operation check失敗時のロールバックそのもの（観測は失敗として扱うだけで、本番のロールバックは再現しない）。
 - 負のLIMIT / OFFSET（#136）。policy limitが効くことの主張の違反で、非干渉の違反ではないため、このテストの検査では原理的に見えない。
 - UPDATE / DELETEのfilterがselectのfilterより広いポリシー（#118）。P3の範囲外。常設のポリシーケースは両者を同じにし、#118の現状は`known_gap_118_wider_mutation_filter`が期待値つきで記録する。
-- 書ける列が`visible_if`に入るポリシー、変更できるresourceが他のresourceの`exists`の対象になるポリシー。mutation後の可視ビューがポリシー自身の意味で変わり（書き込みで隠れていた値や行が見える）、2つの低等価なDBが書き込みの後で分かれるため。ポリシーケースはこの両方を避ける（`policies.rs`の冒頭）。
-
+- 書き込みで隠れていた行や値が見えるようになるポリシー（#140）: 書ける列が`visible_if`に入る、変更できるresourceが他のresourceの`exists`の対象になる。常設のポリシーケースは仕様どおりこの形を含む（`logic`のcommentsは`body`、`parent`のpostsはDELETE可、`limited`のpostsは`status`）が、書き込み後の可視ビュー全体を比べるのは`stable_views`が真のresourceだけで、ほかは(a)の観測（書き込み前に見えていたものに限る）で比べる。この形で(a)は一致し(b)が分かれることを、`known_gap_140_*`が期待値つきで記録する。
 既知の除外（`oracle.rs`の`KNOWN_ISSUES`）。比較は通常どおり行い、集計で`known #N`として別に数える。直ったら表の行を消す:
 
 - #121: 実行時の`InvalidResult`。
