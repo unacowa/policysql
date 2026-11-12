@@ -37,9 +37,9 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   const post = (h, statements, extra = {}) => h.request("a", EXECUTE, new RawJson(JSON.stringify({ statements, ...extra })), null);
   const capabilities = async (h) => (await h.request("a", "/v1/capabilities", undefined, null)).body;
   const db = (h) => h.databases.get("a").database;
-  const insertRows = (h, count, { tenant = "tenant_a", name = "n", prefix = "x" } = {}) => {
-    const insert = db(h).prepare("INSERT INTO projects(id,tenant_id,name,state,seed) VALUES(?,?,?,?,?)");
-    for (let index = 0; index < count; index++) insert.run(`${prefix}${String(index).padStart(6, "0")}`, tenant, name, null, Buffer.alloc(0));
+  const insertRows = (h, count, { tenant = "tenant_a", name = "n", prefix = "x", state = null, privateState = Buffer.from([255]) } = {}) => {
+    const insert = db(h).prepare("INSERT INTO projects(id,tenant_id,name,state,seed,private_state) VALUES(?,?,?,?,?,?)");
+    for (let index = 0; index < count; index++) insert.run(`${prefix}${String(index).padStart(6, "0")}`, tenant, name, state, Buffer.alloc(0), privateState);
   };
   const refusal = (response, status, code, detail, path = null) => {
     assert.equal(response.status, status, JSON.stringify(response.body).slice(0, 300));
@@ -59,13 +59,13 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       ["maxBytesPerValue", { maxBytesPerValue: 4 }, [{
         sql: "INSERT INTO projects(id,name,state) VALUES(:id,:name,:state) RETURNING id",
         params: { id: "p", name: "n", state: Buffer.alloc(5).toString("base64") },
-      }], {}, "POLICYSQL_LIMIT_EXCEEDED", null],
+      }], {}, "POLICYSQL_LIMIT_EXCEEDED", "/statements/0"],
     ];
     for (const [name, limits, statements, extra, code, path] of cases) {
       const h = await setup(t, limits);
       const response = await post(h, statements, extra);
       // A statement's refusal carries its pointer; the request's carries none.
-      refusal(response, 413, code, { limit: name }, name === "maxBytesPerValue" ? response.body.error.path : path);
+      refusal(response, 413, code, { limit: name }, path);
       // The name resolves to the number that was configured.
       assert.equal((await capabilities(h)).limits[name], limits[name], name);
     }
@@ -112,32 +112,65 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     refusal(response, 413, "POLICYSQL_LIMIT_EXCEEDED", { limit: "maxParameters" }, "/statements/0");
   });
 
+  // What a client can read of a statement: the status, the error (name and path included) and the
+  // rows. Two databases that differ only in what the role cannot see must give the same.
+  const outcome = (response) => ({
+    status: response.status, error: response.body.error ? { ...response.body.error, requestId: undefined } : undefined,
+    rows: response.body.results?.map((result) => result.rows),
+    redactions: response.body.results?.map((result) => result.meta?.result?.redactions),
+  });
+  const BIG = 200_000;
+
   test(`${ownerAdapter}: rows the role cannot see never change the name or the outcome`, async (t) => {
-    // Two databases that differ only in rows of another tenant: none, and many large ones.
+    // Two databases that differ only in rows of another tenant: none, and many large ones, with a
+    // large name and a large BLOB in the columns the statement projects.
     const make = async (hidden, limits) => {
       const h = await setup(t, limits);
-      if (hidden) insertRows(h, 40, { tenant: "another_tenant", name: "h".repeat(2_000), prefix: "h" });
+      if (hidden) insertRows(h, 40, { tenant: "another_tenant", name: "h".repeat(2_000), prefix: "h", state: Buffer.alloc(BIG, 9) });
       return h;
     };
-    const outcome = (response) => ({
-      status: response.status, code: response.body.error?.code, detail: response.body.error?.detail,
-      rows: response.body.results?.map((result) => result.rows),
-    });
-    // The visible rows: the seed and two more.
-    for (const [label, limits, visible, expected] of [
-      ["within the limits", { maxRows: 3 }, 2, { status: 200 }],
-      ["over maxRows", { maxRows: 3 }, 3, { status: 413, detail: { limit: "maxRows" } }],
-      ["over maxResultBytes only", { maxResultBytes: 40 }, 2, { status: 413, detail: { limit: "maxResultBytes" } }],
+    // The visible rows: the seed and `visible` more.
+    for (const [label, sql, limits, visible, expected] of [
+      ["within the limits", "SELECT id FROM projects", { maxRows: 3 }, 2, { status: 200 }],
+      ["over maxRows", "SELECT id FROM projects", { maxRows: 3 }, 3, { status: 413, detail: { limit: "maxRows" } }],
+      ["over maxResultBytes only", "SELECT id FROM projects", { maxResultBytes: 40 }, 2, { status: 413, detail: { limit: "maxResultBytes" } }],
+      ["name and BLOB projected, within the limits", "SELECT id, name, state FROM projects", {}, 2, { status: 200 }],
+      ["name and BLOB projected, over maxRows", "SELECT id, name, state FROM projects", { maxRows: 3 }, 3, { status: 413, detail: { limit: "maxRows" } }],
+      ["name and BLOB projected, over maxResultBytes", "SELECT id, name, state FROM projects", { maxResultBytes: 100 }, 2, { status: 413, detail: { limit: "maxResultBytes" } }],
     ]) {
       const answers = [];
       for (const hidden of [false, true]) {
         const h = await make(hidden, limits);
         insertRows(h, visible);
-        answers.push(outcome(await post(h, [SELECT_ID])));
+        answers.push(outcome(await post(h, [{ sql, params: {} }])));
       }
       assert.deepEqual(answers[0], answers[1], label);
       assert.equal(answers[0].status, expected.status, label);
-      assert.deepEqual(answers[0].detail, expected.detail, label);
+      assert.deepEqual(answers[0].error?.detail, expected.detail, label);
+    }
+  });
+
+  // A conditional column's value is NULL on the rows where its condition is false, so the cell a
+  // client reads (and the limits that count it) is the same whatever the hidden value was.
+  test(`${ownerAdapter}: the hidden cell of a conditional column never changes the name or the outcome`, async (t) => {
+    const sql = "SELECT id, private_state FROM projects";
+    // The visible rows are named `n`, so `private_state` is hidden on them (the seed row is named
+    // `visible` and shows its value in both databases).
+    for (const [label, limits, visible, expected] of [
+      ["within the limits", {}, 2, { status: 200 }],
+      ["a small value limit", { maxBytesPerValue: 8 }, 2, { status: 200 }],
+      ["over maxRows", { maxRows: 2 }, 3, { status: 413, detail: { limit: "maxRows" } }],
+      ["over maxResultBytes", { maxResultBytes: 60 }, 2, { status: 413, detail: { limit: "maxResultBytes" } }],
+    ]) {
+      const answers = [];
+      for (const big of [false, true]) {
+        const h = await setup(t, limits);
+        insertRows(h, visible, { privateState: big ? Buffer.alloc(BIG, 7) : Buffer.from([1]) });
+        answers.push(outcome(await post(h, [{ sql, params: {} }])));
+      }
+      assert.deepEqual(answers[0], answers[1], label);
+      assert.equal(answers[0].status, expected.status, `${label}: ${JSON.stringify(answers[0]).slice(0, 300)}`);
+      assert.deepEqual(answers[0].error?.detail, expected.detail, label);
     }
   });
 }

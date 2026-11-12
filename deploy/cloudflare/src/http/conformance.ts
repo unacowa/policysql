@@ -107,8 +107,10 @@ const expectError = async (response: Response, status: number, code: string, lab
   const body = await response.json() as { error?: Record<string, unknown> } | null;
   check(body !== null && typeof body.error === "object", `${label}: error body`);
   const error = body?.error ?? {};
-  // A detail sits between `path` and `requestId`; an error without one has no such field.
-  same(Object.keys(error), detail === undefined ? ["code", "message", "path", "requestId"] : ["code", "message", "path", "detail", "requestId"], `${label}: error fields`);
+  // Without a detail the fields are as they were (no `detail`, in any order). With one, the order is
+  // part of the contract: `detail` sits between `path` and `requestId`.
+  if (detail === undefined) same(Object.keys(error).sort(), ["code", "message", "path", "requestId"], `${label}: error fields`);
+  else same(Object.keys(error), ["code", "message", "path", "detail", "requestId"], `${label}: error fields`);
   if (detail !== undefined) same(error.detail, detail, `${label}: detail`);
   same(error.code, code, `${label}: code`);
   check(typeof error.message === "string" && error.message !== "", `${label}: message`);
