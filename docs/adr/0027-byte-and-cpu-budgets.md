@@ -557,10 +557,14 @@ against real Turso; the message of the expression-depth entry there says `maximu
 (SQLite's own limit is 1,000), which the prefix match does not depend on. The database-detected
 causes added to the fixed cause names are `function_arguments`, `compound_terms`, and
 `join_tables`, next to `columns`, `parameters`, `like_pattern`, and `database_expression_depth`.
-Review follow-ups: a database refusal is classified `complex` only when it is the one error of its
-reply and its statement is the last, because Hrana keeps running the rest of a pipeline after an
-error (a later error could roll the transaction back and a later statement commit in autocommit);
-anything else stays 503. The same rule applies to an **unreadable reply** (#97): an atomic
+**Issue #144 (2026-11-12).** `TursoHttpTransport` sends an envelope's statements as one
+conditional Hrana batch: each step runs only when the step before it succeeded. A reply that does
+not show that nothing ran after the first error is a protocol violation and 503. The first
+refusal is therefore classified (the earlier rule, "the one error of its reply and its statement
+the last", is removed). The reason: when SQLite closes the transaction on an error (`ON CONFLICT
+ROLLBACK`, `RAISE(ROLLBACK)`), a later write committed in autocommit (reproduced on real Turso).
+Core keeps the rule for an **unreadable reply** (#97) because it does not know whether a custom
+transport stops at the first error: an atomic
 execute whose envelope contains a later write and that fails with the limit class is 500
 `POLICYSQL_INTERNAL` (outcome unknown), not 413, because the write after an earlier error could
 have run in autocommit and committed. A read-only envelope, or one whose only write is its

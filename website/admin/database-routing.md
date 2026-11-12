@@ -90,6 +90,8 @@ Tursoを使う場合も、接続設定を明示します。
 new TursoHttpTransport({ url: registeredUrl, authToken: serverOwnedToken }, requestId)
 ```
 
+独自transportの`execute`は、最初に失敗した文の後ろを実行してはいけません。`ON CONFLICT ROLLBACK`や`RAISE(ROLLBACK)`でSQLiteがtransactionを閉じると、後ろの文はautocommitで実行されて部分的にcommitされるためです。`TursoHttpTransport`は、文を1つの条件付きHrana batchで送り、直前の文が成功したときだけ次の文を実行します。
+
 providerの各呼出しは、1秒とtransactionの残り時間の短い方に制限されます。期限は接続準備前に決め、BEGINで設定し直しません。providerの例外・単独の1秒上限は詳細を伏せた`POLICYSQL_DATABASE_UNAVAILABLE`、transaction全体の期限超過はHTTP 504の`POLICYSQL_DATABASE_TIMEOUT`になります。TursoへのBEGIN・SQL・COMMITにも残り時間を適用し、期限切れ後のROLLBACKには後処理用の上限時間を確保します。別DBへのフォールバックは行いません。
 
 ## DBの束縛とcallback

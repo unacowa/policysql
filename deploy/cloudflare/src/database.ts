@@ -29,6 +29,13 @@ export type DatabaseExecuteOptions = Readonly<{ maxResponseBytes: number }>;
 export interface DatabaseTransaction {
   readonly open: boolean;
   readonly usage: DatabaseUsage[];
+  /**
+   * Runs the statements in order. When one fails, the rest of this call must not run and the call
+   * fails: no result array is returned for a partial run. A failure can close the transaction
+   * inside SQLite (`ON CONFLICT ROLLBACK`, `RAISE(ROLLBACK)`), and a later statement would then run
+   * in autocommit and commit outside it. `TursoHttpTransport` meets this with one conditional
+   * Hrana batch (#144).
+   */
   execute(statements: { sql: string; args?: Record<string, unknown> }[], options: DatabaseExecuteOptions): Promise<DatabaseResult[]>;
   commit(): Promise<void>;
   rollback(): Promise<void>;

@@ -18,7 +18,7 @@
 // forwards the primary result code, sends. Each code has exactly one message wrapper, so a code
 // and a wrapper never mix.
 //
-// Only statement requests are classified. BEGIN, COMMIT, and ROLLBACK are not, so a COMMIT is
+// Only statement batch step errors are classified. BEGIN, COMMIT, and ROLLBACK are not, so a COMMIT is
 // never reported as a complexity failure (ADR 0007).
 import { EngineError } from "./errors.ts";
 
