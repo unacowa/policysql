@@ -421,6 +421,13 @@ fn callback_limits_end_the_transaction() {
     assert_eq!(engine.run_callback(&token, &select(1))["ok"], true);
     let over = engine.run_callback(&token, &select(2));
     assert_eq!(code(&over), Some("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED"));
+    // The validator is told which of the two limits (#145 pull request F); the client's commit
+    // is the check's `limit` reason either way.
+    assert_eq!(
+        over["error"]["detail"],
+        json!({"limit": "maxCallbackRowsPerCheck"}),
+        "{over}"
+    );
     engine.settle();
     assert_eq!(
         code(&last_reply(&engine)),
@@ -454,8 +461,14 @@ fn callback_limits_end_the_transaction() {
     let token = engine.token();
     let over = engine.run_callback(&token, &select(1));
     assert_eq!(code(&over), Some("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED"));
+    assert_eq!(
+        over["error"]["detail"],
+        json!({"limit": "maxCallbackBytesPerCheck"}),
+        "{over}"
+    );
     engine.settle();
     assert_eq!(reason(&last_reply(&engine)), Some("limit"));
+    assert!(last_reply(&engine)["error"]["detail"]["limit"].is_null());
 }
 
 #[test]

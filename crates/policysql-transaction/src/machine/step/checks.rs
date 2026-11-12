@@ -13,8 +13,8 @@
 
 use super::super::compiler::{Compiler, Operation, RawResult, TriggeredCheck, Validated};
 use super::super::io::{
-    self, CapabilityGrant, CheckReason, Code, Effect, Event, core_error_reply, error_reply,
-    value_reply,
+    self, CapabilityGrant, CheckReason, Code, Effect, Event, TransactionLimitName,
+    core_error_reply, error_reply, value_reply,
 };
 use super::super::state::{
     CallbackTask, CallbackWork, Capability, CommitChecks, Connection, Durable, Kind, Pending,
@@ -932,10 +932,23 @@ impl<C: Compiler> Step<'_, C> {
         let result_bytes = capability
             .result_bytes
             .saturating_add(u64::try_from(response.get().len()).map_err(|_| Fault("bytes"))?);
-        if rows > self.limits.max_callback_rows
-            || result_bytes > self.limits.max_transaction_result_bytes
-        {
-            return self.fail_validation(error_reply(Code::TransactionLimit), CheckReason::Limit);
+        // Rows first, then bytes: the order of the former `||` (#145 pull request F). Both are
+        // the check's `limit` reason; only the validator's callback reply names which.
+        if rows > self.limits.max_callback_rows {
+            return self.fail_validation(
+                error_reply(Code::TransactionLimit(Some(
+                    TransactionLimitName::CallbackRows,
+                ))),
+                CheckReason::Limit,
+            );
+        }
+        if result_bytes > self.limits.max_transaction_result_bytes {
+            return self.fail_validation(
+                error_reply(Code::TransactionLimit(Some(
+                    TransactionLimitName::CallbackBytes,
+                ))),
+                CheckReason::Limit,
+            );
         }
         if let Some(live) = self
             .volatile

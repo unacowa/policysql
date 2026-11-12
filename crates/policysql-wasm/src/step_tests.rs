@@ -134,10 +134,10 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 }
 
 #[test]
-fn abi_23_names_the_step_machine_with_the_detail_and_reason_answers() {
+fn abi_24_names_the_step_machine_with_the_limit_detail() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 23);
-    assert!(owner.runtime.snapshot().ends_with(":abi-23"));
+    assert_eq!(owner.runtime.abi_version(), 24);
+    assert!(owner.runtime.snapshot().ends_with(":abi-24"));
 }
 
 /// Runs a statement of a begun write transaction up to its `execute`, answers that effect with
@@ -309,6 +309,85 @@ fn a_keyed_compile_failure_is_the_unknown_outcome_with_the_real_compiler() {
             keyed["reply"]["error"]["detail"]["cause"]["path"], "/statements/0",
             "{}",
             output["raw"]
+        );
+    }
+}
+
+/// #145 pull request F with the real compiler: a compile limit is the same answer, `detail.limit`
+/// included, unkeyed (413) and as the cause of a keyed request's unknown outcome.
+#[test]
+fn a_keyed_compile_limit_carries_the_unkeyed_answers_limit_as_its_cause() {
+    let runtime = runtime(
+        r#"{"max_rows":100,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":1,"max_sql_bytes":1024}"#,
+    )
+    .unwrap_or_else(|| unreachable!("valid runtime"));
+    let snapshot = runtime.snapshot();
+    let auth: Value = serde_json::from_str(AUTH).unwrap_or_default();
+    let long_sql = format!("SELECT id FROM counters WHERE id = '{}'", "a".repeat(1_100));
+    for (statements, code, path, limit) in [
+        (
+            json!([
+                {"sql": "SELECT id FROM counters", "params": {}},
+                {"sql": "SELECT id FROM counters", "params": {}},
+            ]),
+            "POLICYSQL_LIMIT_EXCEEDED",
+            Value::Null,
+            "maxStatements",
+        ),
+        (
+            json!([{"sql": long_sql, "params": {}}]),
+            "POLICYSQL_REQUEST_TOO_LARGE",
+            json!("/statements/0/sql"),
+            "maxSqlBytes",
+        ),
+    ] {
+        let body = json!({"statements": statements}).to_string();
+        let answer = |key: Option<&str>| {
+            let mut volatile = None;
+            let mut operation = json!({
+                "kind": "execute", "auth": auth.clone(), "databaseBinding": binding(&snapshot),
+                "snapshot": snapshot.clone(), "bodyText": body.clone(),
+            });
+            if let Some(key) = key {
+                operation["idempotencyKey"] = json!(key);
+            }
+            let output = engine_step(
+                &runtime,
+                &mut volatile,
+                &json!({"type": "request", "operation": operation}),
+                1,
+            );
+            let id = output["effects"][0]["id"].clone();
+            let checked = engine_step(
+                &runtime,
+                &mut volatile,
+                &json!({"type": "bindingChecked", "id": id, "allowed": true}),
+                1,
+            );
+            checked["effects"]
+                .as_array()
+                .and_then(|effects| {
+                    effects
+                        .iter()
+                        .find(|effect| effect["type"] == "respond")
+                        .cloned()
+                })
+                .unwrap_or_default()
+        };
+        let unkeyed = answer(None);
+        let error = &unkeyed["reply"]["error"];
+        assert_eq!(error["code"], code, "{unkeyed}");
+        assert_eq!(error["path"], path, "{unkeyed}");
+        assert_eq!(error["detail"], json!({"limit": limit}), "{unkeyed}");
+        let keyed = answer(Some("keyed-compile-limit-0001"));
+        assert_eq!(
+            keyed["reply"]["error"]["code"], "POLICYSQL_OUTCOME_UNKNOWN",
+            "{keyed}"
+        );
+        assert_eq!(
+            keyed["reply"]["error"]["detail"],
+            json!({"cause": {"code": code, "path": path, "detail": {"limit": limit}}}),
+            "the cause is the unkeyed answer, limit included"
         );
     }
 }

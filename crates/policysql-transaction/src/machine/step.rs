@@ -9,7 +9,8 @@
 use super::compiler::{Compiler, CoreError, Operation, RawResult, ResultBudget, Validated};
 use super::io::{
     self, CheckReason, Class, Code, ConstraintKind, DriverCall, DriverResult, Effect, ErrorDetail,
-    Event, HostFacts, ObserveContext, error_reply, value_reply,
+    Event, HostFacts, ObserveContext, ResultLimitName, TransactionLimitName, error_reply,
+    value_reply,
 };
 use super::state::{
     Binding, Connection, Counters, Durable, Identity, Kind, MAX_DURABLE_BYTES, Mode, Mutation,
@@ -1490,7 +1491,9 @@ impl<C: Compiler> Step<'_, C> {
             return self.close(
                 lane,
                 Phase::Failed,
-                Some(error_reply(Code::TransactionLimit)),
+                Some(error_reply(Code::TransactionLimit(Some(
+                    TransactionLimitName::ResultBytes,
+                )))),
             );
         }
         let usage = Usage {
@@ -1537,10 +1540,11 @@ impl<C: Compiler> Step<'_, C> {
         next.versions = Some(versions);
         let next = Durable::Live(Box::new(next));
         if next.to_json().len() > MAX_DURABLE_BYTES {
+            // `MAX_DURABLE_BYTES` is a fixed constant, not a Capabilities key: no `detail.limit`.
             return self.close(
                 lane,
                 Phase::Failed,
-                Some(error_reply(Code::TransactionLimit)),
+                Some(error_reply(Code::TransactionLimit(None))),
             );
         }
         let previous = self.durable.as_ref().map(Durable::to_json);
@@ -2128,7 +2132,9 @@ impl<C: Compiler> Step<'_, C> {
             return self.close(
                 WorkLane::Client,
                 Phase::Failed,
-                Some(error_reply(Code::TransactionLimit)),
+                Some(error_reply(Code::TransactionLimit(Some(
+                    TransactionLimitName::Statements,
+                )))),
             );
         }
         let compiled = match self.compile(command) {
@@ -2319,7 +2325,9 @@ fn driver_call(sql: &str, statement: &super::DriverStatement) -> Result<DriverCa
     })
 }
 
-/// A codec marker in the raw rows: the engine could not represent a driver value.
+/// A codec marker in the raw rows: the engine could not represent a driver value. The engine
+/// marks only a value over `maxBytesPerValue` with `limit: true` (`step-effects.ts`
+/// `encodeResults`).
 fn codec_failure(result: &DriverResult) -> Option<Code> {
     let mut code = None;
     for value in result.rows.iter().flatten() {
@@ -2327,7 +2335,7 @@ fn codec_failure(result: &DriverResult) -> Option<Code> {
             match object.get("type").and_then(Value::as_str) {
                 Some("blob") => {}
                 Some("invalid") if object.get("limit") == Some(&Value::Bool(true)) => {
-                    return Some(Code::LimitExceeded);
+                    return Some(Code::LimitExceeded(Some(ResultLimitName::BytesPerValue)));
                 }
                 _ => code = Some(Code::SchemaMismatch),
             }

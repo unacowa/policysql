@@ -335,15 +335,7 @@ fn a_complexity_refusal_names_the_cause_and_never_a_position() {
 
 #[test]
 fn codes_without_a_table_row_carry_no_detail() {
-    let wide = format!(
-        "SELECT {} FROM projects",
-        (0..200)
-            .map(|index| format!("id AS c{index}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
     for (sql, expected) in [
-        (wide.as_str(), "POLICYSQL_LIMIT_EXCEEDED"),
         ("SELECT nope FROM projects", "POLICYSQL_FORBIDDEN_COLUMN"),
         (
             "SELECT private_note FROM projects",
@@ -450,7 +442,7 @@ fn the_rejection_reason_names_the_stage_and_the_variant_and_no_identifier() {
         assert_eq!(record["statementIndex"], 0, "{sql}");
         assert_eq!(record["schemaVersion"], "schema_detail", "{sql}");
         assert_eq!(record["policyVersion"], "policy_detail", "{sql}");
-        assert_eq!(record["abiVersion"], 23, "{sql}");
+        assert_eq!(record["abiVersion"], 24, "{sql}");
         assert!(
             record["reason"]
                 .as_str()
@@ -1225,7 +1217,8 @@ fn the_detail_enumerations_are_the_rust_types_and_core_keeps_them() {
     use policysql_gateway::ParameterReason;
     use policysql_parser::UnsupportedFeature;
     use policysql_transaction::machine::io::{
-        COMPLEXITY_CAUSES, COMPLEXITY_DETAILS, EXPECTATIONS, PARAMETER_REASONS,
+        COMPLEXITY_CAUSES, COMPLEXITY_DETAILS, EXCEEDED_LIMITS, EXPECTATIONS, PARAMETER_REASONS,
+        REQUEST_LIMITS, ResultLimitName, TRANSACTION_LIMITS, TransactionLimitName,
         UNSUPPORTED_FEATURES,
     };
 
@@ -1241,6 +1234,19 @@ fn the_detail_enumerations_are_the_rust_types_and_core_keeps_them() {
         policysql_core::ExpectationKind::ALL.map(policysql_core::ExpectationKind::name),
         EXPECTATIONS
     );
+    // The limit names are the Rust types', and every one is in the list of its code. The three
+    // lists hold no other name.
+    let named: BTreeSet<&str> = policysql_core::LimitName::ALL
+        .map(policysql_core::LimitName::name)
+        .into_iter()
+        .chain(ResultLimitName::ALL.map(ResultLimitName::name))
+        .collect();
+    let listed_names: BTreeSet<&str> = EXCEEDED_LIMITS.into_iter().chain(REQUEST_LIMITS).collect();
+    assert_eq!(named, listed_names);
+    assert_eq!(
+        TransactionLimitName::ALL.map(TransactionLimitName::name),
+        TRANSACTION_LIMITS
+    );
     // The complexity values are the compile causes, the database's, and `database`, in this
     // order, and nothing else.
     let expected: Vec<&str> = ComplexityCause::ALL
@@ -1255,4 +1261,441 @@ fn the_detail_enumerations_are_the_rust_types_and_core_keeps_them() {
     listed.sort_unstable();
     sorted.dedup();
     assert_eq!(sorted, listed);
+}
+
+// ---------------------------------------------------------------------------------------------
+// `detail.limit` of the three limit codes (#145 pull request F)
+// ---------------------------------------------------------------------------------------------
+
+/// The limits are small so that each is crossed by a short statement; the ones a test does not
+/// name keep the defaults.
+const SMALL_LIMITS: &str = r#"{"max_rows":2,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":2,"max_parameters":2,"max_joins":1,"max_projections":2,"max_expression_depth":4,"max_sql_bytes":1024}"#;
+
+fn runtime_with(limits: &str) -> super::PolicySqlRuntime {
+    super::PolicySqlRuntime::new(CATALOG, POLICY, "schema_detail", "policy_detail", limits)
+        .unwrap_or_else(|_| unreachable!("valid runtime"))
+}
+
+fn compile_on(runtime: &super::PolicySqlRuntime, statements: &Value, endpoint: &str) -> Value {
+    let request = json!({"statements": statements}).to_string();
+    serde_json::from_str(&runtime.compile_json(AUTH, &request, endpoint))
+        .unwrap_or_else(|_| unreachable!("runtime output is JSON"))
+}
+
+/// One statement with every `:name` parameter given a string value.
+fn one(sql: &str) -> Value {
+    json!([{"sql": sql, "params": parameters(sql)}])
+}
+
+fn limit_of(output: &Value) -> Option<&str> {
+    detail(output)?["limit"].as_str()
+}
+
+/// A case of the test below: the name, the statements, the code, the path, the limit, and the log
+/// reason (empty when there is none to check).
+type CompileLimitCase = (
+    &'static str,
+    Value,
+    &'static str,
+    Option<&'static str>,
+    &'static str,
+    &'static str,
+);
+
+/// Each limit the compile checks names itself, on Execute and Explain, with the code, path and
+/// log reason it had before the detail.
+#[test]
+fn a_compile_limit_names_the_configured_limit() {
+    let small = runtime_with(SMALL_LIMITS);
+    let long_sql = format!(
+        "SELECT id FROM projects WHERE name = '{}'",
+        "a".repeat(1_100)
+    );
+    let cases: Vec<CompileLimitCase> = vec![
+        (
+            "statements",
+            json!([
+                {"sql": "SELECT id FROM projects", "params": {}},
+                {"sql": "SELECT id FROM projects", "params": {}},
+                {"sql": "SELECT id FROM projects", "params": {}},
+            ]),
+            "POLICYSQL_LIMIT_EXCEEDED",
+            None,
+            "maxStatements",
+            "request.StatementLimit",
+        ),
+        (
+            "sql bytes",
+            json!([{"sql": long_sql, "params": {}}]),
+            "POLICYSQL_REQUEST_TOO_LARGE",
+            Some("/statements/0/sql"),
+            "maxSqlBytes",
+            "",
+        ),
+        (
+            "sql bytes of the second statement",
+            json!([
+                {"sql": "SELECT id FROM projects", "params": {}},
+                {"sql": long_sql, "params": {}},
+            ]),
+            "POLICYSQL_REQUEST_TOO_LARGE",
+            Some("/statements/1/sql"),
+            "maxSqlBytes",
+            "",
+        ),
+        (
+            "projections",
+            one("SELECT id, name, status FROM projects"),
+            "POLICYSQL_LIMIT_EXCEEDED",
+            Some("/statements/0"),
+            "maxProjections",
+            "bind.ProjectionLimit",
+        ),
+        (
+            "joins",
+            one(
+                "SELECT p.id FROM projects p JOIN tasks t ON t.project_id = p.id JOIN tasks u ON u.project_id = p.id",
+            ),
+            "POLICYSQL_LIMIT_EXCEEDED",
+            Some("/statements/0"),
+            "maxJoins",
+            "bind.JoinLimit",
+        ),
+        (
+            "parameters",
+            one("SELECT id FROM projects WHERE id = :a OR id = :b OR id = :c"),
+            "POLICYSQL_LIMIT_EXCEEDED",
+            Some("/statements/0"),
+            "maxParameters",
+            "bind.ParameterLimit",
+        ),
+        (
+            "expression depth",
+            one("SELECT id FROM projects WHERE ((((( id IS NULL)))))"),
+            "POLICYSQL_LIMIT_EXCEEDED",
+            Some("/statements/0"),
+            "maxExpressionDepth",
+            "bind.ExpressionDepth",
+        ),
+    ];
+    for (name, statements, expected_code, path, limit, reason) in cases {
+        let mut answers = Vec::new();
+        for endpoint in ["execute", "explain"] {
+            let output = compile_on(&small, &statements, endpoint);
+            assert_eq!(code(&output), expected_code, "{name} {endpoint}: {output}");
+            assert_eq!(
+                output["error"]["path"],
+                path.map_or(Value::Null, |path| json!(path)),
+                "{name} {endpoint}"
+            );
+            assert_eq!(detail(&output), Some(&json!({"limit": limit})), "{name}");
+            if !reason.is_empty() {
+                assert_eq!(log(&output)["reason"], reason, "{name} {endpoint}");
+            }
+            answers.push(output["error"].clone());
+        }
+        assert_eq!(answers[0], answers[1], "{name}: Execute and Explain agree");
+    }
+}
+
+/// A bytes parameter over `maxBytesPerValue` names it.
+#[test]
+fn a_bytes_parameter_over_the_value_limit_names_it() {
+    let runtime = runtime_with(
+        r#"{"max_rows":100,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":2,"max_bytes_per_value":3}"#,
+    );
+    let statements = json!([{
+        "sql": "SELECT id FROM projects WHERE payload = :p",
+        "params": {"p": "AAAAAA=="},
+    }]);
+    let output = compile_on(&runtime, &statements, "execute");
+    assert_eq!(code(&output), "POLICYSQL_LIMIT_EXCEEDED", "{output}");
+    assert_eq!(limit_of(&output), Some("maxBytesPerValue"), "{output}");
+    // Three bytes are within the limit.
+    let statements = json!([{
+        "sql": "SELECT id FROM projects WHERE payload = :p",
+        "params": {"p": "AAAA"},
+    }]);
+    assert!(
+        compile_on(&runtime, &statements, "execute")
+            .get("error")
+            .is_none()
+    );
+}
+
+/// What carries no `detail.limit` is pinned, so that a later change names it on purpose: a
+/// `LIMIT` clause with an invalid value (not a configured limit) and the derived compile input.
+/// An empty statement is `INVALID_SQL`, not `INVALID_REQUEST`, so the envelope check on an empty
+/// SQL (`EnvelopeAt`) is not reachable from a client.
+#[test]
+fn a_bound_without_a_capabilities_key_carries_no_limit() {
+    let small = runtime_with(
+        r#"{"max_rows":2,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":2,"max_request_bytes":65536}"#,
+    );
+    for sql in [
+        "SELECT id FROM projects LIMIT -1",
+        "SELECT id FROM projects LIMIT 'x'",
+    ] {
+        let output = compile_on(&small, &one(sql), "execute");
+        assert_eq!(code(&output), "POLICYSQL_LIMIT_EXCEEDED", "{sql}: {output}");
+        assert_eq!(detail(&output), None, "{sql}");
+        assert_eq!(log(&output)["reason"], "bind.InvalidLimit", "{sql}");
+    }
+    // A SELECT without a result column is not a projection limit: the parser refuses it.
+    let output = compile_on(&small, &one("SELECT FROM projects"), "execute");
+    assert_eq!(code(&output), "POLICYSQL_INVALID_SQL", "{output}");
+    // A blank statement is an invalid SQL, never an invalid request.
+    for sql in ["", "   ", "\n\t"] {
+        let output = compile_on(&small, &one(sql), "execute");
+        assert_eq!(code(&output), "POLICYSQL_INVALID_SQL", "{sql:?}: {output}");
+    }
+    // The compile input bound is derived from `max_request_bytes` (65,536 at the smallest).
+    let request = format!(
+        r#"{{"statements":[{{"sql":"SELECT id FROM projects","params":{{}}}}],"pad":"{}"}}"#,
+        "x".repeat(200_000)
+    );
+    let output: Value =
+        serde_json::from_str(&small.compile_json(AUTH, &request, "execute")).unwrap_or_default();
+    assert_eq!(code(&output), "POLICYSQL_REQUEST_TOO_LARGE", "{output}");
+    assert_eq!(output["error"]["path"], Value::Null);
+    assert_eq!(detail(&output), None);
+}
+
+/// A body over `maxRequestBytes` or `maxJsonValues` names it, through both body checks; the other
+/// refusals of a body carry no detail.
+#[test]
+fn a_body_limit_names_the_configured_limit() {
+    // The smallest request limits, so that a short body crosses them.
+    let runtime = runtime_with(
+        r#"{"max_rows":100,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":2,"max_request_bytes":65536,"max_json_values":1024}"#,
+    );
+    let big = format!(r#"{{"mode":"read","pad":"{}"}}"#, "x".repeat(70_000));
+    let many = format!("[{}]", vec!["0"; 1_100].join(","));
+    for (body, expected_code, expected) in [
+        (
+            big.as_str(),
+            "POLICYSQL_REQUEST_TOO_LARGE",
+            Some("maxRequestBytes"),
+        ),
+        (
+            many.as_str(),
+            "POLICYSQL_REQUEST_TOO_LARGE",
+            Some("maxJsonValues"),
+        ),
+        ("{", "POLICYSQL_INVALID_REQUEST", None),
+        (r#"{"a":1,"a":2}"#, "POLICYSQL_INVALID_REQUEST", None),
+    ] {
+        for output in [runtime.check_body_json(body), runtime.begin_body_json(body)] {
+            let output: Value = serde_json::from_str(&output).unwrap_or_default();
+            assert_eq!(code(&output), expected_code, "{output}");
+            assert_eq!(
+                detail(&output),
+                expected.map(|limit| json!({"limit": limit})).as_ref(),
+                "{output}"
+            );
+        }
+    }
+    // A begin body of the wrong shape is an invalid request without a detail.
+    let output: Value = serde_json::from_str(&runtime.begin_body_json("[]")).unwrap_or_default();
+    assert_eq!(code(&output), "POLICYSQL_INVALID_REQUEST", "{output}");
+    assert_eq!(detail(&output), None);
+    // The depth limit is another code and carries nothing.
+    let deep = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+    let output: Value = serde_json::from_str(&runtime.check_body_json(&deep)).unwrap_or_default();
+    assert_eq!(code(&output), "POLICYSQL_JSON_TOO_DEEP", "{output}");
+    assert_eq!(detail(&output), None);
+}
+
+/// A result the runtime refuses names the limit it crossed, except the raw bound, which is
+/// derived from several limits.
+#[test]
+fn a_result_limit_names_the_configured_limit() {
+    let validate = |runtime: &super::PolicySqlRuntime, sql: &str, raw: &str| -> Value {
+        let compiled = compile_on(runtime, &one(sql), "execute");
+        let handle = compiled["executionHandle"]
+            .as_u64()
+            .unwrap_or_else(|| unreachable!("{sql}: {compiled}"));
+        let output: Value =
+            serde_json::from_str(&runtime.validate_result_json(handle, 0, raw)).unwrap_or_default();
+        runtime.release_execution(handle);
+        output
+    };
+    let rows = |count: usize, cell: &str| {
+        json!({
+            "columns": ["id", "name"],
+            "rows": vec![vec![cell, cell]; count],
+            "affectedRows": 0,
+        })
+        .to_string()
+    };
+    // Rows: `max_rows` is 2.
+    let small = runtime_with(SMALL_LIMITS);
+    let sql = "SELECT id, name FROM projects";
+    assert!(validate(&small, sql, &rows(2, "a")).get("error").is_none());
+    let output = validate(&small, sql, &rows(3, "a"));
+    assert_eq!(code(&output), "POLICYSQL_LIMIT_EXCEEDED", "{output}");
+    assert_eq!(limit_of(&output), Some("maxRows"), "{output}");
+    // Bytes: `max_result_bytes` is 10, and a row of two 6-byte cells crosses it.
+    let bytes = runtime_with(
+        r#"{"max_rows":100,"max_result_bytes":10,"timeout_ms":1000,"max_statements":2}"#,
+    );
+    let output = validate(&bytes, sql, &rows(1, "aaaaaa"));
+    assert_eq!(code(&output), "POLICYSQL_LIMIT_EXCEEDED", "{output}");
+    assert_eq!(limit_of(&output), Some("maxResultBytes"), "{output}");
+    // Values: 1,024 is the smallest `max_json_values`; 600 rows of two cells are 1,202 values.
+    let values = runtime_with(
+        r#"{"max_rows":1000,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":2,"max_json_values":1024}"#,
+    );
+    let output = validate(&values, sql, &rows(600, "a"));
+    assert_eq!(code(&output), "POLICYSQL_LIMIT_EXCEEDED", "{output}");
+    assert_eq!(limit_of(&output), Some("maxJsonValues"), "{output}");
+    // A BLOB cell over `max_bytes_per_value`.
+    let blobs = runtime_with(
+        r#"{"max_rows":100,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":2,"max_bytes_per_value":3}"#,
+    );
+    let raw = json!({
+        "columns": ["payload"],
+        "rows": [[{"type": "blob", "base64": "AAAAAA=="}]],
+        "affectedRows": 0,
+    })
+    .to_string();
+    let output = validate(&blobs, "SELECT payload FROM projects", &raw);
+    assert_eq!(code(&output), "POLICYSQL_LIMIT_EXCEEDED", "{output}");
+    assert_eq!(limit_of(&output), Some("maxBytesPerValue"), "{output}");
+    // The raw text over its derived bound has no name: it is a sum of several limits.
+    let junk = "x".repeat(2_000_000);
+    let output = validate(&small, sql, &junk);
+    assert_eq!(code(&output), "POLICYSQL_LIMIT_EXCEEDED", "{output}");
+    assert_eq!(detail(&output), None, "{output}");
+    assert_eq!(output["error"].get("detail"), None);
+}
+
+/// The limits' numbers never reach the answer: it holds the name and nothing else.
+#[test]
+fn a_limit_answer_holds_the_name_and_not_the_configured_number() {
+    let runtime = runtime_with(
+        r#"{"max_rows":7,"max_result_bytes":7777,"timeout_ms":1000,"max_statements":2,"max_sql_bytes":1777,"max_joins":1}"#,
+    );
+    let long_sql = format!(
+        "SELECT id FROM projects WHERE name = '{}'",
+        "a".repeat(1_800)
+    );
+    for statements in [
+        one(
+            "SELECT p.id FROM projects p JOIN tasks t ON t.project_id = p.id JOIN tasks u ON u.project_id = p.id",
+        ),
+        json!([{"sql": long_sql, "params": {}}]),
+    ] {
+        let output = compile_on(&runtime, &statements, "execute");
+        let error = output["error"].as_object().cloned().unwrap_or_default();
+        assert_eq!(
+            error["detail"].as_object().map(serde_json::Map::len),
+            Some(1)
+        );
+        let text = output["error"].to_string();
+        for number in ["7777", "1777", "limits", "transactions"] {
+            assert!(!text.contains(number), "{number}: {text}");
+        }
+    }
+}
+
+/// A client's own words never become the name: a parameter, a comment and a column alias that
+/// spell a limit leave the name to the place that checked.
+#[test]
+fn a_client_string_does_not_choose_the_limit_name() {
+    let small = runtime_with(SMALL_LIMITS);
+    let output = compile_on(
+        &small,
+        &json!([{
+            "sql": "SELECT id FROM projects /* maxSqlBytes */ WHERE id = :max_rows OR id = :b OR id = :c",
+            "params": {"max_rows": "x", "b": "x", "c": "x"},
+        }]),
+        "execute",
+    );
+    assert_eq!(code(&output), "POLICYSQL_LIMIT_EXCEEDED", "{output}");
+    assert_eq!(limit_of(&output), Some("maxParameters"), "{output}");
+    let output = compile_on(
+        &small,
+        &one("SELECT id AS maxRows, name AS maxJoins, status AS max_rows FROM projects"),
+        "execute",
+    );
+    assert_eq!(limit_of(&output), Some("maxProjections"), "{output}");
+}
+
+/// A binder limit and the column resolution: where a hidden column and a missing one are answered
+/// with the same code, the answers are the same (`detail.limit` included); a template whose codes
+/// differ is listed with the reason. The binder walks in a fixed order and stops at the first
+/// failure, so a limit reached before the column is resolved is the same limit for both.
+#[test]
+fn a_limit_is_the_same_answer_for_a_hidden_column_and_a_missing_one() {
+    // Different codes: the binder walks the statement in order and stops at the first failure. A
+    // hidden column resolves (the role's Binding Catalog has it), so the walk goes on to the third
+    // parameter and stops at `maxParameters`; a missing column stops the walk where it is named,
+    // as `FORBIDDEN_COLUMN`, before the third parameter. The codes already differed before
+    // `detail` (#154), and `limit` adds no fact the code did not give: where both answers have
+    // the same code they are the same answer, `limit` included.
+    const LIMIT_ORDER_CODE_SPLITS: [&str; 2] = [
+        "SELECT id FROM projects WHERE {C} = :a OR id = :b OR id = :c",
+        "UPDATE projects SET name = :a WHERE {C} = :b OR id = :c",
+    ];
+    let small = runtime_with(SMALL_LIMITS);
+    let column_templates = [
+        "SELECT id, name, {C} FROM projects",
+        "SELECT {C} FROM projects p JOIN tasks t ON t.project_id = p.id JOIN tasks u ON u.project_id = p.id",
+        "SELECT id FROM projects WHERE {C} = :a OR id = :b OR id = :c",
+        "SELECT id FROM projects WHERE ((((( {C} IS NULL)))))",
+        "SELECT id FROM projects WHERE id = :a OR (id = :b OR (id = :c OR {C} IS NULL))",
+        "UPDATE projects SET name = :a WHERE {C} = :b OR id = :c",
+    ];
+    let resource_templates = [
+        "SELECT id, name, status FROM {R}",
+        "SELECT p.id FROM projects p JOIN {R} r ON r.id = p.id JOIN tasks t ON t.project_id = p.id JOIN tasks u ON u.project_id = p.id",
+    ];
+    let answer = |sql: &str, endpoint: &str| {
+        let params = if endpoint == "execute" {
+            parameters(sql)
+        } else {
+            json!({})
+        };
+        compile_on(&small, &json!([{"sql": sql, "params": params}]), endpoint)
+    };
+    let mut splits: BTreeSet<&str> = BTreeSet::new();
+    let mut limited = 0;
+    let mut cases: Vec<(&str, String, String)> = Vec::new();
+    for template in column_templates {
+        for hidden in ["private_note", "private_int", "private_bytes"] {
+            cases.push((
+                template,
+                template.replace("{C}", hidden),
+                template.replace("{C}", "no_such_column"),
+            ));
+        }
+    }
+    for template in resource_templates {
+        for (hidden, missing) in [("hidden", "no_such_table"), ("HIDDEN", "NO_SUCH_TABLE")] {
+            cases.push((
+                template,
+                template.replace("{R}", hidden),
+                template.replace("{R}", missing),
+            ));
+        }
+    }
+    for (template, hidden, missing) in cases {
+        for endpoint in ["execute", "explain"] {
+            let (seen, absent) = (answer(&hidden, endpoint), answer(&missing, endpoint));
+            if code(&seen) != code(&absent) {
+                splits.insert(template);
+                continue;
+            }
+            assert_eq!(
+                seen["error"], absent["error"],
+                "{endpoint} {hidden} / {missing}"
+            );
+            if limit_of(&seen).is_some() {
+                limited += 1;
+            }
+        }
+    }
+    assert_eq!(splits, BTreeSet::from(LIMIT_ORDER_CODE_SPLITS));
+    assert!(limited >= 10, "{limited} answers named a limit");
 }

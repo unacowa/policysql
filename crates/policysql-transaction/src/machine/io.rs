@@ -141,6 +141,69 @@ impl CheckReason {
     }
 }
 
+/// A configured limit the machine checks itself on a result or a response, by its Capabilities
+/// key (`limits.<name>`, `error.detail.limit` of `POLICYSQL_LIMIT_EXCEEDED`, #145 pull request F).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResultLimitName {
+    Rows,
+    ResultBytes,
+    ResponseBytes,
+    BytesPerValue,
+}
+
+impl ResultLimitName {
+    /// Every name, in declaration order.
+    pub const ALL: [Self; 4] = [
+        Self::Rows,
+        Self::ResultBytes,
+        Self::ResponseBytes,
+        Self::BytesPerValue,
+    ];
+
+    /// The Capabilities key.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Rows => "maxRows",
+            Self::ResultBytes => "maxResultBytes",
+            Self::ResponseBytes => "maxResponseBytes",
+            Self::BytesPerValue => "maxBytesPerValue",
+        }
+    }
+}
+
+/// A configured limit of an interactive transaction or of a commit check's callbacks, by its
+/// Capabilities key (`transactions.<name>`, `error.detail.limit` of
+/// `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`, #145 pull request F).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionLimitName {
+    Statements,
+    ResultBytes,
+    CallbackRows,
+    CallbackBytes,
+}
+
+impl TransactionLimitName {
+    /// Every name, in declaration order.
+    pub const ALL: [Self; 4] = [
+        Self::Statements,
+        Self::ResultBytes,
+        Self::CallbackRows,
+        Self::CallbackBytes,
+    ];
+
+    /// The Capabilities key.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Statements => "maxStatements",
+            Self::ResultBytes => "maxResultBytes",
+            Self::CallbackRows => "maxCallbackRowsPerCheck",
+            Self::CallbackBytes => "maxCallbackBytesPerCheck",
+        }
+    }
+}
+
 /// The kind of a constraint violation (ADR 0030): one fixed value per refused statement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -552,7 +615,9 @@ pub enum Code {
     /// The commit outcome is unknown (503 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`). Not
     /// [`Code::KeyedOutcomeUnknown`].
     OutcomeUnknown,
-    TransactionLimit,
+    /// A transaction or callback limit (413). `None`: a bound without a Capabilities key (a fixed
+    /// constant), so the reply carries no `detail.limit`.
+    TransactionLimit(Option<TransactionLimitName>),
     ModeViolation,
     /// A commit check rejected the commit (409), with the fixed reason as `detail.reason`.
     CheckRejected(CheckReason),
@@ -563,7 +628,9 @@ pub enum Code {
     /// The database refused a statement (class `refused`, #145 pull request E).
     DatabaseError,
     SchemaMismatch,
-    LimitExceeded,
+    /// A configured limit (413). `None`: a bound without a Capabilities key (derived, fixed, or
+    /// reported as the adapter class `limit`), so the reply carries no `detail.limit`.
+    LimitExceeded(Option<ResultLimitName>),
     IdempotencyConflict,
     KeyInvalid,
     Timeout,
@@ -597,7 +664,7 @@ impl Code {
                 "POLICYSQL_COMMIT_OUTCOME_UNKNOWN",
                 "The commit outcome is unknown.",
             ),
-            Self::TransactionLimit => (
+            Self::TransactionLimit(_) => (
                 "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
                 "The transaction limit was exceeded.",
             ),
@@ -633,7 +700,7 @@ impl Code {
                 "POLICYSQL_SCHEMA_MISMATCH",
                 "The database result does not match the compiled logical contract.",
             ),
-            Self::LimitExceeded => (
+            Self::LimitExceeded(_) => (
                 "POLICYSQL_LIMIT_EXCEEDED",
                 "The request or result exceeded a configured limit.",
             ),
@@ -665,11 +732,14 @@ impl Code {
         }
     }
 
-    /// The detail the machine's own code carries (ADR 0030): a commit check's reason.
+    /// The detail the machine's own code carries (ADR 0030): a commit check's reason, or the
+    /// Capabilities key of a limit.
     #[must_use]
     pub fn detail(self) -> Option<ErrorDetail> {
         match self {
             Self::CheckRejected(reason) => Some(ErrorDetail::reason(reason.name())),
+            Self::LimitExceeded(Some(limit)) => Some(ErrorDetail::limit(limit.name())),
+            Self::TransactionLimit(Some(limit)) => Some(ErrorDetail::limit(limit.name())),
             _ => None,
         }
     }
@@ -687,7 +757,9 @@ impl Code {
             // A constraint class on any event but a statement's `executeFailed` is an adapter
             // bug, so the outcome is unknown (ADR 0030).
             Class::NotCommitted | Class::Unknown | Class::Constraint => Self::Internal,
-            Class::Limit => Self::LimitExceeded,
+            // The class does not say which bound (a value over `maxBytesPerValue` or the
+            // transport's derived read cap), so it has no `limit`.
+            Class::Limit => Self::LimitExceeded(None),
             Class::Complex => Self::SqlTooComplex,
             Class::Refused => Self::DatabaseError,
         }
@@ -805,6 +877,34 @@ pub const EXPECTATIONS: [&str; 2] = ["affectedRows", "rowCount"];
 pub const COMMIT_CHECK_REASONS: [&str; 5] =
     ["denied", "unavailable", "limit", "unconfigured", "callback"];
 
+/// The values `error.detail.limit` may take on `POLICYSQL_LIMIT_EXCEEDED`: Capabilities `limits`
+/// keys.
+pub const EXCEEDED_LIMITS: [&str; 10] = [
+    "maxRows",
+    "maxResultBytes",
+    "maxResponseBytes",
+    "maxStatements",
+    "maxJsonValues",
+    "maxBytesPerValue",
+    "maxParameters",
+    "maxExpressionDepth",
+    "maxProjections",
+    "maxJoins",
+];
+
+/// The values `error.detail.limit` may take on `POLICYSQL_REQUEST_TOO_LARGE`: Capabilities
+/// `limits` keys.
+pub const REQUEST_LIMITS: [&str; 3] = ["maxRequestBytes", "maxJsonValues", "maxSqlBytes"];
+
+/// The values `error.detail.limit` may take on `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`:
+/// Capabilities `transactions` keys.
+pub const TRANSACTION_LIMITS: [&str; 4] = [
+    "maxStatements",
+    "maxResultBytes",
+    "maxCallbackRowsPerCheck",
+    "maxCallbackBytesPerCheck",
+];
+
 /// The largest `error.detail.span` offset: the ceiling of a statement's byte length
 /// (`MAX_SQL_BYTES_CEILING`).
 pub const MAX_SPAN_OFFSET: u64 = 1_048_576;
@@ -851,6 +951,10 @@ pub struct ErrorDetail {
     /// `EXPECTATION_FAILED`: from [`EXPECTATIONS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expectation: Option<String>,
+    /// `LIMIT_EXCEEDED`, `REQUEST_TOO_LARGE`, `TRANSACTION_LIMIT_EXCEEDED`: the Capabilities key
+    /// of the limit, from the code's list. Absent for a bound without a key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<String>,
 }
 
 /// A half-open range of UTF-8 byte offsets into a statement's SQL text.
@@ -911,6 +1015,15 @@ impl ErrorDetail {
         }
     }
 
+    /// A detail naming only `limit`.
+    #[must_use]
+    pub fn limit(name: &str) -> Self {
+        Self {
+            limit: Some(name.to_owned()),
+            ..Self::default()
+        }
+    }
+
     /// A detail holding only `span`.
     #[must_use]
     pub fn span(start: u64, end: u64) -> Self {
@@ -921,7 +1034,8 @@ impl ErrorDetail {
     }
 
     /// Whether `detail` is what `code` allows. A code in the table requires its detail, except
-    /// `POLICYSQL_INVALID_SQL`, whose `span` is absent when the parser reported no position; a
+    /// `POLICYSQL_INVALID_SQL`, whose `span` is absent when the parser reported no position, and
+    /// the three limit codes, whose detail is absent where the bound has no Capabilities key; a
     /// code outside the table has none. The value is read as JSON: serde takes a missing or
     /// `null` `Option` field as `None` and reads a struct from an array.
     #[must_use]
@@ -945,6 +1059,15 @@ impl ErrorDetail {
                 .is_some_and(|value| Self::enumerated(value, "complexity", &COMPLEXITY_DETAILS)),
             "POLICYSQL_EXPECTATION_FAILED" => {
                 detail.is_some_and(|value| Self::enumerated(value, "expectation", &EXPECTATIONS))
+            }
+            "POLICYSQL_LIMIT_EXCEEDED" => {
+                detail.is_none_or(|value| Self::enumerated(value, "limit", &EXCEEDED_LIMITS))
+            }
+            "POLICYSQL_REQUEST_TOO_LARGE" => {
+                detail.is_none_or(|value| Self::enumerated(value, "limit", &REQUEST_LIMITS))
+            }
+            "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED" => {
+                detail.is_none_or(|value| Self::enumerated(value, "limit", &TRANSACTION_LIMITS))
             }
             _ => detail.is_none(),
         }
@@ -1171,9 +1294,10 @@ pub fn value_reply(value: &RawValue) -> Box<RawValue> {
 mod tests {
     use super::{
         COMMIT_CHECK_REASONS, COMPLEXITY_CAUSES, COMPLEXITY_DETAILS, CheckReason, Class, Code,
-        ConstraintKind, EXPECTATIONS, ErrorDetail, OUTCOME_CAUSE_CODES, PARAMETER_REASONS,
-        UNSUPPORTED_FEATURES, class_reply, constraint_reply, core_error_reply, error_reply,
-        error_reply_at_with, is_cause_path, outcome_unknown_reply,
+        ConstraintKind, EXCEEDED_LIMITS, EXPECTATIONS, ErrorDetail, OUTCOME_CAUSE_CODES,
+        PARAMETER_REASONS, REQUEST_LIMITS, ResultLimitName, TRANSACTION_LIMITS,
+        TransactionLimitName, UNSUPPORTED_FEATURES, class_reply, constraint_reply,
+        core_error_reply, error_reply, error_reply_at_with, is_cause_path, outcome_unknown_reply,
     };
     use crate::machine::compiler::CoreError;
     use serde_json::{Value, json};
@@ -1316,6 +1440,93 @@ mod tests {
         }
     }
 
+    const LIMIT_CODES: [(&str, &[&str]); 3] = [
+        ("POLICYSQL_LIMIT_EXCEEDED", &EXCEEDED_LIMITS),
+        ("POLICYSQL_REQUEST_TOO_LARGE", &REQUEST_LIMITS),
+        ("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", &TRANSACTION_LIMITS),
+    ];
+
+    #[test]
+    fn a_limit_row_takes_no_detail_or_one_limit_of_its_own_list() {
+        let allowed =
+            |code: &str, detail: Option<Value>| ErrorDetail::allowed(code, detail.as_ref());
+        let every: Vec<&str> = LIMIT_CODES
+            .iter()
+            .flat_map(|(_, values)| values.iter().copied())
+            .collect();
+        for (code, values) in LIMIT_CODES {
+            // A bound without a Capabilities key carries no detail.
+            assert!(allowed(code, None), "{code}");
+            for limit in values {
+                assert!(
+                    allowed(code, Some(json!({"limit": limit}))),
+                    "{code} {limit}"
+                );
+            }
+            // A value of another code's list is refused, whatever the shared key.
+            for limit in every.iter().filter(|limit| !values.contains(limit)) {
+                assert!(
+                    !allowed(code, Some(json!({"limit": limit}))),
+                    "{code} {limit}"
+                );
+            }
+            for detail in [
+                json!({}),
+                json!({"limit": "timeoutMs"}),
+                json!({"limit": "maxCommitChecks"}),
+                json!({"limit": "maxCallbackQueriesPerCheck"}),
+                json!({"limit": "limits.maxRows"}),
+                json!({"limit": "transactions.maxStatements"}),
+                json!({"limit": "MAXROWS"}),
+                json!({"limit": "maxRows "}),
+                json!({"limit": 100}),
+                json!({"limit": null}),
+                json!({"limit": ["maxRows"]}),
+                json!({"limit": values[0], "value": 100}),
+                json!({"reason": "names"}),
+                json!({"constraint": "unique"}),
+                json!(["maxRows"]),
+                json!("maxRows"),
+                Value::Null,
+            ] {
+                assert!(!allowed(code, Some(detail.clone())), "{code} {detail}");
+            }
+        }
+        // Every other code refuses a limit.
+        for code in [
+            "POLICYSQL_INVALID_PARAMETER",
+            "POLICYSQL_COMMIT_CHECK_REJECTED",
+            "POLICYSQL_DATABASE_ERROR",
+            "POLICYSQL_INTERNAL",
+        ] {
+            assert!(!allowed(code, Some(json!({"limit": "maxRows"}))), "{code}");
+        }
+    }
+
+    #[test]
+    fn the_limit_names_are_the_lists() {
+        let results = ResultLimitName::ALL.map(ResultLimitName::name);
+        let transactions = TransactionLimitName::ALL.map(TransactionLimitName::name);
+        for names in [results.as_slice(), transactions.as_slice()] {
+            let unique: std::collections::BTreeSet<_> = names.iter().collect();
+            assert_eq!(unique.len(), names.len());
+        }
+        assert!(results.iter().all(|name| EXCEEDED_LIMITS.contains(name)));
+        assert_eq!(transactions, TRANSACTION_LIMITS);
+        // A limit without a name carries no detail; a named one carries exactly its name.
+        assert_eq!(Code::LimitExceeded(None).detail(), None);
+        assert_eq!(Code::TransactionLimit(None).detail(), None);
+        assert_eq!(Code::for_class(Class::Limit), Code::LimitExceeded(None));
+        assert_eq!(
+            Code::LimitExceeded(Some(ResultLimitName::Rows)).detail(),
+            Some(ErrorDetail::limit("maxRows"))
+        );
+        assert_eq!(
+            Code::TransactionLimit(Some(TransactionLimitName::CallbackBytes)).detail(),
+            Some(ErrorDetail::limit("maxCallbackBytesPerCheck"))
+        );
+    }
+
     #[test]
     fn the_check_reasons_are_the_names_of_the_type() {
         let all = [
@@ -1360,7 +1571,7 @@ mod tests {
                 | Code::Unavailable
                 | Code::Internal
                 | Code::OutcomeUnknown
-                | Code::TransactionLimit
+                | Code::TransactionLimit(_)
                 | Code::ModeViolation
                 | Code::CheckRejected(_)
                 | Code::Stale
@@ -1369,7 +1580,7 @@ mod tests {
                 | Code::DatabaseUnavailable
                 | Code::DatabaseError
                 | Code::SchemaMismatch
-                | Code::LimitExceeded
+                | Code::LimitExceeded(_)
                 | Code::IdempotencyConflict
                 | Code::KeyInvalid
                 | Code::Timeout
@@ -1385,7 +1596,7 @@ mod tests {
             Code::Unavailable,
             Code::Internal,
             Code::OutcomeUnknown,
-            Code::TransactionLimit,
+            Code::TransactionLimit(None),
             Code::ModeViolation,
             Code::Stale,
             Code::BindingRejected,
@@ -1393,7 +1604,7 @@ mod tests {
             Code::DatabaseUnavailable,
             Code::DatabaseError,
             Code::SchemaMismatch,
-            Code::LimitExceeded,
+            Code::LimitExceeded(None),
             Code::IdempotencyConflict,
             Code::KeyInvalid,
             Code::Timeout,
@@ -1408,6 +1619,18 @@ mod tests {
                 CheckReason::Callback,
             ]
             .map(Code::CheckRejected),
+        );
+        codes.extend(
+            ResultLimitName::ALL
+                .map(Some)
+                .into_iter()
+                .map(Code::LimitExceeded),
+        );
+        codes.extend(
+            TransactionLimitName::ALL
+                .map(Some)
+                .into_iter()
+                .map(Code::TransactionLimit),
         );
         for code in codes {
             exhaustive(code);
@@ -1651,6 +1874,9 @@ mod tests {
             COMPLEXITY_DETAILS.as_slice(),
             EXPECTATIONS.as_slice(),
             COMMIT_CHECK_REASONS.as_slice(),
+            EXCEEDED_LIMITS.as_slice(),
+            REQUEST_LIMITS.as_slice(),
+            TRANSACTION_LIMITS.as_slice(),
         ] {
             let unique: std::collections::BTreeSet<_> = values.iter().collect();
             assert_eq!(unique.len(), values.len());

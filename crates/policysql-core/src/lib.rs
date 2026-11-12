@@ -215,6 +215,59 @@ impl ExpectationKind {
     }
 }
 
+/// A configured limit by its Capabilities key (`limits.<name>`), as `error.detail.limit` of
+/// `POLICYSQL_LIMIT_EXCEEDED` and `POLICYSQL_REQUEST_TOO_LARGE` names it (#145 pull request F).
+/// Only a place that checks the limit itself names it; a derived bound has no name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LimitName {
+    MaxRows,
+    MaxResultBytes,
+    MaxStatements,
+    MaxRequestBytes,
+    MaxJsonValues,
+    MaxSqlBytes,
+    MaxBytesPerValue,
+    MaxParameters,
+    MaxExpressionDepth,
+    MaxProjections,
+    MaxJoins,
+}
+
+impl LimitName {
+    /// Every name, in declaration order.
+    pub const ALL: [Self; 11] = [
+        Self::MaxRows,
+        Self::MaxResultBytes,
+        Self::MaxStatements,
+        Self::MaxRequestBytes,
+        Self::MaxJsonValues,
+        Self::MaxSqlBytes,
+        Self::MaxBytesPerValue,
+        Self::MaxParameters,
+        Self::MaxExpressionDepth,
+        Self::MaxProjections,
+        Self::MaxJoins,
+    ];
+
+    /// The Capabilities key: `"maxRows"`, `"maxResultBytes"`, ...
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MaxRows => "maxRows",
+            Self::MaxResultBytes => "maxResultBytes",
+            Self::MaxStatements => "maxStatements",
+            Self::MaxRequestBytes => "maxRequestBytes",
+            Self::MaxJsonValues => "maxJsonValues",
+            Self::MaxSqlBytes => "maxSqlBytes",
+            Self::MaxBytesPerValue => "maxBytesPerValue",
+            Self::MaxParameters => "maxParameters",
+            Self::MaxExpressionDepth => "maxExpressionDepth",
+            Self::MaxProjections => "maxProjections",
+            Self::MaxJoins => "maxJoins",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationKind {
     Select,

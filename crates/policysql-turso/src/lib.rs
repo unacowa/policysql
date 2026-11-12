@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use policysql_core::{
-    ConstraintScalar, ExpectationKind, LogicalType, LogicalValue, ValueDescriptor,
+    ConstraintScalar, ExpectationKind, LimitName, LogicalType, LogicalValue, ValueDescriptor,
 };
 use policysql_execution::{DatabaseExecutor, VerifiedExecutionPlan};
 use policysql_sqlite::SqliteProfile;
@@ -89,7 +89,8 @@ pub fn validate_sealed_result(
 ///
 /// # Errors
 ///
-/// As [`validate_sealed_result`]; a row crossing `max_result_bytes` is `LimitExceeded`.
+/// As [`validate_sealed_result`]; a row crossing `max_result_bytes` is
+/// `LimitExceeded(MaxResultBytes)`.
 pub fn validate_sealed_result_within(
     plan: &VerifiedExecutionPlan<SqliteProfile>,
     result: &mut ExecuteResult,
@@ -127,7 +128,7 @@ fn validate_public_result(
         return Err(AdapterError::InvalidResult);
     }
     if u64::try_from(result.rows.len()).unwrap_or(u64::MAX) > plan.limits().max_rows {
-        return Err(AdapterError::LimitExceeded);
+        return Err(AdapterError::LimitExceeded(LimitName::MaxRows));
     }
     let mut bytes = 0_u64;
     for (row_index, row) in result.rows.iter().enumerate() {
@@ -143,9 +144,9 @@ fn validate_public_result(
             )?;
             bytes = bytes
                 .checked_add(value_size(value))
-                .ok_or(AdapterError::LimitExceeded)?;
+                .ok_or(AdapterError::LimitExceeded(LimitName::MaxResultBytes))?;
             if bytes > max_result_bytes {
-                return Err(AdapterError::LimitExceeded);
+                return Err(AdapterError::LimitExceeded(LimitName::MaxResultBytes));
             }
         }
         if result.redactions.get(row_index).is_none_or(|flags| {
@@ -289,7 +290,7 @@ fn validate_value(
     max_bytes_per_value: usize,
 ) -> Result<(), AdapterError> {
     if matches!(value, LogicalValue::Bytes(value) if value.len() > max_bytes_per_value) {
-        return Err(AdapterError::LimitExceeded);
+        return Err(AdapterError::LimitExceeded(LimitName::MaxBytesPerValue));
     }
     if matches!(value, LogicalValue::Null) {
         return if descriptor.nullable {
@@ -538,7 +539,8 @@ pub enum ClaimResult {
 pub enum AdapterError {
     NotConfigured,
     Timeout,
-    LimitExceeded,
+    /// A configured limit, by its Capabilities key (`error.detail.limit`, #145 pull request F).
+    LimitExceeded(LimitName),
     ExpectationFailed(ExpectationKind),
     InvalidResult,
     Conflict,
@@ -553,7 +555,7 @@ impl fmt::Display for AdapterError {
         match self {
             Self::NotConfigured => formatter.write_str("database adapter is not configured"),
             Self::Timeout => formatter.write_str("database operation timed out"),
-            Self::LimitExceeded => {
+            Self::LimitExceeded(_) => {
                 formatter.write_str("database result exceeded configured limits")
             }
             Self::ExpectationFailed(_) => {
@@ -592,8 +594,8 @@ mod tests {
     };
     use policysql_catalog::{Catalog, ResourceDescriptor};
     use policysql_core::{
-        ColumnId, ColumnName, ConstraintScalar, ExpectationKind, LogicalType, LogicalValue,
-        PolicyId, ResourceId, ResourceName, ResultName, SnapshotId, ValueConstraints,
+        ColumnId, ColumnName, ConstraintScalar, ExpectationKind, LimitName, LogicalType,
+        LogicalValue, PolicyId, ResourceId, ResourceName, ResultName, SnapshotId, ValueConstraints,
         ValueDescriptor, ValueRepresentation,
     };
     use policysql_execution::{DatabaseExecutor, ExecutionLimits, VerifiedExecutionPlan};
@@ -921,7 +923,7 @@ mod tests {
         }));
         assert_eq!(
             executor.execute(&verified),
-            Err(AdapterError::LimitExceeded)
+            Err(AdapterError::LimitExceeded(LimitName::MaxRows))
         );
     }
 
@@ -1036,7 +1038,7 @@ mod tests {
                 (LogicalValue::Null, Ok(())),
                 (
                     LogicalValue::Bytes(vec![0; limit + 1]),
-                    Err(AdapterError::LimitExceeded),
+                    Err(AdapterError::LimitExceeded(LimitName::MaxBytesPerValue)),
                 ),
                 (
                     LogicalValue::String("AA==".to_owned()),

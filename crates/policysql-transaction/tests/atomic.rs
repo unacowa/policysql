@@ -278,6 +278,92 @@ fn a_commit_failure_is_never_a_rejection_and_rolls_back() {
     }
 }
 
+fn limit_of(reply: &Value) -> Option<&str> {
+    reply["error"]["detail"]["limit"].as_str()
+}
+
+/// Answers the outstanding envelope `execute` with `results` in place of the engine model's own.
+fn answer_envelope(engine: &mut Engine, results: &Value) {
+    while engine
+        .outstanding
+        .as_ref()
+        .is_some_and(|effect| effect["type"] != "execute")
+    {
+        engine.resolve(true, "unknown");
+    }
+    let effect = engine
+        .outstanding
+        .take()
+        .unwrap_or_else(|| unreachable!("an envelope execute is awaited"));
+    engine.feed(&json!({"type": "executed", "id": effect["id"], "results": results}));
+    engine.settle();
+}
+
+/// #145 pull request F: the envelope's cumulative rows and bytes are two checks, in this order,
+/// and each names its own limit; the COMMIT is never sent.
+#[test]
+fn the_cumulative_limits_of_an_envelope_name_the_bound_that_was_crossed() {
+    // Each of the two reads returns one row of 27 bytes.
+    let two = envelope(&[
+        ("SELECT id, name FROM projects", json!({})),
+        ("SELECT id, name FROM projects", json!({})),
+    ]);
+    for (label, max_rows, max_result_bytes, expected) in [
+        ("rows only", 1, 64_000, "maxRows"),
+        ("bytes only", 100, 40, "maxResultBytes"),
+        ("both: the rows are checked first", 1, 40, "maxRows"),
+    ] {
+        let mut engine = Engine::atomic(false);
+        engine.compiler.limits = Some(StatementLimits {
+            max_rows,
+            max_result_bytes,
+            ..STATEMENT_LIMITS
+        });
+        let reply = engine.run(&execute_request(&two, None));
+        assert_eq!(code(&reply), Some("POLICYSQL_LIMIT_EXCEEDED"), "{label}");
+        assert_eq!(limit_of(&reply), Some(expected), "{label}: {reply}");
+        assert_eq!(engine.observed.commits_emitted, 0, "{label}");
+        assert_eq!(engine.observed.rollbacks_emitted, 1, "{label}");
+    }
+}
+
+/// #145 pull request F: the engine's marker for a value over `maxBytesPerValue` names it.
+#[test]
+fn the_codec_marker_of_a_value_over_the_limit_names_the_value_limit() {
+    for keyed in [false, true] {
+        let mut engine = Engine::atomic(false);
+        let request = if keyed {
+            execute_request(&insert("p1"), Some(KEY))
+        } else {
+            execute_request(&select(), None)
+        };
+        engine.feed(&request);
+        let marker = |columns: Value, rows: Value| {
+            json!([{
+                "columns": columns, "rows": rows, "rowsAffected": 0,
+                "usage": {"rowsRead": 1, "rowsWritten": 0, "queryDurationMs": 0.5},
+            }])
+        };
+        if keyed {
+            // The idempotency lookup, then the envelope's `INSERT`.
+            engine.resolve(true, "unknown");
+            engine.resolve(true, "unknown");
+            engine.resolve(true, "unknown");
+        }
+        answer_envelope(
+            &mut engine,
+            &marker(
+                json!(["id", "name"]),
+                json!([[{"type": "invalid", "limit": true}, "x"]]),
+            ),
+        );
+        let reply = engine.last_reply().unwrap_or(&Value::Null);
+        assert_eq!(code(reply), Some("POLICYSQL_LIMIT_EXCEEDED"), "{reply}");
+        assert_eq!(limit_of(reply), Some("maxBytesPerValue"), "{reply}");
+        assert_eq!(engine.observed.commits_emitted, 0);
+    }
+}
+
 /// ADR 0024 pull request 8: a result the adapter could not carry (`limit`) is the client's
 /// `POLICYSQL_LIMIT_EXCEEDED` on the envelope, as the TypeScript direct path answered, and
 /// `POLICYSQL_INTERNAL` on the idempotency lookup and insert. A stored response over the lookup
@@ -299,11 +385,10 @@ fn a_limit_failure_is_limit_exceeded_on_the_envelope_and_internal_on_the_lookup_
         }
         engine.resolve(false, "limit");
         engine.settle();
-        assert_eq!(
-            code(engine.last_reply().unwrap_or(&Value::Null)),
-            Some(expected),
-            "after {successes} effects"
-        );
+        let reply = engine.last_reply().unwrap_or(&Value::Null);
+        assert_eq!(code(reply), Some(expected), "after {successes} effects");
+        // The adapter's class does not say which bound was crossed: no `detail.limit`.
+        assert!(reply["error"].get("detail").is_none(), "{reply}");
         assert_eq!(engine.observed.commits_emitted, 0);
         assert_eq!(engine.observed.rollbacks_emitted, 1);
         assert_eq!(engine.idempotency_rows, Vec::<[String; 3]>::new());
@@ -1957,6 +2042,7 @@ fn a_response_over_max_response_bytes_rolls_back_before_commit_and_leaves_no_rec
         over.limits.max_response_bytes = length + reserve - 1;
         let reply = over.run(&keyed(owner, &insert("p1")));
         assert_eq!(code(&reply), Some("POLICYSQL_LIMIT_EXCEEDED"), "{reply}");
+        assert_eq!(limit_of(&reply), Some("maxResponseBytes"), "{reply}");
         assert_eq!(over.observed.commits_emitted, 0, "no COMMIT is ever sent");
         assert_eq!(over.observed.rollbacks_emitted, 1);
         assert!(over.idempotency_rows.is_empty() && over.pending_rows.is_empty());
