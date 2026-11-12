@@ -28,7 +28,8 @@ Inputs are the body and the operation's fields: `idempotencyKey`, `role`, `trans
 token itself, not an `Authorization` value).
 
 Every result is data and names the request id the engine used:
-`{ ok: true, value, requestId }` or `{ ok: false, error: { code, message, path }, requestId }`.
+`{ ok: true, value, requestId }` or `{ ok: false, error: { code, message, path, detail? }, requestId }`
+(`detail`: values fixed per code, [ADR 0030](0030-error-detail-and-database-constraint-violations.md)).
 Catalog and Capabilities also return `snapshot` and `notModified`. No result has a status, and
 "created" is not a result property: that `begin` is answered with 201 is an HTTP rule.
 Thrown errors are `EngineError(code, message, path)`; an operation never rejects.
@@ -128,11 +129,11 @@ or passes it; `test/http-conformance.test.mjs` runs it against the shipped adapt
 
 ### The owner reply carries no status
 
-`OwnerReply` is `{ ok: true, value } | { ok: false, error: { code, message, path } }`, checked
+`OwnerReply` is `{ ok: true, value } | { ok: false, error: { code, message, path, detail? } }`, checked
 by the engine like any data crossing an adapter. The Durable Objects adapter's replies are: 201 with the value for a
 started transaction, 200 with the value for every other command, atomic execute, and callback
 query, and an error's public status (from the one table, `src/http/status.ts`) with
-`{ error: { code, message, path, requestId } }`. The Worker reads only "2xx is the value,
+`{ error: { code, message, path, detail?, requestId } }`. The Worker reads only "2xx is the value,
 otherwise the error", and a test checks that each reply is what the client sees for begin,
 statement, commit, rollback, atomic execute, and the callback query. The callback capability
 crosses the wire in the body of the owner input (ADR 0024).

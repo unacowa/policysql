@@ -305,7 +305,8 @@ enum TxEvent {
 ```
 
 `class` is a closed enum (`timeout`, `unavailable`, `rejected`, `not_committed`, `unknown`, and
-since pull request 8 `limit`, see its notes). An adapter that cannot classify an error reports
+since pull request 8 `limit`, see its notes), `complex` (ADR 0027) and `constraint` (ADR 0030),
+which only `executeFailed` carries. An adapter that cannot classify an error reports
 `unknown`. Core never sees an error message.
 
 Core uses `entropy` for the unkeyed transaction and validation ids (16 bytes) and the capability

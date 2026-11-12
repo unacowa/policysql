@@ -589,6 +589,14 @@ declared type for a column projected directly (zero for an expression, which has
 the physical schema at construction. Left to later pull requests, as decided: the result side of
 `maxJsonValues`, `maxResponseBytes` and the compiled raw bound (6), and the CPU and memory work (7).
 
+**Issue #145 (2026-11-12).** A step error of a statement batch whose reply kept its baton is
+also classified for constraint violations (ADR 0030): the code must be exactly `SQLITE_CONSTRAINT`,
+and the text after the wrapper `SQLite error: ` is matched against four prefixes (`UNIQUE`,
+`NOT NULL`, `FOREIGN KEY`, `CHECK`; anything else is the kind `other`). A reply that ended the
+stream is not classified. The log event is `database_constraint_violation` (fixed kind, no text).
+What stays in `database_error_unclassified` is `SQLITE_CONSTRAINT` of a reply that ended the
+stream, and every other code.
+
 **Pull request 5 results (2026-10-31).** Implemented as decided: `maxBytesPerValue` is a
 `RuntimeLimits` field (`max_bytes_per_value`, default 262,144, range 1 to 1,048,576, the error names the
 field), reported by `limits_json` and advertised as it is enforced, and the reference wrapper sets it
@@ -1000,6 +1008,7 @@ described as counting companion cells and column descriptors. `spec/openapi.yaml
 | Bytes parameter malformed / over `maxBytesPerValue` | 400 `POLICYSQL_INVALID_PARAMETER` / 413 `POLICYSQL_LIMIT_EXCEEDED` | none started |
 | Rows, result bytes, result values, or the response's `maxResponseBytes`, checked by core after every statement in the envelope returned | 413 `POLICYSQL_LIMIT_EXCEEDED`, even when the envelope contains a later write | rolled back before COMMIT; no idempotency record. The whole reply was read and decoded, so the rollback is definite |
 | The transport's raw result bound (the reply is refused before it can be decoded), or a BLOB cell over the per-value limit while the streaming transport decodes it (a buffering provider's BLOB over the limit is caught by core's result encoding and stays 413) | 413 `POLICYSQL_LIMIT_EXCEEDED`; 500 `POLICYSQL_INTERNAL` (outcome unknown, not in the client's rejection table) for an **atomic execute whose envelope contains a later write** (#97) | rolled back with the recovered baton when the reply named one; an earlier error could have auto-rolled the transaction back and the later write could then commit in autocommit, so this is never a definite rejection. With no readable baton, the stream, and any write lock, remain until the server expires it (ADR 0007/0027) |
+| A statement the database refuses for a constraint (UNIQUE or PRIMARY KEY, NOT NULL, FOREIGN KEY, CHECK, a trigger's `RAISE(ABORT)`), in a reply that kept its baton (#145, ADR 0030) | 409 `POLICYSQL_CONSTRAINT_VIOLATION`, `/statements/<i>`, `detail.constraint`, a fixed message per kind | atomic: rolled back before COMMIT, no idempotency record; interactive: closes as `failed`; keyed: same as atomic |
 | Interactive cumulative limits | 413 `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` (was 429, #62) | per ADR 0024 |
 | Control response or validator response over its fixed bound | 503 `POLICYSQL_DATABASE_UNAVAILABLE`, or `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for COMMIT; validator: commit denied | per ADR 0007/0024 |
 | Session JSON over 65,536 | 500 `POLICYSQL_INTERNAL` (wrapper fault) | none started |

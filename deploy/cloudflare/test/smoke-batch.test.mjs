@@ -6,10 +6,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { STATEMENT_BATCH_TABLES, statementBatchSmoke } from "../scripts/smoke-batch.mjs";
 import { DatabaseStatementError, SqlComplexityError } from "../src/database-complexity.ts";
+import { SqlConstraintError } from "../src/database-constraint.ts";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
 
 const classify = {
-  databaseCode: (error) => (error instanceof DatabaseStatementError ? error.databaseCode : null),
+  databaseCode: (error) => (error instanceof DatabaseStatementError || error instanceof SqlConstraintError ? error.databaseCode : null),
+  constraint: (error) => (error instanceof SqlConstraintError ? error.constraint : null),
   complexityCause: (error) => (error instanceof SqlComplexityError ? error.complexityCause : null),
 };
 
@@ -38,7 +40,10 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     const { failures, report } = await statementBatchSmoke({ transport, ...classify });
     assert.deepEqual(failures, []);
     assert.deepEqual(Object.keys(report.tables).sort(), ["smoke_conflict_abort", "smoke_conflict_rollback", "smoke_raise_rollback"]);
-    for (const entry of Object.values(report.tables)) assert.deepEqual({ code: entry.code, rowsAfter: entry.rowsAfter }, { code: "SQLITE_CONSTRAINT", rowsAfter: 0 });
+    const expected = { smoke_conflict_abort: "unique", smoke_conflict_rollback: null, smoke_raise_rollback: null };
+    for (const [table, entry] of Object.entries(report.tables)) {
+      assert.deepEqual({ code: entry.code, rowsAfter: entry.rowsAfter, constraint: entry.constraint }, { code: "SQLITE_CONSTRAINT", rowsAfter: 0, constraint: expected[table] });
+    }
     assert.equal(report.tables.smoke_conflict_abort.rollback, "ok");
     assert.deepEqual(report.complexity, { cause: "columns", expected: "columns" });
     assert.deepEqual(report.success, { results: 2 });

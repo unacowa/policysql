@@ -14,12 +14,15 @@ import { DEPLOYMENT_VERSION_HEADER, versionTracker, waitForRelease } from "./rel
 import { bytesNullSmoke, commitCheckSmoke, sessionGateSmoke } from "./smoke-sections.mjs";
 import { sqlComplexitySmoke } from "./smoke-complexity.mjs";
 import { STATEMENT_BATCH_TABLES, statementBatchSmoke } from "./smoke-batch.mjs";
+import { CONSTRAINT_TABLES, constraintSmoke } from "./smoke-constraint.mjs";
 import { responseBudgetSmoke } from "./smoke-response.mjs";
 import { idempotencyRetentionSmoke } from "./smoke-retention.mjs";
 import {
   IDEMPOTENCY_CLEANUP_BATCH_SIZE, IDEMPOTENCY_RETENTION_SECONDS,
 } from "../src/idempotency-cleanup.ts";
 import { COMPLEXITY_ALLOWLIST, DatabaseStatementError, SqlComplexityError } from "../src/database-complexity.ts";
+import { CommitNotSentError } from "../src/errors.ts";
+import { SqlConstraintError } from "../src/database-constraint.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 import { SHAPE_TARGET_BYTES, cpuSmoke, referenceScenarioId } from "./smoke-cpu.mjs";
 import { SMOKE_SHAPES } from "./lib/cpu-shapes.mjs";
@@ -445,8 +448,17 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens, schedules
   // SQLite closes the transaction by itself, and a reply keeps the shape the transport requires.
   const statementBatch = await statementBatchSmoke({
     transport: new TursoHttpTransport({ url: database.url, authToken: database.token }, "release-smoke-batch"),
-    databaseCode: (error) => (error instanceof DatabaseStatementError ? error.databaseCode : null),
+    databaseCode: (error) => (error instanceof DatabaseStatementError || error instanceof SqlConstraintError ? error.databaseCode : null),
     complexityCause: (error) => (error instanceof SqlComplexityError ? error.complexityCause : null),
+    constraint: (error) => (error instanceof SqlConstraintError ? error.constraint : null),
+  });
+  // Constraint violations (#145, ADR 0030): each kind real Turso can produce is classified by the
+  // transport (the reply kept its baton), the transaction rolls back, and a deferred foreign key
+  // that fails at COMMIT is not classified.
+  const constraintViolations = await constraintSmoke({
+    transport: new TursoHttpTransport({ url: database.url, authToken: database.token }, "release-smoke-constraint"),
+    classify: (error) => (error instanceof SqlConstraintError ? { constraint: error.constraint, statement: error.statement } : null),
+    isCommitNotSent: (error) => error instanceof CommitNotSentError,
   });
   // The response budget (ADR 0027): a write whose response exceeds maxResponseBytes is refused
   // before COMMIT against the real database, rolled back, and leaves no idempotency record.
@@ -480,6 +492,7 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens, schedules
     bytesNull.failures.length > 0 ||
     sqlComplexity.failures.length > 0 ||
     statementBatch.failures.length > 0 ||
+    constraintViolations.failures.length > 0 ||
     responseBudget.failures.length > 0 ||
     cpu.failures.length > 0 ||
     retention.failures.length > 0 ||
@@ -532,6 +545,7 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens, schedules
       bytesNull,
       sqlComplexity,
       statementBatch,
+      constraintViolations,
       responseBudget,
       cpu,
       retention,
@@ -622,6 +636,7 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens, schedules
     bytesNull: bytesNull.report,
     sqlComplexity: sqlComplexity.report,
     statementBatch: statementBatch.report,
+    constraintViolations: constraintViolations.report,
     responseBudget: responseBudget.report,
     cpu: cpu.report,
     retention: retention.report,
@@ -733,6 +748,7 @@ async function main() {
     "DELETE FROM smoke_values",
     // The conditional statement batch section (#144): development-only, emptied on every release.
     ...STATEMENT_BATCH_TABLES,
+    ...CONSTRAINT_TABLES,
     // ADR 0028, from ADR 0026 section 6: `created_at` is filled by the database and is what the
     // Cron cleanup deletes by; the index bounds that scan. Not WITHOUT ROWID (the cleanup
     // selects its batch by rowid).
