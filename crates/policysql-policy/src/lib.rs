@@ -3715,8 +3715,10 @@ resources:
             ServerParameterName, SnapshotId, StorageClass, ValueConstraints, ValueDescriptor,
             ValueRepresentation,
         };
+        use policysql_core::{RoleName, TrustedSession};
         use policysql_ir::{BoundExpr, BoundStatement};
         use policysql_parser::SqliteFrontend;
+        use std::collections::BTreeMap;
 
         fn typed(
             logical_type: LogicalType,
@@ -3916,26 +3918,29 @@ resources:
             );
         }
 
-        fn insert_policy_with(stamp: &str) -> String {
-            format!(
-                "version: 1
-resources:
-  projects:
-    roles:
-      member:
-        insert:
+        /// A policy with `stamp` as the one preset of the INSERT only, or of the UPDATE only.
+        fn insert_policy_with(stamp: &str, operation: &str) -> String {
+            let rule = match operation {
+                "insert" => format!(
+                    "        insert:
           columns: [id]
           presets:
             stamp: {stamp}
           check: {{ id: {{ neq: none }} }}
-        update:
+"
+                ),
+                "update" => format!(
+                    "        update:
           columns: [id]
           presets:
             stamp: {stamp}
           filter: {{ id: {{ neq: none }} }}
           check: {{ id: {{ neq: none }} }}
 "
-            )
+                ),
+                other => unreachable!("unknown operation {other}"),
+            };
+            format!("version: 1\nresources:\n  projects:\n    roles:\n      member:\n{rule}")
         }
 
         fn stamp_catalog(descriptor: ValueDescriptor) -> Catalog {
@@ -3974,16 +3979,22 @@ resources:
                 ),
                 typed(LogicalType::Integer, ValueRepresentation::Number, None),
             ];
-            for descriptor in accepted {
-                let label = format!("{:?}/{:?}", descriptor.logical_type, descriptor.format);
-                assert!(
-                    activate_on(
-                        &insert_policy_with("{ now: {} }"),
-                        &stamp_catalog(descriptor)
-                    )
-                    .is_ok(),
-                    "{label}"
-                );
+            // The INSERT and the UPDATE are activated apart, so that each is held to the table.
+            for operation in ["insert", "update"] {
+                for descriptor in accepted.clone() {
+                    let label = format!(
+                        "{operation} {:?}/{:?}",
+                        descriptor.logical_type, descriptor.format
+                    );
+                    assert!(
+                        activate_on(
+                            &insert_policy_with("{ now: {} }", operation),
+                            &stamp_catalog(descriptor)
+                        )
+                        .is_ok(),
+                        "{label}"
+                    );
+                }
             }
             let rejected = [
                 typed(LogicalType::String, ValueRepresentation::String, None),
@@ -4014,17 +4025,22 @@ resources:
                 typed(LogicalType::DateTime, ValueRepresentation::String, None),
                 constrained,
             ];
-            for descriptor in rejected {
-                let label = format!("{:?}/{:?}", descriptor.logical_type, descriptor.format);
-                assert_eq!(
-                    activate_on(
-                        &insert_policy_with("{ now: {} }"),
-                        &stamp_catalog(descriptor)
-                    )
-                    .err(),
-                    Some(PolicyError::IncompatibleOperand),
-                    "{label}"
-                );
+            for operation in ["insert", "update"] {
+                for descriptor in rejected.clone() {
+                    let label = format!(
+                        "{operation} {:?}/{:?}",
+                        descriptor.logical_type, descriptor.format
+                    );
+                    assert_eq!(
+                        activate_on(
+                            &insert_policy_with("{ now: {} }", operation),
+                            &stamp_catalog(descriptor)
+                        )
+                        .err(),
+                        Some(PolicyError::IncompatibleOperand),
+                        "{label}"
+                    );
+                }
             }
         }
 
@@ -4040,12 +4056,14 @@ resources:
                 "{ now: { format: rfc3339 } }",
                 "{ now: {}, literal: x }",
             ] {
-                let yaml = insert_policy_with(stamp).replace("stamp", "updated_at");
-                assert_eq!(
-                    activate_on(&yaml, &catalog).err(),
-                    Some(PolicyError::InvalidPredicate),
-                    "{stamp}"
-                );
+                for operation in ["insert", "update"] {
+                    let yaml = insert_policy_with(stamp, operation).replace("stamp", "updated_at");
+                    assert_eq!(
+                        activate_on(&yaml, &catalog).err(),
+                        Some(PolicyError::InvalidPredicate),
+                        "{operation} {stamp}"
+                    );
+                }
             }
             let overlap = STAMP_POLICY.replace(
                 "columns: [id, name]
@@ -4104,6 +4122,38 @@ resources:
                 activate_on(in_list, &catalog).err(),
                 Some(PolicyError::IncompatibleOperand)
             );
+        }
+
+        #[test]
+        fn a_session_key_named_now_is_a_separate_parameter_from_the_time() {
+            let yaml = STAMP_POLICY.replace(
+                "            updated_by: { session: subject_id }\n            updated_at: { now: {} }\n            touched_on: { now: {} }\n            updated_ms: { now: {} }\n          check: { tenant_id: { eq: { session: tenant_id } } }\n          returning",
+                "            updated_by: { session: now }\n            updated_at: { now: {} }\n            touched_on: { now: {} }\n            updated_ms: { now: {} }\n          check: { tenant_id: { eq: { session: tenant_id } } }\n          returning",
+            );
+            assert_ne!(yaml, STAMP_POLICY, "the replacement took effect");
+            let bundle = activate_on(&yaml, &stamped_catalog())
+                .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+            let session = TrustedSession::new(
+                RoleName::new("member").unwrap_or_else(|error| unreachable!("valid role: {error}")),
+                "user_1",
+                BTreeMap::from([
+                    ("tenant_id".to_owned(), "tenant_1".to_owned()),
+                    ("now".to_owned(), "1999-01-01T00:00:00.000Z".to_owned()),
+                ]),
+            )
+            .unwrap_or_else(|error| unreachable!("valid session: {error}"));
+            let output = bundle
+                .compile_insert(&bind(MULTI_ROW_INSERT), &session, &context())
+                .unwrap_or_else(|error| unreachable!("INSERT compiles: {error}"));
+            assert_eq!(
+                output.plan.server_values.get(&name("session_now")),
+                Some(&LogicalValue::String("1999-01-01T00:00:00.000Z".to_owned()))
+            );
+            assert_eq!(
+                output.plan.server_values.get(&name("now_rfc3339")),
+                Some(&LogicalValue::String("2026-10-30T13:14:56.789Z".to_owned()))
+            );
+            assert_ne!(name("session_now").as_str(), name("now_rfc3339").as_str());
         }
 
         #[test]

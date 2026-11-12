@@ -1392,9 +1392,34 @@ pub fn compile_verified_insert(
     VerifiedExecutionPlan::verify(candidate, &verifier).map_err(CompileError::Verification)
 }
 
+/// Whether the column a `__policysql_now_*` parameter is assigned to is one the parameter's name
+/// may fill: the table of ADR 0031, read from the Catalog's descriptor and not from the plan.
+fn now_name_fits(suffix: &str, descriptor: &ValueDescriptor) -> bool {
+    if descriptor.constraints.is_some() {
+        return false;
+    }
+    matches!(
+        (
+            suffix,
+            descriptor.logical_type,
+            descriptor.format.as_deref()
+        ),
+        ("rfc3339", LogicalType::Instant, Some("rfc3339"))
+            | (
+                "sqlite_datetime",
+                LogicalType::DateTime,
+                Some("sqlite-datetime")
+            )
+            | ("epoch_ms", LogicalType::Int64, None | Some("int64"))
+            | ("epoch_ms", LogicalType::Integer, None)
+    )
+}
+
 /// The second check of a server-owned time (ADR 0031), independent of the policy crate: every
-/// INSERT/UPDATE assignment whose whole value is a `__policysql_now_*` server parameter carries
-/// a value of the target column's logical type that satisfies its Catalog contract.
+/// INSERT/UPDATE assignment whose whole value is a `__policysql_now_*` server parameter names one
+/// of the three known shapes, targets a column the Catalog's own descriptor (not the plan's
+/// claim) admits for that shape, has no `constraints`, and carries a value of the descriptor's
+/// logical type that satisfies the Catalog contract.
 fn verify_now_assignments(
     statement: &BoundStatement,
     server_parameters: &BTreeMap<ServerParameterName, LogicalValue>,
@@ -1410,9 +1435,9 @@ fn verify_now_assignments(
         let BoundExpr::ServerParameter { name, .. } = &assignment.value else {
             continue;
         };
-        if !name.as_str().starts_with(NOW_PARAMETER_PREFIX) {
+        let Some(suffix) = name.as_str().strip_prefix(NOW_PARAMETER_PREFIX) else {
             continue;
-        }
+        };
         let violation = || {
             EmitError::InvariantViolation(
                 "server-owned time violates the column contract".to_owned(),
@@ -1421,11 +1446,13 @@ fn verify_now_assignments(
         let value = server_parameters.get(name).ok_or_else(violation)?;
         let descriptor = parameter_contracts::column_descriptor(catalog, &assignment.column)
             .ok_or_else(violation)?;
-        if !parameter_contracts::logical_value_matches(
-            value,
-            assignment.column.logical_type,
-            max_bytes_per_value,
-        ) || !policysql_core::value_satisfies_contract(value, descriptor, max_bytes_per_value)
+        if !now_name_fits(suffix, descriptor)
+            || !parameter_contracts::logical_value_matches(
+                value,
+                descriptor.logical_type,
+                max_bytes_per_value,
+            )
+            || !policysql_core::value_satisfies_contract(value, descriptor, max_bytes_per_value)
         {
             return Err(violation());
         }
@@ -3199,19 +3226,25 @@ resources:
         }
 
         fn catalog() -> Catalog {
+            catalog_with(
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                ),
+                typed(LogicalType::Int64, ValueRepresentation::String, None),
+            )
+        }
+
+        /// The Catalog the policy crate activated against, with `updated_at` and `updated_ms`
+        /// replaced: a plan is then sealed against a Catalog that differs from the plan's claim.
+        fn catalog_with(updated_at: ValueDescriptor, updated_ms: ValueDescriptor) -> Catalog {
             let string = || typed(LogicalType::String, ValueRepresentation::String, None);
             let columns = [
                 ("id", string()),
                 ("tenant_id", string()),
                 ("name", string()),
-                (
-                    "updated_at",
-                    typed(
-                        LogicalType::Instant,
-                        ValueRepresentation::String,
-                        Some("rfc3339"),
-                    ),
-                ),
+                ("updated_at", updated_at),
                 (
                     "touched_on",
                     typed(
@@ -3220,10 +3253,7 @@ resources:
                         Some("sqlite-datetime"),
                     ),
                 ),
-                (
-                    "updated_ms",
-                    typed(LogicalType::Int64, ValueRepresentation::String, None),
-                ),
+                ("updated_ms", updated_ms),
             ];
             let resource = ResourceDescriptor::new(
                 ResourceId::new(1).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
@@ -3348,6 +3378,125 @@ resources:
                 logical_type: LogicalType::Instant,
             };
             violation(&seal(&catalog, &plan));
+        }
+
+        /// Points the first assignment `pick` accepts at the server parameter `suffix`.
+        fn reassign(
+            plan: &mut ProtectedPlan,
+            pick: impl Fn(&policysql_ir::BoundAssignment) -> bool,
+            suffix: &str,
+        ) {
+            let BoundStatement::Update(update) = &mut plan.statement else {
+                unreachable!("an UPDATE stays an UPDATE");
+            };
+            let assignment = update
+                .assignments
+                .iter_mut()
+                .find(|assignment| pick(assignment))
+                .unwrap_or_else(|| unreachable!("the assignment exists"));
+            assignment.value = BoundExpr::ServerParameter {
+                name: name(suffix),
+                logical_type: assignment.column.logical_type,
+            };
+        }
+
+        #[test]
+        fn a_plan_is_checked_against_the_catalog_and_not_against_its_own_claim() {
+            // The plan was made for an `int64` `updated_ms`; this Catalog has a `string` one.
+            let plan = sealed(&catalog());
+            let other = catalog_with(
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                ),
+                typed(LogicalType::String, ValueRepresentation::String, None),
+            );
+            violation(&seal(&other, &plan));
+        }
+
+        #[test]
+        fn the_catalogs_integer_type_is_a_pairing_for_the_epoch() {
+            let plan = sealed(&catalog());
+            let integer = catalog_with(
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                ),
+                typed(LogicalType::Integer, ValueRepresentation::Number, None),
+            );
+            assert!(seal(&integer, &plan).is_ok());
+        }
+
+        #[test]
+        fn a_time_name_in_a_string_column_is_refused() {
+            let catalog = catalog();
+            let mut plan = sealed(&catalog);
+            // `name` is a `string` column: no time is ever guessed into it.
+            reassign(
+                &mut plan,
+                |assignment| assignment.column.logical_type == LogicalType::String,
+                "now_rfc3339",
+            );
+            violation(&seal(&catalog, &plan));
+        }
+
+        #[test]
+        fn a_time_name_for_another_shape_than_its_column_is_refused() {
+            let catalog = catalog();
+            // The instant spelling in the `int64` column: only the name table stops it.
+            let mut plan = sealed(&catalog);
+            reassign(
+                &mut plan,
+                |assignment| assignment.column.logical_type == LogicalType::Int64,
+                "now_rfc3339",
+            );
+            violation(&seal(&catalog, &plan));
+            // The epoch with a `String` value in the `int64` column: only the value's type
+            // stops it (an `int64` column has no format).
+            let mut plan = sealed(&catalog);
+            plan.server_values.insert(
+                name("now_epoch_ms"),
+                LogicalValue::String("1793366096789".to_owned()),
+            );
+            violation(&seal(&catalog, &plan));
+        }
+
+        #[test]
+        fn an_unknown_time_name_is_refused() {
+            let catalog = catalog();
+            let mut plan = sealed(&catalog);
+            plan.server_values.insert(
+                name("now_other"),
+                LogicalValue::String("2026-10-30T13:14:56.789Z".to_owned()),
+            );
+            reassign(
+                &mut plan,
+                |assignment| assignment.column.logical_type == LogicalType::Instant,
+                "now_other",
+            );
+            violation(&seal(&catalog, &plan));
+        }
+
+        #[test]
+        fn a_catalog_column_with_constraints_takes_no_time() {
+            let plan = sealed(&catalog());
+            let constrained = catalog_with(
+                ValueDescriptor {
+                    constraints: Some(policysql_core::ValueConstraints {
+                        min_length: Some(1),
+                        ..policysql_core::ValueConstraints::default()
+                    }),
+                    ..typed(
+                        LogicalType::Instant,
+                        ValueRepresentation::String,
+                        Some("rfc3339"),
+                    )
+                },
+                typed(LogicalType::Int64, ValueRepresentation::String, None),
+            );
+            violation(&seal(&constrained, &plan));
         }
 
         #[test]

@@ -46,7 +46,13 @@ fn a_now_preset_compiles_with_the_context_time() {
 #[test]
 fn a_malformed_context_is_an_internal_error_without_detail() {
     let runtime = runtime();
-    let too_long = format!(r#"{{"nowMs":1,"pad":"{}"}}"#, "x".repeat(257));
+    // Valid JSON padded with spaces: only the length bound can refuse it.
+    let padded = |bytes: usize| {
+        let body = r#"{"nowMs":1"#;
+        format!("{body}{}}}", " ".repeat(bytes - body.len() - 1))
+    };
+    let too_long = padded(257);
+    assert_eq!(too_long.len(), 257);
     for context in [
         "",
         "{}",
@@ -62,6 +68,12 @@ fn a_malformed_context_is_an_internal_error_without_detail() {
         assert!(output["error"].get("detail").is_none(), "{context}");
         assert!(output.get("statements").is_none(), "{context}");
     }
+    let exact = padded(256);
+    assert_eq!(exact.len(), 256);
+    assert_eq!(
+        compile(&runtime, UPDATE, &exact)["statements"][0]["serverParameters"]["__policysql_now_rfc3339"],
+        "1970-01-01T00:00:00.001Z"
+    );
     let edge = compile(&runtime, UPDATE, r#"{"nowMs":253402300799999}"#);
     assert_eq!(
         edge["statements"][0]["serverParameters"]["__policysql_now_rfc3339"],

@@ -132,8 +132,15 @@ test("Explain compiles with the real time, names the parameters, and never retur
     [...result.body.statements[0].serverParameters].sort(),
     ["__policysql_now_epoch_ms", "__policysql_now_rfc3339", "__policysql_now_sqlite_datetime", "__policysql_session_tenant_id"],
   );
-  assert.ok(!JSON.stringify(result.body).includes(new Date().getUTCFullYear() + "-"), "no instant in the explanation");
   assert.equal(h.events.length, 0, "Explain reaches no database statement that writes");
+  // No value leaks: an Explain made between two readings of the clock shows no instant in any
+  // spelling inside that range and no epoch number.
+  const { result: again, before, after } = await bracket(() => h.request("a", "/v1/transactions:explain", { statements: [update("p1", "Renamed")] }, null));
+  const text = JSON.stringify(again.body);
+  for (let ms = before; ms <= after; ms++) {
+    const iso = new Date(ms).toISOString();
+    assert.ok(!text.includes(iso) && !text.includes(iso.slice(0, 19)) && !text.includes(String(ms)), `no ${iso} in the explanation`);
+  }
 });
 
 test("a client cannot name, pass, assign, or send the time: every attempt is refused before the database", async t => {
@@ -155,4 +162,15 @@ test("a client cannot name, pass, assign, or send the time: every attempt is ref
     assert.equal(h.counts().connects, 0);
   }
   assert.equal(row(h, "p1").updated_ms, 0, "nothing was written");
+});
+
+test("a header or a session claim cannot set the time", async t => {
+  const h = await harness(t, { hooks: false, fixture });
+  const forged = "1999-01-01T00:00:00.000Z";
+  const credential = h.session("a", { session: { tenant_id: "tenant_a", now: forged, now_ms: "915148800000" } });
+  const headers = { "x-now": forged, "x-policysql-now-ms": "915148800000", date: new Date(915148800000).toUTCString() };
+  const { result, before, after } = await bracket(() => h.request("a", "/v1/transactions:execute", { statements: [update("p1", "Renamed")] }, null, credential, headers));
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  const at = consistent(result.body.results[0].rows[0], row(h, "p1"));
+  assert.ok(before <= at && at <= after, `${before} <= ${at} <= ${after}`);
 });
