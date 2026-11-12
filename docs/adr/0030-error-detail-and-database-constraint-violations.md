@@ -614,14 +614,26 @@ Capabilities), and the policy-protected result, never of rows the role cannot se
 - Request side (body, SQL, parameters, statement count, binder limits): decided from the client's
   own bytes before the database is read. A binder limit and a column that does not resolve: the
   binder stops at its first failure, so where both answers have the same code they are the same
-  answer. Where the codes differ (a hidden column is reached and the walk goes on to the third
-  parameter; a missing column stops the walk first) the code already told them apart (#154), and
-  the limit adds nothing (`a_limit_is_the_same_answer_for_a_hidden_column_and_a_missing_one`).
+  answer. Where the codes differ, the cause is the order of the walk, which #154 describes: the bind
+  and the decoding of the values come before the policy. A hidden column is reached and the walk
+  goes on to a binder limit that lies after the column (the third parameter, an expression deeper
+  than `maxExpressionDepth`, a second statement's `maxProjections`) or to a value over
+  `maxBytesPerValue`; a missing column stops the walk first as `FORBIDDEN_COLUMN`. The code already
+  told the two apart, and the limit adds nothing: where both answers have the same code they are the
+  same answer, `limit` and `path` included (`a_limit_is_the_same_answer_for_a_hidden_column_and_a_missing_one`
+  lists the splits by template, and `a_limit_after_the_column_is_a_code_split_and_nothing_more` the
+  ones that need their own parameters or statements).
 - Result side: the rows, bytes, values and cells counted are those of the statement the policy
-  protected (the policy's filter is in the SQL; a hidden conditional cell must be NULL, so its size
-  is not counted), so the name is a function of the visible result. A test runs two databases that
-  differ only in rows of another tenant and reads the same name. A client could already learn the
-  same from queries that stay inside the limits (`LIMIT`/`OFFSET`, fewer columns).
+  protected. For a `SELECT` the policy's filter is in the SQL and a hidden conditional cell must be
+  NULL (so its size is not counted): the name is a function of the visible result, and the tests run
+  two databases that differ only in rows of another tenant, and only in the hidden cell of a
+  conditional column, and read the same name. A client could already learn the same from queries
+  that stay inside the limits (`LIMIT`/`OFFSET`, fewer columns). For `INSERT`, `UPDATE` and `DELETE`
+  the count is of the rows the statement changed: `RETURNING` rows, and one internal check cell per
+  row, so `maxJsonValues` can be crossed by the number of changed rows even without `RETURNING`
+  (and `maxRows` or `maxResultBytes` by the `RETURNING` rows, which an update or delete filter wider
+  than the select filter can make rows the role cannot select). The number of changed rows is what
+  the affected-row count already gives (P3), so the name adds no fact.
 - A commit check's callback limits go to the validator, a trusted component that already received
   the rows; the client gets the check's `limit` reason as before (and the rows-or-bytes split is not
   shown to it).
