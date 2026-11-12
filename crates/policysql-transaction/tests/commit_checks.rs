@@ -469,6 +469,21 @@ fn callback_limits_end_the_transaction() {
     engine.settle();
     assert_eq!(reason(&last_reply(&engine)), Some("limit"));
     assert!(last_reply(&engine)["error"]["detail"]["limit"].is_null());
+
+    // Both crossed by one reply: the rows are checked first, as the former combined condition did.
+    let mut engine = checked();
+    engine.limits.max_callback_rows = 0;
+    engine.limits.max_transaction_result_bytes = 64;
+    validating(&mut engine);
+    let token = engine.token();
+    let over = engine.run_callback(&token, &select(1));
+    assert_eq!(
+        over["error"]["detail"],
+        json!({"limit": "maxCallbackRowsPerCheck"}),
+        "{over}"
+    );
+    engine.settle();
+    assert_eq!(reason(&last_reply(&engine)), Some("limit"));
 }
 
 #[test]

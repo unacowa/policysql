@@ -1634,8 +1634,13 @@ fn a_limit_is_the_same_answer_for_a_hidden_column_and_a_missing_one() {
     // as `FORBIDDEN_COLUMN`, before the third parameter. The codes already differed before
     // `detail` (#154), and `limit` adds no fact the code did not give: where both answers have
     // the same code they are the same answer, `limit` included.
-    const LIMIT_ORDER_CODE_SPLITS: [&str; 2] = [
+    // The same holds for an expression deeper than `maxExpressionDepth` that comes after the
+    // column. Two more kinds of the same split (a decoded value over `maxBytesPerValue`, and a
+    // second statement over a binder limit) have parameters or statements of their own and are
+    // in `a_limit_after_the_column_is_a_code_split_and_nothing_more`.
+    const LIMIT_ORDER_CODE_SPLITS: [&str; 3] = [
         "SELECT id FROM projects WHERE {C} = :a OR id = :b OR id = :c",
+        "SELECT id FROM projects WHERE {C} IS NULL AND (((((id IS NULL)))))",
         "UPDATE projects SET name = :a WHERE {C} = :b OR id = :c",
     ];
     let small = runtime_with(SMALL_LIMITS);
@@ -1644,6 +1649,7 @@ fn a_limit_is_the_same_answer_for_a_hidden_column_and_a_missing_one() {
         "SELECT {C} FROM projects p JOIN tasks t ON t.project_id = p.id JOIN tasks u ON u.project_id = p.id",
         "SELECT id FROM projects WHERE {C} = :a OR id = :b OR id = :c",
         "SELECT id FROM projects WHERE ((((( {C} IS NULL)))))",
+        "SELECT id FROM projects WHERE {C} IS NULL AND (((((id IS NULL)))))",
         "SELECT id FROM projects WHERE id = :a OR (id = :b OR (id = :c OR {C} IS NULL))",
         "UPDATE projects SET name = :a WHERE {C} = :b OR id = :c",
     ];
@@ -1698,4 +1704,78 @@ fn a_limit_is_the_same_answer_for_a_hidden_column_and_a_missing_one() {
     }
     assert_eq!(splits, BTreeSet::from(LIMIT_ORDER_CODE_SPLITS));
     assert!(limited >= 10, "{limited} answers named a limit");
+}
+
+/// The other ways a limit comes after a column in the binder's walk. Each is a split of the code
+/// that the binder's order already made (a hidden column is reached and the walk goes on; a missing
+/// one stops it), never a split of `limit` under one code: both answers of every pair below are
+/// listed, so a change that closes the split (or opens another) fails here.
+#[test]
+fn a_limit_after_the_column_is_a_code_split_and_nothing_more() {
+    let bytes = runtime_with(
+        r#"{"max_rows":2,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":2,"max_projections":2,"max_bytes_per_value":3}"#,
+    );
+    let small = runtime_with(SMALL_LIMITS);
+    let code_and_limit = |output: &Value| {
+        (
+            code(output).to_owned(),
+            output["error"]["path"].clone(),
+            limit_of(output).map(str::to_owned),
+        )
+    };
+    // A decoded value over `maxBytesPerValue` (after the bind, before the policy), whichever
+    // column comes first; and a second statement over a binder limit, whose path is its own.
+    for hidden in ["private_note", "private_int", "private_bytes"] {
+        let sql = format!("SELECT id FROM projects WHERE {hidden} = :a AND payload = :b");
+        let params = json!({"a": "AAAAAA==", "b": "AAAAAA=="});
+        let statements = json!([{"sql": sql, "params": params}]);
+        let missing = json!([{
+            "sql": "SELECT id FROM projects WHERE no_such_column = :a AND payload = :b",
+            "params": params,
+        }]);
+        // Execute only: Explain takes no parameter values, so it never decodes one.
+        let seen = compile_on(&bytes, &statements, "execute");
+        let absent = compile_on(&bytes, &missing, "execute");
+        assert_eq!(
+            code_and_limit(&seen),
+            (
+                "POLICYSQL_LIMIT_EXCEEDED".to_owned(),
+                json!("/statements/0"),
+                Some("maxBytesPerValue".to_owned())
+            ),
+            "{hidden}: {seen}"
+        );
+        assert_eq!(
+            code(&absent),
+            "POLICYSQL_FORBIDDEN_COLUMN",
+            "a missing column stops the walk first: {absent}"
+        );
+    }
+    for hidden_or_missing in ["private_note", "no_such_column"] {
+        let statements = json!([
+            {"sql": format!("SELECT {hidden_or_missing} FROM projects"), "params": {}},
+            {"sql": "SELECT id, name, status FROM projects", "params": {}},
+        ]);
+        let output = compile_on(&small, &statements, "execute");
+        let expected = if hidden_or_missing == "private_note" {
+            // A hidden column is refused by the policy only after every statement is bound, so the
+            // second statement's binder limit comes first.
+            (
+                "POLICYSQL_LIMIT_EXCEEDED",
+                "/statements/1",
+                Some("maxProjections"),
+            )
+        } else {
+            ("POLICYSQL_FORBIDDEN_COLUMN", "/statements/0", None)
+        };
+        assert_eq!(
+            code_and_limit(&output),
+            (
+                expected.0.to_owned(),
+                json!(expected.1),
+                expected.2.map(str::to_owned)
+            ),
+            "{hidden_or_missing}: {output}"
+        );
+    }
 }
