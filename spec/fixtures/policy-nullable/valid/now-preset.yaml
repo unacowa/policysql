@@ -1,0 +1,39 @@
+resource: projects
+
+roles:
+  member:
+    select:
+      columns: [id, name, created_at, updated_at]
+      filter:
+        tenant_id:
+          eq:
+            session: tenant_id
+      limit: 100
+
+    insert:
+      columns: [id, name]
+      presets:
+        tenant_id:
+          session: tenant_id
+        created_at:
+          now: {}
+        updated_at:
+          now: {}
+      check:
+        tenant_id:
+          eq:
+            session: tenant_id
+
+    update:
+      columns: [name]
+      presets:
+        updated_at:
+          now: {}
+      filter:
+        tenant_id:
+          eq:
+            session: tenant_id
+      check:
+        tenant_id:
+          eq:
+            session: tenant_id

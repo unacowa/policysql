@@ -403,15 +403,17 @@ allow_windows: true
 
 ## Preset
 
-presetのformatは、INSERTまたはUPDATEの`presets`へserver-owned columnと値のsourceを指定します。
+presetのformatは、INSERTまたはUPDATEの`presets`へserver-owned columnと値のsourceを指定します。値のsourceは`session`、`literal`、`now`の3つです。
 
 ```yaml
 presets:
   author_id:
     session: subject_id
+  updated_at:
+    now: {}
 ```
 
-詳細な動作と使用例は[書き込みの整合性](../sql/write-integrity#preset)を参照してください。
+`now: {}`はPolicySQLを動かすサーバーの現在時刻です。`now`はpresetでだけ使えます。詳細な動作と使用例は[書き込みの整合性](../sql/write-integrity#preset)を参照してください。
 
 同じcolumnを`columns`と`presets`へ定義するpolicyは無効です。client SQLがpreset columnを指定した場合は、同じ値でも上書きせず拒否します。
 

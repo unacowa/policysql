@@ -4,7 +4,8 @@
   pull request 9, deleted the TypeScript decision path)
 - Issue: #35 (stage 4 of [ADR 0019](0019-library-layers-and-the-wrapper-boundary.md))
 - Amended by: [ADR 0025](0025-core-defined-canonical-json.md) (canonical JSON is defined by
-  core; byte equality with TypeScript and the dual-hash gate are dropped)
+  core; byte equality with TypeScript and the dual-hash gate are dropped),
+  [ADR 0031](0031-server-time-presets.md) (a compile takes the compiling step's `now_ms`)
 - Related: [ADR 0007](0007-transaction-retry-and-commit-check-protocol.md),
   [ADR 0011](0011-use-versioned-backend-profiles-for-multi-database-support.md),
   [ADR 0014](0014-wrapper-provided-database-bindings.md),
@@ -721,6 +722,9 @@ today.
   and `Code::TransactionLimit` carry the Capabilities key of the limit the machine checked, and
   `step_json` returns replies with `detail.limit` for existing inputs, so `ABI_VERSION` is 24 and
   the owner wire version is `"6"`.
+- **Request time (#162, ABI 25).** `Compiler::compile` takes the compiling step's `now_ms`
+  (`CompileFacts`) and `compile_json` takes the request context (ADR 0031). No state or event
+  changes; the owner wire version stays `"6"`.
 
 
 ## Migration

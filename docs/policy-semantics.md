@@ -62,6 +62,8 @@ insert:
       session: tenant_id
     created_by:
       session: user_id
+    created_at:
+      now: {}
   check:
     tenant_id:
       eq:
@@ -74,6 +76,11 @@ Semantics:
 
 - caller may provide only listed columns;
 - preset columns are server-owned, disjoint from caller columns, and rejected if supplied by the caller;
+- a preset value is `session: <key>`, `literal: <value>`, or `now: {}`;
+- `now: {}` is the time of the compile: the `Date.now()` of the engine or the owner that compiles ([ADR 0031](adr/0031-server-time-presets.md)). The column's Catalog type fixes the spelling: `instant` (format `rfc3339`) gets `2026-10-30T13:14:56.789Z` (UTC, milliseconds), `datetime` (format `sqlite-datetime`) gets `2026-10-30 13:14:56` (UTC, milliseconds truncated, the form of SQLite's `CURRENT_TIMESTAMP`), and `int64` or `integer` gets epoch milliseconds. Any other type or format, and any column with `constraints`, is rejected at activation, because whether a constraint accepts a time depends on the time;
+- one compile has one time: every statement and every row of an atomic envelope get the same value (an interactive transaction compiles each statement in its own request, so each statement has its own time);
+- `now` is a preset value only. In `filter`, `check`, `visible_if` and `exists.where` it is rejected at activation;
+- the time is not a trusted-session value and cannot be written as `session:`: the idempotency identity and the interactive replay identity include the session, so a value that changes with every request would turn a retry into another request;
 - `check` describes required post-insert state;
 - every changed row must evaluate the check to TRUE; FALSE and UNKNOWN fail, while zero changed rows pass vacuously;
 - unsupported atomic check behavior means reject, not best-effort execution.
@@ -104,6 +111,8 @@ update:
   presets:
     updated_by:
       session: user_id
+    updated_at:
+      now: {}
   check:
     tenant_id:
       eq:
@@ -118,7 +127,7 @@ Semantics:
 - `filter` is not composed with the select `filter` (issue #118). If it admits rows the select `filter` hides, the regular select columns of those rows can be inferred through the caller `WHERE`, so P3 in [security-model.md](security-model.md#security-properties) holds only when every row the update `filter` admits is also admitted by the select `filter`;
 - a caller `WHERE` may reference only the role's regular select columns for the resource (issue #116). `returning.columns` do not count: `RETURNING` shows post-update values (a preset or an assignment overwrites the pre-state one) and never a row that fails `check`. Columns that are only writable, used only by policy filters, or conditional (`visible_if`) are rejected, and a role without a select policy may not reference any column;
 - `columns` constrains assignments;
-- `presets` add or replace server-owned assignments according to configured conflict behavior;
+- `presets` add or replace server-owned assignments according to configured conflict behavior; `now: {}` follows the rules under Insert policy;
 - `check` constrains resulting rows.
 - every changed row must evaluate the check to TRUE; use an affected-row expectation when zero rows must fail.
 

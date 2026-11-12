@@ -108,6 +108,8 @@ Explainでは`params`にruntime値がなくても、SQL内の利用箇所、Cata
 
 ## 公開範囲
 
+`now` presetがある場合、`serverParameters`には`__policysql_now_rfc3339`などの名前が入ります。Explainは実際の時刻でcompileしますが、値は返しません。
+
 deploymentのredaction policyに応じて、policy内部識別子、policy-only column、server parameter名、protected SQL、physical名を省略または一般化できます。`parameters`と`result`は生成に必要なrole-visible情報なので省略しません。
 
 Explainをclient側の認可判定に使用しません。Atomic Executeはrequestごとに改めて認証・compile・検証します。拒否時も禁止column名やpolicy条件を追加公開しません。

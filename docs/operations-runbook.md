@@ -64,7 +64,7 @@ compile happened (the Worker, the Durable Object that owns a transaction, and Ex
 `requestId` as the `request_rejected` of the same request:
 
 ```json
-{"event":"rejection_reason","requestId":"req_…","statementIndex":0,"code":"POLICYSQL_FORBIDDEN_COLUMN","reason":"bind.UnknownColumn","shape":null,"schemaVersion":"…","policyVersion":"…","abiVersion":24}
+{"event":"rejection_reason","requestId":"req_…","statementIndex":0,"code":"POLICYSQL_FORBIDDEN_COLUMN","reason":"bind.UnknownColumn","shape":null,"schemaVersion":"…","policyVersion":"…","abiVersion":25}
 ```
 
 `reason` is `<stage>.<variant>`. The stages tell where the statement stopped: `bind` (the client's
