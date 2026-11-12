@@ -334,6 +334,19 @@ pub enum VerificationError {
     InvariantViolation(String),
 }
 
+impl VerificationError {
+    /// The variant name, logged in `rejection_reason`; never returned to a client and never
+    /// includes the variant's payload.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::EmptyProtectedSql => "EmptyProtectedSql",
+            Self::ProfileMismatch => "ProfileMismatch",
+            Self::InvariantViolation(_) => "InvariantViolation",
+        }
+    }
+}
+
 impl fmt::Display for VerificationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

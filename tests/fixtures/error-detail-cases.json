@@ -1,0 +1,1801 @@
+[
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "detail": {
+   "constraint": "unique"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "detail": {
+   "constraint": "not_null"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "detail": {
+   "constraint": "foreign_key"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "detail": {
+   "constraint": "check"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "detail": {
+   "constraint": "other"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "detail": {
+   "constraint": "primary_key"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "detail": {
+   "constraint": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "detail": {
+   "constraint": "unique",
+   "cause": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "explain"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "statement"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "constant_select"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "json_collection"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "delete"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "update"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "insert"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "insert_select"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "compound_select"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "values"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "distinct"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "window_clause"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "group_by"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "nulls_ordering"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "cte"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "derived_table"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "table_source"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "database_qualifier"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "indexed_by"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "join"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "self_join"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "window_function"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "subquery"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "expression"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "cast"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "function"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "literal"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "missing_from"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "duplicate_alias"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "duplicate_write_column"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "insert_arity"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "protected_statement"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "nope"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "EXPLAIN"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "Explain"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": 1
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": [
+    "explain"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": {
+    "feature": "explain"
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "explain",
+   "extra": 1
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "feature": "explain",
+   "reason": "explain"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": [
+   "explain"
+  ],
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": "explain",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "detail": {
+   "reason": "explain"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_UNSUPPORTED_SQL",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "positional"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "prefix"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "name"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "type"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "null"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "literal"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "value"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "names"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "nope"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "POSITIONAL"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "Positional"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": 1
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": [
+    "positional"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": {
+    "reason": "positional"
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "positional",
+   "extra": 1
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "positional",
+   "feature": "positional"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": [
+   "positional"
+  ],
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": "positional",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "feature": "positional"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "height"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "recursion"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "columns"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "parameters"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "like_pattern"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "column_metadata"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "database_expression_depth"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "function_arguments"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "compound_terms"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "join_tables"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "database"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "nope"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "HEIGHT"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "Height"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": 1
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": [
+    "height"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": {
+    "complexity": "height"
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "height",
+   "extra": 1
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "complexity": "height",
+   "expectation": "height"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": [
+   "height"
+  ],
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": "height",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "detail": {
+   "expectation": "height"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_SQL_TOO_COMPLEX",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": "affectedRows"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": "rowCount"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": "nope"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": "AFFECTEDROWS"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": "Affectedrows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": 1
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": [
+    "affectedRows"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": {
+    "expectation": "affectedRows"
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": "affectedRows",
+   "extra": 1
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "expectation": "affectedRows",
+   "complexity": "affectedRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": [
+   "affectedRows"
+  ],
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": "affectedRows",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "detail": {
+   "complexity": "affectedRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_EXPECTATION_FAILED",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 0
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 7,
+    "end": 11
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 27,
+    "end": 31
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 1048576,
+    "end": 1048576
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1048576
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": -1,
+    "end": 3
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 3,
+    "end": 2
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1048577
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 1.5,
+    "end": 3
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": "1",
+    "end": 3
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 0
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "end": 3
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 3,
+    "extra": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": null,
+    "end": 3
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": null
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": {
+     "n": 0
+    },
+    "end": 3
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": [
+    0,
+    3
+   ]
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": "0-3"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": 3
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {}
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   },
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": {
+   "reason": "names"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": [],
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": "span",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_SQL",
+  "detail": 1,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_COLUMN",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_COLUMN",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_COLUMN",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_COLUMN",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_COLUMN",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_MULTIPLE_STATEMENTS",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_MULTIPLE_STATEMENTS",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_MULTIPLE_STATEMENTS",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_MULTIPLE_STATEMENTS",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_MULTIPLE_STATEMENTS",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_AMBIGUOUS_PARAMETER_TYPE",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_AMBIGUOUS_PARAMETER_TYPE",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_AMBIGUOUS_PARAMETER_TYPE",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_AMBIGUOUS_PARAMETER_TYPE",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_AMBIGUOUS_PARAMETER_TYPE",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_RESERVED_PARAMETER",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_RESERVED_PARAMETER",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_RESERVED_PARAMETER",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_RESERVED_PARAMETER",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_RESERVED_PARAMETER",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_REQUEST",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INVALID_REQUEST",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_REQUEST",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_REQUEST",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_REQUEST",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INTERNAL",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_INTERNAL",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INTERNAL",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INTERNAL",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INTERNAL",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_OPERATION",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_OPERATION",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_OPERATION",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_OPERATION",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_OPERATION",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "feature": "star"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "span": {
+    "start": 0,
+    "end": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_FORBIDDEN_COLUMN",
+    "path": null,
+    "detail": null
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_FORBIDDEN_COLUMN",
+    "path": "/statements/1",
+    "detail": null
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_SQL",
+    "path": "/statements/0",
+    "detail": null
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_SQL",
+    "path": "/statements/0",
+    "detail": {
+     "span": {
+      "start": 7,
+      "end": 11
+     }
+    }
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_UNSUPPORTED_SQL",
+    "path": "/statements/0",
+    "detail": {
+     "feature": "star"
+    }
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_PARAMETER",
+    "path": "/statements/2",
+    "detail": {
+     "reason": "names"
+    }
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_SQL_TOO_COMPLEX",
+    "path": "/statements/0",
+    "detail": {
+     "complexity": "height"
+    }
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_EXPECTATION_FAILED",
+    "path": "/statements/0",
+    "detail": {
+     "expectation": "rowCount"
+    }
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_SQL",
+    "path": "/statements/0"
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_SQL",
+    "path": null
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_UNSUPPORTED_SQL",
+    "path": "/statements/0",
+    "detail": null
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_PARAMETER",
+    "path": null,
+    "detail": null
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_SQL_TOO_COMPLEX",
+    "path": null,
+    "detail": null
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_EXPECTATION_FAILED",
+    "path": null,
+    "detail": null
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_SQL",
+    "path": "/statements/0",
+    "detail": {
+     "feature": "star"
+    }
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_UNSUPPORTED_SQL",
+    "path": "/statements/0",
+    "detail": {
+     "span": {
+      "start": 0,
+      "end": 1
+     }
+    }
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_FORBIDDEN_COLUMN",
+    "path": "/statements/0",
+    "detail": {
+     "feature": "star"
+    }
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_FORBIDDEN_COLUMN",
+    "path": "/statements/0",
+    "detail": {}
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_UNSUPPORTED_SQL",
+    "path": "/statements/0",
+    "detail": {
+     "feature": "nope"
+    }
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_UNSUPPORTED_SQL",
+    "path": "/statements/0",
+    "detail": []
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_UNSUPPORTED_SQL",
+    "path": "/statements/0",
+    "detail": "star"
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_SQL",
+    "path": "/statements/0",
+    "detail": {
+     "cause": {
+      "code": "POLICYSQL_INVALID_SQL",
+      "path": null,
+      "detail": null
+     }
+    }
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_UNSUPPORTED_SQL",
+    "path": "/statements/0",
+    "detail": {
+     "feature": "star",
+     "cause": null
+    }
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_OUTCOME_UNKNOWN",
+    "path": null,
+    "detail": null
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_COMMIT_OUTCOME_UNKNOWN",
+    "path": null,
+    "detail": null
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_SQL",
+    "path": null,
+    "detail": null,
+    "extra": 1
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_SQL",
+    "detail": null
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_SQL",
+    "path": "/statements/01",
+    "detail": null
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_INVALID_SQL",
+    "path": null,
+    "detail": null
+   },
+   "feature": "star"
+  },
+  "valid": false
+ }
+]

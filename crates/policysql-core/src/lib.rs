@@ -194,6 +194,24 @@ impl ServerParameterName {
     }
 }
 
+/// Which declared expectation (`expect.affectedRows` or `expect.rowCount`) a result violated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExpectationKind {
+    AffectedRows,
+    RowCount,
+}
+
+impl ExpectationKind {
+    /// The public name used in `error.detail.expectation` and in the request's `expect` object.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AffectedRows => "affectedRows",
+            Self::RowCount => "rowCount",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationKind {
     Select,

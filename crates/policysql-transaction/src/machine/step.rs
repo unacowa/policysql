@@ -8,8 +8,8 @@
 
 use super::compiler::{Compiler, CoreError, Operation, RawResult, ResultBudget, Validated};
 use super::io::{
-    self, Class, Code, ConstraintKind, DriverCall, DriverResult, Effect, Event, HostFacts,
-    ObserveContext, error_reply, value_reply,
+    self, Class, Code, ConstraintKind, DriverCall, DriverResult, Effect, ErrorDetail, Event,
+    HostFacts, ObserveContext, error_reply, value_reply,
 };
 use super::state::{
     Binding, Connection, Counters, Durable, Identity, Kind, MAX_DURABLE_BYTES, Mode, Mutation,
@@ -447,7 +447,7 @@ impl<C: Compiler> Step<'_, C> {
                 "policyVersion": policy,
                 "cause": cause,
             }));
-            return io::error_reply_at(code, index);
+            return io::error_reply_at_with(code, index, &ErrorDetail::complexity(cause));
         }
         error_reply(code)
     }
@@ -908,7 +908,7 @@ impl<C: Compiler> Step<'_, C> {
                 Ok(())
             }
             (Task::BeginBinding { .. }, Event::BindingCheckFailed { class, .. }) => {
-                self.respond(error_reply(Code::for_class(*class)));
+                self.respond(io::class_reply(*class));
                 Ok(())
             }
             (
@@ -942,7 +942,7 @@ impl<C: Compiler> Step<'_, C> {
             }
             (Task::BeginOpen { .. }, Event::OpenFailed { class, .. }) => {
                 self.set_connection(Connection::None);
-                self.respond(error_reply(Code::for_class(*class)));
+                self.respond(io::class_reply(*class));
                 Ok(())
             }
             (Task::BeginPersist, Event::Persisted { .. }) => {
@@ -1041,11 +1041,7 @@ impl<C: Compiler> Step<'_, C> {
                 | Task::CommitBinding { .. }
                 | Task::RollbackBinding { .. },
                 Event::BindingCheckFailed { class, .. },
-            ) => self.close(
-                lane,
-                Phase::Failed,
-                Some(error_reply(Code::for_class(*class))),
-            ),
+            ) => self.close(lane, Phase::Failed, Some(io::class_reply(*class))),
             (task @ Task::StatementExecute { .. }, Event::Executed { results, .. }) => {
                 self.executed(lane, request_id, task, results)
             }

@@ -2,18 +2,19 @@
 
 use policysql_catalog::{Catalog, ResourceDescriptor};
 use policysql_core::{
-    ClientParameterName, ColumnName, ConstraintScalar, JsonSchemaType, JsonValueSchema,
-    LogicalType, LogicalValue, ResourceId, ResourceName, SnapshotId, StorageClass,
+    ClientParameterName, ColumnName, ConstraintScalar, ExpectationKind, JsonSchemaType,
+    JsonValueSchema, LogicalType, LogicalValue, ResourceId, ResourceName, SnapshotId, StorageClass,
     ValueConstraints, ValueDescriptor, ValueRepresentation,
 };
 use policysql_execution::{ComplexityCause, ExecutionLimits};
 use policysql_gateway::{
-    AuthContext, EndpointPermission, Gateway, GatewayError, RejectionKind, StatementRequest,
-    classify_bind_error,
+    AuthContext, EndpointPermission, Gateway, GatewayError, ParameterReason, Rejection,
+    RejectionDetail, RejectionKind, StatementRequest, classify_bind_error,
 };
 use policysql_ir::{BoundExpr, BoundSelect, BoundStatement};
-use policysql_parser::SqliteFrontend;
+use policysql_parser::{SqliteFrontend, UnsupportedFeature};
 use policysql_policy::PolicyBundle;
+use policysql_transaction::machine::io::ErrorDetail;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -91,7 +92,12 @@ use wasm_bindgen::prelude::*;
 /// answers 403 `POLICYSQL_CHECK_FAILED` at `/statements/<i>` (was 422 `POLICYSQL_SCHEMA_MISMATCH`),
 /// and a keyed atomic execute that does not compile answers 500 `POLICYSQL_OUTCOME_UNKNOWN` with
 /// `detail.cause` (`code`, `path`) (was `POLICYSQL_INTERNAL`). No identity value changed.
-const ABI_VERSION: u32 = 20;
+/// 21: issue #145 pull request C: the compile and result-validation errors carry `error.detail`
+/// where the public table has a row (`feature`, `span`, `reason`, `complexity`,
+/// `expectation`), a keyed `POLICYSQL_OUTCOME_UNKNOWN`'s `cause` gains `detail`, a database
+/// complexity refusal names its `complexity`, `compile_json`'s error envelope may carry a `log`
+/// record, and the machine writes the log event `rejection_reason`. No identity value changed.
+const ABI_VERSION: u32 = 21;
 /// The fixed JSON levels the machine adds when it wraps an interactive command in the
 /// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
 /// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must
@@ -109,6 +115,8 @@ mod step;
 
 #[cfg(test)]
 mod bytes_tests;
+#[cfg(test)]
+mod detail_tests;
 #[cfg(test)]
 mod nullable_tests;
 #[cfg(test)]
@@ -509,6 +517,11 @@ struct CatalogDescriptorDto {
 #[derive(Debug, Serialize)]
 struct ErrorEnvelope {
     error: ErrorBody,
+    /// The `rejection_reason` record of a compile error: private to the ABI, read by the
+    /// engine for an operation that runs no step machine (Explain), and never part of a
+    /// response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    log: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -528,6 +541,8 @@ struct ErrorBody {
     code: &'static str,
     message: &'static str,
     path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<ErrorDetail>,
 }
 
 #[wasm_bindgen]
@@ -731,6 +746,7 @@ impl PolicySqlRuntime {
                         Err(error) => {
                             return serialize_or_internal(&ErrorEnvelope {
                                 error: error_body(error),
+                                log: None,
                             });
                         }
                     }
@@ -738,6 +754,7 @@ impl PolicySqlRuntime {
                 serialize_or_internal(&response)
             }
             Err(error) => serialize_or_internal(&ErrorEnvelope {
+                log: rejection_reason_log(self, &error),
                 error: error_body(error),
             }),
         }
@@ -750,6 +767,7 @@ impl PolicySqlRuntime {
             Ok(response) => serialize_or_internal(&response),
             Err(error) => serialize_or_internal(&ErrorEnvelope {
                 error: error_body(error.at_statement(index)),
+                log: None,
             }),
         }
     }
@@ -832,6 +850,7 @@ impl PolicySqlRuntime {
         let Some(required) = session::parse_access(required_access) else {
             return serialize_or_internal(&ErrorEnvelope {
                 error: error_body(RuntimeError::Internal),
+                log: None,
             });
         };
         let outcome = if session_json.len() > policysql_transaction::bounds::SESSION_INPUT_BYTES {
@@ -855,6 +874,7 @@ impl PolicySqlRuntime {
             }
             Err(session::SessionError::Forbidden) => serialize_or_internal(&ErrorEnvelope {
                 error: error_body(RuntimeError::Access),
+                log: None,
             }),
         }
     }
@@ -951,6 +971,7 @@ impl PolicySqlRuntime {
             Ok(response) => serialize_or_internal(&response),
             Err(error) => serialize_or_internal(&ErrorEnvelope {
                 error: error_body(error),
+                log: None,
             }),
         }
     }
@@ -1123,7 +1144,7 @@ impl PolicySqlRuntime {
         // checked before a byte is parsed, against what the earlier statements left.
         let raw_bytes = u64::try_from(raw_result_json.len()).unwrap_or(u64::MAX);
         if raw_bytes > budget.raw_bytes {
-            return Err(RuntimeError::Rejected(RejectionKind::LimitExceeded));
+            return Err(rejected(RejectionKind::LimitExceeded, "result.RawBytes"));
         }
         let raw: RawExecuteResult =
             serde_json::from_str(raw_result_json).map_err(|_| RuntimeError::RemoteResult)?;
@@ -1151,7 +1172,7 @@ impl PolicySqlRuntime {
     ) -> Result<ValidatedExecuteResult, RuntimeError> {
         let raw_bytes = raw_result_bytes(&raw);
         if raw_bytes > budget.raw_bytes {
-            return Err(RuntimeError::Rejected(RejectionKind::LimitExceeded));
+            return Err(rejected(RejectionKind::LimitExceeded, "result.RawBytes"));
         }
         self.validate_result_parts(
             handle,
@@ -1201,7 +1222,7 @@ impl PolicySqlRuntime {
         // JSON-typed cell.
         let values_limit = budget.values;
         let mut values = u64::try_from(columns.len()).unwrap_or(u64::MAX);
-        let over_limit = || RuntimeError::Rejected(RejectionKind::LimitExceeded);
+        let over_limit = || rejected(RejectionKind::LimitExceeded, "result.Values");
         if values > values_limit {
             return Err(over_limit());
         }
@@ -1243,11 +1264,19 @@ impl PolicySqlRuntime {
             budget.result_bytes,
         )
         .map_err(|error| match error {
-            policysql_turso::AdapterError::ExpectationFailed => {
-                RuntimeError::Rejected(RejectionKind::ExpectationFailed)
+            policysql_turso::AdapterError::ExpectationFailed(kind) => {
+                RuntimeError::Rejected(Rejection {
+                    kind: RejectionKind::ExpectationFailed,
+                    detail: Some(RejectionDetail::Expectation(kind)),
+                    reason: match kind {
+                        ExpectationKind::AffectedRows => "result.AffectedRows",
+                        ExpectationKind::RowCount => "result.RowCount",
+                    },
+                    shape: None,
+                })
             }
             policysql_turso::AdapterError::LimitExceeded => {
-                RuntimeError::Rejected(RejectionKind::LimitExceeded)
+                rejected(RejectionKind::LimitExceeded, "result.Limit")
             }
             policysql_turso::AdapterError::CheckFailed => RuntimeError::CheckFailedAt(index),
             _ => RuntimeError::RemoteResult,
@@ -1274,7 +1303,7 @@ impl PolicySqlRuntime {
         // The auth comes from `authorize_session_json`, never from the client: one over its
         // derived bound is the engine's or wrapper's inconsistency (500), not a bad request.
         if verified_auth_json.len() > policysql_transaction::bounds::AUTH_BYTES {
-            return Err(RuntimeError::Internal);
+            return Err(RuntimeError::AuthTooLarge);
         }
         let auth = activate_auth(verified_auth_json, EndpointPermission::Catalog)?;
         let role = auth.session().role();
@@ -1363,6 +1392,7 @@ impl PolicySqlRuntime {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn compile(
         &self,
         verified_auth_json: &str,
@@ -1374,7 +1404,7 @@ impl PolicySqlRuntime {
         // `max_request_bytes`, and over the derived bound is the configured limit's 413.
         let max_request_bytes = self.machine_limits().max_request_bytes();
         if verified_auth_json.len() > policysql_transaction::bounds::AUTH_BYTES {
-            return Err(RuntimeError::Internal);
+            return Err(RuntimeError::AuthTooLarge);
         }
         // The envelope the engine or an owner builds around a body (an interactive command is
         // wrapped as a one-statement envelope) can be a few bytes longer than the body, so the
@@ -1400,7 +1430,10 @@ impl PolicySqlRuntime {
         if u64::try_from(raw_request.statements.len()).unwrap_or(u64::MAX)
             > self.limits.max_statements
         {
-            return Err(RuntimeError::Rejected(RejectionKind::LimitExceeded));
+            return Err(rejected(
+                RejectionKind::LimitExceeded,
+                "request.StatementLimit",
+            ));
         }
         // Before any statement is parsed: a statement over `max_sql_bytes` costs nothing more.
         if let Some(index) = raw_request.statements.iter().position(|statement| {
@@ -1687,7 +1720,11 @@ fn validate_deployment_surface(
         };
         if !accepted {
             return Err(RuntimeError::RejectedAt(
-                RejectionKind::UnsupportedSql,
+                Rejection::with_detail(
+                    RejectionKind::UnsupportedSql,
+                    RejectionDetail::Feature(UnsupportedFeature::WindowFunction),
+                    "request.Surface",
+                ),
                 index,
             ));
         }
@@ -1763,13 +1800,15 @@ enum RuntimeError {
     RequestTooLarge,
     /// Statement `n`'s SQL is over `max_sql_bytes` (413, path `/statements/<n>/sql`).
     SqlTooLargeAt(usize),
-    Rejected(RejectionKind),
-    RejectedAt(RejectionKind, usize),
+    Rejected(Rejection),
+    RejectedAt(Rejection, usize),
     /// The emitted statement `n` reached a downstream complexity limit (400, ADR 0027).
     TooComplexAt(ComplexityCause, usize),
     /// The emitted SQL of statement `n` did not parse again (500; an emitter bug).
     EmittedSqlInvalidAt(usize),
     Internal,
+    /// The trusted auth is over its derived bound: a wrapper fault, answered as `INTERNAL`.
+    AuthTooLarge,
     Busy,
     RemoteResult,
     RemoteResultAt(usize),
@@ -1778,10 +1817,55 @@ enum RuntimeError {
 }
 
 impl RuntimeError {
+    /// The statement the error points at, when it does.
+    pub(crate) const fn statement_index(&self) -> Option<usize> {
+        match self {
+            Self::EnvelopeAt(index)
+            | Self::SqlTooLargeAt(index)
+            | Self::RejectedAt(_, index)
+            | Self::TooComplexAt(_, index)
+            | Self::EmittedSqlInvalidAt(index)
+            | Self::RemoteResultAt(index)
+            | Self::CheckFailedAt(index) => Some(*index),
+            Self::Session
+            | Self::Access
+            | Self::Snapshot
+            | Self::Envelope
+            | Self::RequestTooLarge
+            | Self::Rejected(_)
+            | Self::Internal
+            | Self::AuthTooLarge
+            | Self::Busy
+            | Self::RemoteResult => None,
+        }
+    }
+
+    /// The fixed internal reason of the error, `<stage>.<name>`: logged as `rejection_reason`
+    /// and never returned to a client. Never a name, SQL text, or a payload.
+    const fn reason(&self) -> &'static str {
+        match self {
+            Self::Session => "auth.Session",
+            Self::Access => "auth.Access",
+            Self::Snapshot => "request.Stale",
+            Self::Envelope | Self::EnvelopeAt(_) => "request.Envelope",
+            Self::RequestTooLarge => "request.TooLarge",
+            Self::SqlTooLargeAt(_) => "request.SqlTooLarge",
+            Self::AuthTooLarge => "request.AuthTooLarge",
+            Self::Rejected(rejection) | Self::RejectedAt(rejection, _) => rejection.reason,
+            // Logged by their own events (`sql_too_complex`, `emitted_sql_reparse_failed`).
+            Self::TooComplexAt(..) => "compile.TooComplex",
+            Self::EmittedSqlInvalidAt(_) => "emit.ReparseFailed",
+            Self::Internal => "runtime.Internal",
+            Self::Busy => "runtime.Busy",
+            Self::RemoteResult | Self::RemoteResultAt(_) => "result.Invalid",
+            Self::CheckFailedAt(_) => "result.CheckFailed",
+        }
+    }
+
     const fn at_statement(self, index: usize) -> Self {
         match self {
             Self::Envelope => Self::EnvelopeAt(index),
-            Self::Rejected(kind) => Self::RejectedAt(kind, index),
+            Self::Rejected(rejection) => Self::RejectedAt(rejection, index),
             Self::RemoteResult => Self::RemoteResultAt(index),
             other => other,
         }
@@ -1800,9 +1884,9 @@ fn activate_catalog_with_schema(
     physical_schema: Option<&PhysicalSchema>,
 ) -> Result<Catalog, RuntimeError> {
     let manifest: CatalogManifest = serde_yaml::from_str(yaml)
-        .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?;
+        .map_err(|_| rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?;
     if manifest.version != 1 || manifest.resources.is_empty() {
-        return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+        return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"));
     }
     let resources = manifest
         .resources
@@ -1810,18 +1894,18 @@ fn activate_catalog_with_schema(
         .enumerate()
         .map(|(index, (name, resource))| {
             if resource.columns.is_empty() {
-                return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+                return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"));
             }
             let physical_table = physical_schema
                 .map(|schema| {
                     schema
                         .tables
                         .get(&resource.source.table)
-                        .ok_or(RuntimeError::Rejected(RejectionKind::InvalidRequest))
+                        .ok_or(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))
                 })
                 .transpose()?;
             let id = u64::try_from(index + 1)
-                .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?;
+                .map_err(|_| rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?;
             let columns = resource
                 .columns
                 .into_iter()
@@ -1831,7 +1915,7 @@ fn activate_catalog_with_schema(
                             table
                                 .columns
                                 .get(&column_name)
-                                .ok_or(RuntimeError::Rejected(RejectionKind::InvalidRequest))
+                                .ok_or(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))
                         })
                         .transpose()?;
                     let derived_storage = physical_column
@@ -1842,7 +1926,7 @@ fn activate_catalog_with_schema(
                     } else {
                         derived_storage
                             .map(derived_logical_type)
-                            .ok_or(RuntimeError::Rejected(RejectionKind::InvalidRequest))?
+                            .ok_or(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?
                     };
                     let representation =
                         representation(column.representation.as_deref(), default_representation)?;
@@ -1852,7 +1936,7 @@ fn activate_catalog_with_schema(
                             ValueRepresentation::Base64 | ValueRepresentation::String
                         )
                     {
-                        return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+                        return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"));
                     }
                     validate_format(logical_type, column.format.as_deref())?;
                     let constraints = column
@@ -1865,7 +1949,7 @@ fn activate_catalog_with_schema(
                             || representation != ValueRepresentation::Json
                             || !valid_json_value_schema(schema, 0)
                         {
-                            return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+                            return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"));
                         }
                         Some(parse_json_value_schema(schema)?)
                     } else {
@@ -1885,7 +1969,7 @@ fn activate_catalog_with_schema(
                         .zip(derived_storage)
                         .is_some_and(|(declared, derived)| declared != derived)
                     {
-                        return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+                        return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"));
                     }
                     validate_storage(logical_type, storage)?;
                     let nullable = column
@@ -1897,13 +1981,14 @@ fn activate_catalog_with_schema(
                         .zip(physical_column.map(|column| column.nullable))
                         .is_some_and(|(manifest, physical)| manifest != physical)
                     {
-                        return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+                        return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"));
                     }
                     let declared_type_bytes =
                         physical_column.map_or(0, |column| column.declared_type.len());
                     Ok((
-                        ColumnName::new(column_name)
-                            .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?,
+                        ColumnName::new(column_name).map_err(|_| {
+                            rejected(RejectionKind::InvalidRequest, "runtime.Catalog")
+                        })?,
                         declared_type_bytes,
                         ValueDescriptor {
                             logical_type,
@@ -1925,14 +2010,14 @@ fn activate_catalog_with_schema(
                 .collect::<Vec<_>>();
             let descriptor = ResourceDescriptor::new_with_source(
                 ResourceId::new(id)
-                    .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?,
+                    .map_err(|_| rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?,
                 ResourceName::new(name)
-                    .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?,
+                    .map_err(|_| rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?,
                 ResourceName::new(resource.source.table)
-                    .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?,
+                    .map_err(|_| rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?,
                 columns.into_iter().map(|(name, _, value)| (name, value)),
             )
-            .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))?;
+            .map_err(|_| rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?;
             Ok(declared
                 .into_iter()
                 .fold(descriptor, |descriptor, (column, bytes)| {
@@ -1941,7 +2026,7 @@ fn activate_catalog_with_schema(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Catalog::new(snapshot, resources)
-        .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidRequest))
+        .map_err(|_| rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))
 }
 
 fn valid_json_value_schema(value: &serde_yaml::Value, depth: usize) -> bool {
@@ -2055,7 +2140,7 @@ fn valid_json_schema_type(value: &serde_yaml::Value) -> bool {
 fn parse_json_value_schema(value: &serde_yaml::Value) -> Result<JsonValueSchema, RuntimeError> {
     let object = value
         .as_mapping()
-        .ok_or(RuntimeError::Rejected(RejectionKind::InvalidRequest))?;
+        .ok_or(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?;
     let types = object
         .get("type")
         .map(json_schema_types)
@@ -2070,7 +2155,7 @@ fn parse_json_value_schema(value: &serde_yaml::Value) -> Result<JsonValueSchema,
                 .map(|(name, schema)| {
                     Ok((
                         name.as_str()
-                            .ok_or(RuntimeError::Rejected(RejectionKind::InvalidRequest))?
+                            .ok_or(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?
                             .to_owned(),
                         parse_json_value_schema(schema)?,
                     ))
@@ -2130,7 +2215,7 @@ fn json_schema_types(value: &serde_yaml::Value) -> Result<Vec<JsonSchemaType>, R
             Some("string") => Ok(JsonSchemaType::String),
             Some("array") => Ok(JsonSchemaType::Array),
             Some("object") => Ok(JsonSchemaType::Object),
-            _ => Err(RuntimeError::Rejected(RejectionKind::InvalidRequest)),
+            _ => Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog")),
         })
         .collect()
 }
@@ -2141,7 +2226,7 @@ fn parse_constraints(
 ) -> Result<ValueConstraints, RuntimeError> {
     let object = value
         .as_mapping()
-        .ok_or(RuntimeError::Rejected(RejectionKind::InvalidRequest))?;
+        .ok_or(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?;
     let allowed = object
         .get("enum")
         .and_then(serde_yaml::Value::as_sequence)
@@ -2175,7 +2260,7 @@ fn parse_constraints(
             .zip(max_length)
             .is_some_and(|(minimum, maximum)| minimum > maximum)
     {
-        return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+        return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"));
     }
     let numeric = matches!(
         logical_type,
@@ -2191,11 +2276,11 @@ fn parse_constraints(
             .iter()
             .any(|value| !constraint_matches_type(value, logical_type))
     {
-        return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+        return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"));
     }
     if let Some(pattern) = &pattern {
         if pattern.len() > 256 || regex_lite::Regex::new(pattern).is_err() {
-            return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+            return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"));
         }
     }
     Ok(ValueConstraints {
@@ -2212,7 +2297,7 @@ fn canonical_number(value: &serde_yaml::Value) -> Result<String, RuntimeError> {
     let value = value
         .as_f64()
         .filter(|value| value.is_finite())
-        .ok_or(RuntimeError::Rejected(RejectionKind::InvalidRequest))?;
+        .ok_or(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))?;
     Ok(value.to_string())
 }
 
@@ -2220,7 +2305,7 @@ fn nonnegative_usize(value: &serde_yaml::Value) -> Result<usize, RuntimeError> {
     value
         .as_u64()
         .and_then(|value| usize::try_from(value).ok())
-        .ok_or(RuntimeError::Rejected(RejectionKind::InvalidRequest))
+        .ok_or(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))
 }
 
 fn constraint_scalar(value: &serde_yaml::Value) -> Result<ConstraintScalar, RuntimeError> {
@@ -2253,7 +2338,7 @@ fn storage_class(value: &str) -> Result<StorageClass, RuntimeError> {
         "real" => Ok(StorageClass::Real),
         "text" => Ok(StorageClass::Text),
         "blob" => Ok(StorageClass::Blob),
-        _ => Err(RuntimeError::Rejected(RejectionKind::InvalidRequest)),
+        _ => Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog")),
     }
 }
 
@@ -2268,7 +2353,7 @@ fn declared_storage(value: &str) -> Result<StorageClass, RuntimeError> {
     } else if value.contains("REAL") || value.contains("FLOA") || value.contains("DOUB") {
         Ok(StorageClass::Real)
     } else {
-        Err(RuntimeError::Rejected(RejectionKind::InvalidRequest))
+        Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))
     }
 }
 
@@ -2304,7 +2389,7 @@ fn validate_storage(
             ) | (LogicalType::Bytes, StorageClass::Blob)
         )
     }) {
-        return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest));
+        return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"));
     }
     Ok(())
 }
@@ -2329,7 +2414,7 @@ fn validate_format(logical_type: LogicalType, format: Option<&str>) -> Result<()
     if valid {
         Ok(())
     } else {
-        Err(RuntimeError::Rejected(RejectionKind::InvalidRequest))
+        Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog"))
     }
 }
 
@@ -2345,7 +2430,7 @@ fn logical_type(value: Option<&str>) -> Result<(LogicalType, ValueRepresentation
         Some("datetime") => Ok((LogicalType::DateTime, ValueRepresentation::String)),
         Some("instant") => Ok((LogicalType::Instant, ValueRepresentation::String)),
         Some("json") => Ok((LogicalType::Json, ValueRepresentation::Json)),
-        _ => Err(RuntimeError::Rejected(RejectionKind::InvalidRequest)),
+        _ => Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog")),
     }
 }
 
@@ -2359,7 +2444,7 @@ fn representation(
         Some("number") => ValueRepresentation::Number,
         Some("boolean") => ValueRepresentation::Boolean,
         Some("object" | "array") => ValueRepresentation::Json,
-        _ => return Err(RuntimeError::Rejected(RejectionKind::InvalidRequest)),
+        _ => return Err(rejected(RejectionKind::InvalidRequest, "runtime.Catalog")),
     };
     Ok(output)
 }
@@ -2411,7 +2496,7 @@ fn statement_request(
         .into_iter()
         .map(|(name, value)| {
             let name = ClientParameterName::new(name)
-                .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidParameter))?;
+                .map_err(|_| parameter_error(ParameterReason::Name, "parameter.Name"))?;
             let value = logical_parameter_value(
                 max_bytes_per_value,
                 &value,
@@ -2464,7 +2549,7 @@ fn statement_parameter_types(
     policysql_sqlite::analyze_client_parameters(statement, catalog)
         .contracts()
         .cloned()
-        .map_err(|_| RuntimeError::Rejected(RejectionKind::AmbiguousParameterType))
+        .map_err(|_| rejected(RejectionKind::AmbiguousParameterType, "parameter.Types"))
 }
 
 /// A client parameter from its exact body text (ADR 0027 pull request 7). An array or object
@@ -2482,10 +2567,11 @@ fn logical_parameter_value(
         return if expected == Some(LogicalType::Json) {
             Ok(LogicalValue::Json(text.to_owned()))
         } else {
-            Err(invalid_parameter())
+            Err(invalid_parameter("parameter.Container"))
         };
     }
-    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| invalid_parameter())?;
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| invalid_parameter("parameter.Text"))?;
     logical_value(max_bytes, value, expected)
 }
 
@@ -2501,17 +2587,15 @@ fn logical_value(
             serde_json::Value::Null => Ok(LogicalValue::Null),
             serde_json::Value::String(value) => policysql_core::bytes::decode(&value, max_bytes)
                 .map(LogicalValue::Bytes)
-                .map_err(|error| {
-                    RuntimeError::Rejected(match error {
-                        policysql_core::bytes::DecodeError::TooLarge => {
-                            RejectionKind::LimitExceeded
-                        }
-                        policysql_core::bytes::DecodeError::InvalidEncoding => {
-                            RejectionKind::InvalidParameter
-                        }
-                    })
+                .map_err(|error| match error {
+                    policysql_core::bytes::DecodeError::TooLarge => {
+                        rejected(RejectionKind::LimitExceeded, "parameter.BytesTooLarge")
+                    }
+                    policysql_core::bytes::DecodeError::InvalidEncoding => {
+                        invalid_parameter("parameter.BytesEncoding")
+                    }
                 }),
-            _ => Err(RuntimeError::Rejected(RejectionKind::InvalidParameter)),
+            _ => Err(invalid_parameter("parameter.BytesType")),
         };
     }
     match value {
@@ -2523,7 +2607,7 @@ fn logical_value(
                     .as_f64()
                     .filter(|number| number.is_finite())
                     .map(LogicalValue::Number)
-                    .ok_or(RuntimeError::Rejected(RejectionKind::InvalidParameter))
+                    .ok_or_else(|| invalid_parameter("parameter.NonFinite"))
             },
             |value| Ok(LogicalValue::Int64(value)),
         ),
@@ -2533,16 +2617,31 @@ fn logical_value(
         {
             serde_json::to_string(&value)
                 .map(LogicalValue::Json)
-                .map_err(|_| RuntimeError::Rejected(RejectionKind::InvalidParameter))
+                .map_err(|_| invalid_parameter("parameter.JsonEncode"))
         }
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Err(RuntimeError::Rejected(RejectionKind::InvalidParameter))
+            Err(invalid_parameter("parameter.Container"))
         }
     }
 }
 
-fn invalid_parameter() -> RuntimeError {
-    RuntimeError::Rejected(RejectionKind::InvalidParameter)
+/// A rejection with no public detail, for the internal `reason` that is only logged.
+const fn rejected(kind: RejectionKind, reason: &'static str) -> RuntimeError {
+    RuntimeError::Rejected(Rejection::plain(kind, reason))
+}
+
+/// An `INVALID_PARAMETER` whose public detail is `reason`.
+const fn parameter_error(reason: ParameterReason, internal: &'static str) -> RuntimeError {
+    RuntimeError::Rejected(Rejection::with_detail(
+        RejectionKind::InvalidParameter,
+        RejectionDetail::Parameter(reason),
+        internal,
+    ))
+}
+
+/// A supplied value that does not fit its parameter (`reason: value`).
+const fn invalid_parameter(internal: &'static str) -> RuntimeError {
+    parameter_error(ParameterReason::Value, internal)
 }
 
 fn logical_result_value(
@@ -2565,7 +2664,7 @@ fn logical_result_value(
             .map(LogicalValue::Bytes)
             .map_err(|error| match error {
                 policysql_core::bytes::DecodeError::TooLarge => {
-                    RuntimeError::Rejected(RejectionKind::LimitExceeded)
+                    rejected(RejectionKind::LimitExceeded, "result.BytesTooLarge")
                 }
                 policysql_core::bytes::DecodeError::InvalidEncoding => RuntimeError::RemoteResult,
             });
@@ -2854,14 +2953,48 @@ fn runtime_gateway_error(error: GatewayError) -> RuntimeError {
         GatewayError::AccessDenied => RuntimeError::Access,
         GatewayError::SnapshotMismatch => RuntimeError::Snapshot,
         GatewayError::EnvelopeLimit => RuntimeError::Envelope,
-        GatewayError::Rejected { kind, index } => RuntimeError::RejectedAt(kind, index),
+        GatewayError::Rejected { rejection, index } => RuntimeError::RejectedAt(rejection, index),
         GatewayError::TooComplex { cause, index } => RuntimeError::TooComplexAt(cause, index),
         GatewayError::EmittedSqlInvalid { index } => RuntimeError::EmittedSqlInvalidAt(index),
-        GatewayError::TransactionRequired => {
-            RuntimeError::Rejected(RejectionKind::ForbiddenOperation)
-        }
+        GatewayError::TransactionRequired => rejected(
+            RejectionKind::ForbiddenOperation,
+            "gateway.TransactionRequired",
+        ),
         GatewayError::ExecutionFailed => RuntimeError::Internal,
     }
+}
+
+/// The `rejection_reason` log record of a refused compile or result validation (ADR 0027 and
+/// ADR 0030 amendments), without the request id: the statement, the code, the fixed internal
+/// reason, and the versions. Never SQL text, a name, a value, or a payload. The complexity
+/// refusals and the emitter's re-parse failure have their own events and no record here.
+fn rejection_reason_log(
+    runtime: &PolicySqlRuntime,
+    error: &RuntimeError,
+) -> Option<serde_json::Value> {
+    if matches!(
+        error,
+        RuntimeError::TooComplexAt(..) | RuntimeError::EmittedSqlInvalidAt(_)
+    ) {
+        return None;
+    }
+    let shape = match error {
+        RuntimeError::Rejected(rejection) | RuntimeError::RejectedAt(rejection, _) => {
+            rejection.shape
+        }
+        _ => None,
+    };
+    let code = error_body(*error).code;
+    Some(serde_json::json!({
+        "event": "rejection_reason",
+        "statementIndex": error.statement_index(),
+        "code": code,
+        "reason": error.reason(),
+        "shape": shape,
+        "schemaVersion": runtime.schema_version,
+        "policyVersion": runtime.policy_version,
+        "abiVersion": ABI_VERSION,
+    }))
 }
 
 fn error_body(runtime_error: RuntimeError) -> ErrorBody {
@@ -2895,21 +3028,26 @@ fn error_body(runtime_error: RuntimeError) -> ErrorBody {
             code: "POLICYSQL_REQUEST_TOO_LARGE",
             message: "A statement's SQL exceeds the size limit.",
             path: Some(format!("/statements/{index}/sql")),
+            detail: None,
         },
-        RuntimeError::Rejected(kind) => rejection_body(kind, None),
-        RuntimeError::RejectedAt(kind, index) => rejection_body(kind, Some(index)),
-        RuntimeError::TooComplexAt(_, index) => error(
-            "POLICYSQL_SQL_TOO_COMPLEX",
-            "The statement is too complex to run under the active policy.",
-            Some(index),
-        ),
-        RuntimeError::Session | RuntimeError::Internal | RuntimeError::EmittedSqlInvalidAt(_) => {
-            error(
-                "POLICYSQL_INTERNAL",
-                "The request could not be completed.",
-                None,
+        RuntimeError::Rejected(rejection) => rejection_body(rejection, None),
+        RuntimeError::RejectedAt(rejection, index) => rejection_body(rejection, Some(index)),
+        RuntimeError::TooComplexAt(cause, index) => ErrorBody {
+            detail: Some(ErrorDetail::complexity(cause.name())),
+            ..error(
+                "POLICYSQL_SQL_TOO_COMPLEX",
+                "The statement is too complex to run under the active policy.",
+                Some(index),
             )
-        }
+        },
+        RuntimeError::Session
+        | RuntimeError::Internal
+        | RuntimeError::AuthTooLarge
+        | RuntimeError::EmittedSqlInvalidAt(_) => error(
+            "POLICYSQL_INTERNAL",
+            "The request could not be completed.",
+            None,
+        ),
         RuntimeError::Busy => error(
             "POLICYSQL_DATABASE_UNAVAILABLE",
             "The database adapter is temporarily unavailable.",
@@ -2938,11 +3076,28 @@ fn error(code: &'static str, message: &'static str, index: Option<usize>) -> Err
         code,
         message,
         path: index.map(|index| format!("/statements/{index}")),
+        detail: None,
     }
 }
 
-fn rejection_body(kind: RejectionKind, index: Option<usize>) -> ErrorBody {
-    let (code, message) = match kind {
+/// The public `error.detail` of a rejection. A span past the checked ceiling is left out: the
+/// detail is optional for `INVALID_SQL`, and a value the table would refuse must not be sent.
+fn rejection_detail(detail: RejectionDetail) -> Option<ErrorDetail> {
+    match detail {
+        RejectionDetail::Feature(feature) => Some(ErrorDetail::feature(feature.name())),
+        RejectionDetail::Span(span) => {
+            let start = u64::try_from(span.start).ok()?;
+            let end = u64::try_from(span.end).ok()?;
+            (start <= end && end <= policysql_transaction::machine::io::MAX_SPAN_OFFSET)
+                .then(|| ErrorDetail::span(start, end))
+        }
+        RejectionDetail::Parameter(reason) => Some(ErrorDetail::reason(reason.name())),
+        RejectionDetail::Expectation(kind) => Some(ErrorDetail::expectation(kind.name())),
+    }
+}
+
+fn rejection_body(rejection: Rejection, index: Option<usize>) -> ErrorBody {
+    let (code, message) = match rejection.kind {
         RejectionKind::InvalidRequest => ("POLICYSQL_INVALID_REQUEST", "The request is invalid."),
         RejectionKind::InvalidSql => (
             "POLICYSQL_INVALID_SQL",
@@ -3001,7 +3156,10 @@ fn rejection_body(kind: RejectionKind, index: Option<usize>) -> ErrorBody {
             "The operation did not satisfy its declared expectation.",
         ),
     };
-    error(code, message, index)
+    ErrorBody {
+        detail: rejection.detail.and_then(rejection_detail),
+        ..error(code, message, index)
+    }
 }
 
 fn serialize_or_internal(value: &impl Serialize) -> String {
@@ -3912,9 +4070,13 @@ resources:
     /// (`OUTCOME_CAUSE_CODES`) with a path of the fixed form; only the result validation's
     /// codes are outside it. A new `RuntimeError` or `RejectionKind` must be placed here.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn every_compile_error_is_a_valid_outcome_cause_and_a_result_error_is_not() {
-        use super::{ComplexityCause, RejectionKind, RuntimeError, error_body};
-        use policysql_transaction::machine::io::{OUTCOME_CAUSE_CODES, is_cause_path};
+        use super::{
+            ComplexityCause, ExpectationKind, ParameterReason, Rejection, RejectionDetail,
+            RejectionKind, RuntimeError, UnsupportedFeature, error_body,
+        };
+        use policysql_transaction::machine::io::{ErrorDetail, OUTCOME_CAUSE_CODES, is_cause_path};
 
         let kinds = [
             RejectionKind::InvalidRequest,
@@ -3953,12 +4115,32 @@ resources:
                 | RejectionKind::ExpectationFailed => {}
             }
         }
+        // A rejection as a real site builds it: the kinds with a row in the public detail table
+        // carry the detail of that row.
+        let representative = |kind: RejectionKind| Rejection {
+            kind,
+            detail: match kind {
+                RejectionKind::UnsupportedSql => {
+                    Some(RejectionDetail::Feature(UnsupportedFeature::Star))
+                }
+                RejectionKind::InvalidParameter => {
+                    Some(RejectionDetail::Parameter(ParameterReason::Names))
+                }
+                RejectionKind::ExpectationFailed => {
+                    Some(RejectionDetail::Expectation(ExpectationKind::RowCount))
+                }
+                _ => None,
+            },
+            reason: "bind.Test",
+            shape: None,
+        };
         let mut errors = vec![
             RuntimeError::Session,
             RuntimeError::Access,
             RuntimeError::Snapshot,
             RuntimeError::Envelope,
             RuntimeError::RequestTooLarge,
+            RuntimeError::AuthTooLarge,
             RuntimeError::Internal,
             RuntimeError::Busy,
             RuntimeError::RemoteResult,
@@ -3973,10 +4155,10 @@ resources:
                 RuntimeError::CheckFailedAt(index),
             ]);
             for kind in kinds {
-                errors.push(RuntimeError::RejectedAt(kind, index));
+                errors.push(RuntimeError::RejectedAt(representative(kind), index));
             }
         }
-        errors.extend(kinds.map(RuntimeError::Rejected));
+        errors.extend(kinds.map(|kind| RuntimeError::Rejected(representative(kind))));
         for error in errors {
             // Exhaustive: a new variant fails to compile until it is placed.
             let in_cause_list = match error {
@@ -3992,6 +4174,7 @@ resources:
                 | RuntimeError::TooComplexAt(..)
                 | RuntimeError::EmittedSqlInvalidAt(_)
                 | RuntimeError::Internal
+                | RuntimeError::AuthTooLarge
                 | RuntimeError::Busy => true,
                 RuntimeError::RemoteResult
                 | RuntimeError::RemoteResultAt(_)
@@ -4004,6 +4187,29 @@ resources:
                 "{error:?} -> {}",
                 body.code
             );
+            // The detail is what the public table allows for the code: required for a code
+            // with a row (`INVALID_SQL` excepted), absent for every other code.
+            let detail = body
+                .detail
+                .as_ref()
+                .map(|detail| serde_json::to_value(detail).unwrap_or_default());
+            assert!(
+                ErrorDetail::allowed(body.code, detail.as_ref()),
+                "{error:?} -> {} {detail:?}",
+                body.code
+            );
+            if in_cause_list {
+                // A keyed unknown outcome carries the cause's detail, checked as the reply is.
+                let cause = serde_json::json!({"cause": {
+                    "code": body.code,
+                    "path": body.path,
+                    "detail": detail,
+                }});
+                assert!(
+                    ErrorDetail::allowed("POLICYSQL_OUTCOME_UNKNOWN", Some(&cause)),
+                    "{error:?} -> {cause}"
+                );
+            }
             if in_cause_list {
                 assert!(
                     body.path.as_deref().is_none_or(is_cause_path),

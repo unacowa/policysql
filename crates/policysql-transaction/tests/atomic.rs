@@ -453,6 +453,11 @@ fn a_complexity_refusal_is_too_complex_on_the_envelope_and_never_on_commit_or_th
         );
         if expected == "POLICYSQL_SQL_TOO_COMPLEX" {
             assert_eq!(reply["error"]["path"], "/statements/0");
+            assert_eq!(reply["error"]["detail"], json!({"complexity": "columns"}));
+            assert!(
+                ErrorDetail::allowed("POLICYSQL_SQL_TOO_COMPLEX", reply["error"].get("detail")),
+                "{reply}"
+            );
             assert!(log.contains("\"event\":\"sql_too_complex\""), "{log}");
             assert!(log.contains("\"cause\":\"columns\""), "{log}");
         } else {
@@ -490,6 +495,13 @@ fn a_complexity_refusal_is_too_complex_on_the_envelope_and_never_on_commit_or_th
             .last_reply()
             .map(|reply| reply["error"]["path"].clone()),
         Some(json!("/statements/0"))
+    );
+    // A cause the adapter did not name (or named outside the list) is `database`.
+    assert_eq!(
+        engine
+            .last_reply()
+            .map(|reply| reply["error"]["detail"].clone()),
+        Some(json!({"complexity": "database"}))
     );
 }
 
@@ -797,6 +809,7 @@ fn a_forwarded_reply_keeps_a_valid_detail_and_rejects_a_forged_one() {
 /// ADR 0030 amendment: a forwarded `POLICYSQL_OUTCOME_UNKNOWN` is relayed only with its `cause`
 /// in the fixed form; anything else an owner could say is a forgery.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_forwarded_outcome_unknown_keeps_a_valid_cause_and_rejects_a_forged_one() {
     let unknown = |detail: Option<Value>| {
         let mut error = json!({
@@ -807,8 +820,22 @@ fn a_forwarded_outcome_unknown_keeps_a_valid_cause_and_rejects_a_forged_one() {
         }
         json!({"ok": false, "error": error})
     };
-    let cause = |code: Value, path: Value| json!({"cause": {"code": code, "path": path}});
+    let cause =
+        |code: Value, path: Value| json!({"cause": {"code": code, "path": path, "detail": null}});
+    let detailed = |code: &str, detail: Value| json!({"cause": {"code": code, "path": "/statements/0", "detail": detail}});
     for valid in [
+        unknown(Some(detailed(
+            "POLICYSQL_UNSUPPORTED_SQL",
+            json!({"feature": "star"}),
+        ))),
+        unknown(Some(detailed(
+            "POLICYSQL_INVALID_SQL",
+            json!({"span": {"start": 7, "end": 11}}),
+        ))),
+        unknown(Some(detailed(
+            "POLICYSQL_SQL_TOO_COMPLEX",
+            json!({"complexity": "height"}),
+        ))),
         unknown(Some(cause(
             json!("POLICYSQL_MISSING_POLICY"),
             json!("/statements/0"),
@@ -828,6 +855,27 @@ fn a_forwarded_outcome_unknown_keeps_a_valid_cause_and_rejects_a_forged_one() {
         assert_eq!(reply, valid, "a valid cause is relayed as it is");
     }
     for forged in [
+        unknown(Some(detailed("POLICYSQL_UNSUPPORTED_SQL", Value::Null))),
+        unknown(Some(detailed(
+            "POLICYSQL_INVALID_SQL",
+            json!({"feature": "star"}),
+        ))),
+        unknown(Some(detailed(
+            "POLICYSQL_UNSUPPORTED_SQL",
+            json!({"feature": "nope"}),
+        ))),
+        unknown(Some(detailed(
+            "POLICYSQL_INVALID_SQL",
+            json!({"span": {"start": 3, "end": 2}}),
+        ))),
+        unknown(Some(detailed(
+            "POLICYSQL_FORBIDDEN_COLUMN",
+            json!({"feature": "star"}),
+        ))),
+        unknown(Some(detailed(
+            "POLICYSQL_INVALID_SQL",
+            json!({"cause": {"code": "POLICYSQL_INVALID_SQL", "path": null, "detail": null}}),
+        ))),
         unknown(None),
         unknown(Some(json!({}))),
         unknown(Some(json!({"cause": null}))),
@@ -1590,7 +1638,7 @@ fn a_keyed_compile_failure_after_a_commit_is_the_unknown_outcome_on_both_placeme
         assert_eq!(retry["error"]["path"], Value::Null);
         assert_eq!(
             retry["error"]["detail"],
-            json!({"cause": {"code": error_code, "path": "/statements/0"}}),
+            json!({"cause": {"code": error_code, "path": "/statements/0", "detail": null}}),
             "owner={owner}, {error_code}: the compile's code and path"
         );
         assert!(
@@ -1672,7 +1720,7 @@ fn a_keyed_compile_failure_without_a_prior_commit_is_also_the_unknown_outcome() 
             );
             assert_eq!(
                 reply["error"]["detail"],
-                json!({"cause": {"code": "POLICYSQL_INVALID_SQL", "path": null}}),
+                json!({"cause": {"code": "POLICYSQL_INVALID_SQL", "path": null, "detail": null}}),
                 "owner={owner}, {label}"
             );
             assert_eq!(engine.observed.envelope_executes, 0);

@@ -6,7 +6,7 @@
 //! values `compile_json` and `validate_result_json` report, so the step path and the
 //! TypeScript path see one contract.
 
-use super::{PolicySqlRuntime, RuntimeError, compiled_statement, error_body};
+use super::{PolicySqlRuntime, RuntimeError, compiled_statement, error_body, rejection_reason_log};
 use policysql_transaction::machine::{
     Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, ResultBudget,
     StatementLimits, StatementSummary, TriggeredCheck, Validated,
@@ -17,7 +17,8 @@ pub(crate) struct RuntimeCompiler<'a>(pub(crate) &'a PolicySqlRuntime);
 
 fn core_error(runtime: &PolicySqlRuntime, error: RuntimeError) -> CoreError {
     // The log record of a complexity failure: the statement index, the versions, and a fixed
-    // cause name; never the parser's or the database's text, the emitted SQL, or a name.
+    // cause name; never the parser's or the database's text, the emitted SQL, or a name. Every
+    // other refusal writes `rejection_reason` with its fixed internal reason.
     let log = match &error {
         RuntimeError::TooComplexAt(cause, index) => Some(("sql_too_complex", *index, cause.name())),
         RuntimeError::EmittedSqlInvalidAt(index) => {
@@ -34,12 +35,14 @@ fn core_error(runtime: &PolicySqlRuntime, error: RuntimeError) -> CoreError {
             "abiVersion": super::ABI_VERSION,
             "cause": cause,
         })
-    });
+    })
+    .or_else(|| rejection_reason_log(runtime, &error));
     let body = error_body(error);
     CoreError {
         code: body.code.to_owned(),
         message: body.message.to_owned(),
         path: body.path,
+        detail: body.detail.map(Box::new),
         log,
     }
 }

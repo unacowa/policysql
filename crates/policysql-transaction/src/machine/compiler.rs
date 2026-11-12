@@ -5,6 +5,7 @@
 //! handle of a compiled statement, asks the compiler for the driver statements when it emits
 //! `Execute`, validates the raw result against the handle, and releases it.
 
+use super::io::ErrorDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::collections::BTreeMap;
@@ -37,6 +38,10 @@ pub struct CoreError {
     pub code: String,
     pub message: String,
     pub path: Option<String>,
+    /// The public `error.detail` of the code (ADR 0030), checked against the table on the way
+    /// out. Fixed enumerations and byte positions only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Box<ErrorDetail>>,
     /// A log record the machine writes (with the request id added) when it answers with this
     /// error: fixed fields only, never SQL text, parameters, or names (ADR 0027).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,6 +55,7 @@ impl CoreError {
             code: code.to_owned(),
             message: message.to_owned(),
             path: None,
+            detail: None,
             log: None,
         }
     }

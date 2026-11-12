@@ -587,12 +587,11 @@ fn non_string_quoting_and_blob_literals_are_rejected_before_execution() {
             RejectionKind::ForbiddenColumn,
         ),
     ] {
-        assert_eq!(
-            compile(sql).map(|_| ()),
-            Err(GatewayError::Rejected {
-                kind: expected,
-                index: 0
-            }),
+        assert!(
+            matches!(
+                compile(sql).map(|_| ()),
+                Err(GatewayError::Rejected { rejection, index: 0 }) if rejection.kind == expected
+            ),
             "{sql}"
         );
     }
@@ -630,12 +629,13 @@ fn nul_is_rejected_like_sqlite_and_other_control_characters_match_sqlite() {
             "{sql:?}: {error}"
         );
         // `InvalidLiteral` keeps its existing public classification.
-        assert_eq!(
-            compile(sql).map(|_| ()),
-            Err(GatewayError::Rejected {
-                kind: RejectionKind::InvalidParameter,
-                index: 0
-            }),
+        assert!(
+            matches!(
+                compile(sql).map(|_| ()),
+                Err(GatewayError::Rejected { rejection, index: 0 })
+                    if rejection.kind == RejectionKind::InvalidParameter
+                        && rejection.reason == "bind.InvalidLiteral"
+            ),
             "{sql:?}"
         );
     }

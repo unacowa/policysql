@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 
 use policysql_catalog::Catalog;
-use policysql_core::{ClientParameterName, LogicalValue, SnapshotId, TrustedSession};
+use policysql_core::{
+    ClientParameterName, ExpectationKind, LogicalValue, SnapshotId, TrustedSession,
+};
 use policysql_execution::{
-    ComplexityCause, DatabaseExecutor, ExecutionLimits, VerifiedExecutionPlan,
+    ComplexityCause, DatabaseExecutor, ExecutionLimits, VerificationError, VerifiedExecutionPlan,
 };
 use policysql_ir::BoundStatement;
-use policysql_parser::{BindError, BindingLimits, SqliteFrontend};
+use policysql_parser::{BindError, BindingLimits, SourceSpan, SqliteFrontend, UnsupportedFeature};
 use policysql_policy::{Explain, PolicyBundle, PolicyError};
 use policysql_sqlite::{
     ClientParameterContract, CompileError, EmitError, SqliteProfile, analyze_client_parameters,
@@ -146,7 +148,7 @@ impl Gateway {
             let document = frontend
                 .bind_document(&request.sql, &self.catalog)
                 .map_err(|error| GatewayError::Rejected {
-                    kind: classify_bind_error(&error),
+                    rejection: classify_bind_error(&error),
                     index,
                 })?;
             let statement = document.statement;
@@ -167,7 +169,7 @@ impl Gateway {
                 }
             }
             .map_err(|error| GatewayError::Rejected {
-                kind: policy_rejection(&error),
+                rejection: policy_rejection(&error),
                 index,
             })?;
             match (
@@ -183,13 +185,23 @@ impl Gateway {
                     _,
                 ) => {
                     return Err(GatewayError::Rejected {
-                        kind: RejectionKind::InvalidRequest,
+                        rejection: Rejection::plain(
+                            RejectionKind::InvalidRequest,
+                            "gateway.SelectExpectation",
+                        ),
                         index,
                     });
                 }
                 (_, Some(requested), Some(compiled)) if requested != compiled => {
                     return Err(GatewayError::Rejected {
-                        kind: RejectionKind::ExpectationFailed,
+                        rejection: Rejection {
+                            kind: RejectionKind::ExpectationFailed,
+                            detail: Some(RejectionDetail::Expectation(
+                                ExpectationKind::AffectedRows,
+                            )),
+                            reason: "gateway.ExpectationMismatch",
+                            shape: None,
+                        },
                         index,
                     });
                 }
@@ -247,7 +259,12 @@ impl Gateway {
                 analyze_client_parameters(&output.plan.statement, &self.catalog)
                     .contracts()
                     .map_err(|_| GatewayError::Rejected {
-                        kind: RejectionKind::InvalidParameter,
+                        rejection: Rejection {
+                            kind: RejectionKind::InvalidParameter,
+                            detail: Some(RejectionDetail::Parameter(ParameterReason::Type)),
+                            reason: "compile.ParameterContracts",
+                            shape: None,
+                        },
                         index,
                     })?
                     .clone();
@@ -312,13 +329,110 @@ pub enum RejectionKind {
     ExpectationFailed,
 }
 
+/// Why a client parameter was rejected. Public as `error.detail.reason`; never names the parameter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParameterReason {
+    /// A parameter without a name (`?`, `?1`).
+    Positional,
+    /// A prefix other than `:` (`$x`, `@x`).
+    Prefix,
+    /// A parameter name that breaks the naming rule.
+    Name,
+    /// A comparison, assignment or function argument of the wrong type.
+    Type,
+    /// A comparison with NULL.
+    Null,
+    /// A literal the binder cannot read.
+    Literal,
+    /// A supplied value that does not fit the parameter's type or contract.
+    Value,
+    /// The supplied parameter names differ from the SQL's (missing or extra).
+    Names,
+}
+
+impl ParameterReason {
+    pub const ALL: [Self; 8] = [
+        Self::Positional,
+        Self::Prefix,
+        Self::Name,
+        Self::Type,
+        Self::Null,
+        Self::Literal,
+        Self::Value,
+        Self::Names,
+    ];
+
+    /// The public `error.detail.reason` value.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Positional => "positional",
+            Self::Prefix => "prefix",
+            Self::Name => "name",
+            Self::Type => "type",
+            Self::Null => "null",
+            Self::Literal => "literal",
+            Self::Value => "value",
+            Self::Names => "names",
+        }
+    }
+}
+
+/// The public, fixed-vocabulary detail of a rejection (`error.detail`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RejectionDetail {
+    Feature(UnsupportedFeature),
+    Span(SourceSpan),
+    Parameter(ParameterReason),
+    Expectation(ExpectationKind),
+}
+
+/// A rejection: the public kind and detail, plus the internal reason that is only logged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Rejection {
+    pub kind: RejectionKind,
+    pub detail: Option<RejectionDetail>,
+    /// The fixed internal reason (`bind.UnknownColumn`), logged and never returned.
+    pub reason: &'static str,
+    /// The binder's internal shape for `bind.Unsupported`, logged only.
+    pub shape: Option<&'static str>,
+}
+
+impl Rejection {
+    /// A rejection without a public detail.
+    #[must_use]
+    pub const fn plain(kind: RejectionKind, reason: &'static str) -> Self {
+        Self {
+            kind,
+            detail: None,
+            reason,
+            shape: None,
+        }
+    }
+
+    /// A rejection whose public detail is `detail`.
+    #[must_use]
+    pub const fn with_detail(
+        kind: RejectionKind,
+        detail: RejectionDetail,
+        reason: &'static str,
+    ) -> Self {
+        Self {
+            kind,
+            detail: Some(detail),
+            reason,
+            shape: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayError {
     AccessDenied,
     SnapshotMismatch,
     EnvelopeLimit,
     Rejected {
-        kind: RejectionKind,
+        rejection: Rejection,
         index: usize,
     },
     /// The emitted statement `index` reached a downstream complexity limit (ADR 0027).
@@ -351,80 +465,230 @@ impl fmt::Display for GatewayError {
 }
 
 #[must_use]
-pub const fn classify_bind_error(error: &BindError) -> RejectionKind {
+pub const fn classify_bind_error(error: &BindError) -> Rejection {
+    use RejectionKind as Kind;
     match error {
-        BindError::Empty | BindError::InvalidSql => RejectionKind::InvalidSql,
-        BindError::MultipleStatements => RejectionKind::MultipleStatements,
-        BindError::UnknownColumn | BindError::AmbiguousColumn | BindError::ImplicitRowId => {
-            RejectionKind::ForbiddenColumn
+        BindError::Empty => Rejection::plain(Kind::InvalidSql, "bind.Empty"),
+        BindError::InvalidSql(span) => Rejection {
+            kind: Kind::InvalidSql,
+            detail: match span {
+                Some(span) => Some(RejectionDetail::Span(*span)),
+                None => None,
+            },
+            reason: "bind.InvalidSql",
+            shape: None,
+        },
+        BindError::MultipleStatements => {
+            Rejection::plain(Kind::MultipleStatements, "bind.MultipleStatements")
         }
-        BindError::DuplicateResultName | BindError::InvalidResultName => {
-            RejectionKind::DuplicateResultColumn
+        BindError::UnknownColumn => Rejection::plain(Kind::ForbiddenColumn, "bind.UnknownColumn"),
+        BindError::AmbiguousColumn => {
+            Rejection::plain(Kind::ForbiddenColumn, "bind.AmbiguousColumn")
         }
-        BindError::ReservedParameterNamespace => RejectionKind::ReservedParameter,
-        BindError::UnprovableParameterType => RejectionKind::AmbiguousParameterType,
-        BindError::InvalidParameterName
-        | BindError::PositionalParameter
-        | BindError::UnsupportedParameterPrefix
-        | BindError::IncompatibleTypes
-        | BindError::NullComparison
-        | BindError::InvalidLiteral => RejectionKind::InvalidParameter,
-        BindError::ProjectionLimit
-        | BindError::JoinLimit
-        | BindError::ParameterLimit
-        | BindError::ExpressionDepth
-        | BindError::InvalidLimit => RejectionKind::LimitExceeded,
-        BindError::UnknownResource => RejectionKind::ForbiddenOperation,
-        BindError::Unsupported(_)
-        | BindError::MissingFrom
-        | BindError::DuplicateAlias
-        | BindError::DuplicateWriteColumn
-        | BindError::InsertArity => RejectionKind::UnsupportedSql,
+        BindError::ImplicitRowId => Rejection::plain(Kind::ForbiddenColumn, "bind.ImplicitRowId"),
+        BindError::DuplicateResultName => {
+            Rejection::plain(Kind::DuplicateResultColumn, "bind.DuplicateResultName")
+        }
+        BindError::InvalidResultName => {
+            Rejection::plain(Kind::DuplicateResultColumn, "bind.InvalidResultName")
+        }
+        BindError::ReservedParameterNamespace => {
+            Rejection::plain(Kind::ReservedParameter, "bind.ReservedParameterNamespace")
+        }
+        BindError::UnprovableParameterType => {
+            Rejection::plain(Kind::AmbiguousParameterType, "bind.UnprovableParameterType")
+        }
+        BindError::InvalidParameterName => {
+            parameter_rejection(ParameterReason::Name, "bind.InvalidParameterName")
+        }
+        BindError::PositionalParameter => {
+            parameter_rejection(ParameterReason::Positional, "bind.PositionalParameter")
+        }
+        BindError::UnsupportedParameterPrefix => {
+            parameter_rejection(ParameterReason::Prefix, "bind.UnsupportedParameterPrefix")
+        }
+        BindError::IncompatibleTypes => {
+            parameter_rejection(ParameterReason::Type, "bind.IncompatibleTypes")
+        }
+        BindError::NullComparison => {
+            parameter_rejection(ParameterReason::Null, "bind.NullComparison")
+        }
+        BindError::InvalidLiteral => {
+            parameter_rejection(ParameterReason::Literal, "bind.InvalidLiteral")
+        }
+        BindError::ProjectionLimit => Rejection::plain(Kind::LimitExceeded, "bind.ProjectionLimit"),
+        BindError::JoinLimit => Rejection::plain(Kind::LimitExceeded, "bind.JoinLimit"),
+        BindError::ParameterLimit => Rejection::plain(Kind::LimitExceeded, "bind.ParameterLimit"),
+        BindError::ExpressionDepth => Rejection::plain(Kind::LimitExceeded, "bind.ExpressionDepth"),
+        BindError::InvalidLimit => Rejection::plain(Kind::LimitExceeded, "bind.InvalidLimit"),
+        BindError::UnknownResource => {
+            Rejection::plain(Kind::ForbiddenOperation, "bind.UnknownResource")
+        }
+        BindError::Unsupported(feature, shape) => Rejection {
+            kind: Kind::UnsupportedSql,
+            detail: Some(RejectionDetail::Feature(*feature)),
+            reason: "bind.Unsupported",
+            shape: Some(shape),
+        },
+        BindError::MissingFrom => {
+            feature_rejection(UnsupportedFeature::MissingFrom, "bind.MissingFrom")
+        }
+        BindError::DuplicateAlias => {
+            feature_rejection(UnsupportedFeature::DuplicateAlias, "bind.DuplicateAlias")
+        }
+        BindError::DuplicateWriteColumn => feature_rejection(
+            UnsupportedFeature::DuplicateWriteColumn,
+            "bind.DuplicateWriteColumn",
+        ),
+        BindError::InsertArity => {
+            feature_rejection(UnsupportedFeature::InsertArity, "bind.InsertArity")
+        }
     }
 }
 
-const fn policy_rejection(error: &PolicyError) -> RejectionKind {
+const fn parameter_rejection(reason: ParameterReason, internal: &'static str) -> Rejection {
+    Rejection::with_detail(
+        RejectionKind::InvalidParameter,
+        RejectionDetail::Parameter(reason),
+        internal,
+    )
+}
+
+const fn feature_rejection(feature: UnsupportedFeature, internal: &'static str) -> Rejection {
+    Rejection::with_detail(
+        RejectionKind::UnsupportedSql,
+        RejectionDetail::Feature(feature),
+        internal,
+    )
+}
+
+const fn policy_rejection(error: &PolicyError) -> Rejection {
+    use RejectionKind as Kind;
     match error {
-        PolicyError::MissingPolicy => RejectionKind::MissingPolicy,
-        PolicyError::ForbiddenColumn | PolicyError::UnknownColumn => RejectionKind::ForbiddenColumn,
-        PolicyError::ForbiddenColumnContext => RejectionKind::ForbiddenColumnContext,
-        PolicyError::PresetColumnOverlap => RejectionKind::PresetColumn,
-        PolicyError::TooManyPolicies => RejectionKind::LimitExceeded,
-        PolicyError::UnsupportedCapability
-        | PolicyError::InvalidBundle
-        | PolicyError::InvalidRole
-        | PolicyError::UnknownResource
-        | PolicyError::UnknownOperator
-        | PolicyError::InvalidPredicate
-        | PolicyError::BytesPresetTooLarge
-        | PolicyError::IncompatibleOperand
-        | PolicyError::NullComparison
-        | PolicyError::UnsupportedRedaction
-        | PolicyError::DuplicateColumnPermission
-        | PolicyError::DuplicatePolicy
-        | PolicyError::MissingSessionValue
-        | PolicyError::InvalidSessionKey
-        | PolicyError::InvariantViolation(_) => RejectionKind::ForbiddenOperation,
+        PolicyError::MissingPolicy => Rejection::plain(Kind::MissingPolicy, "policy.MissingPolicy"),
+        PolicyError::ForbiddenColumn => {
+            Rejection::plain(Kind::ForbiddenColumn, "policy.ForbiddenColumn")
+        }
+        PolicyError::UnknownColumn => {
+            Rejection::plain(Kind::ForbiddenColumn, "policy.UnknownColumn")
+        }
+        PolicyError::ForbiddenColumnContext => Rejection::plain(
+            Kind::ForbiddenColumnContext,
+            "policy.ForbiddenColumnContext",
+        ),
+        PolicyError::PresetColumnOverlap => {
+            Rejection::plain(Kind::PresetColumn, "policy.PresetColumnOverlap")
+        }
+        PolicyError::TooManyPolicies => {
+            Rejection::plain(Kind::LimitExceeded, "policy.TooManyPolicies")
+        }
+        PolicyError::UnsupportedCapability => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.UnsupportedCapability")
+        }
+        PolicyError::InvalidBundle => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.InvalidBundle")
+        }
+        PolicyError::InvalidRole => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.InvalidRole")
+        }
+        PolicyError::UnknownResource => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.UnknownResource")
+        }
+        PolicyError::UnknownOperator => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.UnknownOperator")
+        }
+        PolicyError::InvalidPredicate => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.InvalidPredicate")
+        }
+        PolicyError::BytesPresetTooLarge => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.BytesPresetTooLarge")
+        }
+        PolicyError::IncompatibleOperand => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.IncompatibleOperand")
+        }
+        PolicyError::NullComparison => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.NullComparison")
+        }
+        PolicyError::UnsupportedRedaction => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.UnsupportedRedaction")
+        }
+        PolicyError::DuplicateColumnPermission => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.DuplicateColumnPermission")
+        }
+        PolicyError::DuplicatePolicy => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.DuplicatePolicy")
+        }
+        PolicyError::MissingSessionValue => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.MissingSessionValue")
+        }
+        PolicyError::InvalidSessionKey => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.InvalidSessionKey")
+        }
+        PolicyError::InvariantViolation(_) => {
+            Rejection::plain(Kind::ForbiddenOperation, "policy.InvariantViolation")
+        }
     }
 }
 
-const fn compile_failure(error: &CompileError, index: usize) -> GatewayError {
+fn compile_failure(error: &CompileError, index: usize) -> GatewayError {
     match error {
-        CompileError::ClientParameterMismatch | CompileError::ClientParameterTypeMismatch => {
-            GatewayError::Rejected {
-                kind: RejectionKind::InvalidParameter,
-                index,
-            }
-        }
+        CompileError::ClientParameterMismatch => GatewayError::Rejected {
+            rejection: parameter_rejection(
+                ParameterReason::Names,
+                "compile.ClientParameterMismatch",
+            ),
+            index,
+        },
+        CompileError::ClientParameterTypeMismatch => GatewayError::Rejected {
+            rejection: parameter_rejection(
+                ParameterReason::Value,
+                "compile.ClientParameterTypeMismatch",
+            ),
+            index,
+        },
         CompileError::Emit(EmitError::TooComplex(cause)) => GatewayError::TooComplex {
             cause: *cause,
             index,
         },
         CompileError::Emit(EmitError::ReparseFailed) => GatewayError::EmittedSqlInvalid { index },
-        CompileError::Emit(_) | CompileError::Verification(_) => GatewayError::Rejected {
-            kind: RejectionKind::UnsupportedSql,
+        CompileError::Emit(error) => GatewayError::Rejected {
+            rejection: feature_rejection(
+                UnsupportedFeature::ProtectedStatement,
+                emit_reason(error),
+            ),
             index,
         },
+        CompileError::Verification(error) => GatewayError::Rejected {
+            rejection: feature_rejection(
+                UnsupportedFeature::ProtectedStatement,
+                verify_reason(error),
+            ),
+            index,
+        },
+    }
+}
+
+const fn emit_reason(error: &EmitError) -> &'static str {
+    match error {
+        EmitError::UnsupportedStatement => "emit.UnsupportedStatement",
+        EmitError::UnknownResource => "emit.UnknownResource",
+        EmitError::UnknownColumn => "emit.UnknownColumn",
+        EmitError::MissingServerParameter(_) => "emit.MissingServerParameter",
+        EmitError::LiteralRequiresParameter => "emit.LiteralRequiresParameter",
+        EmitError::UnsupportedValue => "emit.UnsupportedValue",
+        EmitError::TooManyLiterals => "emit.TooManyLiterals",
+        EmitError::Formatting => "emit.Formatting",
+        EmitError::InvariantViolation(_) => "emit.InvariantViolation",
+        EmitError::TooComplex(_) => "emit.TooComplex",
+        EmitError::ReparseFailed => "emit.ReparseFailed",
+    }
+}
+
+const fn verify_reason(error: &VerificationError) -> &'static str {
+    match error {
+        VerificationError::EmptyProtectedSql => "verify.EmptyProtectedSql",
+        VerificationError::ProfileMismatch => "verify.ProfileMismatch",
+        VerificationError::InvariantViolation(_) => "verify.InvariantViolation",
     }
 }
 
@@ -433,7 +697,9 @@ impl std::error::Error for GatewayError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthContext, EndpointPermission, Gateway, GatewayError, RejectionKind, StatementRequest,
+        AuthContext, EndpointPermission, Gateway, GatewayError, ParameterReason, Rejection,
+        RejectionDetail, RejectionKind, StatementRequest, classify_bind_error, emit_reason,
+        verify_reason,
     };
     use policysql_catalog::{Catalog, ResourceDescriptor};
     use policysql_core::{
@@ -441,7 +707,9 @@ mod tests {
         ValueDescriptor, ValueRepresentation,
     };
     use policysql_execution::{DatabaseExecutor, ExecutionLimits, VerifiedExecutionPlan};
+    use policysql_parser::{BindError, SourceSpan, UnsupportedFeature};
     use policysql_policy::PolicyBundle;
+    use policysql_sqlite::EmitError;
     use policysql_sqlite::SqliteProfile;
     use std::collections::BTreeMap;
     use std::fmt;
@@ -572,7 +840,12 @@ resources:
         assert_eq!(
             gateway.execute_atomic(&auth, Some(&snapshot()), &requests, &executor),
             Err(GatewayError::Rejected {
-                kind: RejectionKind::ForbiddenColumn,
+                rejection: Rejection {
+                    kind: RejectionKind::ForbiddenColumn,
+                    detail: None,
+                    reason: "policy.ForbiddenColumn",
+                    shape: None,
+                },
                 index: 1,
             })
         );
@@ -641,5 +914,70 @@ resources:
                 .unwrap_or_else(|error| unreachable!("test mutex: {error}")),
             0
         );
+    }
+
+    #[test]
+    fn internal_reasons_follow_the_variant_names() {
+        for (error, name) in [
+            (EmitError::UnsupportedStatement, "UnsupportedStatement"),
+            (EmitError::Formatting, "Formatting"),
+            (
+                EmitError::MissingServerParameter("x".to_owned()),
+                "MissingServerParameter",
+            ),
+            (
+                EmitError::InvariantViolation("x".to_owned()),
+                "InvariantViolation",
+            ),
+        ] {
+            assert_eq!(error.name(), name);
+            assert_eq!(emit_reason(&error), format!("emit.{name}"));
+        }
+        let verification = policysql_execution::VerificationError::ProfileMismatch;
+        assert_eq!(
+            verify_reason(&verification),
+            format!("verify.{}", verification.name())
+        );
+    }
+
+    #[test]
+    fn bind_errors_carry_a_public_detail_and_a_private_reason() {
+        let span = SourceSpan { start: 3, end: 5 };
+        let rejection = classify_bind_error(&BindError::InvalidSql(Some(span)));
+        assert_eq!(rejection.kind, RejectionKind::InvalidSql);
+        assert_eq!(rejection.detail, Some(RejectionDetail::Span(span)));
+        assert_eq!(
+            classify_bind_error(&BindError::InvalidSql(None)).detail,
+            None
+        );
+        let rejection = classify_bind_error(&BindError::Unsupported(
+            UnsupportedFeature::Cte,
+            "CTE shadows protected resource",
+        ));
+        assert_eq!(rejection.reason, "bind.Unsupported");
+        assert_eq!(rejection.shape, Some("CTE shadows protected resource"));
+        assert_eq!(
+            rejection.detail,
+            Some(RejectionDetail::Feature(UnsupportedFeature::Cte))
+        );
+        assert_eq!(
+            classify_bind_error(&BindError::PositionalParameter).detail,
+            Some(RejectionDetail::Parameter(ParameterReason::Positional))
+        );
+        // A forbidden column and a missing one answer with the same kind and no detail.
+        let unknown = classify_bind_error(&BindError::UnknownColumn);
+        assert_eq!(unknown.kind, RejectionKind::ForbiddenColumn);
+        assert_eq!(unknown.detail, None);
+        assert_eq!(
+            Rejection::plain(RejectionKind::ForbiddenColumn, "policy.ForbiddenColumn").kind,
+            unknown.kind
+        );
+    }
+
+    #[test]
+    fn parameter_reason_names_are_unique() {
+        let names = ParameterReason::ALL.map(ParameterReason::name);
+        let unique: std::collections::BTreeSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), 8);
     }
 }

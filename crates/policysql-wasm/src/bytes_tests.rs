@@ -227,14 +227,16 @@ fn malformed_large_bytes_and_valid_oversize_have_distinct_error_categories() {
             assert!(
                 matches!(
                     input,
-                    Err(RuntimeError::Rejected(RejectionKind::LimitExceeded))
+                    Err(RuntimeError::Rejected(rejection))
+                        if rejection.kind == RejectionKind::LimitExceeded
                 ),
                 "{case}"
             );
             assert!(
                 matches!(
                     result,
-                    Err(RuntimeError::Rejected(RejectionKind::LimitExceeded))
+                    Err(RuntimeError::Rejected(rejection))
+                        if rejection.kind == RejectionKind::LimitExceeded
                 ),
                 "{case}"
             );
@@ -242,7 +244,8 @@ fn malformed_large_bytes_and_valid_oversize_have_distinct_error_categories() {
             assert!(
                 matches!(
                     input,
-                    Err(RuntimeError::Rejected(RejectionKind::InvalidParameter))
+                    Err(RuntimeError::Rejected(rejection))
+                        if rejection.kind == RejectionKind::InvalidParameter
                 ),
                 "{case}"
             );
