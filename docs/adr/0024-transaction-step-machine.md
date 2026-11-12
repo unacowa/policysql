@@ -707,6 +707,9 @@ today.
   the log event `rejection_reason` (ADR 0030, amendment). No state or event changes; `step_json`
   returns different replies for existing inputs, so `ABI_VERSION` is 21 and the owner wire
   version is `"4"`.
+- **Resource unification (#145 pull request D, ABI 22).** No state or event changes; `step_json`
+  returns different replies for existing inputs, so `ABI_VERSION` is 22; the owner wire version
+  stays `"4"`.
 
 
 ## Migration

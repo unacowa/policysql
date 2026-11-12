@@ -349,7 +349,7 @@ fn codes_without_a_table_row_carry_no_detail() {
             "SELECT private_note FROM projects",
             "POLICYSQL_FORBIDDEN_COLUMN",
         ),
-        ("SELECT id FROM nope", "POLICYSQL_FORBIDDEN_OPERATION"),
+        ("SELECT id FROM nope", "POLICYSQL_MISSING_POLICY"),
         ("SELECT id FROM hidden", "POLICYSQL_MISSING_POLICY"),
         (
             "SELECT id AS a, name AS a FROM projects",
@@ -390,13 +390,19 @@ fn the_rejection_reason_names_the_stage_and_the_variant_and_no_identifier() {
         (
             "SELECT id FROM hidden",
             "POLICYSQL_MISSING_POLICY",
-            "policy.MissingPolicy",
+            "bind.UnknownResource",
             Value::Null,
         ),
         (
             "SELECT id FROM nope",
-            "POLICYSQL_FORBIDDEN_OPERATION",
+            "POLICYSQL_MISSING_POLICY",
             "bind.UnknownResource",
+            Value::Null,
+        ),
+        (
+            "DELETE FROM tasks WHERE id = :v",
+            "POLICYSQL_MISSING_POLICY",
+            "policy.MissingPolicy",
             Value::Null,
         ),
         (
@@ -444,7 +450,7 @@ fn the_rejection_reason_names_the_stage_and_the_variant_and_no_identifier() {
         assert_eq!(record["statementIndex"], 0, "{sql}");
         assert_eq!(record["schemaVersion"], "schema_detail", "{sql}");
         assert_eq!(record["policyVersion"], "policy_detail", "{sql}");
-        assert_eq!(record["abiVersion"], 21, "{sql}");
+        assert_eq!(record["abiVersion"], 22, "{sql}");
         assert!(
             record["reason"]
                 .as_str()
@@ -619,6 +625,8 @@ enum Pair {
     CodeSplit,
     /// The hidden name compiles and the missing one is refused.
     HiddenAccepted,
+    /// Both compile, to the same statements.
+    BothAccepted,
 }
 
 /// Existence pairs: a column or resource that does not exist and one the role cannot see, in
@@ -629,28 +637,18 @@ enum Pair {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same() {
-    // Same code, different `detail`: the binder refuses a CTE named like a Catalog resource
-    // before the role is looked at ("CTE shadows protected resource"), while a CTE of a name
-    // that is not a resource goes on to its next refusal. Closed by the resource-unification
-    // change (#145 proposal 7).
-    const DETAIL_SPLITS: [&str; 1] = ["WITH {R} AS (SELECT id FROM projects) SELECT * FROM {R}"];
-    // Different codes. A resource without a policy for the role is `MISSING_POLICY`, one that
-    // does not exist `FORBIDDEN_OPERATION` (#145 proposal 7: stop telling resources apart).
-    const RESOURCE_CODE_SPLITS: [&str; 10] = [
-        "SELECT id FROM {R}",
-        "SELECT id FROM {R} WHERE id = :v",
-        "SELECT {R}.id FROM {R}",
-        "SELECT r.id FROM {R} AS r ORDER BY r.id",
-        "SELECT id FROM {R} r",
-        "INSERT INTO {R} (id) VALUES (:v)",
-        "UPDATE {R} SET id = :v WHERE id = :i",
-        "DELETE FROM {R} WHERE id = :v",
-        "SELECT p.id FROM projects p JOIN {R} r ON r.id = p.id",
-        "SELECT id FROM projects WHERE EXISTS (SELECT 1 FROM {R} WHERE {R}.id = :v)",
+    // A resource the role has no policy on is not in the Catalog its SQL is bound against, so it
+    // is the same input as a name that does not exist (#145 pull request D): every resource
+    // template is answered alike, except the CTEs named like it, which both compile.
+    const BOTH_ACCEPTED: [&str; 4] = [
+        "WITH {R} AS (SELECT id FROM projects) SELECT id FROM {R}",
+        "WITH {R} AS (SELECT id FROM projects) SELECT {R}.id FROM {R}",
+        "WITH {R} AS (SELECT id FROM projects) SELECT p.id FROM {R} AS p",
+        "SELECT {R}.id FROM projects AS {R}",
     ];
     // Different codes: the statement is refused by the policy for a reason of its own
     // (aggregation, windows and JSON collections are off) after the binder resolved every
-    // column against the whole Catalog, so a hidden column reaches that refusal and a missing
+    // column of the role's resources, so a hidden column reaches that refusal and a missing
     // one does not (#154).
     const POLICY_ORDER_CODE_SPLITS: [&str; 5] = [
         "SELECT id, count(*) FROM projects GROUP BY {C}",
@@ -659,7 +657,7 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "SELECT id FROM projects GROUP BY id HAVING {C} = :v",
         "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.{C}, '$') AS j",
     ];
-    // Different codes: the binder and the decoding of the values run against the whole
+    // Different codes: the binder and the decoding of the values run against the role's Binding
     // Catalog before the policy, so the type of a hidden column shows in the code
     // (`INVALID_PARAMETER` for a literal or value of another type, `FORBIDDEN_COLUMN` for a
     // column that does not exist). Documented in the ADR 0030 amendment and the security model;
@@ -772,6 +770,40 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "SELECT id FROM projects WHERE id IN (SELECT id FROM {R})",
         "SELECT id FROM projects WHERE EXISTS (SELECT 1 FROM {R} WHERE {R}.id = :v)",
         "WITH {R} AS (SELECT id FROM projects) SELECT * FROM {R}",
+        "SELECT nope FROM {R}",
+        "SELECT {R}.nope FROM {R}",
+        "SELECT * FROM {R}",
+        "SELECT id FROM {R} WHERE tenant_id = 1",
+        "SELECT id FROM {R} WHERE tenant_id = TRUE",
+        "SELECT id FROM {R} WHERE id = NULL",
+        "SELECT id FROM {R} ORDER BY nope",
+        "SELECT count(*) FROM {R}",
+        "SELECT id, count(*) FROM {R} GROUP BY id",
+        "SELECT row_number() OVER (ORDER BY id) FROM {R}",
+        "SELECT upper(nope) FROM {R}",
+        "INSERT INTO {R} (id, nope) VALUES (:a, :b)",
+        "INSERT INTO {R} (id) VALUES (1)",
+        "INSERT INTO {R} (id) VALUES (:v) RETURNING nope",
+        "UPDATE {R} SET nope = :v",
+        "UPDATE {R} SET id = 1 WHERE id = :i",
+        "DELETE FROM {R} WHERE nope = :v",
+        "DELETE FROM {R} WHERE id = :v RETURNING nope",
+        "SELECT p.id FROM projects p JOIN {R} r ON r.nope = p.id",
+        "SELECT p.id FROM projects p LEFT JOIN {R} r ON r.id = p.id",
+        "SELECT id FROM projects WHERE EXISTS (SELECT 1 FROM {R} WHERE {R}.nope = projects.id)",
+        "SELECT id FROM projects WHERE EXISTS (SELECT 1 FROM {R} r WHERE r.id = projects.id)",
+        "SELECT d.id FROM (SELECT id FROM {R}) AS d",
+        "WITH c AS (SELECT id FROM {R}) SELECT id FROM c",
+        "WITH {R} AS (SELECT id FROM projects) SELECT id FROM {R}",
+        "WITH {R} AS (SELECT id FROM projects) SELECT {R}.id FROM {R}",
+        "SELECT json_group_array(j.value) AS items FROM {R} AS r, json_each(r.id, '$') AS j",
+        "SELECT {R}.id FROM projects",
+        "SELECT {R}.id FROM projects AS {R}",
+        "SELECT id FROM \"{R}\"",
+        "WITH {R} AS (SELECT id FROM {R}) SELECT id FROM {R}",
+        "WITH {R} AS (SELECT id FROM projects) SELECT p.id FROM {R} AS p",
+        "WITH c AS (SELECT id FROM {R}) SELECT p.id FROM projects p JOIN c ON c.id = p.id",
+        "DELETE FROM projects WHERE EXISTS (SELECT 1 FROM {R} r WHERE r.id = projects.id)",
     ];
     assert!(column_templates.len() + resource_templates.len() >= 55);
     let answer = |template: &str, token: &str, name: &str, endpoint: &str| {
@@ -800,25 +832,32 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
             }
         }
     }
+    // The names are also written in capitals: a name is looked up without regard to case.
+    let mut named: Vec<(&str, &str, &str, &str)> = cases
+        .into_iter()
+        .map(|(template, token, hidden)| (template, token, hidden, "no_such_column"))
+        .collect();
     for template in &resource_templates {
-        cases.push((template, "{R}", "hidden"));
+        named.push((template, "{R}", "hidden", "no_such_table"));
+        named.push((template, "{R}", "HIDDEN", "NO_SUCH_TABLE"));
     }
-    for (template, token, hidden) in cases {
-        let absent = if token == "{C}" {
-            "no_such_column"
-        } else {
-            "no_such_table"
-        };
+    let mut only_missing: BTreeSet<&str> = BTreeSet::new();
+    for (template, token, hidden, absent) in named {
         for endpoint in ["execute", "explain"] {
             let (seen_answer, missing) = (
                 answer(template, token, hidden, endpoint),
                 answer(template, token, absent, endpoint),
             );
-            assert!(
-                missing.get("error").is_some(),
-                "{endpoint} {template}: {missing}"
-            );
-            let pair = if seen_answer.get("error").is_none() {
+            let pair = if seen_answer.get("error").is_none() && missing.get("error").is_none() {
+                assert_eq!(
+                    seen_answer["statements"], missing["statements"],
+                    "{endpoint} {template}"
+                );
+                Pair::BothAccepted
+            } else if missing.get("error").is_none() {
+                only_missing.insert(template);
+                continue;
+            } else if seen_answer.get("error").is_none() {
                 Pair::HiddenAccepted
             } else if code(&seen_answer) != code(&missing) {
                 Pair::CodeSplit
@@ -836,14 +875,18 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
     };
     let got = |pair: Pair| -> BTreeSet<&str> { seen.get(&pair).cloned().unwrap_or_default() };
     assert_eq!(
+        only_missing,
+        BTreeSet::new(),
+        "a name that does not exist never compiles where a hidden one is refused"
+    );
+    assert_eq!(
         got(Pair::DetailSplit),
-        listed(&[&DETAIL_SPLITS]),
-        "the answers of a hidden name and a missing one differ in `detail` exactly where listed"
+        BTreeSet::new(),
+        "the answers of a hidden name and a missing one never differ in `detail`"
     );
     assert_eq!(
         got(Pair::CodeSplit),
         listed(&[
-            &RESOURCE_CODE_SPLITS,
             &POLICY_ORDER_CODE_SPLITS,
             &TYPE_CODE_SPLITS,
             &VALUE_POSITION_CODE_SPLITS,
@@ -855,7 +898,109 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         listed(&[&ACCEPTED_HIDDEN_SPLITS]),
         "a hidden name compiles where a missing one is refused exactly where listed"
     );
-    assert!(checked >= 250, "{checked}");
+    assert_eq!(
+        got(Pair::BothAccepted),
+        listed(&[&BOTH_ACCEPTED]),
+        "a hidden resource and a missing one both compile exactly where listed"
+    );
+    assert!(checked >= 438, "{checked}");
+}
+
+/// A request over several statements, for one endpoint.
+fn compile_statements(statements: &Value, endpoint: &str) -> Value {
+    let request = json!({"statements": statements}).to_string();
+    serde_json::from_str(&runtime().compile_json(AUTH, &request, endpoint))
+        .unwrap_or_else(|_| unreachable!("runtime output is JSON"))
+}
+
+const NOT_PERMITTED: &str = "No policy permits this operation, or the resource does not exist.";
+
+/// A resource the role has no policy on and one that does not exist are one answer: the code,
+/// the message, the path and the (absent) detail, on Execute and Explain (#145 pull request D).
+#[test]
+fn a_resource_without_a_policy_is_the_same_answer_as_one_that_does_not_exist() {
+    for endpoint in ["execute", "explain"] {
+        let answers: Vec<Value> = ["hidden", "no_such_table"]
+            .iter()
+            .map(|name| {
+                let sql = format!("SELECT id FROM {name}");
+                compile_with(AUTH, &json!({"sql": sql, "params": {}}), endpoint)
+            })
+            .collect();
+        assert_eq!(answers[0]["error"], answers[1]["error"], "{endpoint}");
+        let error = &answers[0]["error"];
+        assert_eq!(error["code"], "POLICYSQL_MISSING_POLICY", "{endpoint}");
+        assert_eq!(error["message"], NOT_PERMITTED, "{endpoint}");
+        assert_eq!(error["path"], "/statements/0", "{endpoint}");
+        assert_eq!(detail(&answers[0]), None, "{endpoint}");
+    }
+}
+
+/// The operation without a policy on a resource the role can use keeps its own reason in the log.
+#[test]
+fn a_missing_operation_policy_and_a_missing_resource_share_a_code_not_a_reason() {
+    let output = compile_params("DELETE FROM tasks WHERE id = :v", &json!({"v": "x"}));
+    assert_eq!(code(&output), "POLICYSQL_MISSING_POLICY", "{output}");
+    assert_eq!(output["error"]["message"], NOT_PERMITTED);
+    assert_eq!(log(&output)["reason"], "policy.MissingPolicy");
+    // `tasks` is a resource the role has a policy on: its columns are still checked.
+    let output = compile_params("DELETE FROM tasks WHERE nope = :v", &json!({"v": "x"}));
+    assert_eq!(code(&output), "POLICYSQL_FORBIDDEN_COLUMN", "{output}");
+    let output = compile_params("SELECT nope FROM projects", &json!({}));
+    assert_eq!(code(&output), "POLICYSQL_FORBIDDEN_COLUMN", "{output}");
+    assert_eq!(log(&output)["reason"], "bind.UnknownColumn");
+}
+
+/// The parameter values and the position of the statement in the envelope do not tell a hidden
+/// resource from a missing one.
+#[test]
+fn a_value_and_a_second_statement_do_not_tell_a_hidden_resource_from_a_missing_one() {
+    for value in [json!(1), json!("a"), json!(null)] {
+        let answers: Vec<Value> = ["hidden", "no_such_table"]
+            .iter()
+            .map(|name| {
+                compile_params(
+                    &format!("SELECT id FROM {name} WHERE id = :v"),
+                    &json!({"v": value}),
+                )
+            })
+            .collect();
+        assert_eq!(answers[0]["error"], answers[1]["error"], "{value}");
+        assert_eq!(code(&answers[0]), "POLICYSQL_MISSING_POLICY", "{value}");
+    }
+    let answers: Vec<Value> = ["hidden", "no_such_table"]
+        .iter()
+        .map(|name| {
+            compile_statements(
+                &json!([
+                    {"sql": "SELECT id FROM projects", "params": {}},
+                    {"sql": format!("SELECT nope FROM {name}"), "params": {}},
+                ]),
+                "execute",
+            )
+        })
+        .collect();
+    assert_eq!(answers[0]["error"], answers[1]["error"]);
+    assert_eq!(answers[0]["error"]["path"], "/statements/1");
+}
+
+/// A CTE named like a resource the role can use is refused; one named like a resource it cannot
+/// use is a name that does not exist, and compiles to the same protected SQL.
+#[test]
+fn a_cte_named_like_a_hidden_resource_is_accepted_and_one_named_like_a_visible_one_is_not() {
+    let output = compile("WITH projects AS (SELECT id FROM tasks) SELECT id FROM projects");
+    assert_eq!(code(&output), "POLICYSQL_UNSUPPORTED_SQL", "{output}");
+    assert_eq!(detail(&output), Some(&json!({"feature": "cte"})));
+    let hidden = compile("WITH hidden AS (SELECT id FROM projects) SELECT id FROM hidden");
+    let missing =
+        compile("WITH no_such_name AS (SELECT id FROM projects) SELECT id FROM no_such_name");
+    assert!(hidden.get("error").is_none(), "{hidden}");
+    assert_eq!(hidden["statements"], missing["statements"]);
+    let protected = hidden["statements"][0]["protectedSql"]
+        .as_str()
+        .unwrap_or_else(|| unreachable!("a compiled statement has protected SQL: {hidden}"));
+    assert!(!protected.contains("hidden"), "{protected}");
+    assert!(!protected.contains("WITH"), "{protected}");
 }
 
 /// Every refusal the compiler can produce, as a production site builds it, has the detail its

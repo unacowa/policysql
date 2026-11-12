@@ -239,6 +239,28 @@ enum RawColumn {
 }
 
 impl PolicyBundle {
+    /// Every role that has a policy, with the resources it has a policy of any operation on
+    /// (#145 pull request D: the resources the role's SQL may name).
+    #[must_use]
+    pub fn resources_by_role(&self) -> BTreeMap<RoleName, BTreeSet<policysql_core::ResourceId>> {
+        fn add<P>(
+            into: &mut BTreeMap<RoleName, BTreeSet<policysql_core::ResourceId>>,
+            policies: &BTreeMap<policysql_core::ResourceId, BTreeMap<RoleName, P>>,
+        ) {
+            for (resource, roles) in policies {
+                for role in roles.keys() {
+                    into.entry(role.clone()).or_default().insert(*resource);
+                }
+            }
+        }
+        let mut by_role = BTreeMap::new();
+        add(&mut by_role, &self.select);
+        add(&mut by_role, &self.insert);
+        add(&mut by_role, &self.update);
+        add(&mut by_role, &self.delete);
+        by_role
+    }
+
     /// Returns only the already-activated SELECT surface visible to one role.
     #[must_use]
     pub fn select_access(
@@ -2451,7 +2473,7 @@ mod tests {
     use policysql_testkit::{
         OracleRow, OracleSession, OracleValue, TruthValue, evaluate_select_filter,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn descriptor() -> ValueDescriptor {
         ValueDescriptor {
@@ -2512,6 +2534,129 @@ mod tests {
                 .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
         )
         .unwrap_or_else(|error| unreachable!("valid policy: {error}"))
+    }
+
+    #[test]
+    fn lists_the_resources_each_role_has_a_policy_on() {
+        let bundle = activate(
+            "version: 1
+resources:
+  projects:
+    roles:
+      reader:
+        select:
+          columns: [id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+      writer:
+        insert:
+          columns: [id, name]
+          presets:
+            tenant_id: { session: tenant_id }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id] }
+",
+        );
+        let by_role = bundle.resources_by_role();
+        let projects = ResourceId::new(1).unwrap_or_else(|error| unreachable!("valid ID: {error}"));
+        let role = |name: &str| {
+            RoleName::new(name).unwrap_or_else(|error| unreachable!("valid role: {error}"))
+        };
+        assert_eq!(by_role.len(), 2);
+        assert_eq!(
+            by_role.get(&role("reader")),
+            Some(&BTreeSet::from([projects]))
+        );
+        assert_eq!(
+            by_role.get(&role("writer")),
+            Some(&BTreeSet::from([projects]))
+        );
+        assert_eq!(by_role.get(&role("stranger")), None);
+    }
+
+    /// Roles with a policy of one operation only, on different resources: each role's set holds
+    /// exactly its own resource, whatever the operation (#145 pull request D).
+    #[test]
+    fn resources_by_role_covers_every_operation_and_keeps_roles_apart() {
+        let text = |name: &str| {
+            ResourceName::new(name).unwrap_or_else(|error| unreachable!("valid name: {error}"))
+        };
+        let resource = |id: u64, name: &str| {
+            ResourceDescriptor::new(
+                ResourceId::new(id).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+                text(name),
+                ["id", "tenant_id", "name"].map(|column| {
+                    (
+                        ColumnName::new(column)
+                            .unwrap_or_else(|error| unreachable!("valid column: {error}")),
+                        descriptor(),
+                    )
+                }),
+            )
+            .unwrap_or_else(|error| unreachable!("valid resource: {error}"))
+        };
+        let catalog = Catalog::new(
+            SnapshotId::new("schema_1")
+                .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
+            [
+                resource(1, "projects"),
+                resource(2, "notes"),
+                resource(3, "unused"),
+            ],
+        )
+        .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"));
+        let bundle = PolicyBundle::activate(
+            "version: 1
+resources:
+  projects:
+    roles:
+      reader:
+        select:
+          columns: [id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+      inserter:
+        insert:
+          columns: [id, name]
+          presets:
+            tenant_id: { session: tenant_id }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id] }
+  notes:
+    roles:
+      updater:
+        update:
+          columns: [name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id] }
+      deleter:
+        delete:
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id] }
+",
+            &catalog,
+            SnapshotId::new("policy_1")
+                .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
+        )
+        .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+        let id = |value: u64| {
+            ResourceId::new(value).unwrap_or_else(|error| unreachable!("valid ID: {error}"))
+        };
+        let expected = BTreeMap::from([
+            ("reader", BTreeSet::from([id(1)])),
+            ("inserter", BTreeSet::from([id(1)])),
+            ("updater", BTreeSet::from([id(2)])),
+            ("deleter", BTreeSet::from([id(2)])),
+        ]);
+        let expected = expected
+            .into_iter()
+            .map(|(role, resources)| {
+                (
+                    RoleName::new(role).unwrap_or_else(|error| unreachable!("valid role: {error}")),
+                    resources,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(bundle.resources_by_role(), expected);
     }
 
     #[test]

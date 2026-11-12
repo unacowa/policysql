@@ -31,7 +31,28 @@ initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.
 
 // What LegacyTransactionOwnerCore did in every scenario below (the "ts" side), recorded before
 // pull request 9 deleted it.
-const reference = referenceTranscript(new URL("./fixtures/reference/step-differential.json", import.meta.url));
+const recorded = referenceTranscript(new URL("./fixtures/reference/step-differential.json", import.meta.url));
+
+// #145 pull request D changed the message of POLICYSQL_MISSING_POLICY; the code and the path are
+// compared as recorded. The recording cannot be regenerated, so the recorded message is read as
+// the new one wherever the reference side's reply carries it.
+const RECORDED_MESSAGES = Object.freeze({
+  "No policy permits this operation.": "No policy permits this operation, or the resource does not exist.",
+});
+const currentMessages = (value) => {
+  if (Array.isArray(value)) return value.map(currentMessages);
+  if (value === null || typeof value !== "object") return value;
+  const read = Object.fromEntries(Object.entries(value).map(([key, member]) => [key, currentMessages(member)]));
+  return read.code === "POLICYSQL_MISSING_POLICY" && Object.hasOwn(RECORDED_MESSAGES, read.message)
+    ? { ...read, message: RECORDED_MESSAGES[read.message] }
+    : read;
+};
+const reference = {
+  of(t) {
+    const observations = recorded.of(t);
+    return { take: (label) => currentMessages(observations.take(label)) };
+  },
+};
 
 /**
  * The intentional differences (ADR 0024 "Inconsistencies the move must resolve", the failure

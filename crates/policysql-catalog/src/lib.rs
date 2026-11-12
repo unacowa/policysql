@@ -148,6 +148,22 @@ impl Catalog {
     pub fn resource_by_id(&self, id: ResourceId) -> Option<&ResourceDescriptor> {
         self.resources.values().find(|resource| resource.id == id)
     }
+
+    /// This Catalog with only the resources `keep` accepts, ids unchanged (#145 pull request D).
+    /// Unlike [`Catalog::new`] the result may be empty: it is the Catalog a role's SQL is bound
+    /// against, and a role without any policy can name no resource.
+    #[must_use]
+    pub fn restricted(&self, keep: impl Fn(&ResourceDescriptor) -> bool) -> Self {
+        Self {
+            snapshot: self.snapshot.clone(),
+            resources: self
+                .resources
+                .iter()
+                .filter(|(_, resource)| keep(resource))
+                .map(|(key, resource)| (key.clone(), resource.clone()))
+                .collect(),
+        }
+    }
 }
 
 fn canonical(value: &str) -> String {
@@ -229,5 +245,41 @@ mod tests {
             ],
         );
         assert!(matches!(catalog, Err(CatalogError::DuplicateResource(_))));
+    }
+
+    #[test]
+    fn restricted_keeps_ids_and_names_and_may_be_empty() {
+        let resource = |id: u64, name: &str| {
+            ResourceDescriptor::new(
+                ResourceId::new(id).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+                ResourceName::new(name).unwrap_or_else(|error| unreachable!("valid name: {error}")),
+                [(
+                    policysql_core::ColumnName::new("id")
+                        .unwrap_or_else(|error| unreachable!("valid name: {error}")),
+                    string_descriptor(),
+                )],
+            )
+            .unwrap_or_else(|error| unreachable!("valid resource: {error}"))
+        };
+        let catalog = Catalog::new(
+            SnapshotId::new("schema_1")
+                .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
+            [resource(1, "projects"), resource(2, "hidden")],
+        )
+        .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"));
+        let kept = catalog.restricted(|resource| resource.name.as_str() == "projects");
+        assert_eq!(kept.snapshot(), catalog.snapshot());
+        assert_eq!(
+            kept.resource("projects").map(|resource| resource.id),
+            catalog.resource("projects").map(|resource| resource.id)
+        );
+        assert!(kept.resource("hidden").is_none());
+        let hidden_id =
+            ResourceId::new(2).unwrap_or_else(|error| unreachable!("valid ID: {error}"));
+        assert!(kept.resource_by_id(hidden_id).is_none());
+        assert!(catalog.resource_by_id(hidden_id).is_some());
+        let empty = catalog.restricted(|_| false);
+        assert_eq!(empty.resources().count(), 0);
+        assert_eq!(empty.snapshot(), catalog.snapshot());
     }
 }

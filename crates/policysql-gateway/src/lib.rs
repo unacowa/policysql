@@ -2,7 +2,7 @@
 
 use policysql_catalog::Catalog;
 use policysql_core::{
-    ClientParameterName, ExpectationKind, LogicalValue, SnapshotId, TrustedSession,
+    ClientParameterName, ExpectationKind, LogicalValue, RoleName, SnapshotId, TrustedSession,
 };
 use policysql_execution::{
     ComplexityCause, DatabaseExecutor, ExecutionLimits, VerificationError, VerifiedExecutionPlan,
@@ -73,9 +73,28 @@ pub struct CompiledEnvelope {
     pub statements: Vec<CompiledStatement>,
 }
 
+/// The Catalog a role's SQL is bound against: the resources the role has a policy of any
+/// operation on (#145 pull request D). Only [`Gateway::binding_catalog`] makes one, so the
+/// runtime's functions that bind a client's SQL (which take this type) cannot be given the whole
+/// Catalog. The binder itself takes a plain `Catalog`: the gateway's own call is not guarded by
+/// the type, and a test (a CTE named like a hidden resource) catches a regression there.
+#[derive(Clone, Copy, Debug)]
+pub struct BindingCatalog<'a>(&'a Catalog);
+
+impl<'a> BindingCatalog<'a> {
+    #[must_use]
+    pub const fn get(self) -> &'a Catalog {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Gateway {
     catalog: Catalog,
+    /// Per role, `catalog` restricted to the resources the role has a policy on.
+    binding_catalogs: BTreeMap<RoleName, Catalog>,
+    /// What a role without any policy binds against: no resource at all.
+    no_resources: Catalog,
     policies: PolicyBundle,
     snapshot: SnapshotId,
     limits: ExecutionLimits,
@@ -97,14 +116,36 @@ impl Gateway {
         limits: ExecutionLimits,
         max_statements: usize,
     ) -> Self {
+        let binding_catalogs = policies
+            .resources_by_role()
+            .into_iter()
+            .map(|(role, resources)| {
+                let restricted = catalog.restricted(|resource| resources.contains(&resource.id));
+                (role, restricted)
+            })
+            .collect();
+        let no_resources = catalog.restricted(|_| false);
         Self {
             catalog,
+            binding_catalogs,
+            no_resources,
             policies,
             snapshot,
             limits,
             max_statements,
             binding_limits: BindingLimits::default(),
         }
+    }
+
+    /// The Catalog `role`'s SQL is bound against. A resource the role has no policy on is absent,
+    /// so it is the same input to the binder as a name that does not exist (#145 pull request D).
+    #[must_use]
+    pub fn binding_catalog(&self, role: &RoleName) -> BindingCatalog<'_> {
+        BindingCatalog(
+            self.binding_catalogs
+                .get(role)
+                .unwrap_or(&self.no_resources),
+        )
     }
 
     /// Sets the input-side limits the binder enforces on the client's SQL.
@@ -146,7 +187,10 @@ impl Gateway {
         let mut metadata_bytes = 0_u64;
         for (index, request) in requests.iter().enumerate() {
             let document = frontend
-                .bind_document(&request.sql, &self.catalog)
+                .bind_document(
+                    &request.sql,
+                    self.binding_catalog(auth.session.role()).get(),
+                )
                 .map_err(|error| GatewayError::Rejected {
                     rejection: classify_bind_error(&error),
                     index,
@@ -214,6 +258,8 @@ impl Gateway {
             output.plan.expected_result_rows = request
                 .expected_row_count
                 .or(output.plan.expected_result_rows);
+            // After the policy the whole Catalog is used: the statement is bound and authorized,
+            // and only resolves ids to emit.
             let plan = match &output.plan.statement {
                 BoundStatement::Select(_)
                 | BoundStatement::ConstantSelect(_)
@@ -464,6 +510,8 @@ impl fmt::Display for GatewayError {
     }
 }
 
+/// `BindError::UnknownResource` is both a name that does not exist and a resource the role has no
+/// policy on; the two are not told apart (#145 pull request D).
 #[must_use]
 pub const fn classify_bind_error(error: &BindError) -> Rejection {
     use RejectionKind as Kind;
@@ -521,9 +569,7 @@ pub const fn classify_bind_error(error: &BindError) -> Rejection {
         BindError::ParameterLimit => Rejection::plain(Kind::LimitExceeded, "bind.ParameterLimit"),
         BindError::ExpressionDepth => Rejection::plain(Kind::LimitExceeded, "bind.ExpressionDepth"),
         BindError::InvalidLimit => Rejection::plain(Kind::LimitExceeded, "bind.InvalidLimit"),
-        BindError::UnknownResource => {
-            Rejection::plain(Kind::ForbiddenOperation, "bind.UnknownResource")
-        }
+        BindError::UnknownResource => Rejection::plain(Kind::MissingPolicy, "bind.UnknownResource"),
         BindError::Unsupported(feature, shape) => Rejection {
             kind: Kind::UnsupportedSql,
             detail: Some(RejectionDetail::Feature(*feature)),
@@ -791,6 +837,109 @@ resources:
             ),
             AuthContext::new(session, [EndpointPermission::Execute]),
         )
+    }
+
+    #[test]
+    fn binds_each_role_against_only_the_resources_it_has_a_policy_on() {
+        let descriptor = ValueDescriptor {
+            logical_type: LogicalType::String,
+            representation: ValueRepresentation::String,
+            nullable: false,
+            format: None,
+            storage: None,
+            constraints: None,
+            json_schema: None,
+        };
+        let resource = |id: u64, name: &str| {
+            ResourceDescriptor::new(
+                ResourceId::new(id).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+                ResourceName::new(name)
+                    .unwrap_or_else(|error| unreachable!("valid resource: {error}")),
+                ["id", "tenant_id"].map(|column| {
+                    (
+                        ColumnName::new(column)
+                            .unwrap_or_else(|error| unreachable!("valid column: {error}")),
+                        descriptor.clone(),
+                    )
+                }),
+            )
+            .unwrap_or_else(|error| unreachable!("valid resource: {error}"))
+        };
+        let catalog = Catalog::new(
+            snapshot(),
+            [
+                resource(1, "projects"),
+                resource(2, "hidden"),
+                resource(3, "unused"),
+            ],
+        )
+        .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"));
+        let policies = PolicyBundle::activate(
+            r"
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+  hidden:
+    roles:
+      other:
+        select:
+          columns: [id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+",
+            &catalog,
+            snapshot(),
+        )
+        .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+        let gateway = Gateway::new(
+            catalog,
+            policies,
+            snapshot(),
+            ExecutionLimits {
+                max_rows: 10,
+                max_result_bytes: 1_000,
+                timeout_ms: 1_000,
+                max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
+            },
+            4,
+        );
+        let role = |name: &str| {
+            RoleName::new(name).unwrap_or_else(|error| unreachable!("valid role: {error}"))
+        };
+        let names = |name: &str| {
+            gateway
+                .binding_catalog(&role(name))
+                .get()
+                .resources()
+                .map(|resource| resource.name.as_str().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("member"), ["projects"]);
+        assert_eq!(names("other"), ["hidden"]);
+        assert_eq!(names("stranger"), Vec::<String>::new());
+        // The ids are the whole Catalog's: what the binder resolves is what the emitter reads.
+        for (name, id) in [("member", 1), ("other", 2)] {
+            let id = ResourceId::new(id).unwrap_or_else(|error| unreachable!("valid ID: {error}"));
+            assert_eq!(
+                gateway
+                    .binding_catalog(&role(name))
+                    .get()
+                    .resource_by_id(id),
+                gateway.catalog.resource_by_id(id)
+            );
+        }
+        let projects = ResourceId::new(1).unwrap_or_else(|error| unreachable!("valid ID: {error}"));
+        assert!(
+            gateway
+                .binding_catalog(&role("other"))
+                .get()
+                .resource_by_id(projects)
+                .is_none()
+        );
     }
 
     #[derive(Debug)]

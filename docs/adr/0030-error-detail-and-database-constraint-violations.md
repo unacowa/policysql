@@ -285,7 +285,7 @@ detail (the full argument is in the issue):
   answer wherever the code is the same.
 - That test also lists where the *code* already differs, which `detail` does not change:
   a resource without a policy for the role is `MISSING_POLICY` and one that does not exist is
-  `FORBIDDEN_OPERATION` (the resource unification of #145 proposal 7 closes this); a hidden column
+  `FORBIDDEN_OPERATION` (the resource unification of pull request D closed this, see its amendment); a hidden column
   that reaches a policy refusal of its own (aggregation or windows off) before the column check is
   answered with that refusal (#154); a column used as an inserted or assigned value is `UNSUPPORTED_SQL`
   when it exists and `FORBIDDEN_COLUMN` when it does not; a literal or value of another type than
@@ -298,8 +298,8 @@ detail (the full argument is in the issue):
   to its next refusal. That told a client whether a resource exists before `feature` was added
   (a successful compile against a refusal), so the set of facts is the same and `feature` only makes
   it cheaper to combine with another refusal. It is listed in the test as the only known split of
-  this kind, and the unification change closes it.
-- The binder and the decoding of parameter values run before the policy, against the whole Catalog:
+  this kind, and pull request D closed it.
+- The binder and the decoding of parameter values run before the policy, against the role's Binding Catalog (pull request D; before it, the whole Catalog):
   a forbidden column's existence and logical type are visible from the code (`WHERE tenant_id = 1` is
   `INVALID_PARAMETER`, `WHERE nope = 1` is `FORBIDDEN_COLUMN`). `reason: type` and `feature: cast`
   make a second type-dependent failure cheaper to read; they do not add a fact the first request
@@ -344,10 +344,77 @@ The ABI is 21 (the snapshot is `…:abi-21`) and the owner wire version is `"4"`
 are those of section Consequences: an active interactive transaction is closed with 409
 `POLICYSQL_TRANSACTION_UNAVAILABLE` on its next command, and a keyed atomic retry replays.
 
-### Left to pull request D and later
+### Left to pull request E and later
 
 `limit` of `LIMIT_EXCEEDED`, `REQUEST_TOO_LARGE` and `TRANSACTION_LIMIT_EXCEEDED`, a finer `path` of
-`INVALID_REQUEST`, merging the resource distinction (proposal 7), `DATABASE_ERROR` (proposal 6),
-and the `reason` of a commit check (proposal 8). Positions of `FORBIDDEN_COLUMN` and the like need a
-lexical rescan and are not planned.
+`INVALID_REQUEST`, `DATABASE_ERROR` (proposal 6), and the `reason` of a commit check (proposal 8).
+The resource distinction (proposal 7) was closed by pull request D. Positions of
+`FORBIDDEN_COLUMN` and the like need a lexical rescan and are not planned.
 
+## Amendment (#145 pull request D)
+
+### Decision
+
+The client's SQL is bound against the resources on which the role has a policy of any operation
+(select, insert, update, delete), the Binding Catalog (`policysql_gateway::BindingCatalog`, made
+only by `Gateway::binding_catalog(role)`). A resource outside it is, to the binder, a name that
+does not exist. `BindError::UnknownResource` answers 403 `MISSING_POLICY` with the message "No
+policy permits this operation, or the resource does not exist."; so a resource without a policy for
+the role, a name that does not exist, and an operation without a policy on a resource the role
+has a policy on, are one code, one message, one `path`, and no `detail`. `FORBIDDEN_OPERATION`
+stays for a refusal by the policy of the statement's shape (aggregation or windows off, a session
+without a value the policy needs, and the like); it is no longer given for a name that does not exist.
+The `detail` table is unchanged.
+
+### Why not only a new code
+
+Renaming the code of `UnknownResource` does not close it: the binder resolves a name against the
+whole Catalog, so a resource without a policy passes the binder and meets the next bind failure
+(`SELECT nope FROM hidden` is `FORBIDDEN_COLUMN`, `SELECT * FROM hidden` is `UNSUPPORTED_SQL`, a
+literal of the wrong type is `INVALID_PARAMETER`), while a name that does not exist stops at the
+first lookup. A Catalog restricted to the role's resources makes both the same input to bind, to the
+decoding of parameter values and to the deployment-surface check, so the answers are equal by
+construction. The policy itself is not passed to the binder: a subset of the Catalog is enough, and
+the parser's API is unchanged. The columns of a resource the role can see stay as in #154: their
+visibility is per operation and per conditional column, which a Catalog subset cannot express.
+
+### CTE names
+
+The binder refuses a CTE named like a resource in the Catalog it is given, which is now the role's.
+A CTE named like a resource the role cannot use is accepted, as a CTE of a name that is not a resource
+is. This is safe: the emitter writes no client CTE (the binder flattens it onto the base resource's
+scope), no client alias is emitted (table aliases are internal), and the parent resource of a
+policy `exists` (ADR 0029) is resolved from the whole Catalog at activation and written by its
+physical name. A test (`resource_tests.rs`) fixes this: with `projects` read only through a parent
+`exists`, `WITH projects AS (SELECT id, project_id FROM tasks) SELECT id FROM projects` compiles
+to the same protected SQL as `SELECT id FROM tasks`, `EXISTS` over the physical `projects` included.
+
+### What stays observable
+
+A resource on which the role has a policy of some operation is told from a name that does not
+exist (`DELETE FROM tasks WHERE nope = :v` is `FORBIDDEN_COLUMN` when only select is granted on
+`tasks`): the role's Explain compiles it, so its existence is information the policy gave. The
+existence and type of a forbidden column of such a resource (#154, #141) are unchanged, and the
+differential test's lists of those places (`POLICY_ORDER_CODE_SPLITS`, `TYPE_CODE_SPLITS`,
+`VALUE_POSITION_CODE_SPLITS`, `ACCEPTED_HIDDEN_SPLITS`) are kept. `RESOURCE_CODE_SPLITS` and
+`DETAIL_SPLITS` are deleted: every resource template is answered alike, and the two CTEs named like
+the resource compile to the same statements (`BOTH_ACCEPTED`).
+
+### Log
+
+A resource outside the Binding Catalog is logged as `bind.UnknownResource`, as a name that does not
+exist is. The binder is not told "exists but hidden", since that difference could reach the answer.
+`policy.MissingPolicy` now means a resource the role has a policy on, without one for this operation.
+An operator reads the role's policy with Explain and the Catalog endpoint.
+
+### Versions
+
+The ABI is 22 (the snapshot is `…:abi-22`); the owner wire version stays `"4"`, because the owner
+reply and the `detail` table are unchanged (the difference is a snapshot skew). The consequences are
+those of section Consequences: an active interactive transaction is closed with 409
+`POLICYSQL_TRANSACTION_UNAVAILABLE` on its next command, and a keyed atomic retry replays.
+
+### Left to later pull requests
+
+Pull request E: `DATABASE_ERROR` (proposal 6) and the `reason` of a commit check (proposal 8).
+Pull request F: `limit` and the `path` of `INVALID_REQUEST`.

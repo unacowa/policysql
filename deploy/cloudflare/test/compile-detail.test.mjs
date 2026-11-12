@@ -49,7 +49,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         assert.equal(record.code, code);
         assert.equal(record.reason, reason);
         assert.equal(record.statementIndex, 0);
-        assert.equal(record.abiVersion, 21);
+        assert.equal(record.abiVersion, 22);
         assert.deepEqual(Object.keys(record).sort(), ["abiVersion", "code", "event", "policyVersion", "reason", "requestId", "schemaVersion", "shape", "statementIndex"]);
         assert.ok(/^[a-z]+\.[A-Za-z]+$/u.test(record.reason), record.reason);
         // The reason is never in the answer.
@@ -81,6 +81,51 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         assert.equal(keyedReasons[0].code, code, "with the code of the compile, not the unknown outcome");
       });
     }
+  }
+
+  // #145 pull request D: a resource the role has no policy on is a name that does not exist. The
+  // example policy's `projects` is given to another role, so `member` has no policy at all (the
+  // example has one resource): this goes through the empty Catalog a role without a policy binds
+  // against. The roles that each have a policy on a different resource are in
+  // `crates/policysql-wasm/src/resource_tests.rs`.
+  const hidden = (policy) => policy.replace("      member:", "      other:");
+  const HIDDEN_CASES = [
+    ["SELECT id FROM {R}", {}],
+    ["SELECT nope FROM {R}", {}],
+    ["SELECT * FROM {R}", {}],
+    ["INSERT INTO {R} (id) VALUES (:v)", { v: "x" }],
+    ["UPDATE {R} SET name = :v WHERE id = :id", { v: "x", id: "y" }],
+    ["DELETE FROM {R} WHERE id = :v", { v: "x" }],
+  ];
+  for (const [placement, hooks] of [["direct", false], ["owner", true]]) {
+    test(`${ownerAdapter}: a resource without a policy and a name that does not exist are one answer (${placement})`, async (t) => {
+      const h = await harness(t, { ownerAdapter, hooks, customizePolicy: hidden });
+      h.setValidator?.(async () => true);
+      let key = 0;
+      for (const [template, params] of HIDDEN_CASES) {
+        for (const [endpoint, keyed] of [[EXECUTE, false], [EXPLAIN, false], [EXECUTE, true]]) {
+          const answer = async (name) => {
+            const statement = { sql: template.replaceAll("{R}", name), params: endpoint === EXPLAIN ? {} : params };
+            return h.request("a", endpoint, one(statement), keyed ? `hidden-resource-${placement}-${++key}` : null);
+          };
+          const [seen, missing] = [await answer("projects"), await answer("no_such_table")];
+          const label = `${template} ${endpoint} ${keyed ? "keyed" : "unkeyed"}`;
+          assert.equal(seen.status, keyed ? 500 : 403, `${label}: ${JSON.stringify(seen.body)}`);
+          assert.equal(missing.status, seen.status, label);
+          const without = ({ requestId, ...error }) => error;
+          assert.deepEqual(without(seen.body.error), without(missing.body.error), label);
+          if (keyed) {
+            assert.equal(seen.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN", label);
+            assert.deepEqual(seen.body.error.detail, { cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0", detail: null } }, label);
+          } else {
+            assert.equal(seen.body.error.code, "POLICYSQL_MISSING_POLICY", label);
+            assert.equal(seen.body.error.message, "No policy permits this operation, or the resource does not exist.", label);
+            assert.equal(seen.body.error.path, "/statements/0", label);
+            assert.equal(Object.hasOwn(seen.body.error, "detail"), false, label);
+          }
+        }
+      }
+    });
   }
 
   test(`${ownerAdapter}: an interactive statement answers the same detail and logs its reason`, async (t) => {

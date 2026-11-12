@@ -8,8 +8,8 @@ use policysql_core::{
 };
 use policysql_execution::{ComplexityCause, ExecutionLimits};
 use policysql_gateway::{
-    AuthContext, EndpointPermission, Gateway, GatewayError, ParameterReason, Rejection,
-    RejectionDetail, RejectionKind, StatementRequest, classify_bind_error,
+    AuthContext, BindingCatalog, EndpointPermission, Gateway, GatewayError, ParameterReason,
+    Rejection, RejectionDetail, RejectionKind, StatementRequest, classify_bind_error,
 };
 use policysql_ir::{BoundExpr, BoundSelect, BoundStatement};
 use policysql_parser::{SqliteFrontend, UnsupportedFeature};
@@ -97,7 +97,12 @@ use wasm_bindgen::prelude::*;
 /// `expectation`), a keyed `POLICYSQL_OUTCOME_UNKNOWN`'s `cause` gains `detail`, a database
 /// complexity refusal names its `complexity`, `compile_json`'s error envelope may carry a `log`
 /// record, and the machine writes the log event `rejection_reason`. No identity value changed.
-const ABI_VERSION: u32 = 21;
+/// 22: issue #145 pull request D: the client's SQL is bound against the resources the role has a
+/// policy on, so a resource without one and a name that does not exist are both 403
+/// `POLICYSQL_MISSING_POLICY` with the message "No policy permits this operation, or the resource
+/// does not exist." (a name that does not exist was `POLICYSQL_FORBIDDEN_OPERATION`); a CTE named
+/// like a resource the role cannot use is no longer refused. No identity value changed.
+const ABI_VERSION: u32 = 22;
 /// The fixed JSON levels the machine adds when it wraps an interactive command in the
 /// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
 /// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must
@@ -119,6 +124,8 @@ mod bytes_tests;
 mod detail_tests;
 #[cfg(test)]
 mod nullable_tests;
+#[cfg(test)]
+mod resource_tests;
 #[cfg(test)]
 mod result_budget_tests;
 #[cfg(test)]
@@ -1441,11 +1448,11 @@ impl PolicySqlRuntime {
         }) {
             return Err(RuntimeError::SqlTooLargeAt(index));
         }
-        validate_deployment_surface(
-            &raw_request.statements,
-            &self.catalog,
-            self.binding_limits(),
-        )?;
+        // The client's SQL is bound against the resources the role has a policy on: a resource
+        // without one is a name that does not exist (#145 pull request D). Only the code after
+        // the policy (`compiled_statement`, `publicResources`) reads the whole Catalog.
+        let binding = self.gateway.binding_catalog(auth.session().role());
+        validate_deployment_surface(&raw_request.statements, binding, self.binding_limits())?;
         let requests = raw_request
             .statements
             .into_iter()
@@ -1454,7 +1461,7 @@ impl PolicySqlRuntime {
                 statement_request(
                     statement,
                     endpoint,
-                    &self.catalog,
+                    binding,
                     self.binding_limits(),
                     value_limit(&self.limits),
                 )
@@ -1673,13 +1680,13 @@ fn select_column_usage(
 
 fn validate_deployment_surface(
     requests: &[RequestStatement],
-    catalog: &Catalog,
+    catalog: BindingCatalog<'_>,
     binding_limits: policysql_parser::BindingLimits,
 ) -> Result<(), RuntimeError> {
     let frontend = SqliteFrontend::new(binding_limits);
     for (index, request) in requests.iter().enumerate() {
         let statement = frontend
-            .bind(&request.sql, catalog)
+            .bind(&request.sql, catalog.get())
             .map_err(|error| RuntimeError::RejectedAt(classify_bind_error(&error), index))?;
         let accepted = match statement {
             BoundStatement::Select(select) => supported_select(&select),
@@ -2475,7 +2482,7 @@ impl From<session::SessionError> for RuntimeError {
 fn statement_request(
     raw: RequestStatement,
     endpoint: EndpointPermission,
-    catalog: &Catalog,
+    catalog: BindingCatalog<'_>,
     binding_limits: policysql_parser::BindingLimits,
     max_bytes_per_value: usize,
 ) -> Result<StatementRequest, RuntimeError> {
@@ -2488,9 +2495,9 @@ fn statement_request(
         row_count: None,
     });
     let statement = SqliteFrontend::new(binding_limits)
-        .bind(&raw.sql, catalog)
+        .bind(&raw.sql, catalog.get())
         .map_err(|error| RuntimeError::Rejected(classify_bind_error(&error)))?;
-    let parameter_types = statement_parameter_types(&statement, catalog)?;
+    let parameter_types = statement_parameter_types(&statement, catalog.get())?;
     let mut parameters = raw
         .params
         .into_iter()
@@ -3124,7 +3131,7 @@ fn rejection_body(rejection: Rejection, index: Option<usize>) -> ErrorBody {
         ),
         RejectionKind::MissingPolicy => (
             "POLICYSQL_MISSING_POLICY",
-            "No policy permits this operation.",
+            "No policy permits this operation, or the resource does not exist.",
         ),
         RejectionKind::ForbiddenOperation => (
             "POLICYSQL_FORBIDDEN_OPERATION",

@@ -200,6 +200,10 @@ impl SqliteFrontend {
 
     /// Binds a statement while preserving its source range and named parameters.
     ///
+    /// `catalog` holds only the resources the client's SQL may name: the gateway and the runtime
+    /// pass the role's `BindingCatalog`, so a resource the role has no policy on is a name that
+    /// does not exist (#145 pull request D).
+    ///
     /// # Errors
     ///
     /// Returns the same fail-closed errors as [`Self::bind`].
@@ -961,6 +965,9 @@ impl SqliteFrontend {
                     .as_ref()
                     .ok_or(BindError::Unsupported(UnsupportedFeature::Cte, "CTE"))?;
                 let cte = &with.ctes[0];
+                // `catalog` is the role's Catalog, so a CTE named like a resource the role cannot
+                // use is not refused here: it is a name that does not exist, and a CTE name is
+                // never emitted (#145 pull request D).
                 if catalog.resource(cte.tbl_name.as_str()).is_some() {
                     return Err(BindError::Unsupported(
                         UnsupportedFeature::Cte,
