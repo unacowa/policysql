@@ -131,7 +131,7 @@ Correlated subqueryから外側queryを参照する場合は、`p.id`のよう�
 
 ### Protected tableのshadowing
 
-roleがpolicyを持つresourceと同じ名前のCTEは使用できません。以下の例は、memberが`posts`にpolicyを持つ前提です。roleが使えないresourceの名前は、そのroleには存在しない名前と同じ扱いで、CTE名に使えます（CTE名は生成SQLに出ません）。
+roleがpolicyを持つresourceと同じ名前のCTEは使用できません。以下の例は、memberが`posts`にpolicyを持つ前提です。roleが使えないresourceの名前は、そのroleには存在しない名前と同じ扱いで、CTE名に使えます（CTE名は生成SQLに出ません）。なお、roleにそのresourceのpolicyを追加すると、そのroleの同名のCTEは使えなくなります（`UNSUPPORTED_SQL`）。policyの追加が既存のSQLを拒否に変えうる点に注意してください。
 
 ```sql
 WITH posts AS (
