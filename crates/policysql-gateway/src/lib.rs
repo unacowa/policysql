@@ -562,7 +562,9 @@ const fn feature_rejection(feature: UnsupportedFeature, internal: &'static str) 
     )
 }
 
-const fn policy_rejection(error: &PolicyError) -> Rejection {
+/// The rejection of a policy refusal.
+#[must_use]
+pub const fn policy_rejection(error: &PolicyError) -> Rejection {
     use RejectionKind as Kind;
     match error {
         PolicyError::MissingPolicy => Rejection::plain(Kind::MissingPolicy, "policy.MissingPolicy"),
@@ -630,7 +632,9 @@ const fn policy_rejection(error: &PolicyError) -> Rejection {
     }
 }
 
-fn compile_failure(error: &CompileError, index: usize) -> GatewayError {
+/// The gateway's answer to a failed compile of statement `index`.
+#[must_use]
+pub fn compile_failure(error: &CompileError, index: usize) -> GatewayError {
     match error {
         CompileError::ClientParameterMismatch => GatewayError::Rejected {
             rejection: parameter_rejection(

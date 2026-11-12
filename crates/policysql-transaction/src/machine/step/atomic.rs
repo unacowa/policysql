@@ -980,7 +980,7 @@ impl<C: Compiler> Step<'_, C> {
                 Task::RequestBinding { .. } | Task::AtomicBinding { .. },
                 Event::BindingCheckFailed { class, .. },
             ) => {
-                self.abort(error_reply(Code::for_class(*class)));
+                self.abort(io::class_reply(*class));
                 Ok(())
             }
             (Task::AtomicForward, Event::OwnerReplied { reply, .. }) => {
@@ -1004,7 +1004,7 @@ impl<C: Compiler> Step<'_, C> {
             }
             (Task::AtomicOpen, Event::OpenFailed { class, .. }) => {
                 // No record of this execution exists yet; the owner's earlier record stays.
-                self.abort(error_reply(Code::for_class(*class)));
+                self.abort(io::class_reply(*class));
                 Ok(())
             }
             (Task::AtomicPersist, Event::Persisted { .. }) => {
@@ -1073,11 +1073,9 @@ impl<C: Compiler> Step<'_, C> {
                     Phase::Failed,
                     Some(error_reply(Code::BindingRejected)),
                 ),
-            (Task::AtomicCommitBinding, Event::BindingCheckFailed { class, .. }) => self.close(
-                lane,
-                Phase::Failed,
-                Some(error_reply(Code::for_class(*class))),
-            ),
+            (Task::AtomicCommitBinding, Event::BindingCheckFailed { class, .. }) => {
+                self.close(lane, Phase::Failed, Some(io::class_reply(*class)))
+            }
             (Task::AtomicInsert, Event::Executed { .. }) => {
                 self.set_connection(Connection::Open);
                 self.atomic_commit(lane, request)

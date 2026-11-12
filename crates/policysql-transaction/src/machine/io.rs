@@ -999,23 +999,6 @@ pub fn error_reply(code: Code) -> Box<RawValue> {
 }
 
 /// `{"ok":false,"error":{…}}` for one of the machine's own codes, pointing at statement
-/// `index` of the request.
-#[must_use]
-pub fn error_reply_at(code: Code, index: u64) -> Box<RawValue> {
-    let (code, message) = code.parts();
-    let path = format!("/statements/{index}");
-    to_raw(&ErrorReply {
-        ok: false,
-        error: ErrorBody {
-            code,
-            message,
-            path: Some(&path),
-            detail: None,
-        },
-    })
-}
-
-/// `{"ok":false,"error":{…}}` for one of the machine's own codes, pointing at statement
 /// `index` of the request and carrying the code's `detail` (ADR 0030).
 #[must_use]
 pub fn error_reply_at_with(code: Code, index: u64, detail: &ErrorDetail) -> Box<RawValue> {

@@ -202,6 +202,9 @@ pub enum ExpectationKind {
 }
 
 impl ExpectationKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Self; 2] = [Self::AffectedRows, Self::RowCount];
+
     /// The public name used in `error.detail.expectation` and in the request's `expect` object.
     #[must_use]
     pub const fn name(self) -> &'static str {

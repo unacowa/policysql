@@ -20,6 +20,10 @@ resources:
       private_note: { type: string }
       count: { type: integer, storage: integer }
       payload: { type: bytes }
+      private_int: { type: integer, storage: integer }
+      private_json: { type: json, representation: object, storage: text }
+      private_bool: { type: boolean, storage: integer }
+      private_bytes: { type: bytes }
   tasks:
     source: { table: tasks }
     columns:
@@ -321,8 +325,12 @@ fn a_complexity_refusal_names_the_cause_and_never_a_position() {
         Some(&json!({"complexity": "like_pattern"}))
     );
     assert!(output["error"]["detail"].get("span").is_none());
-    // A complexity refusal has its own log event, not `rejection_reason`.
-    assert!(output.get("log").is_none(), "{output}");
+    // A complexity refusal has its own log event, not `rejection_reason`, and Explain's
+    // `compile_json` carries it like any other refusal's record.
+    assert_eq!(output["log"]["event"], "sql_too_complex", "{output}");
+    assert_eq!(output["log"]["cause"], "like_pattern");
+    assert_eq!(output["log"]["statementIndex"], 0);
+    assert!(output["log"].get("requestId").is_none());
 }
 
 #[test]
@@ -600,11 +608,24 @@ fn the_policy_does_not_remove_a_client_parameter() {
     }
 }
 
+/// How a hidden name and a missing one are answered, per template.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Pair {
+    /// The same answer (or the same error code and the same detail).
+    Alike,
+    /// The same code, a different `detail`.
+    DetailSplit,
+    /// Different codes.
+    CodeSplit,
+    /// The hidden name compiles and the missing one is refused.
+    HiddenAccepted,
+}
+
 /// Existence pairs: a column or resource that does not exist and one the role cannot see, in
-/// every place the name is resolved. The property: where the two answers have the same code,
-/// they are the same answer, `detail` included. Where the codes differ, the template is listed
-/// below, with the change that closes it; a new difference, or a listed one that disappears,
-/// fails the test.
+/// every place the name is resolved, for a hidden column of each logical type. The property:
+/// where the two answers have the same code, they are the same answer, `detail` included.
+/// Everywhere else the template is listed below, with the change that closes it; a new
+/// difference, or a listed one that disappears, fails the test.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same() {
@@ -628,11 +649,25 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "SELECT id FROM projects WHERE EXISTS (SELECT 1 FROM {R} WHERE {R}.id = :v)",
     ];
     // Different codes: the statement is refused by the policy for a reason of its own
-    // (aggregation and windows are off) after the binder resolved every column against the
-    // whole Catalog, so a hidden column reaches that refusal and a missing one does not (#154).
-    const POLICY_ORDER_CODE_SPLITS: [&str; 2] = [
+    // (aggregation, windows and JSON collections are off) after the binder resolved every
+    // column against the whole Catalog, so a hidden column reaches that refusal and a missing
+    // one does not (#154).
+    const POLICY_ORDER_CODE_SPLITS: [&str; 5] = [
         "SELECT id, count(*) FROM projects GROUP BY {C}",
         "SELECT row_number() OVER (ORDER BY {C}) FROM projects",
+        "SELECT id FROM projects GROUP BY id HAVING {C} IS NULL",
+        "SELECT id FROM projects GROUP BY id HAVING {C} = :v",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.{C}, '$') AS j",
+    ];
+    // Different codes: the binder and the decoding of the values run against the whole
+    // Catalog before the policy, so the type of a hidden column shows in the code
+    // (`INVALID_PARAMETER` for a literal or value of another type, `FORBIDDEN_COLUMN` for a
+    // column that does not exist). Documented in the ADR 0030 amendment and the security model;
+    // the root fix is #154. A single request already tells the same fact from the code.
+    const TYPE_CODE_SPLITS: [&str; 3] = [
+        "SELECT id FROM projects WHERE {C} = 1",
+        "SELECT id FROM projects WHERE {C} = TRUE",
+        "SELECT id FROM projects WHERE {C} = 'a'",
     ];
     // Different codes: the binder refuses a column used as an inserted or assigned value as
     // an unsupported form before it resolves the name, so a hidden column is `UNSUPPORTED_SQL`
@@ -641,6 +676,12 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
     const VALUE_POSITION_CODE_SPLITS: [&str; 2] = [
         "INSERT INTO projects (id, name) VALUES (:id, {C})",
         "UPDATE projects SET name = {C} WHERE id = :id",
+    ];
+    // The hidden name compiles and the missing one is refused: a column that a derived table
+    // or a CTE carries but the outer statement does not use is not checked (#141).
+    const ACCEPTED_HIDDEN_SPLITS: [&str; 2] = [
+        "WITH c AS (SELECT id, {C} FROM projects) SELECT id FROM c",
+        "SELECT d.id FROM (SELECT id, {C} FROM projects) AS d",
     ];
     let column_templates = [
         "SELECT {C} FROM projects",
@@ -676,6 +717,20 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "DELETE FROM projects WHERE {C} = :v",
         "DELETE FROM projects WHERE id = :id RETURNING {C}",
         "SELECT row_number() OVER (ORDER BY {C}) FROM projects",
+        "SELECT id FROM projects WHERE {C} = 'a'",
+        "SELECT id FROM projects WHERE {C} = 1",
+        "SELECT id FROM projects WHERE {C} = TRUE",
+        "WITH c AS (SELECT id, {C} FROM projects) SELECT id FROM c",
+        "WITH c AS (SELECT id, {C} FROM projects) SELECT {C} FROM c",
+        "WITH c AS (SELECT id, {C} FROM projects) SELECT c.{C} FROM c",
+        "SELECT d.id FROM (SELECT id, {C} FROM projects) AS d",
+        "SELECT d.{C} FROM (SELECT id, {C} FROM projects) AS d",
+        "SELECT id FROM projects GROUP BY id HAVING {C} IS NULL",
+        "SELECT id FROM projects GROUP BY id HAVING {C} = :v",
+        "SELECT id, count(*) FROM projects GROUP BY id HAVING count({C}) > 1",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.{C}, '$') AS j",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.id, :path) AS j WHERE p.{C} IS NULL",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.id, '$') AS j WHERE j.{C} IS NULL",
     ];
     let resource_templates = [
         "SELECT id FROM {R}",
@@ -691,59 +746,371 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "SELECT id FROM projects WHERE EXISTS (SELECT 1 FROM {R} WHERE {R}.id = :v)",
         "WITH {R} AS (SELECT id FROM projects) SELECT * FROM {R}",
     ];
-    assert!(column_templates.len() + resource_templates.len() >= 30);
-    let mut detail_splits = BTreeSet::new();
-    let mut code_splits = BTreeSet::new();
+    assert!(column_templates.len() + resource_templates.len() >= 55);
+    let answer = |template: &str, token: &str, name: &str, endpoint: &str| {
+        let sql = template.replace(token, name);
+        let params = if endpoint == "execute" {
+            parameters(&sql)
+        } else {
+            json!({})
+        };
+        compile_with(AUTH, &json!({"sql": sql, "params": params}), endpoint)
+    };
+    let mut seen: std::collections::BTreeMap<Pair, BTreeSet<&str>> =
+        std::collections::BTreeMap::new();
     let mut checked = 0;
-    for (templates, token, present, absent) in [
-        (
-            &column_templates[..],
-            "{C}",
-            "private_note",
-            "no_such_column",
-        ),
-        (&resource_templates[..], "{R}", "hidden", "no_such_table"),
-    ] {
-        for template in templates {
-            for endpoint in ["execute", "explain"] {
-                let answer = |name: &str| {
-                    let sql = template.replace(token, name);
-                    let params = if endpoint == "execute" {
-                        parameters(&sql)
-                    } else {
-                        json!({})
-                    };
-                    compile_with(AUTH, &json!({"sql": sql, "params": params}), endpoint)
-                };
-                let (seen, missing) = (answer(present), answer(absent));
-                assert!(seen.get("error").is_some(), "{endpoint} {template}: {seen}");
-                assert!(
-                    missing.get("error").is_some(),
-                    "{endpoint} {template}: {missing}"
-                );
-                // Only the operator-facing log may differ: it names the stage that refused.
-                if code(&seen) != code(&missing) {
-                    code_splits.insert(*template);
-                } else if seen["error"] != missing["error"] {
-                    detail_splits.insert(*template);
-                }
-                checked += 1;
+    // A hidden column of another type is run with the templates that do not themselves ask for a
+    // type (a value or a function argument), so that what differs is the name and not a
+    // parameter value of the wrong type; the literal comparisons are the type probes.
+    const TYPED_TEMPLATES: [&str; 22] = [
+        "SELECT {C} FROM projects",
+        "SELECT projects.{C} FROM projects",
+        "SELECT id FROM projects WHERE {C} IS NULL",
+        "SELECT id FROM projects ORDER BY {C}",
+        "UPDATE projects SET name = :v WHERE {C} IS NULL",
+        "DELETE FROM projects WHERE {C} IS NULL",
+        "INSERT INTO projects (id, name) VALUES (:id, :n) RETURNING {C}",
+        "SELECT id FROM projects WHERE {C} = 'a'",
+        "SELECT id FROM projects WHERE {C} = 1",
+        "SELECT id FROM projects WHERE {C} = TRUE",
+        "WITH c AS (SELECT id, {C} FROM projects) SELECT id FROM c",
+        "WITH c AS (SELECT id, {C} FROM projects) SELECT {C} FROM c",
+        "WITH c AS (SELECT id, {C} FROM projects) SELECT c.{C} FROM c",
+        "SELECT d.id FROM (SELECT id, {C} FROM projects) AS d",
+        "SELECT d.{C} FROM (SELECT id, {C} FROM projects) AS d",
+        "SELECT id FROM projects GROUP BY id HAVING {C} IS NULL",
+        "SELECT id, count(*) FROM projects GROUP BY id HAVING count({C}) > 1",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.{C}, '$') AS j",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.id, :path) AS j WHERE p.{C} IS NULL",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.id, '$') AS j WHERE j.{C} IS NULL",
+        "SELECT id, count(*) FROM projects GROUP BY {C}",
+        "SELECT row_number() OVER (ORDER BY {C}) FROM projects",
+    ];
+    let mut cases: Vec<(&str, &str, &str)> = Vec::new();
+    for template in &column_templates {
+        cases.push((template, "{C}", "private_note"));
+        if TYPED_TEMPLATES.contains(template) {
+            for hidden in [
+                "private_int",
+                "private_json",
+                "private_bool",
+                "private_bytes",
+            ] {
+                cases.push((template, "{C}", hidden));
             }
         }
     }
+    for template in &resource_templates {
+        cases.push((template, "{R}", "hidden"));
+    }
+    for (template, token, hidden) in cases {
+        let absent = if token == "{C}" {
+            "no_such_column"
+        } else {
+            "no_such_table"
+        };
+        for endpoint in ["execute", "explain"] {
+            let (seen_answer, missing) = (
+                answer(template, token, hidden, endpoint),
+                answer(template, token, absent, endpoint),
+            );
+            assert!(
+                missing.get("error").is_some(),
+                "{endpoint} {template}: {missing}"
+            );
+            let pair = if seen_answer.get("error").is_none() {
+                Pair::HiddenAccepted
+            } else if code(&seen_answer) != code(&missing) {
+                Pair::CodeSplit
+            } else if seen_answer["error"] != missing["error"] {
+                Pair::DetailSplit
+            } else {
+                Pair::Alike
+            };
+            seen.entry(pair).or_default().insert(template);
+            checked += 1;
+        }
+    }
+    let listed = |lists: &[&[&'static str]]| -> BTreeSet<&'static str> {
+        lists.iter().flat_map(|list| list.iter().copied()).collect()
+    };
+    let got = |pair: Pair| -> BTreeSet<&str> { seen.get(&pair).cloned().unwrap_or_default() };
     assert_eq!(
-        detail_splits,
-        BTreeSet::from(DETAIL_SPLITS),
+        got(Pair::DetailSplit),
+        listed(&[&DETAIL_SPLITS]),
         "the answers of a hidden name and a missing one differ in `detail` exactly where listed"
     );
     assert_eq!(
-        code_splits,
-        RESOURCE_CODE_SPLITS
-            .into_iter()
-            .chain(POLICY_ORDER_CODE_SPLITS)
-            .chain(VALUE_POSITION_CODE_SPLITS)
-            .collect::<BTreeSet<_>>(),
+        got(Pair::CodeSplit),
+        listed(&[
+            &RESOURCE_CODE_SPLITS,
+            &POLICY_ORDER_CODE_SPLITS,
+            &TYPE_CODE_SPLITS,
+            &VALUE_POSITION_CODE_SPLITS,
+        ]),
         "the codes of a hidden name and a missing one differ exactly where listed"
     );
-    assert!(checked >= 60, "{checked}");
+    assert_eq!(
+        got(Pair::HiddenAccepted),
+        listed(&[&ACCEPTED_HIDDEN_SPLITS]),
+        "a hidden name compiles where a missing one is refused exactly where listed"
+    );
+    assert!(checked >= 250, "{checked}");
+}
+
+/// Every refusal the compiler can produce, as a production site builds it, has the detail its
+/// code requires. The match functions fail to compile when a variant is added, so a new one has to
+/// be placed here.
+#[test]
+fn every_production_refusal_carries_the_detail_its_code_requires() {
+    use policysql_execution::{ComplexityCause, VerificationError};
+    use policysql_gateway::{classify_bind_error, compile_failure, policy_rejection};
+    use policysql_parser::{BindError, UnsupportedFeature};
+    use policysql_policy::PolicyError;
+    use policysql_sqlite::{CompileError, EmitError};
+
+    const fn covered_bind(error: &BindError) {
+        match error {
+            BindError::Empty
+            | BindError::InvalidSql(_)
+            | BindError::MultipleStatements
+            | BindError::Unsupported(..)
+            | BindError::MissingFrom
+            | BindError::UnknownResource
+            | BindError::UnknownColumn
+            | BindError::AmbiguousColumn
+            | BindError::DuplicateAlias
+            | BindError::ImplicitRowId
+            | BindError::ProjectionLimit
+            | BindError::JoinLimit
+            | BindError::ParameterLimit
+            | BindError::ExpressionDepth
+            | BindError::PositionalParameter
+            | BindError::UnsupportedParameterPrefix
+            | BindError::InvalidParameterName
+            | BindError::ReservedParameterNamespace
+            | BindError::UnprovableParameterType
+            | BindError::IncompatibleTypes
+            | BindError::InvalidLiteral
+            | BindError::NullComparison
+            | BindError::InvalidLimit
+            | BindError::InvalidResultName
+            | BindError::DuplicateResultName
+            | BindError::DuplicateWriteColumn
+            | BindError::InsertArity => {}
+        }
+    }
+    const fn covered_policy(error: &PolicyError) {
+        match error {
+            PolicyError::InvalidBundle
+            | PolicyError::InvalidRole
+            | PolicyError::UnknownResource
+            | PolicyError::UnknownColumn
+            | PolicyError::UnknownOperator
+            | PolicyError::InvalidPredicate
+            | PolicyError::IncompatibleOperand
+            | PolicyError::BytesPresetTooLarge
+            | PolicyError::NullComparison
+            | PolicyError::UnsupportedCapability
+            | PolicyError::UnsupportedRedaction
+            | PolicyError::DuplicateColumnPermission
+            | PolicyError::PresetColumnOverlap
+            | PolicyError::DuplicatePolicy
+            | PolicyError::TooManyPolicies
+            | PolicyError::MissingPolicy
+            | PolicyError::ForbiddenColumn
+            | PolicyError::ForbiddenColumnContext
+            | PolicyError::MissingSessionValue
+            | PolicyError::InvalidSessionKey
+            | PolicyError::InvariantViolation(_) => {}
+        }
+    }
+    const fn covered_emit(error: &EmitError) {
+        match error {
+            EmitError::UnsupportedStatement
+            | EmitError::UnknownResource
+            | EmitError::UnknownColumn
+            | EmitError::MissingServerParameter(_)
+            | EmitError::LiteralRequiresParameter
+            | EmitError::UnsupportedValue
+            | EmitError::TooManyLiterals
+            | EmitError::Formatting
+            | EmitError::InvariantViolation(_)
+            | EmitError::TooComplex(_)
+            | EmitError::ReparseFailed => {}
+        }
+    }
+    const fn covered_verification(error: &VerificationError) {
+        match error {
+            VerificationError::EmptyProtectedSql
+            | VerificationError::ProfileMismatch
+            | VerificationError::InvariantViolation(_) => {}
+        }
+    }
+
+    let mut binds = vec![
+        BindError::Empty,
+        BindError::InvalidSql(None),
+        BindError::InvalidSql(Some(policysql_parser::SourceSpan { start: 1, end: 3 })),
+        BindError::MultipleStatements,
+        BindError::MissingFrom,
+        BindError::UnknownResource,
+        BindError::UnknownColumn,
+        BindError::AmbiguousColumn,
+        BindError::DuplicateAlias,
+        BindError::ImplicitRowId,
+        BindError::ProjectionLimit,
+        BindError::JoinLimit,
+        BindError::ParameterLimit,
+        BindError::ExpressionDepth,
+        BindError::PositionalParameter,
+        BindError::UnsupportedParameterPrefix,
+        BindError::InvalidParameterName,
+        BindError::ReservedParameterNamespace,
+        BindError::UnprovableParameterType,
+        BindError::IncompatibleTypes,
+        BindError::InvalidLiteral,
+        BindError::NullComparison,
+        BindError::InvalidLimit,
+        BindError::InvalidResultName,
+        BindError::DuplicateResultName,
+        BindError::DuplicateWriteColumn,
+        BindError::InsertArity,
+    ];
+    binds.extend(
+        UnsupportedFeature::ALL
+            .map(|feature| BindError::Unsupported(feature, "shape"))
+            .into_iter(),
+    );
+    let policies = [
+        PolicyError::InvalidBundle,
+        PolicyError::InvalidRole,
+        PolicyError::UnknownResource,
+        PolicyError::UnknownColumn,
+        PolicyError::UnknownOperator,
+        PolicyError::InvalidPredicate,
+        PolicyError::IncompatibleOperand,
+        PolicyError::BytesPresetTooLarge,
+        PolicyError::NullComparison,
+        PolicyError::UnsupportedCapability,
+        PolicyError::UnsupportedRedaction,
+        PolicyError::DuplicateColumnPermission,
+        PolicyError::PresetColumnOverlap,
+        PolicyError::DuplicatePolicy,
+        PolicyError::TooManyPolicies,
+        PolicyError::MissingPolicy,
+        PolicyError::ForbiddenColumn,
+        PolicyError::ForbiddenColumnContext,
+        PolicyError::MissingSessionValue,
+        PolicyError::InvalidSessionKey,
+        PolicyError::InvariantViolation("x".to_owned()),
+    ];
+    let emits = [
+        EmitError::UnsupportedStatement,
+        EmitError::UnknownResource,
+        EmitError::UnknownColumn,
+        EmitError::MissingServerParameter("x".to_owned()),
+        EmitError::LiteralRequiresParameter,
+        EmitError::UnsupportedValue,
+        EmitError::TooManyLiterals,
+        EmitError::Formatting,
+        EmitError::InvariantViolation("x".to_owned()),
+        EmitError::TooComplex(ComplexityCause::Height),
+        EmitError::ReparseFailed,
+    ];
+    let verifications = [
+        VerificationError::EmptyProtectedSql,
+        VerificationError::ProfileMismatch,
+        VerificationError::InvariantViolation("x".to_owned()),
+    ];
+    for error in &binds {
+        covered_bind(error);
+    }
+    for error in &policies {
+        covered_policy(error);
+    }
+    for error in &emits {
+        covered_emit(error);
+    }
+    for error in &verifications {
+        covered_verification(error);
+    }
+
+    let mut answers: Vec<(String, super::RuntimeError)> = Vec::new();
+    for error in &binds {
+        answers.push((
+            format!("{error:?}"),
+            super::RuntimeError::RejectedAt(classify_bind_error(error), 0),
+        ));
+    }
+    for error in &policies {
+        answers.push((
+            format!("{error:?}"),
+            super::RuntimeError::RejectedAt(policy_rejection(error), 0),
+        ));
+    }
+    let mut compiles = vec![
+        CompileError::ClientParameterMismatch,
+        CompileError::ClientParameterTypeMismatch,
+    ];
+    compiles.extend(emits.into_iter().map(CompileError::Emit));
+    compiles.extend(verifications.into_iter().map(CompileError::Verification));
+    for error in &compiles {
+        answers.push((
+            format!("{error:?}"),
+            super::runtime_gateway_error(compile_failure(error, 0)),
+        ));
+    }
+    assert!(answers.len() > 80, "{}", answers.len());
+    for (label, answer) in answers {
+        let body = super::error_body(answer);
+        let found = body
+            .detail
+            .as_ref()
+            .map(|detail| serde_json::to_value(detail).unwrap_or_default());
+        assert!(
+            ErrorDetail::allowed(body.code, found.as_ref()),
+            "{label}: {} {found:?}",
+            body.code
+        );
+    }
+}
+
+/// The enumerations of the public detail table are the Rust types', variant for variant.
+#[test]
+fn the_detail_enumerations_are_the_rust_types_and_core_keeps_them() {
+    use policysql_execution::ComplexityCause;
+    use policysql_gateway::ParameterReason;
+    use policysql_parser::UnsupportedFeature;
+    use policysql_transaction::machine::io::{
+        COMPLEXITY_CAUSES, COMPLEXITY_DETAILS, EXPECTATIONS, PARAMETER_REASONS,
+        UNSUPPORTED_FEATURES,
+    };
+
+    assert_eq!(
+        UnsupportedFeature::ALL.map(UnsupportedFeature::name),
+        UNSUPPORTED_FEATURES
+    );
+    assert_eq!(
+        ParameterReason::ALL.map(ParameterReason::name),
+        PARAMETER_REASONS
+    );
+    assert_eq!(
+        policysql_core::ExpectationKind::ALL.map(policysql_core::ExpectationKind::name),
+        EXPECTATIONS
+    );
+    // The complexity values are the compile causes, the database's, and `database`, in this
+    // order, and nothing else.
+    let expected: Vec<&str> = ComplexityCause::ALL
+        .map(ComplexityCause::name)
+        .into_iter()
+        .chain(COMPLEXITY_CAUSES)
+        .chain(["database"])
+        .collect();
+    let mut sorted = expected.clone();
+    sorted.sort_unstable();
+    let mut listed = COMPLEXITY_DETAILS.to_vec();
+    listed.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted, listed);
 }

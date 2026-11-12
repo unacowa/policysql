@@ -754,7 +754,7 @@ impl PolicySqlRuntime {
                 serialize_or_internal(&response)
             }
             Err(error) => serialize_or_internal(&ErrorEnvelope {
-                log: rejection_reason_log(self, &error),
+                log: Some(refusal_log(self, &error)),
                 error: error_body(error),
             }),
         }
@@ -2964,19 +2964,30 @@ fn runtime_gateway_error(error: GatewayError) -> RuntimeError {
     }
 }
 
-/// The `rejection_reason` log record of a refused compile or result validation (ADR 0027 and
-/// ADR 0030 amendments), without the request id: the statement, the code, the fixed internal
-/// reason, and the versions. Never SQL text, a name, a value, or a payload. The complexity
-/// refusals and the emitter's re-parse failure have their own events and no record here.
-fn rejection_reason_log(
-    runtime: &PolicySqlRuntime,
-    error: &RuntimeError,
-) -> Option<serde_json::Value> {
-    if matches!(
-        error,
-        RuntimeError::TooComplexAt(..) | RuntimeError::EmittedSqlInvalidAt(_)
-    ) {
-        return None;
+/// The log record of a refused compile or result validation, without the request id; the
+/// step machine adds it and the engine adds it for Explain. A complexity refusal and the
+/// emitter's re-parse failure keep their own events (`sql_too_complex`,
+/// `emitted_sql_reparse_failed`: the statement, the versions, and a fixed cause name); every
+/// other refusal writes `rejection_reason` (ADR 0027 and ADR 0030 amendments): the statement, the
+/// code, the fixed internal reason, and the versions. Never SQL text, a name, a value, the
+/// parser's or the database's text, or a payload.
+fn refusal_log(runtime: &PolicySqlRuntime, error: &RuntimeError) -> serde_json::Value {
+    let named = match error {
+        RuntimeError::TooComplexAt(cause, index) => Some(("sql_too_complex", *index, cause.name())),
+        RuntimeError::EmittedSqlInvalidAt(index) => {
+            Some(("emitted_sql_reparse_failed", *index, "reparse"))
+        }
+        _ => None,
+    };
+    if let Some((event, index, cause)) = named {
+        return serde_json::json!({
+            "event": event,
+            "statementIndex": index,
+            "schemaVersion": runtime.schema_version,
+            "policyVersion": runtime.policy_version,
+            "abiVersion": ABI_VERSION,
+            "cause": cause,
+        });
     }
     let shape = match error {
         RuntimeError::Rejected(rejection) | RuntimeError::RejectedAt(rejection, _) => {
@@ -2985,7 +2996,7 @@ fn rejection_reason_log(
         _ => None,
     };
     let code = error_body(*error).code;
-    Some(serde_json::json!({
+    serde_json::json!({
         "event": "rejection_reason",
         "statementIndex": error.statement_index(),
         "code": code,
@@ -2994,7 +3005,7 @@ fn rejection_reason_log(
         "schemaVersion": runtime.schema_version,
         "policyVersion": runtime.policy_version,
         "abiVersion": ABI_VERSION,
-    }))
+    })
 }
 
 fn error_body(runtime_error: RuntimeError) -> ErrorBody {

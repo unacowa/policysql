@@ -39,6 +39,17 @@ pub enum ComplexityCause {
 }
 
 impl ComplexityCause {
+    /// Every cause, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::Height,
+        Self::Recursion,
+        Self::Columns,
+        Self::Parameters,
+        Self::LikePattern,
+        Self::ColumnMetadata,
+        Self::DatabaseExpressionDepth,
+    ];
+
     /// The fixed cause name logged as `cause`.
     #[must_use]
     pub const fn name(self) -> &'static str {

@@ -505,6 +505,32 @@ fn a_complexity_refusal_is_too_complex_on_the_envelope_and_never_on_commit_or_th
     );
 }
 
+/// A complexity class outside a statement's execution (the binding check, the open) is answered
+/// with its required detail, so the code never leaves the machine without one (#145 pull request C).
+#[test]
+fn a_complexity_class_outside_a_statement_still_carries_its_detail() {
+    for successes in [0, 1] {
+        let mut engine = Engine::atomic(false);
+        engine.feed(&execute_request(&insert("p1"), Some(KEY)));
+        for _ in 0..successes {
+            engine.resolve(true, "unknown");
+        }
+        engine.resolve(false, "complex");
+        engine.settle();
+        let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+        assert_eq!(
+            code(&reply),
+            Some("POLICYSQL_SQL_TOO_COMPLEX"),
+            "after {successes} effects: {reply}"
+        );
+        assert!(
+            ErrorDetail::allowed("POLICYSQL_SQL_TOO_COMPLEX", reply["error"].get("detail")),
+            "{reply}"
+        );
+        assert_eq!(reply["error"]["detail"], json!({"complexity": "database"}));
+    }
+}
+
 /// ADR 0030: the database's constraint violation (`constraint` with the statement index and a
 /// kind) is the client's 409 `POLICYSQL_CONSTRAINT_VIOLATION` on the envelope, rolled back before
 /// COMMIT, with a fixed message and `detail` per kind and a log record with fixed keys;
