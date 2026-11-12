@@ -279,7 +279,7 @@ detail (the full argument is in the issue):
 - A column that does not exist and one the role cannot see are answered alike. The binder walks a
   statement in a fixed order and stops at the first failure; up to the point where a column is
   resolved both walk the same way, and `FORBIDDEN_COLUMN` has no `detail`. A test
-  (`detail_tests.rs`, "a missing name and a hidden one") compiles 47 column templates (22 of them
+  (`detail_tests.rs`, "a missing name and a hidden one") compiles 47 column templates (20 of them
   also for a hidden column of integer, json, boolean and bytes type: CTEs, derived tables,
   `HAVING`, JSON collections included) and 12 resource templates against both and requires the same
   answer wherever the code is the same.
