@@ -120,6 +120,13 @@ Every custom transport must preserve exclusive transaction ownership and the adv
 SQLite/Turso semantics. The library cannot prove the physical identity behind an
 arbitrary trusted transport; registration and conformance tests must establish it.
 
+A custom transport's `execute` must run an envelope's statements in order and must not run
+any statement after the first one that fails; it fails the call and returns no result array.
+When SQLite closes the transaction on an error (`ON CONFLICT ROLLBACK`, `RAISE(ROLLBACK)`),
+every later statement would otherwise run in autocommit and commit outside the transaction.
+`TursoHttpTransport` meets this with one conditional Hrana batch per call: each step runs only
+when the step before it succeeded.
+
 The transport's `begin(mode, timeoutMs, deadlineMs?, options?)` receives a per-operation
 timeout and an absolute deadline in Unix milliseconds. Bound BEGIN, statement execution,
 and COMMIT by the remaining time as well as the operation limit. The Turso HTTP adapter

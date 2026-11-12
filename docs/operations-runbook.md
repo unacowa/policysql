@@ -74,7 +74,9 @@ Configure alerts in the production account for:
 - any `database_stream_recovery` event with `outcome` `refused` or `failed`: a transaction, with
   any write lock, is waiting for Turso to expire a stream that PolicySQL could not roll back; see
   ADR 0027, "Baton recovery" (the lock can outlast the client by more than 25 minutes, and no
-  client-side recovery can shorten it). A BEGIN reply whose headers never arrived has no baton,
+  client-side recovery can shorten it). A stream the server ended itself (a read reply with no
+  baton, after SQLite closed the transaction) logs no recovery event and leaves no lock. A BEGIN
+  reply whose headers never arrived has no baton,
   so that residual produces no event; a write lock that appears without one may come from it;
 - JWKS, cost-admission, or Turso availability errors for three consecutive minutes;
 - any wrapper `rate_limiter_missing` or `rate_limiter_failed` event, and a sustained 429

@@ -8,6 +8,7 @@ import { COMPLEXITY_ALLOWLIST, COMPLEXITY_CODES, DatabaseStatementError, SqlComp
 import { TursoHttpTransport } from "../src/turso-http.ts";
 import { COMPLEXITY_PROBES, sqlComplexitySmoke } from "../scripts/smoke-complexity.mjs";
 import { CommitNotSentError, EngineError } from "../src/errors.ts";
+import { requestSqls, runBatch } from "./helpers/hrana.mjs";
 import { directCommitFailureClass, directFailureClass, executeFailedEvent, failureClass } from "../src/step-effects.ts";
 
 // The read cap core passes with each execute (ADR 0027); these tests choose their own.
@@ -117,11 +118,20 @@ const ok = (columns = [], rows = []) => ({
 // Every reply carries a new baton, as a real server's does; `batons` records the one each request used.
 const transport = (reply, batons = []) => {
   let serial = 0;
+  // A statement batch is evaluated as Hrana does (steps after the first error do not run) and each
+  // step is answered by `reply` as an `execute` request; BEGIN, COMMIT, ROLLBACK, and `close` are
+  // answered by `reply` as they are.
   return new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "complexity", async (_url, init) => {
     const { baton, requests } = JSON.parse(init.body);
     batons.push(baton ?? null);
     serial += 1;
-    return Response.json({ baton: `complexity-baton-${serial}`, results: requests.map((request, index) => reply(request, index)) });
+    const results = [];
+    for (const [index, request] of requests.entries()) {
+      results.push(request.type === "batch"
+        ? await runBatch(request, (stmt, step) => reply({ type: "execute", stmt }, step))
+        : reply(request, index));
+    }
+    return Response.json({ baton: `complexity-baton-${serial}`, results });
   });
 };
 
@@ -153,7 +163,7 @@ test("after a refused statement the rollback continues the stream with the baton
   assert.deepEqual(other, [null, "complexity-baton-1", "complexity-baton-2"]);
 });
 
-test("the transport classifies the first refused statement of a pipeline by its index, and BEGIN, COMMIT, and ROLLBACK never", async () => {
+test("the transport classifies the first refused statement of a batch by its index, and BEGIN, COMMIT, and ROLLBACK never", async () => {
   const columns = refusal("too many columns in result set");
   const instance = transport((request, index) => {
     const sql = request.stmt?.sql ?? "";
@@ -233,7 +243,7 @@ test("the release smoke reports a failed begin and a failed rollback instead of 
 
 const complexity = () => refusal("SQLite error: too many columns in result set", "SQLITE_UNKNOWN");
 
-test("a complexity refusal is classified only when it is the one error and the last statement of its reply", async () => {
+test("the first refused statement of a batch is classified, wherever it is (#144)", async () => {
   const run = async (replies) => {
     const instance = transport((request) => {
       const sql = request.stmt?.sql ?? "";
@@ -243,20 +253,25 @@ test("a complexity refusal is classified only when it is the one error and the l
     const transaction = await instance.begin("write", 1_000, undefined, limit);
     return transaction.execute(Object.keys(replies).map((sql) => ({ sql })), { maxResponseBytes: READ_CAP }).then(() => null, (error) => error);
   };
-  // Alone and last: a definite refusal.
-  const alone = await run({ "SELECT a": ok(), "SELECT b": complexity() });
-  assert.ok(alone instanceof SqlComplexityError && alone.statement === 1);
-  // Complexity, then a second error: SQLite may have rolled back by itself in between, and a statement
-  // after that ran in autocommit. Not a definite rejection.
-  const second = await run({ "SELECT a": complexity(), "SELECT b": refusal("SQLite error: disk I/O error", "SQLITE_IOERR"), "SELECT c": ok() });
-  assert.ok(second instanceof DatabaseStatementError && !(second instanceof SqlComplexityError));
-  assert.equal(second.databaseCode, "SQLITE_UNKNOWN");
-  // Complexity, then a later statement that ran (a write may have committed).
-  const later = await run({ "SELECT a": complexity(), "INSERT later": ok() });
-  assert.ok(later instanceof DatabaseStatementError && !(later instanceof SqlComplexityError));
-  // Two complexity errors are two errors.
+  // C1: the refusal is in the middle: nothing after it ran, so it is a definite refusal.
+  const middle = await run({ "SELECT a": ok(), "SELECT b": complexity(), "SELECT c": ok() });
+  assert.ok(middle instanceof SqlComplexityError && middle.statement === 1 && middle.complexityCause === "columns");
+  // C2: the refusal is first (the earlier "alone and last" rule made this a 503).
+  const first = await run({ "SELECT a": complexity(), "SELECT b": ok(), "SELECT c": ok() });
+  assert.ok(first instanceof SqlComplexityError && first.statement === 0);
+  // The statements after the first refusal never run, even when they would fail too.
   const twice = await run({ "SELECT a": complexity(), "SELECT b": complexity() });
-  assert.ok(twice instanceof DatabaseStatementError && !(twice instanceof SqlComplexityError));
+  assert.ok(twice instanceof SqlComplexityError && twice.statement === 0);
+  // The last statement refused: unchanged.
+  const last = await run({ "SELECT a": ok(), "SELECT b": complexity() });
+  assert.ok(last instanceof SqlComplexityError && last.statement === 1);
+  // C3: any other database error keeps its code and is not a complexity refusal.
+  const constraint = await run({ "SELECT a": ok(), "INSERT b": refusal("SQLite error: UNIQUE constraint failed: t.id", "SQLITE_CONSTRAINT"), "SELECT c": ok() });
+  assert.ok(constraint instanceof DatabaseStatementError && !(constraint instanceof SqlComplexityError));
+  assert.equal(constraint.databaseCode, "SQLITE_CONSTRAINT");
+  const odd = await run({ "SELECT a": refusal("SQLite error: x", "sqlite_x"), "SELECT b": ok() });
+  assert.ok(odd instanceof DatabaseStatementError);
+  assert.equal(odd.databaseCode, "UNKNOWN");
 });
 
 test("a statement reply that cannot be read: the rollback continues from the reply's leading baton, or tries the last one (#96, #97)", async (t) => {
@@ -313,17 +328,19 @@ test("a statement reply that cannot be read: the rollback continues from the rep
     "wrong result count with the baton after results": { reply: () => Response.json({ results: [], baton: "b9" }), next: "b9" },
     "stalled after the baton": { reply: () => stalled('{"baton":"b6","base_url":null,'), next: "b6", timeoutMs: 50 },
     "read error after the baton": { reply: () => failing('{"baton":"b7","base_url":null,'), next: "b7" },
-    "no baton": { reply: () => Response.json({ baton: null, results: [ok()] }), next: null },
+    // A reply that was read and has a null baton: the server ended the stream (#144), so there is
+    // nothing to roll back and no request or recovery log.
+    "no baton": { reply: () => Response.json({ baton: null, results: [ok()] }), next: null, ended: true },
     "HTTP failure": { reply: () => new Response("no", { status: 502 }), next: null },
   };
   const logged = [];
   t.mock.method(console, "log", (line) => { try { logged.push(JSON.parse(line)); } catch { /* not a record */ } });
-  for (const [kind, { reply, next, timeoutMs = 1_000 }] of Object.entries(kinds)) {
+  for (const [kind, { reply, next, timeoutMs = 1_000, ended = false }] of Object.entries(kinds)) {
     logged.length = 0;
     const sent = [];
     const instance = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "unreadable", async (_url, init) => {
       const { baton: used, requests } = JSON.parse(init.body);
-      const sql = requests[0]?.stmt?.sql ?? requests[0]?.type;
+      const sql = requestSqls(requests)[0];
       sent.push({ baton: used ?? null, sql });
       if (/^BEGIN/u.test(sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
       if (sql === "ROLLBACK") return Response.json({ baton: null, results: [ok(), { type: "ok", response: { type: "close" } }] });
@@ -333,7 +350,12 @@ test("a statement reply that cannot be read: the rollback continues from the rep
     await assert.rejects(transaction.execute([{ sql: "SELECT big" }], { maxResponseBytes: READ_CAP }), (error) => error instanceof EngineError, kind);
     const before = sent.length;
     await transaction.rollback();
-    if (next === null) {
+    if (ended) {
+      assert.equal(sent.length, before, `${kind}: nothing is sent on a stream the server ended`);
+      assert.deepEqual(logged, [], `${kind}: no recovery outcome is logged`);
+      await assert.rejects(transaction.commit().then(() => { throw new Error("committed"); }), () => true, kind);
+      assert.equal(sent.length, before, `${kind}: COMMIT is not sent either`);
+    } else if (next === null) {
       // The baton never arrived: one best-effort attempt with the last one; this fixture accepts
       // it, so the recovery is recorded (a real server refuses a consumed baton, see below).
       assert.deepEqual(sent.at(-1), { baton: "b1", sql: "ROLLBACK" }, `${kind}: the last baton is tried`);
@@ -354,7 +376,7 @@ test("a statement reply that cannot be read: the rollback continues from the rep
   const sent = [];
   const instance = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "header-timeout", async (_url, init) => {
     const { baton: used, requests } = JSON.parse(init.body);
-    const sql = requests[0]?.stmt?.sql;
+    const sql = requestSqls(requests)[0];
     sent.push({ baton: used ?? null, sql });
     if (/^BEGIN/u.test(sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
     if (sql === "ROLLBACK") return Response.json({ baton: null, results: [ok(), { type: "ok", response: { type: "close" } }] });
@@ -381,7 +403,7 @@ test("a statement reply that cannot be read: the rollback continues from the rep
     logged.length = 0;
     const refused = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "header-timeout", async (_url, init) => {
       const { requests } = JSON.parse(init.body);
-      const sql = requests[0]?.stmt?.sql;
+      const sql = requestSqls(requests)[0];
       if (/^BEGIN/u.test(sql ?? "")) return Response.json({ baton: "b1", results: [ok()] });
       if (sql === "ROLLBACK") return refusal();
       throw Object.assign(new Error("aborted"), { name: "TimeoutError" });

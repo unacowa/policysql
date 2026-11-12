@@ -8,6 +8,7 @@ import { initSync, PolicySqlRuntime } from "../../pkg/policysql_wasm.js";
 import { createApp } from "../../src/app.ts";
 import { createWorkerEntrypoints } from "../../src/worker.ts";
 import { callCommitCheckHook } from "../../src/adapters/commit-check-hook.ts";
+import { requestSqls, runBatch } from "./hrana.mjs";
 import { createMemoryTransactionOwners } from "./memory-owner.mjs";
 import { createSimulatedDurableObjects } from "./durable-object-owner.mjs";
 import { TursoHttpTransport } from "../../src/turso-http.ts";
@@ -108,10 +109,10 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     databases.set(tenant, { path, database });
   }
   const events = [];
-  // Called after the remote database ran each statement; may lose the owner, or throw to
-  // fail the transport after the statement took effect.
+  // Called after the remote database ran each statement of a batch (or a control statement) that
+  // succeeded; may lose the owner, or throw to fail the transport after the statement took effect.
   let afterStatement = null;
-  // Called with the remote reply after the database ran a whole pipeline; a returned Response
+  // Called with the remote reply after the database ran a whole pipeline (its batch steps that ran); a returned Response
   // is sent instead (for example an oversized or malformed reply to a COMMIT that applied).
   let replaceResponse = null;
   const connections = new Map();
@@ -144,15 +145,9 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     assert.equal(connection.tenant, tenant, "transaction baton never crosses a database boundary");
     const results = [];
     let closed = false;
-    for (const request of input.requests) {
-      if (request.type === "close") {
-        connection.database.close();
-        connections.delete(baton);
-        closed = true;
-        results.push({ type: "ok", response: { type: "close" } });
-        continue;
-      }
-      const { sql, named_args: args } = request.stmt;
+    // One statement of a batch or a control `execute`, run on the real SQLite connection. The event
+    // is recorded only for a statement that runs, whether it then succeeds or not.
+    const executeStatement = ({ sql, named_args: args }) => {
       events.push({ tenant, sql, baton, args, credential: options.headers.authorization });
       try {
         const statement = connection.database.prepare(sql);
@@ -162,10 +157,10 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
         const columns = statement.columns().map((column) => ({ name: column.name, decltype: column.type ?? "TEXT" }));
         const affected = /^(INSERT|UPDATE|DELETE)\b/i.test(sql)
           ? connection.database.prepare("SELECT changes() AS n").get().n : 0;
-        results.push({ type: "ok", response: { type: "execute", result: {
+        return { type: "ok", response: { type: "execute", result: {
           cols: columns, rows: rows.map((row) => row.map(encode)), affected_row_count: affected,
           rows_read: rows.length, rows_written: affected, query_duration_ms: 1,
-        } } });
+        } } };
       } catch (error) {
         // The Hrana error object as the real Turso database sends it (observed by the release
         // smoke): SQLite's own text with a wrapper, and `SQLITE_UNKNOWN` for the general error,
@@ -178,20 +173,45 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
           : primary === 1 ? { code: "SQLITE_UNKNOWN", message: `SQLite error: ${text}` }
             : primary === 19 ? { code: "SQLITE_CONSTRAINT", message: `SQLite error: ${text}` }
               : { code: "SQLITE_UNKNOWN", message: `SQLite error: ${text}` };
-        results.push({ type: "error", error: error_ });
+        return { type: "error", error: error_ };
+      }
+    };
+    // The hook runs after a statement that succeeded, and may throw to fail the transport.
+    const runStatement = async (stmt) => {
+      const entry = executeStatement(stmt);
+      if (entry.type === "ok" && afterStatement) await afterStatement({ tenant, sql: stmt.sql, baton });
+      return entry;
+    };
+    for (const request of input.requests) {
+      if (request.type === "close") {
+        connection.database.close();
+        connections.delete(baton);
+        closed = true;
+        results.push({ type: "ok", response: { type: "close" } });
         continue;
       }
-      if (afterStatement) await afterStatement({ tenant, sql, baton });
+      if (request.type === "batch") {
+        results.push(await runBatch(request, (stmt) => runStatement(stmt)));
+        continue;
+      }
+      // A regression guard: statements are only ever sent as a conditional batch (#144).
+      assert.match(request.stmt.sql, /^(BEGIN (DEFERRED|IMMEDIATE)|COMMIT|ROLLBACK)$/u, "statements are sent as one conditional batch");
+      results.push(await runStatement(request.stmt));
     }
     // Every reply carries a new baton, as a real server's does; a replacement reply may name it.
+    // As real Turso (observed by the release smoke, #144), a stream whose transaction SQLite closed
+    // by itself (`ON CONFLICT ROLLBACK`, `RAISE(ROLLBACK)`) ends with the reply: `baton: null`.
     let next = null;
-    if (!closed) {
+    if (!closed && !connection.database.isTransaction) {
+      connection.database.close();
+      connections.delete(baton);
+    } else if (!closed) {
       next = crypto.randomUUID();
       connections.delete(baton);
       connections.set(next, connection);
     }
     const replaced = replaceResponse && await replaceResponse({
-      tenant, sqls: input.requests.map((request) => request.stmt?.sql ?? request.type),
+      tenant, sqls: requestSqls(input.requests),
       requestBaton: input.baton ?? null, baton: next, results,
     });
     return replaced ?? Response.json({ baton: next, results });
@@ -378,7 +398,7 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
     interceptOwnerPut: (hook) => owners.interceptPut(hook && ((input) => hook({ ...input, raw: input.value, value: recordView(input.value) }))),
     /** Fault injection on owner store reads, for both adapters (see helpers/memory-owner.mjs). */
     interceptOwnerGet: (hook) => owners.interceptGet(hook),
-    /** `hook({ tenant, sql })` runs after the remote database executed each statement. */
+    /** `hook({ tenant, sql })` runs after the remote database executed each statement that ran and succeeded. */
     afterDatabaseStatement(hook) { afterStatement = hook; },
     /** `hook({ tenant, sqls, requestBaton, baton, results })` may return a Response sent instead of the remote reply. */
     replaceDatabaseResponse(hook) { replaceResponse = hook; },

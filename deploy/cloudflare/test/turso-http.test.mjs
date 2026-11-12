@@ -5,6 +5,8 @@ import { TursoHttpTransport } from "../src/turso-http.ts";
 import { CommitNotSentError } from "../src/errors.ts";
 import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
 import { redirectResponses } from "./helpers/redirects.mjs";
+import { batchReply, okResults, requestSqls, runBatch } from "./helpers/hrana.mjs";
+import { DatabaseStatementError, SqlComplexityError } from "../src/database-complexity.ts";
 
 // The read cap core passes with each execute (ADR 0027); these tests choose their own.
 const READ_CAP = 2_097_152;
@@ -39,11 +41,11 @@ const readBlob = async (base64, options = runtimeLimit) => {
   const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "blob-response", async (_url, init) => {
     const { requests } = JSON.parse(init.body);
     return Response.json({ baton: "blob-baton", results: requests.map(request => {
-      if (request.stmt.sql.startsWith("BEGIN")) return result([], []);
+      if (request.type === "execute") return result([], []);
       const response = result(["state"], [[null]]);
       response.response.result.cols[0].decltype = "BLOB";
       response.response.result.rows = [[{ type: "blob", base64 }]];
-      return response;
+      return batchReply([response]);
     }) });
   });
   const transaction = await transport.begin("read", 1000, undefined, options);
@@ -129,11 +131,11 @@ test("classifies oversized Hrana statement responses as result limit errors", as
   const run = async ({ declare = false, failBegin = false, status = 200 } = {}) => {
     const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "oversized", async (_url, init) => {
       const { requests } = JSON.parse(init.body);
-      const begin = requests[0].stmt?.sql.startsWith("BEGIN");
+      const begin = requests[0].type === "execute";
       if (begin && !failBegin) return Response.json({ baton: "b", results: [result([], [])] });
       const response = result(["state"], [[null]]);
       response.response.result.rows = [[{ type: "blob", base64: huge }]];
-      const text = JSON.stringify({ baton: "b", results: [response] });
+      const text = JSON.stringify({ baton: "b", results: [batchReply([response])] });
       return new Response(declare ? "{}" : text, {
         status,
         headers: declare ? { "content-length": String(text.length) } : {},
@@ -155,10 +157,10 @@ test("decodes exact usage metrics while preserving transaction ownership", async
     assert.equal(this, undefined, "host fetch must not be invoked as a transport method");
     const body = JSON.parse(init.body);
     requests.push(body);
-    if (body.requests[0].stmt?.sql.startsWith("BEGIN")) {
+    if (requestSqls(body.requests)[0].startsWith("BEGIN")) {
       return new Response(JSON.stringify({ baton: "baton_1", results: [result([], [])] }));
     }
-    if (body.requests[0].stmt?.sql === "COMMIT") {
+    if (requestSqls(body.requests)[0] === "COMMIT") {
       return new Response(JSON.stringify({
         baton: null,
         results: [result([], []), { type: "ok", response: { type: "close" } }],
@@ -166,7 +168,7 @@ test("decodes exact usage metrics while preserving transaction ownership", async
     }
     return new Response(JSON.stringify({
       baton: "baton_2",
-      results: [result(["id"], [["p1"]], { rowsRead: 12, queryDurationMs: 2.5 })],
+      results: [batchReply([result(["id"], [["p1"]], { rowsRead: 12, queryDurationMs: 2.5 })])],
     }));
   };
   const transport = new TursoHttpTransport(
@@ -194,8 +196,8 @@ test("rejects missing per-query billing metrics and rolls back the BEGIN through
     "req_1",
     async (_url, init) => {
       const body = JSON.parse(init.body);
-      requests.push({ baton: body.baton, sql: body.requests[0].stmt?.sql });
-      if (body.requests[0].stmt?.sql.startsWith("BEGIN")) {
+      requests.push({ baton: body.baton, sql: requestSqls(body.requests)[0] });
+      if (requestSqls(body.requests)[0].startsWith("BEGIN")) {
         return Response.json({
           baton: "begin_baton",
           results: [{
@@ -228,8 +230,8 @@ test("rolls back a BEGIN reply over the declared control bound through the baton
     "req_1",
     async (_url, init) => {
       const body = JSON.parse(init.body);
-      requests.push({ baton: body.baton, sql: body.requests[0].stmt?.sql });
-      if (body.requests[0].stmt?.sql.startsWith("BEGIN")) {
+      requests.push({ baton: body.baton, sql: requestSqls(body.requests)[0] });
+      if (requestSqls(body.requests)[0].startsWith("BEGIN")) {
         return new Response(huge, { headers: { "content-length": String(new TextEncoder().encode(huge).byteLength) } });
       }
       return Response.json({ baton: null, results: [result([], []), closeReply()] });
@@ -254,8 +256,8 @@ test("rolls back a BEGIN reply that stalls after its baton", async (t) => {
     "req_1",
     async (_url, init) => {
       const body = JSON.parse(init.body);
-      requests.push({ baton: body.baton, sql: body.requests[0].stmt?.sql });
-      if (body.requests[0].stmt?.sql.startsWith("BEGIN")) {
+      requests.push({ baton: body.baton, sql: requestSqls(body.requests)[0] });
+      if (requestSqls(body.requests)[0].startsWith("BEGIN")) {
         return new Response(new ReadableStream({
           start(controller) {
             controller.enqueue(new TextEncoder().encode('{"baton":"lead_baton","base_url":null,"results":['));
@@ -301,11 +303,10 @@ test("HTTP operations share an absolute deadline while rollback retains its clea
   });
   const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "secret" }, "deadline", async (_url, init) => {
     const { requests: commands } = JSON.parse(init.body);
-    requests.push(commands[0].stmt.sql);
+    requests.push(requestSqls(commands)[0]);
     return Response.json({
       baton: commands.length === 1 ? "baton" : null,
-      results: commands.map((command) => command.type === "close"
-        ? { type: "ok", response: { type: "close" } } : result([], [])),
+      results: okResults(commands, result([], [])),
     });
   });
   const first = await transport.begin("read", 1000, 10_200, runtimeLimit);
@@ -364,12 +365,12 @@ test("encodes BigInt arguments as exact Hrana integers within the signed 64-bit 
   const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "bigint", async (_url, init) => {
     const { requests } = JSON.parse(init.body);
     sent.push(...requests);
-    return Response.json({ baton: "baton", results: requests.map(() => result([], [])) });
+    return Response.json({ baton: "baton", results: okResults(requests, result([], [])) });
   });
   const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
   const args = { big: 9007199254740993n, min: -(2n ** 63n), max: 2n ** 63n - 1n, small: 7 };
   await transaction.execute([{ sql: "INSERT INTO counters (big) VALUES (:big)", args }], { maxResponseBytes: READ_CAP });
-  assert.deepEqual(sent.at(-1).stmt.named_args, [
+  assert.deepEqual(sent.at(-1).batch.steps[0].stmt.named_args, [
     { name: "big", value: { type: "integer", value: "9007199254740993" } },
     { name: "min", value: { type: "integer", value: "-9223372036854775808" } },
     { name: "max", value: { type: "integer", value: "9223372036854775807" } },
@@ -390,12 +391,285 @@ test("a second COMMIT after a sent one failed is never CommitNotSentError", asyn
   let commits = 0;
   const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "secret" }, "twice", async (_url, init) => {
     const { requests: commands } = JSON.parse(init.body);
-    if (commands[0].stmt?.sql === "COMMIT") { commits++; return new Response("down", { status: 503 }); }
-    return Response.json({ baton: "baton", results: commands.map(() => result([], [])) });
+    if (requestSqls(commands)[0] === "COMMIT") { commits++; return new Response("down", { status: 503 }); }
+    return Response.json({ baton: "baton", results: okResults(commands, result([], [])) });
   });
   const transaction = await transport.begin("write", 1000, 10_200, runtimeLimit);
   await assert.rejects(transaction.commit(), (error) => !(error instanceof CommitNotSentError));
   now = 10_300;
   await assert.rejects(transaction.commit(), (error) => !(error instanceof CommitNotSentError));
   assert.equal(commits, 1, "no second COMMIT request");
+});
+
+// ---------------------------------------------------------------------------------------------
+// #144: an envelope's statements go out as one conditional Hrana batch, and a reply is read as
+// "the statements before the first error ran, that one failed, nothing after it ran".
+
+const COMPLEXITY = { code: "SQLITE_UNKNOWN", message: "SQLite error: too many columns in result set" };
+const CONSTRAINT = { code: "SQLITE_CONSTRAINT", message: "SQLite error: UNIQUE constraint failed: projects.id" };
+const okStep = (name = "n") => result([name], [["1"]]).response.result;
+const stepsReply = (stepResults, stepErrors) => ({
+  type: "ok", response: { type: "batch", result: { step_results: stepResults, step_errors: stepErrors, replication_index: null } },
+});
+
+/** A transport whose statement requests are all answered by `answer(request)`; it records every body. */
+const batchTransport = (answer, sent = []) => {
+  let serial = 0;
+  return new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "batch", async (_url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(body);
+    const sql = requestSqls(body.requests)[0] ?? "";
+    if (sql.startsWith("BEGIN")) return Response.json({ baton: "b0", results: [result([], [])] });
+    if (sql === "ROLLBACK" || sql === "COMMIT") return Response.json({ baton: null, results: [result([], []), closeReply()] });
+    serial += 1;
+    return Response.json({ baton: `b${serial}`, results: [answer(body.requests[0])] });
+  });
+};
+const threeStatements = [{ sql: "INSERT a" }, { sql: "INSERT b" }, { sql: "INSERT c" }];
+
+test("P1: three statements are one batch whose steps each depend on the step before", async () => {
+  const sent = [];
+  const transport = batchTransport((request) => batchReply(request.batch.steps.map(() => result(["n"], [["1"]]))), sent);
+  const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
+  const statements = [
+    { sql: "INSERT a", args: { x: "t", n: 1 } },
+    { sql: "INSERT b", args: {} },
+    { sql: "INSERT c" },
+  ];
+  const results = await transaction.execute(statements, { maxResponseBytes: READ_CAP });
+  assert.equal(results.length, 3);
+  const [request, ...extra] = sent[1].requests;
+  assert.equal(extra.length, 0, "exactly one request");
+  assert.equal(request.type, "batch");
+  const { steps } = request.batch;
+  assert.equal(steps.length, 3);
+  assert.equal(Object.hasOwn(steps[0], "condition"), false);
+  assert.deepEqual(steps[1].condition, { type: "ok", step: 0 });
+  assert.deepEqual(steps[2].condition, { type: "ok", step: 1 });
+  assert.deepEqual(steps.map((step) => step.stmt.sql), ["INSERT a", "INSERT b", "INSERT c"]);
+  assert.deepEqual(steps[0].stmt.named_args, [
+    { name: "x", value: { type: "text", value: "t" } },
+    { name: "n", value: { type: "integer", value: "1" } },
+  ]);
+  assert.deepEqual(steps[1].stmt.named_args, []);
+  assert.equal(sent[0].requests[0].type, "execute", "BEGIN stays a plain execute request");
+});
+
+test("P2: a single statement is a one-step batch without a condition", async () => {
+  const sent = [];
+  const transport = batchTransport((request) => batchReply(request.batch.steps.map(() => result(["n"], [["1"]]))), sent);
+  const transaction = await transport.begin("read", 1000, undefined, runtimeLimit);
+  await transaction.execute([{ sql: "SELECT 1" }], { maxResponseBytes: READ_CAP });
+  assert.equal(sent[1].requests.length, 1);
+  assert.equal(sent[1].requests[0].type, "batch");
+  assert.equal(sent[1].requests[0].batch.steps.length, 1);
+  assert.equal(Object.hasOwn(sent[1].requests[0].batch.steps[0], "condition"), false);
+});
+
+test("P3: results come back in statement order and each statement's usage is recorded in order", async () => {
+  const transport = batchTransport((request) => batchReply(request.batch.steps.map((_step, index) =>
+    result(["n"], [[String(index)]], { rowsRead: 10 + index, rowsWritten: index, queryDurationMs: 2 + index }))));
+  const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
+  const results = await transaction.execute([{ sql: "INSERT a" }, { sql: "INSERT b" }], { maxResponseBytes: READ_CAP });
+  assert.deepEqual(results.map((item) => item.rows), [[["0"]], [["1"]]]);
+  assert.deepEqual(transaction.usage.map((usage) => usage.rowsRead), [0, 10, 11]);
+  assert.deepEqual(transaction.usage.map((usage) => usage.rowsWritten), [0, 0, 1]);
+});
+
+test("P4: no statements is a zero-step batch and an empty result", async () => {
+  const sent = [];
+  const transport = batchTransport((request) => batchReply(request.batch.steps.map(() => result([], []))), sent);
+  const transaction = await transport.begin("read", 1000, undefined, runtimeLimit);
+  assert.deepEqual(await transaction.execute([], { maxResponseBytes: READ_CAP }), []);
+  assert.deepEqual(sent[1].requests, [{ type: "batch", batch: { steps: [] } }]);
+});
+
+test("runBatch evaluates conditions as Hrana does: only the steps whose predecessor succeeded run", async () => {
+  const request = { type: "batch", batch: { steps: [
+    { stmt: { sql: "a", named_args: [] } },
+    { stmt: { sql: "b", named_args: [] }, condition: { type: "ok", step: 0 } },
+    { stmt: { sql: "c", named_args: [] }, condition: { type: "ok", step: 1 } },
+  ] } };
+  const ran = [];
+  const reply = await runBatch(request, ({ sql }) => {
+    ran.push(sql);
+    return sql === "b" ? { type: "error", error: CONSTRAINT } : result(["n"], [["1"]]);
+  });
+  assert.deepEqual(ran, ["a", "b"]);
+  assert.equal(reply.response.result.step_results[2], null);
+  assert.deepEqual(reply.response.result.step_errors.map((error) => error === null), [true, false, true]);
+});
+
+test("C1-C3: the first error of a batch is classified by its own step", async () => {
+  const run = async (stepErrors) => {
+    const refused = stepErrors.findIndex((error) => error !== null);
+    const transport = batchTransport(() => stepsReply(stepErrors.map((_error, index) => (index < refused ? okStep() : null)), stepErrors));
+    const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
+    return transaction.execute(threeStatements.slice(0, stepErrors.length), { maxResponseBytes: READ_CAP }).then(() => null, (error) => error);
+  };
+  const middle = await run([null, COMPLEXITY, null]);
+  assert.ok(middle instanceof SqlComplexityError && middle.statement === 1 && middle.complexityCause === "columns");
+  const first = await run([COMPLEXITY, null, null]);
+  assert.ok(first instanceof SqlComplexityError && first.statement === 0);
+  const constraint = await run([null, CONSTRAINT, null]);
+  assert.ok(constraint instanceof DatabaseStatementError && constraint.databaseCode === "SQLITE_CONSTRAINT");
+  const odd = await run([null, { code: "sqlite_x", message: "x" }, null]);
+  assert.ok(odd instanceof DatabaseStatementError && odd.databaseCode === "UNKNOWN");
+});
+
+// Every shape below is something a conforming server never sends. The transport trusts none of
+// them: each is a plain 503, never a classified refusal, and a write may have run after the refusal.
+const protocolViolations = {
+  "a top-level error that is not an object": () => ({ type: "error", error: "too many columns in result set" }),
+  "an execute reply to a batch request": () => ({ type: "ok", response: { type: "execute", result: okStep() } }),
+  "no response object": () => ({ type: "ok" }),
+  "no step_results": () => ({ type: "ok", response: { type: "batch", result: { step_errors: [null, null, null] } } }),
+  "no step_errors": () => ({ type: "ok", response: { type: "batch", result: { step_results: [okStep(), okStep(), okStep()] } } }),
+  "a result that is not an object": () => ({ type: "ok", response: { type: "batch", result: null } }),
+  "step arrays that are too short": () => stepsReply([okStep(), okStep()], [null, null]),
+  "step arrays that are too long": () => stepsReply([okStep(), okStep(), okStep(), okStep()], [null, null, null, null]),
+  "step_errors shorter than step_results": () => stepsReply([okStep(), okStep(), okStep()], [null, null]),
+  "no error and a step that did not run": () => stepsReply([okStep(), null, okStep()], [null, null, null]),
+  "a step before the error that did not run": () => stepsReply([null, null, null], [null, COMPLEXITY, null]),
+  "a result on the step that errored": () => stepsReply([okStep(), okStep(), null], [null, COMPLEXITY, null]),
+  "a step that ran after the error": () => stepsReply([okStep(), null, okStep()], [null, COMPLEXITY, null]),
+  "a second error after the first": () => stepsReply([okStep(), null, null], [null, COMPLEXITY, COMPLEXITY]),
+  "an error that is a string": () => stepsReply([okStep(), null, null], [null, "too many columns in result set", null]),
+  "an error that is a number": () => stepsReply([okStep(), null, null], [null, 7, null]),
+  "an error that is an array": () => stepsReply([okStep(), null, null], [null, [COMPLEXITY], null]),
+  "a step result that is a string": () => stepsReply([okStep(), "ok", okStep()], [null, null, null]),
+  "a step result without rows_read": () => {
+    const { rows_read: _omitted, ...incomplete } = okStep();
+    return stepsReply([okStep(), incomplete, okStep()], [null, null, null]);
+  },
+};
+// The shapes where a statement after the refusal ran or errored: a write may have committed.
+const ranAfterRefusal = ["a step that ran after the error", "a second error after the first"];
+// The reply shapes that break the conditional-batch contract once the first error is known: each is
+// logged once with its fixed reason (#144).
+const loggedViolations = {
+  "a step before the error that did not run": "step_before_error_not_run",
+  "a result on the step that errored": "error_step_has_result",
+  "a step that ran after the error": "step_after_error_ran",
+  "a second error after the first": "step_after_error_ran",
+  "an error that is a string": "error_not_object",
+  "an error that is a number": "error_not_object",
+  "an error that is an array": "error_not_object",
+};
+
+for (const [name, reply] of Object.entries(protocolViolations)) {
+  test(`N1: ${name} is an unclassified 503 and the rollback continues from the reply's baton`, async (t) => {
+    const lines = [];
+    t.mock.method(console, "log", (...args) => lines.push(args.map(String).join(" ")));
+    const batons = [];
+    let serial = 0;
+    const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "violation", async (_url, init) => {
+      const body = JSON.parse(init.body);
+      batons.push(body.baton ?? null);
+      const [sql] = requestSqls(body.requests);
+      if (sql.startsWith("BEGIN")) return Response.json({ baton: "b0", results: [result([], [])] });
+      if (sql === "ROLLBACK") return Response.json({ baton: null, results: [result([], []), closeReply()] });
+      serial += 1;
+      return Response.json({ baton: `next-${serial}`, results: [reply()] });
+    });
+    const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
+    const failure = await transaction.execute(threeStatements, { maxResponseBytes: READ_CAP }).then(() => null, (error) => error);
+    assert.ok(failure, "the call fails");
+    assert.equal(failure.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+    assert.ok(!(failure instanceof SqlComplexityError), "never a classified refusal");
+    assert.ok(!(failure instanceof DatabaseStatementError), "never a classified database error");
+    // R1: the stream continues with the baton of the reply that was a violation (#97).
+    await transaction.rollback();
+    assert.deepEqual(batons, [null, "b0", "next-1"]);
+    // S3: a broken contract is logged with a fixed reason and nothing of the reply.
+    const violations = lines.flatMap((line) => { try { const record = JSON.parse(line); return record.event === "database_protocol_violation" ? [record] : []; } catch { return []; } });
+    if (Object.hasOwn(loggedViolations, name)) {
+      assert.deepEqual(violations, [{ event: "database_protocol_violation", requestId: "violation", reason: loggedViolations[name] }]);
+    } else {
+      assert.deepEqual(violations, [], "no violation event for a shape that is not a broken contract after an error");
+    }
+    const everything = lines.join("\n");
+    for (const text of ["b0", "next-1", "too many columns", "SQLite", "INSERT", "UNIQUE"]) assert.equal(everything.includes(text), false, text);
+  });
+}
+
+test("B1: a refusal followed by a step that ran is never a definite rejection", async () => {
+  for (const name of ranAfterRefusal) {
+    const transport = batchTransport(() => protocolViolations[name]());
+    const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
+    await assert.rejects(
+      transaction.execute(threeStatements, { maxResponseBytes: READ_CAP }),
+      (error) => error.code === "POLICYSQL_DATABASE_UNAVAILABLE" && !(error instanceof SqlComplexityError),
+      name,
+    );
+  }
+});
+
+test("S2: a batch that fails as a whole keeps its code, is never a complexity refusal, and its message is not read", async () => {
+  const run = async (error) => {
+    const transport = batchTransport(() => ({ type: "error", error }));
+    const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
+    return transaction.execute(threeStatements, { maxResponseBytes: READ_CAP }).then(() => null, (failure) => failure);
+  };
+  const complexity = await run(COMPLEXITY);
+  assert.ok(complexity instanceof DatabaseStatementError && !(complexity instanceof SqlComplexityError));
+  assert.equal(complexity.databaseCode, "SQLITE_UNKNOWN");
+  assert.equal(complexity.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+  const busy = await run({ code: "SQLITE_BUSY", message: "database is locked" });
+  assert.equal(busy.databaseCode, "SQLITE_BUSY");
+  const unsafe = await run({ code: "sqlite busy: secret", message: "x" });
+  assert.ok(unsafe instanceof DatabaseStatementError);
+  assert.equal(unsafe.databaseCode, "UNKNOWN");
+  const none = await run({ message: "no code" });
+  assert.equal(none.databaseCode, "UNKNOWN");
+});
+
+// Real Turso ends the stream (`baton: null`) when SQLite closed the transaction itself on the
+// error; the reply is still the batch reply (observed by the release smoke, #144). Its refusal keeps
+// its code but is never a definite (complexity) refusal, and no request is sent on the ended stream.
+test("E1: a batch reply that ends the stream keeps its code, is never classified as complexity, and sends nothing more", async (t) => {
+  const lines = [];
+  t.mock.method(console, "log", (...args) => lines.push(args.map(String).join(" ")));
+  const sent = [];
+  const run = async (entry) => {
+    sent.length = 0;
+    lines.length = 0;
+    const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "ended", async (_url, init) => {
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      const sql = requestSqls(body.requests)[0] ?? "";
+      if (sql.startsWith("BEGIN")) return Response.json({ baton: "b0", results: [result([], [])] });
+      return Response.json({ baton: null, results: [entry] });
+    });
+    const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
+    const failure = await transaction.execute(threeStatements, { maxResponseBytes: READ_CAP }).then(() => null, (error) => error);
+    return { transaction, failure };
+  };
+  const events = (name) => lines.flatMap((line) => { try { const record = JSON.parse(line); return record.event === name ? [record] : []; } catch { return []; } });
+
+  const refused = await run(stepsReply([okStep(), null, null], [null, CONSTRAINT, null]));
+  assert.ok(refused.failure instanceof DatabaseStatementError && refused.failure.databaseCode === "SQLITE_CONSTRAINT");
+  // The stream ended: COMMIT is refused before it is sent, ROLLBACK sends nothing and logs no recovery.
+  await assert.rejects(refused.transaction.commit(), CommitNotSentError);
+  await refused.transaction.rollback();
+  assert.equal(refused.transaction.open, false);
+  assert.deepEqual(requestSqls(sent.flatMap((body) => body.requests)).filter((sql) => /^(COMMIT|ROLLBACK|close)$/u.test(sql)), []);
+  assert.equal(sent.length, 2, "only BEGIN and the batch were sent");
+  assert.deepEqual(events("database_stream_recovery"), []);
+
+  // A complexity message is not a definite refusal here: only its code is kept (a 503).
+  const complex = await run(stepsReply([okStep(), null, null], [null, COMPLEXITY, null]));
+  assert.ok(complex.failure instanceof DatabaseStatementError && !(complex.failure instanceof SqlComplexityError));
+  assert.equal(complex.failure.databaseCode, "SQLITE_UNKNOWN");
+  assert.equal(complex.failure.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+
+  // Success without a baton, or a reply that breaks the contract: a plain 503; a success is logged.
+  const success = await run(batchReply([result(["n"], [["1"]]), result(["n"], [["1"]]), result(["n"], [["1"]])]));
+  assert.equal(success.failure.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+  assert.ok(!(success.failure instanceof DatabaseStatementError) && !(success.failure instanceof SqlComplexityError));
+  assert.deepEqual(events("database_protocol_violation"), [{ event: "database_protocol_violation", requestId: "ended", reason: "stream_ended_without_error" }]);
+  assert.equal(lines.join("\n").includes("too many columns"), false);
+  const broken = await run(stepsReply([okStep(), okStep(), null], [null, COMPLEXITY, null]));
+  assert.ok(!(broken.failure instanceof DatabaseStatementError) && !(broken.failure instanceof SqlComplexityError));
+  assert.deepEqual(events("database_protocol_violation").map((record) => record.reason), ["error_step_has_result"]);
 });

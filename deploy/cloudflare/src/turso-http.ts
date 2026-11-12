@@ -5,10 +5,10 @@ import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.t
 import { discardBody, fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { BodyTooLargeError, readBoundedText } from "./bounded-body.ts";
-import { SqlComplexityError, statementFailure } from "./database-complexity.ts";
+import { statementFailure, unclassifiedFailure } from "./database-complexity.ts";
 
-// Statement replies carry result rows: their read cap comes with each call (core's compiled raw
-// result bound, ADR 0027). Control replies (BEGIN, COMMIT, ROLLBACK, close) carry no result data,
+// The statement batch reply carries result rows: its read cap comes with each call (core's compiled
+// raw result bound, ADR 0027). Control replies (BEGIN, COMMIT, ROLLBACK, close) carry no result data,
 // so their bound is a fixed protocol constant (ADR 0027 "Fixed protocol constants").
 const CONTROL_RESPONSE_BYTES = 65_536;
 const INT64_MIN = -(2n ** 63n);
@@ -40,6 +40,13 @@ const withReplyBaton = <T extends Error>(error: T, body: unknown): T => {
 const logStreamRecovery = (requestId: string, outcome: string) => {
   console.log(JSON.stringify({ event: "database_stream_recovery", requestId, outcome }));
 };
+// A batch reply that breaks the conditional-batch contract (a step after the first error ran or
+// errored, a step before it did not run, a malformed error) is logged once with a fixed reason: a
+// write may have committed after the refusal, and this is the only signal of it. Never the baton,
+// a message, or SQL.
+const logProtocolViolation = (requestId: string, reason: string) => {
+  console.log(JSON.stringify({ event: "database_protocol_violation", requestId, reason }));
+};
 const databaseFailure = () =>
   new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
 
@@ -58,8 +65,16 @@ type HranaValue =
   | { type: "blob"; base64: string };
 
 type HranaStatement = { sql: string; args?: Record<string, unknown> };
+// An envelope's statements go out as one conditional batch (#144): each step runs only when the
+// step before it succeeded. Hrana otherwise keeps running a pipeline after an error, and when
+// SQLite itself closes the transaction on that error (`ON CONFLICT ROLLBACK`, `RAISE(ROLLBACK)`)
+// every later statement would run in autocommit and commit behind the client's back. Only BEGIN,
+// COMMIT, and ROLLBACK are sent as plain `execute` requests.
+type HranaStmt = { sql: string; named_args: Array<{ name: string; value: HranaValue }> };
+type BatchStep = { stmt: HranaStmt; condition?: { type: "ok"; step: number } };
 type PipelineRequest =
-  | { type: "execute"; stmt: { sql: string; named_args: Array<{ name: string; value: HranaValue }> } }
+  | { type: "execute"; stmt: HranaStmt }
+  | { type: "batch"; batch: { steps: BatchStep[] } }
   | { type: "close" };
 /** A parsed reply: its results are still unchecked, its baton is the only field read unvalidated. */
 type PipelineReply = { readonly results: unknown[]; readonly baton: string | null };
@@ -118,19 +133,31 @@ const decodeValue = (value: unknown, maxBytes: number): unknown => {
   throw databaseFailure();
 };
 
-const executeRequest = ({ sql, args = {} }: HranaStatement, maxBytes: number): PipelineRequest => ({
+const encodeStmt = ({ sql, args = {} }: HranaStatement, maxBytes: number): HranaStmt => ({
+  sql,
+  named_args: Object.entries(args).map(([name, value]) => ({ name, value: encodeValue(value, maxBytes) })),
+});
+
+const executeRequest = (statement: HranaStatement, maxBytes: number): PipelineRequest => ({
   type: "execute",
-  stmt: {
-    sql,
-    named_args: Object.entries(args).map(([name, value]) => ({ name, value: encodeValue(value, maxBytes) })),
+  stmt: encodeStmt(statement, maxBytes),
+});
+
+// Step 0 has no condition; step i runs only when step i - 1 succeeded, so one failure stops the
+// whole chain (a step that did not run is not ok).
+const batchRequest = (statements: HranaStatement[], maxBytes: number): PipelineRequest => ({
+  type: "batch",
+  batch: {
+    steps: statements.map((statement, index): BatchStep => ({
+      stmt: encodeStmt(statement, maxBytes),
+      ...(index > 0 ? { condition: { type: "ok", step: index - 1 } as const } : {}),
+    })),
   },
 });
 
-const decodeResult = (entry: unknown, maxBytes: number): DatabaseResult => {
-  // `entry` is the server's: `entry.response.result` is checked field by field below.
-  const reply = isRecord(entry) && entry.type === "ok" && isRecord(entry.response) ? entry.response : undefined;
-  if (reply?.type !== "execute" || !isRecord(reply.result)) throw databaseFailure();
-  const result = reply.result;
+const decodeStmtResult = (result: unknown, maxBytes: number): DatabaseResult => {
+  // `result` is the server's, checked field by field below.
+  if (!isRecord(result)) throw databaseFailure();
   if (
     !Array.isArray(result.cols) ||
     !Array.isArray(result.rows) ||
@@ -163,6 +190,45 @@ const decodeResult = (entry: unknown, maxBytes: number): DatabaseResult => {
       queryDurationMs: result.query_duration_ms,
     },
   };
+};
+
+const decodeResult = (entry: unknown, maxBytes: number): DatabaseResult => {
+  // `entry` is the server's: `entry.response.result` is checked in decodeStmtResult.
+  const reply = isRecord(entry) && entry.type === "ok" && isRecord(entry.response) ? entry.response : undefined;
+  if (reply?.type !== "execute" || !isRecord(reply.result)) throw databaseFailure();
+  return decodeStmtResult(reply.result, maxBytes);
+};
+
+type BatchOutcome =
+  | { readonly refused: null; readonly results: unknown[] }
+  | { readonly refused: number; readonly error: Record<string, unknown> };
+
+// Reads a batch reply. The server is not trusted to have honoured the conditions: any shape that
+// is not exactly "steps before the first error ran, the error step errored, nothing after it ran"
+// is a protocol violation, a plain 503 (never a classified refusal). A later step that ran, or a
+// second error, means a write may have committed after the refusal (#144).
+const readBatch = (entry: unknown, count: number, requestId: string): BatchOutcome => {
+  // A top-level error is the whole batch failing (not a statement's step error): its code is kept
+  // for the log, its message is never read, so it cannot classify as a complexity refusal.
+  if (isRecord(entry) && entry.type === "error" && isRecord(entry.error)) throw unclassifiedFailure(entry.error);
+  const response = isRecord(entry) && entry.type === "ok" && isRecord(entry.response) ? entry.response : undefined;
+  if (response?.type !== "batch" || !isRecord(response.result)) throw databaseFailure();
+  const { step_results: stepResults, step_errors: stepErrors } = response.result;
+  if (!Array.isArray(stepResults) || !Array.isArray(stepErrors)) throw databaseFailure();
+  if (stepResults.length !== count || stepErrors.length !== count) throw databaseFailure();
+  const refused = stepErrors.findIndex((error) => error !== null);
+  if (refused === -1) return { refused: null, results: stepResults };
+  const violation = (reason: string): never => {
+    logProtocolViolation(requestId, reason);
+    throw databaseFailure();
+  };
+  for (let index = 0; index < count; index += 1) {
+    if (index < refused && !isRecord(stepResults[index])) violation("step_before_error_not_run");
+    if (index === refused && stepResults[index] !== null) violation("error_step_has_result");
+    if (index === refused && !isRecord(stepErrors[index])) violation("error_not_object");
+    if (index > refused && (stepResults[index] !== null || stepErrors[index] !== null)) violation("step_after_error_ran");
+  }
+  return { refused, error: stepErrors[refused] as Record<string, unknown> };
 };
 
 export class TursoHttpTransport {
@@ -322,6 +388,8 @@ class TursoHttpTransaction {
   open: boolean;
   /** The reply to the last request on the stream was not read, so its baton is unknown (#96). */
   unusable = false;
+  /** The reply was read and its baton was null: the server ended the stream, so nothing is left to roll back (#144). */
+  streamEnded = false;
   readonly usage: DatabaseUsage[];
 
   constructor(
@@ -350,7 +418,7 @@ class TursoHttpTransaction {
     // Nothing is sent yet: an expired deadline or an unencodable value fails here, and the stream
     // stays usable (the baton is still the server's current one).
     const timeoutMs = Math.min(this.timeoutMs, remainingDatabaseTime(this.deadlineMs));
-    const requests = statements.map((statement): PipelineRequest => executeRequest(statement, this.maxBytes));
+    const requests = [batchRequest(statements, this.maxBytes)];
     let body: PipelineReply;
     try {
       body = await this.transport.pipeline(
@@ -371,31 +439,31 @@ class TursoHttpTransaction {
       if (validBaton(next)) this.baton = next; else this.unusable = true;
       throw error;
     }
-    if (!body.baton) { this.unusable = true; throw databaseFailure(); }
+    if (!body.baton) {
+      this.unusable = true;
+      this.streamEnded = true;
+      // Real Turso ends the stream (`baton: null`) when SQLite itself closed the transaction on the
+      // error (`ON CONFLICT ROLLBACK`, `RAISE(ROLLBACK)`), and the reply is still the batch reply.
+      // It is read so the refusal keeps its code, but never classified as a complexity refusal: a
+      // stream that ended gives no evidence that the steps before the error ran inside a
+      // transaction, so the refusal is not definite. Nothing more is sent on the ended stream, and
+      // a success without a baton is a plain 503 that is logged (a statement may have run outside
+      // a transaction).
+      const ended = readBatch(body.results[0], statements.length, this.transport.requestId);
+      if (ended.refused !== null) throw unclassifiedFailure(ended.error);
+      logProtocolViolation(this.transport.requestId, "stream_ended_without_error");
+      throw databaseFailure();
+    }
     // The stream's next baton comes first, even when a statement was refused: the rollback that
     // follows a refusal must continue this stream with the baton of this reply, or the server
     // keeps the transaction (and its write lock) open until the stream expires.
     this.baton = body.baton;
-    // The Hrana error object of a refused statement is read here, and only for statement
-    // requests (never BEGIN, COMMIT, or ROLLBACK): the first refused statement decides, and its
-    // message is read only to classify it (src/database-complexity.ts).
-    const errors = body.results.flatMap((entry, index) =>
-      (isRecord(entry) && entry.type === "error" ? [index] : []));
-    if (errors.length > 0) {
-      // Hrana runs the rest of the pipeline after an error. The refusal is a complexity refusal
-      // only when it is the one error and the last statement: then nothing ran after it, so no
-      // statement could have committed or rolled the transaction back behind the client's back.
-      // Anything else (a second error, or a statement that ran after the refused one) keeps the
-      // unclassified 503, whose outcome is not a definite rejection.
-      const [refused] = errors;
-      const alone = errors.length === 1 && refused === body.results.length - 1;
-      const refusedEntry = body.results[refused];
-      const failure = statementFailure(isRecord(refusedEntry) ? refusedEntry.error : undefined, refused);
-      // The message is dropped so that the failure cannot classify as complexity.
-      const code = isRecord(refusedEntry) && isRecord(refusedEntry.error) ? refusedEntry.error.code : undefined;
-      throw alone || !(failure instanceof SqlComplexityError) ? failure : statementFailure({ code }, refused);
-    }
-    const results = body.results.map((entry) => decodeResult(entry, this.maxBytes));
+    // The first error decides, and its message is read only to classify it
+    // (src/database-complexity.ts). readBatch has checked that nothing ran after it; a reply that
+    // does not show that is a protocol violation and a plain 503.
+    const outcome = readBatch(body.results[0], statements.length, this.transport.requestId);
+    if (outcome.refused !== null) throw statementFailure(outcome.error, outcome.refused);
+    const results = outcome.results.map((result) => decodeStmtResult(result, this.maxBytes));
     this.usage.push(...results.map((result) => result.usage));
     return results;
   }
@@ -408,6 +476,13 @@ class TursoHttpTransaction {
     // the transaction and its write lock now; when it did, the server refuses it and the stream
     // stays until the server expires it (ADR 0027, "Baton recovery"). COMMIT is never skipped
     // or attempted this way: an unusable stream is committed only if that same reply was read.
+    // A stream the server ended (a read reply with a null baton) has nothing left to roll back and
+    // no baton to continue: no request is sent and no recovery outcome is logged, so the runbook's
+    // `refused` signal (a write lock waiting for expiry) is not raised for it (#144).
+    if (this.streamEnded && sql === "ROLLBACK") {
+      this.open = false;
+      return;
+    }
     if (this.unusable && sql === "ROLLBACK") {
       this.open = false;
       await this.recover();

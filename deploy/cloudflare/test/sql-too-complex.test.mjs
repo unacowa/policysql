@@ -367,6 +367,21 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(next.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
   });
 
+  test(`${ownerAdapter}: a database complexity refusal before the last statement is 400 at its own index and nothing after it runs (#144)`, async (t) => {
+    const h = await setup(t, { maxSqlBytes: 65_536 });
+    const insert = { sql: "INSERT INTO projects(id,name,note) VALUES(:id,:name,:note)", params: { id: "after_refusal", name: "n", note: "n" } };
+    h.logs.length = 0;
+    const before = await statementsRun(h);
+    const refused = await post(h, { statements: [computedPattern, insert] }, EXECUTE, "complex-first-key-00001");
+    assertTooComplex(h, refused, 0);
+    const [record] = events(h, "sql_too_complex");
+    assert.equal(record.statementIndex, 0);
+    assert.equal(events(h, "database_error_unclassified").length, 0);
+    const { database } = h.databases.get("a");
+    assert.equal(database.prepare("SELECT count(*) AS n FROM projects WHERE id = 'after_refusal'").get().n, 0);
+    assert.equal(h.events.slice(before).some((event) => event.sql.startsWith("INSERT INTO")), false, "the INSERT after the refusal never reached the database");
+  });
+
   test(`${ownerAdapter}: a database error the allowlist does not name stays 503 and is logged with its code only`, async (t) => {
     const h = await setup(t);
     const insert = (id) => ({ sql: "INSERT INTO projects(id,name,note) VALUES(:id,:name,:note)", params: { id, name: "n", note: "n" } });
