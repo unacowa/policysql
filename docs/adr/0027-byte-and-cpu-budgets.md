@@ -595,7 +595,8 @@ and the text after the wrapper `SQLite error: ` is matched against four prefixes
 `NOT NULL`, `FOREIGN KEY`, `CHECK`; anything else is the kind `other`). A reply that ended the
 stream is not classified. The log event is `database_constraint_violation` (fixed kind, no text).
 What stays in `database_error_unclassified` is `SQLITE_CONSTRAINT` of a reply that ended the
-stream, and every other code.
+stream, a constraint violation of the idempotency lookup or insert or of a callback query (500,
+the code only), and every other code.
 
 **Pull request 5 results (2026-10-31).** Implemented as decided: `maxBytesPerValue` is a
 `RuntimeLimits` field (`max_bytes_per_value`, default 262,144, range 1 to 1,048,576, the error names the

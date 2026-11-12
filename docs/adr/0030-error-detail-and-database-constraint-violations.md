@@ -15,7 +15,8 @@ A statement the database refuses for a constraint (a duplicate in a UNIQUE colum
 key, NOT NULL, FOREIGN KEY, CHECK, or a trigger's `RAISE`) is a definite refusal by the data,
 not a fault of the service. PolicySQL answered it 503 `POLICYSQL_DATABASE_UNAVAILABLE`, which a
 client treats as "outcome unknown" and retries, and which an operator reads as an outage. A
-retry of the same request can never succeed.
+retry of the same request does not succeed unless the data changes (a parent row appears for a
+foreign key, a duplicate row is deleted).
 
 What real Turso sends (observed for #145): every kind of violation has the code
 `SQLITE_CONSTRAINT`; the message is `SQLite error: ` followed by SQLite's text; a trigger's
@@ -67,7 +68,7 @@ text names tables, columns, and constraints, and a trigger's text is any string 
 ### 4. Which replies may be a definite refusal
 
 Only a statement batch step error of a reply that kept its baton and that `readBatch` checked
-(errors before it executed, one error, nothing after it executed). Then the transport throws
+(steps before it executed, one error, nothing after it executed). Then the transport throws
 `SqlConstraintError`. A reply that ended the stream stays `DatabaseStatementError` (503), as in
 #144: it is no evidence that the statements ran inside a transaction. The difference is carried
 by which exception the transport throws, and core sees only the class. The class `constraint` is
@@ -110,7 +111,9 @@ SQL, parameters.
 `database_constraint_violation` with `requestId`, `statementIndex`, `constraint`, `databaseCode`
 (`[A-Z0-9_]{1,64}`, else `UNKNOWN`, or `null`), `schemaVersion`, `policyVersion`. It is written
 only when the reply is a `POLICYSQL_CONSTRAINT_VIOLATION`. A constraint violation of the
-idempotency table (500) has no log of its own.
+idempotency lookup or insert, or of a callback query (500), is logged as
+`database_error_unclassified` with the database's code only, as such a failure was before this
+change, so an operator can trace a mismatched idempotency table; no new event and no new decision.
 
 ### 10. When Turso changes
 
@@ -130,9 +133,19 @@ extended code, the refusal returns to 503 (the exact match of the code), and the
 - A refusal now tells a client, in one request and reliably, that a row exists, and tells a
   constraint violation apart from a failure (503). Before, whether a statement failed was already
   visible from whether the write happened. The inference of residual risk 2 of the
-  security model gets cheaper. The measures are in the schema: put the tenant column in every
-  UNIQUE key, put no UNIQUE constraint across tenants on a value that must stay private, and
-  rate-limit the endpoint.
+  security model gets cheaper. The measures are in the schema and the policy: put the tenant
+  column in every UNIQUE key, put no UNIQUE constraint across tenants on a value that must stay
+  private, fix the scoping column (the tenant) with `presets` and do not leave it to a `check`
+  alone, and rate-limit the endpoint. A `check` is evaluated on the row after the write, so a row
+  it would reject can still reach the database's constraint first: with an insert policy of
+  `columns: [id, tenant_id, code]`, `check: tenant_id = session` (no preset) and
+  `UNIQUE (tenant_id, code)`, a client of tenant `a` that inserts `tenant_id = 'another_tenant'`
+  gets 409 `unique` when another tenant has that `code` and 422 `POLICYSQL_SCHEMA_MISMATCH` when it
+  does not.
+- The ABI is 19, so the snapshot (`…:abi-19`) changes with this deployment. An interactive
+  transaction begun under the earlier snapshot can still be committed or have its commit retried
+  (ADR 0007), but any other command needs the current snapshot; a keyed atomic retry replays when
+  only the snapshot differs (ADR 0007).
 
 ## Rejected alternatives
 

@@ -386,15 +386,19 @@ impl<C: Compiler> Step<'_, C> {
     }
 
     /// The reply of a failed statement execution. A complexity refusal or a constraint violation
-    /// (ADR 0030) points at the failed statement; a failure with a database code that no class names is logged as
-    /// `database_error_unclassified` with that code only (ADR 0027), never the message.
+    /// (ADR 0030) points at the failed statement; a failure with a database code that no class
+    /// names, and a constraint class that is not a conflict (the idempotency lookup or insert, a
+    /// callback), are logged as `database_error_unclassified` with that code only (ADR 0027,
+    /// ADR 0030), never the message.
     fn execute_failed_reply(
         &mut self,
         code: Code,
         class: Class,
         detail: FailureDetail<'_>,
     ) -> Box<RawValue> {
-        if matches!(class, Class::Unavailable | Class::Unknown) {
+        if matches!(class, Class::Unavailable | Class::Unknown)
+            || (class == Class::Constraint && code != Code::ConstraintViolation)
+        {
             if let Some(database_code) = detail.database_code {
                 self.log(&json!({
                     "event": "database_error_unclassified",

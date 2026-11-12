@@ -5,7 +5,7 @@ export class PolicySqlError extends Error {
     this.code = code;
     if (status !== undefined) this.status = status;
     if (options?.response !== undefined) this.response = options.response;
-    if (options?.detail !== undefined) this.detail = Object.freeze(options.detail);
+    if (options?.detail !== undefined) this.detail = Object.freeze({ ...options.detail });
   }
 }
 

@@ -548,6 +548,12 @@ fn a_constraint_violation_is_a_conflict_on_the_envelope_and_never_on_commit_or_t
         } else {
             assert!(reply["error"].get("detail").is_none(), "{reply}");
             assert!(!log.contains("database_constraint_violation"), "{log}");
+            // The 500 is traceable: the database's code only, as `database_error_unclassified`.
+            assert!(
+                log.contains("\"event\":\"database_error_unclassified\""),
+                "{log}"
+            );
+            assert!(log.contains("\"code\":\"SQLITE_CONSTRAINT\""), "{log}");
         }
         assert_eq!(engine.observed.commits_emitted, 0);
         assert_eq!(engine.observed.rollbacks_emitted, 1);
@@ -640,7 +646,12 @@ fn the_kind_and_the_index_of_a_constraint_violation_are_bounded() {
         Some(json!({"constraint": "other"}))
     );
     // An index over the envelope limit is the first statement; one inside it is kept.
-    for (statement, path) in [(4_000_000_000_u64, "/statements/0"), (8, "/statements/0")] {
+    for (statement, path) in [
+        (4_000_000_000_u64, "/statements/0"),
+        (8, "/statements/0"),
+        (7, "/statements/7"),
+        (1, "/statements/1"),
+    ] {
         let mut engine = Engine::atomic(false);
         engine.feed(&execute_request(&insert("p1"), None));
         engine.resolve(true, "unknown");

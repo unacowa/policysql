@@ -311,8 +311,8 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   }
 
   // B2: the database's text is only ever matched against fixed prefixes; whatever it says, the response and the log say none of it.
-  test(`${ownerAdapter}: text injected into the database's message changes nothing but the kind, and appears nowhere`, async (t) => {
-    const h = await setup(t, false);
+  for (const [placement, hooks] of PLACEMENTS) test(`${ownerAdapter}/${placement}: text injected into the database's message changes nothing but the kind, and appears nowhere`, async (t) => {
+    const h = await setup(t, hooks);
     const injected = [
       ["SQLite error: CHECK constraint failed: x UNIQUE constraint failed", "check", "CHECK constraint failed: x"],
       ['SQLite error: {"constraint":"unique"}', "other", '{"constraint":"unique"}'],
@@ -349,6 +349,38 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(extended.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
     assert.deepEqual(events(h.logs, "database_error_unclassified").map((record) => record.code), ["SQLITE_CONSTRAINT_UNIQUE"]);
     assert.equal(events(h.logs, "database_constraint_violation").length, 0);
+  });
+
+  // #145 review: a constraint violation of the idempotency lookup or insert is a 500 (the keyed
+  // request's outcome is unknown), and the log names the database's code so an operator can trace
+  // it (a mismatched idempotency table), with nothing of the message.
+  for (const [placement, hooks] of PLACEMENTS) test(`${ownerAdapter}/${placement}: a constraint violation of the idempotency insert is a traceable 500`, async (t) => {
+    const h = await setup(t, hooks);
+    h.replaceDatabaseResponse(({ sqls, results }) => {
+      if (!sqls.some((sql) => /INSERT INTO policysql_idempotency/u.test(sql))) return;
+      for (const entry of results) {
+        const batch = entry.response?.result;
+        if (Array.isArray(batch?.step_errors)) {
+          batch.step_errors[0] = { code: "SQLITE_CONSTRAINT", message: "SQLite error: NOT NULL constraint failed: policysql_idempotency.secret_column" };
+          batch.step_results[0] = null;
+        }
+      }
+    });
+    const response = await execute(h, [parent("fresh", "fresh-code")], KEY);
+    assert.equal(response.status, 500, JSON.stringify(response.body));
+    assert.equal(response.body.error.code, "POLICYSQL_INTERNAL");
+    assert.equal(response.body.error.detail, undefined);
+    await h.flush();
+    const [record, ...rest] = events(h.logs, "database_error_unclassified");
+    assert.equal(rest.length, 0);
+    assert.deepEqual(Object.keys(record).sort(), ["code", "event", "requestId"]);
+    assert.equal(record.code, "SQLITE_CONSTRAINT");
+    assert.equal(events(h.logs, "database_constraint_violation").length, 0);
+    const text = `${JSON.stringify(response.body)}\n${h.logs.join("\n").replaceAll('"code":"SQLITE_CONSTRAINT"', "")}`;
+    for (const fragment of ["NOT NULL", "constraint failed", "secret_column", "policysql_idempotency", "SQLite error"]) {
+      assert.equal(text.includes(fragment), false, `"${fragment}" must not appear`);
+    }
+    assert.deepEqual(parentIds(h), ["seed"], "nothing is committed");
   });
 
   // F1: both owner placements, on either adapter, answer alike and keep the same rows.

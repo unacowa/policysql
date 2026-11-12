@@ -444,9 +444,11 @@ class TursoHttpTransaction {
       this.streamEnded = true;
       // Real Turso ends the stream (`baton: null`) when SQLite itself closed the transaction on the
       // error (`ON CONFLICT ROLLBACK`, `RAISE(ROLLBACK)`), and the reply is still the batch reply.
-      // It is read so the refusal keeps its code, but never classified as a complexity refusal: a
-      // stream that ended gives no evidence that the steps before the error ran inside a
-      // transaction, so the refusal is not definite. Nothing more is sent on the ended stream, and
+      // It is read so the refusal keeps its code, but it is classified neither as a complexity
+      // refusal nor as a constraint violation: a stream that ended gives no evidence that the steps
+      // before the error ran inside a transaction, so the refusal is not definite (#144, ADR 0030).
+      // This one `unclassifiedFailure` is what keeps a 409 `POLICYSQL_CONSTRAINT_VIOLATION` honest;
+      // do not align it with `statementFailure` below. Nothing more is sent on the ended stream, and
       // a success without a baton is a plain 503 that is logged (a statement may have run outside
       // a transaction).
       const ended = readBatch(body.results[0], statements.length, this.transport.requestId);
@@ -458,9 +460,10 @@ class TursoHttpTransaction {
     // follows a refusal must continue this stream with the baton of this reply, or the server
     // keeps the transaction (and its write lock) open until the stream expires.
     this.baton = body.baton;
-    // The first error decides, and its message is read only to classify it
-    // (src/database-complexity.ts). readBatch has checked that nothing ran after it; a reply that
-    // does not show that is a protocol violation and a plain 503.
+    // The first error decides (complexity, constraint violation, or other), and its message is read
+    // only to classify it (src/database-complexity.ts, src/database-constraint.ts). The reply kept
+    // its baton, so the transaction is still open, and readBatch has checked that nothing ran after
+    // the error; a reply that does not show that is a protocol violation and a plain 503.
     const outcome = readBatch(body.results[0], statements.length, this.transport.requestId);
     if (outcome.refused !== null) throw statementFailure(outcome.error, outcome.refused);
     const results = outcome.results.map((result) => decodeStmtResult(result, this.maxBytes));

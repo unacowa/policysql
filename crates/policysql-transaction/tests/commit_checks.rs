@@ -545,6 +545,12 @@ fn a_constraint_class_in_a_callback_query_is_internal() {
             .any(|line| line.output.contains("database_constraint_violation")),
         "no violation is logged for a callback"
     );
+    assert!(
+        engine.transcript.iter().any(|line| line
+            .output
+            .contains("\"event\":\"database_error_unclassified\"")),
+        "the 500 is traceable by its database code"
+    );
 }
 
 #[test]
