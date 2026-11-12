@@ -362,7 +362,9 @@ export class PolicySqlRuntime {
      * proved that no COMMIT was sent (`commitFailed` with class `not_committed`) answers:
      * `POLICYSQL_TRANSACTION_UNAVAILABLE` (a definite rejection) for an atomic execution (was
      * `POLICYSQL_INTERNAL`) and for an interactive commit (was a 200 with status `failed`), and
-     * bumped `ABI_VERSION` to 12; no identity value changed.
+     * bumped `ABI_VERSION` to 12; no identity value changed. #145 added the outcome class
+     * `constraint` and `error.detail` (409 `POLICYSQL_CONSTRAINT_VIOLATION`) and bumped
+     * `ABI_VERSION` to 19; no identity value changed.
      * @param {string | null | undefined} durable_json
      * @param {string | null | undefined} volatile_json
      * @param {string} event_json

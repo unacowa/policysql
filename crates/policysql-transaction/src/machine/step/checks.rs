@@ -805,12 +805,15 @@ impl<C: Compiler> Step<'_, C> {
                     statement,
                     database_code,
                     cause,
+                    constraint,
                     ..
                 },
             ) => {
                 self.release(handle);
                 // A complexity refusal in a callback query is traceable in the log like any other
-                // (the validator still receives the code without a path).
+                // (the validator still receives the code without a path). A callback runs a
+                // SELECT only, so a constraint class cannot be true there: it stays
+                // `Code::for_class`, which is `POLICYSQL_INTERNAL` (ADR 0030).
                 let reply = self.execute_failed_reply(
                     Code::for_class(*class),
                     *class,
@@ -818,6 +821,7 @@ impl<C: Compiler> Step<'_, C> {
                         statement: *statement,
                         database_code: database_code.as_deref(),
                         cause: cause.as_deref(),
+                        constraint: constraint.as_deref(),
                         versions: Some(versions),
                     },
                 );

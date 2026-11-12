@@ -8,8 +8,8 @@
 
 use super::compiler::{Compiler, CoreError, Operation, RawResult, ResultBudget, Validated};
 use super::io::{
-    self, Class, Code, DriverCall, DriverResult, Effect, Event, HostFacts, ObserveContext,
-    error_reply, value_reply,
+    self, Class, Code, ConstraintKind, DriverCall, DriverResult, Effect, Event, HostFacts,
+    ObserveContext, error_reply, value_reply,
 };
 use super::state::{
     Binding, Connection, Counters, Durable, Identity, Kind, MAX_DURABLE_BYTES, Mode, Mutation,
@@ -385,8 +385,8 @@ impl<C: Compiler> Step<'_, C> {
         });
     }
 
-    /// The reply of a failed statement execution. A complexity refusal points at the failed
-    /// statement; a failure with a database code that no class names is logged as
+    /// The reply of a failed statement execution. A complexity refusal or a constraint violation
+    /// (ADR 0030) points at the failed statement; a failure with a database code that no class names is logged as
     /// `database_error_unclassified` with that code only (ADR 0027), never the message.
     fn execute_failed_reply(
         &mut self,
@@ -396,17 +396,32 @@ impl<C: Compiler> Step<'_, C> {
     ) -> Box<RawValue> {
         if matches!(class, Class::Unavailable | Class::Unknown) {
             if let Some(database_code) = detail.database_code {
-                let safe = database_code.len() <= 64
-                    && !database_code.is_empty()
-                    && database_code.bytes().all(|byte| {
-                        byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
-                    });
                 self.log(&json!({
                     "event": "database_error_unclassified",
                     "requestId": self.request,
-                    "code": if safe { database_code } else { "UNKNOWN" },
+                    "code": safe_database_code(database_code),
                 }));
             }
+        }
+        if code == Code::ConstraintViolation {
+            let index = detail
+                .statement
+                .filter(|index| *index < self.limits.max_statements)
+                .unwrap_or(0);
+            let kind = ConstraintKind::from_name(detail.constraint);
+            let (schema, policy) = detail.versions.map_or((None, None), |versions| {
+                (Some(versions.schema), Some(versions.policy))
+            });
+            self.log(&json!({
+                "event": "database_constraint_violation",
+                "requestId": self.request,
+                "statementIndex": index,
+                "constraint": kind.name(),
+                "databaseCode": detail.database_code.map(safe_database_code),
+                "schemaVersion": schema,
+                "policyVersion": policy,
+            }));
+            return io::constraint_reply(kind, index);
         }
         if code == Code::SqlTooComplex {
             let index = detail
@@ -1039,6 +1054,7 @@ impl<C: Compiler> Step<'_, C> {
                     statement,
                     database_code,
                     cause,
+                    constraint,
                     ..
                 },
             ) => {
@@ -1049,14 +1065,16 @@ impl<C: Compiler> Step<'_, C> {
                     return self.expire_client(lane);
                 }
                 // The transaction closes as failed and is rolled back, whatever the class
-                // (ADR 0027: a complexity refusal by the database is like any execute failure).
+                // (ADR 0027: a complexity refusal by the database is like any execute failure;
+                // a constraint violation is the same, ADR 0030).
                 let reply = self.execute_failed_reply(
-                    Code::for_class(*class),
+                    Code::for_execute(*class),
                     *class,
                     FailureDetail {
                         statement: *statement,
                         database_code: database_code.as_deref(),
                         cause: cause.as_deref(),
+                        constraint: constraint.as_deref(),
                         versions: Some(versions),
                     },
                 );
@@ -2416,11 +2434,22 @@ struct Row<'a> {
     values: &'a [Value],
 }
 
+/// A database code that is safe to log: `[A-Z0-9_]{1,64}`, otherwise `UNKNOWN`.
+fn safe_database_code(database_code: &str) -> &str {
+    let safe = database_code.len() <= 64
+        && !database_code.is_empty()
+        && database_code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+    if safe { database_code } else { "UNKNOWN" }
+}
+
 /// What an `executeFailed` event says about its failure besides the class.
 pub(super) struct FailureDetail<'a> {
     pub(super) statement: Option<u64>,
     pub(super) database_code: Option<&'a str>,
     pub(super) cause: Option<&'a str>,
+    pub(super) constraint: Option<&'a str>,
     pub(super) versions: Option<Versions>,
 }
 
