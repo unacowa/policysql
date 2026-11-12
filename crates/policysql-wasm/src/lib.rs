@@ -79,7 +79,15 @@ use wasm_bindgen::prelude::*;
 /// forbidden; the request is not looked up and a matching row is not replayed without the
 /// authorization the compile would have given. An unkeyed request keeps its compile error. No
 /// identity value changed.
-const ABI_VERSION: u32 = 18;
+/// 19: issue #145: the outcome class `constraint` on `executeFailed` (with the statement index, a
+/// `constraint` name, and the `databaseCode`) answers 409 `POLICYSQL_CONSTRAINT_VIOLATION` at
+/// `/statements/<i>` with `detail.constraint` and a fixed message per kind, for an atomic or an
+/// interactive statement; the same database error was 503 `POLICYSQL_DATABASE_UNAVAILABLE`
+/// (class `unavailable`). On the idempotency lookup or insert, a callback query, COMMIT, and any
+/// event other than `executeFailed`, the class is 500 `POLICYSQL_INTERNAL`. An error reply may
+/// carry `detail`; a forwarded owner reply is read with it and checked against the code. The
+/// machine writes the log event `database_constraint_violation`. No identity value changed.
+const ABI_VERSION: u32 = 19;
 /// The fixed JSON levels the machine adds when it wraps an interactive command in the
 /// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
 /// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must
@@ -894,7 +902,9 @@ impl PolicySqlRuntime {
     /// proved that no COMMIT was sent (`commitFailed` with class `not_committed`) answers:
     /// `POLICYSQL_TRANSACTION_UNAVAILABLE` (a definite rejection) for an atomic execution (was
     /// `POLICYSQL_INTERNAL`) and for an interactive commit (was a 200 with status `failed`), and
-    /// bumped `ABI_VERSION` to 12; no identity value changed.
+    /// bumped `ABI_VERSION` to 12; no identity value changed. #145 added the outcome class
+    /// `constraint` and `error.detail` (409 `POLICYSQL_CONSTRAINT_VIOLATION`) and bumped
+    /// `ABI_VERSION` to 19; no identity value changed.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn step_json(

@@ -13,9 +13,10 @@ import type { PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import type { WireEffect } from "./core-wire.ts";
 import { stringifyExact } from "./exact-json.ts";
 import { SqlComplexityError } from "./database-complexity.ts";
+import { SqlConstraintError } from "./database-constraint.ts";
 
 /** An outcome class core accepts (ADR 0024 "Events and host facts"). */
-export type FailureClass = "timeout" | "unavailable" | "rejected" | "not_committed" | "unknown" | "limit" | "complex";
+export type FailureClass = "timeout" | "unavailable" | "rejected" | "not_committed" | "unknown" | "limit" | "complex" | "constraint";
 
 /**
  * The class of a database or provider failure on an owner: a query timeout is `timeout`, the
@@ -24,6 +25,7 @@ export type FailureClass = "timeout" | "unavailable" | "rejected" | "not_committ
  */
 export const failureClass = (error: unknown): FailureClass => {
   if (error instanceof SqlComplexityError) return "complex";
+  if (error instanceof SqlConstraintError) return "constraint";
   const coded = error as { name?: unknown; code?: unknown };
   if (coded?.name === "QueryTimeoutError" || coded?.code === "QUERY_TIMEOUT") return "timeout";
   if (error instanceof EngineError) {
@@ -56,13 +58,20 @@ export const commitFailureClass = (error: unknown): FailureClass =>
 
 /**
  * The `executeFailed` event of a failed `execute` effect. A database complexity refusal is class
- * `complex` with the failed statement's index and a fixed cause name; a failure the database
+ * `complex` with the failed statement's index and a fixed cause name; a constraint violation is
+ * class `constraint` with the index and the kind (ADR 0030); a failure the database
  * reported with a code no class names carries that code (only the code) for core's
  * `database_error_unclassified` log. `classify` is the placement's class function.
  */
 export const executeFailedEvent = (id: number, error: unknown, classify: (error: unknown) => FailureClass) => {
   if (error instanceof SqlComplexityError) {
     return { type: "executeFailed", id, class: "complex", statement: error.statement, cause: error.complexityCause };
+  }
+  if (error instanceof SqlConstraintError) {
+    return {
+      type: "executeFailed", id, class: "constraint", statement: error.statement,
+      constraint: error.constraint, databaseCode: error.databaseCode,
+    };
   }
   const databaseCode = (error as { databaseCode?: unknown } | null | undefined)?.databaseCode;
   return {
@@ -74,9 +83,10 @@ export const executeFailedEvent = (id: number, error: unknown, classify: (error:
 /** The same for the direct placement: any other failure is classified as `directFailureClass`. */
 export const directCommitFailureClass = (error: unknown): FailureClass => {
   if (error instanceof CommitNotSentError) return "not_committed";
-  // A complexity refusal is a statement outcome, never a COMMIT's (ADR 0027).
+  // A complexity refusal or a constraint violation is a statement outcome, never a COMMIT's
+  // (ADR 0007, ADR 0027, ADR 0030).
   const errorClass = directFailureClass(error);
-  return errorClass === "complex" ? "unavailable" : errorClass;
+  return errorClass === "complex" || errorClass === "constraint" ? "unavailable" : errorClass;
 };
 
 const IMMEDIATE = new Set(["respond", "log", "observe", "reset"]);

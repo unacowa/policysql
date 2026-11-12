@@ -91,7 +91,7 @@ compileした更新がcommit checkの対象になり得る場合は、DOがDBト
 次のいずれかが失敗すると、変更全体をrollbackし、途中の`results`は返しません。
 
 - SQL parse、bind、policy、parameter、type validation
-- statement execution
+- statement execution（DBの制約違反は409 `POLICYSQL_CONSTRAINT_VIOLATION`）
 - operation check
 - `expect`
 - commit check

@@ -349,3 +349,22 @@ for (const hooks of [false, true]) test(`the real client sends a base64 key unch
   assert.throws(() => policyOptions({ idempotencyKey: "has space in key 12345" }), TypeError);
   assert.equal(requests.length, before);
 });
+
+for (const hooks of [false, true]) test(`a constraint violation inside a Kysely transaction reaches the caller as PolicySqlError and rolls back the earlier insert (hooks=${hooks})`, async (t) => {
+  t.mock.method(console, "log", () => {});
+  const h = await harness(t, { hooks });
+  const { db } = await makeClient(t, h);
+  await assert.rejects(db.transaction().execute(async trx => {
+    await trx.insertInto("projects").values({ id: "before", name: "Before" }).execute();
+    await trx.insertInto("projects").values({ id: "seed", name: "Duplicate" }).execute();
+  }), error => {
+    assert.equal(error.name, "PolicySqlError");
+    assert.equal(error.code, "POLICYSQL_CONSTRAINT_VIOLATION");
+    assert.equal(error.status, 409);
+    assert.deepEqual({ ...error.detail }, { constraint: "unique" });
+    return true;
+  });
+  await h.flush();
+  assert.equal(h.rows("a").some(row => row.id === "before"), false);
+  assert.deepEqual(h.rows("a").map(row => row.id), ["seed"]);
+});

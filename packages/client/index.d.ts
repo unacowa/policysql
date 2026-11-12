@@ -37,13 +37,21 @@ export interface PolicyExecuteResult<Row = Record<string, unknown>> {
   envelopeMeta: Record<string, unknown>
   debug?: { executionTrace?: unknown }
 }
-export interface PolicySqlErrorOptions extends ErrorOptions { response?: TransportResponse }
+export type PolicySqlConstraintKind = 'unique' | 'not_null' | 'foreign_key' | 'check' | 'other'
+/** Machine-readable values fixed per error code. Branch on `code`, not on the presence of a field. */
+export interface PolicySqlErrorDetail {
+  readonly constraint?: PolicySqlConstraintKind
+  readonly [field: string]: unknown
+}
+export interface PolicySqlErrorOptions extends ErrorOptions { response?: TransportResponse; detail?: PolicySqlErrorDetail }
 export class PolicySqlError extends Error {
   constructor(message: string, code: string, status?: number, options?: PolicySqlErrorOptions)
   readonly code: string
   readonly status?: number
   /** Validated public response, including the original server error fields. */
   readonly response?: TransportResponse
+  /** Machine-readable values fixed per code. The branch key is `code`. */
+  readonly detail?: PolicySqlErrorDetail
 }
 export class PolicySqlOutcomeUnknownError extends PolicySqlError {
   constructor(context: {

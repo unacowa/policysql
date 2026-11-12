@@ -96,6 +96,60 @@ pub enum Class {
     /// a statement request and never on COMMIT. Only `executeFailed` carries it, with the index
     /// of the failed statement.
     Complex,
+    /// The database refused the statement as a constraint violation (`SQLITE_CONSTRAINT`,
+    /// ADR 0030). An adapter may report it only when the reply left the transaction open and
+    /// it knows nothing after the failed statement ran (the conditional batch and the baton of
+    /// #144). Only `executeFailed` carries it, with the index of the failed statement and a
+    /// `constraint` name.
+    Constraint,
+}
+
+/// The kind of a constraint violation (ADR 0030): one fixed value per refused statement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstraintKind {
+    Unique,
+    NotNull,
+    ForeignKey,
+    Check,
+    Other,
+}
+
+impl ConstraintKind {
+    /// The kind an adapter named. An unknown name and no name are `Other`.
+    #[must_use]
+    pub fn from_name(name: Option<&str>) -> Self {
+        match name {
+            Some("unique") => Self::Unique,
+            Some("not_null") => Self::NotNull,
+            Some("foreign_key") => Self::ForeignKey,
+            Some("check") => Self::Check,
+            _ => Self::Other,
+        }
+    }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unique => "unique",
+            Self::NotNull => "not_null",
+            Self::ForeignKey => "foreign_key",
+            Self::Check => "check",
+            Self::Other => "other",
+        }
+    }
+
+    /// The fixed message of the kind. It never carries the database's own text.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Unique => "The statement violates a unique constraint.",
+            Self::NotNull => "The statement violates a NOT NULL constraint.",
+            Self::ForeignKey => "The statement violates a foreign key constraint.",
+            Self::Check => "The statement violates a CHECK constraint.",
+            Self::Other => "The statement violates a database constraint.",
+        }
+    }
 }
 
 /// The causes an adapter may name for a database complexity refusal (ADR 0027).
@@ -179,6 +233,10 @@ pub enum Event {
         /// names of [`COMPLEXITY_CAUSES`]; anything else is logged as `database`.
         #[serde(default)]
         cause: Option<String>,
+        /// The kind of a constraint violation (class `constraint`): one of the names of
+        /// [`ConstraintKind`]; anything else, and no name, is `other`.
+        #[serde(default)]
+        constraint: Option<String>,
     },
     Committed {
         id: u64,
@@ -468,6 +526,8 @@ pub enum Code {
     KeyInvalid,
     Timeout,
     SqlTooComplex,
+    /// The database refused a statement as a constraint violation (ADR 0030, #145).
+    ConstraintViolation,
     /// Request JSON nests deeper than the documented depth (ADR 0027 pull request 7, #66).
     JsonTooDeep,
 }
@@ -539,6 +599,10 @@ impl Code {
                 "POLICYSQL_SQL_TOO_COMPLEX",
                 "The statement is too complex to run under the active policy.",
             ),
+            Self::ConstraintViolation => (
+                "POLICYSQL_CONSTRAINT_VIOLATION",
+                "The statement violates a database constraint.",
+            ),
             Self::JsonTooDeep => (
                 "POLICYSQL_JSON_TOO_DEEP",
                 "The request JSON nests too deeply.",
@@ -554,9 +618,46 @@ impl Code {
             Class::Timeout => Self::DatabaseTimeout,
             Class::Unavailable => Self::DatabaseUnavailable,
             Class::Rejected => Self::BindingRejected,
-            Class::NotCommitted | Class::Unknown => Self::Internal,
+            // A constraint class on any event but a statement's `executeFailed` is an adapter
+            // bug, so the outcome is unknown (ADR 0030).
+            Class::NotCommitted | Class::Unknown | Class::Constraint => Self::Internal,
             Class::Limit => Self::LimitExceeded,
             Class::Complex => Self::SqlTooComplex,
+        }
+    }
+
+    /// The code for a failed statement execution: the only place a constraint violation is a
+    /// definite refusal (ADR 0030). Every other class maps as [`Code::for_class`] does.
+    #[must_use]
+    pub const fn for_execute(class: Class) -> Self {
+        match class {
+            Class::Constraint => Self::ConstraintViolation,
+            other => Self::for_class(other),
+        }
+    }
+}
+
+/// `error.detail`: values fixed per code, enumerations and numbers only (ADR 0030). A later
+/// change adds a field and a row to [`ErrorDetail::allowed`].
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ErrorDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraint: Option<ConstraintKind>,
+}
+
+impl ErrorDetail {
+    /// Whether `detail` is what `code` allows. A code in the table requires its detail; a code
+    /// outside the table has none.
+    #[must_use]
+    pub fn allowed(code: &str, detail: Option<&serde_json::Value>) -> bool {
+        match code {
+            // A struct also reads from a JSON array, so the shape is checked first.
+            "POLICYSQL_CONSTRAINT_VIOLATION" => detail
+                .filter(|value| value.is_object())
+                .and_then(|value| Self::deserialize(value).ok())
+                .is_some_and(|detail| detail.constraint.is_some()),
+            _ => detail.is_none(),
         }
     }
 }
@@ -572,6 +673,8 @@ struct ErrorBody<'a> {
     code: &'a str,
     message: &'a str,
     path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'a ErrorDetail>,
 }
 
 #[derive(Serialize)]
@@ -603,6 +706,7 @@ pub fn error_reply(code: Code) -> Box<RawValue> {
             code,
             message,
             path: None,
+            detail: None,
         },
     })
 }
@@ -619,6 +723,26 @@ pub fn error_reply_at(code: Code, index: u64) -> Box<RawValue> {
             code,
             message,
             path: Some(&path),
+            detail: None,
+        },
+    })
+}
+
+/// 409 `POLICYSQL_CONSTRAINT_VIOLATION` at `/statements/{index}`, with the fixed message and
+/// `detail` of the kind (ADR 0030).
+#[must_use]
+pub fn constraint_reply(kind: ConstraintKind, index: u64) -> Box<RawValue> {
+    let (code, _) = Code::ConstraintViolation.parts();
+    let path = format!("/statements/{index}");
+    to_raw(&ErrorReply {
+        ok: false,
+        error: ErrorBody {
+            code,
+            message: kind.message(),
+            path: Some(&path),
+            detail: Some(&ErrorDetail {
+                constraint: Some(kind),
+            }),
         },
     })
 }
@@ -632,6 +756,7 @@ pub fn core_error_reply(error: &super::compiler::CoreError) -> Box<RawValue> {
             code: &error.code,
             message: &error.message,
             path: error.path.as_deref(),
+            detail: None,
         },
     })
 }
@@ -640,4 +765,107 @@ pub fn core_error_reply(error: &super::compiler::CoreError) -> Box<RawValue> {
 #[must_use]
 pub fn value_reply(value: &RawValue) -> Box<RawValue> {
     to_raw(&ValueReply { ok: true, value })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Class, Code, ConstraintKind, ErrorDetail, constraint_reply};
+    use serde_json::{Value, json};
+
+    #[test]
+    fn a_kind_is_named_by_the_adapter_and_anything_else_is_other() {
+        for (name, kind) in [
+            ("unique", ConstraintKind::Unique),
+            ("not_null", ConstraintKind::NotNull),
+            ("foreign_key", ConstraintKind::ForeignKey),
+            ("check", ConstraintKind::Check),
+            ("other", ConstraintKind::Other),
+        ] {
+            assert_eq!(ConstraintKind::from_name(Some(name)), kind);
+            assert_eq!(kind.name(), name);
+            assert!(kind.message().starts_with("The statement violates a"));
+        }
+        for name in ["", "UNIQUE", "primary_key", "unique ", "notnull"] {
+            assert_eq!(ConstraintKind::from_name(Some(name)), ConstraintKind::Other);
+        }
+        assert_eq!(ConstraintKind::from_name(None), ConstraintKind::Other);
+        assert_eq!(
+            Code::ConstraintViolation.parts().1,
+            ConstraintKind::Other.message(),
+            "the code's own message is the `other` one"
+        );
+    }
+
+    #[test]
+    fn only_an_execute_failure_maps_a_constraint_to_the_conflict_code() {
+        assert_eq!(
+            Code::for_execute(Class::Constraint),
+            Code::ConstraintViolation
+        );
+        assert_eq!(Code::for_class(Class::Constraint), Code::Internal);
+        for class in [
+            Class::Timeout,
+            Class::Unavailable,
+            Class::Rejected,
+            Class::NotCommitted,
+            Class::Unknown,
+            Class::Limit,
+            Class::Complex,
+        ] {
+            assert_eq!(Code::for_execute(class), Code::for_class(class));
+        }
+    }
+
+    #[test]
+    fn the_detail_table_has_one_row_and_every_other_code_has_no_detail() {
+        let allowed =
+            |code: &str, detail: Option<Value>| ErrorDetail::allowed(code, detail.as_ref());
+        let violation = "POLICYSQL_CONSTRAINT_VIOLATION";
+        for kind in ["unique", "not_null", "foreign_key", "check", "other"] {
+            assert!(
+                allowed(violation, Some(json!({"constraint": kind}))),
+                "{kind}"
+            );
+        }
+        for detail in [
+            None,
+            Some(json!({})),
+            Some(json!({"constraint": "unique", "column": "x"})),
+            Some(json!({"constraint": "primary_key"})),
+            Some(json!({"constraint": null})),
+            Some(json!({"constraint": 1})),
+            Some(json!(["unique"])),
+            Some(json!("unique")),
+            Some(json!(1)),
+            Some(Value::Null),
+        ] {
+            assert!(!allowed(violation, detail.clone()), "{detail:?}");
+        }
+        for code in ["POLICYSQL_FORBIDDEN_COLUMN", "POLICYSQL_INTERNAL"] {
+            assert!(allowed(code, None), "{code}");
+            for detail in [
+                json!({}),
+                json!({"constraint": "unique"}),
+                json!([]),
+                Value::Null,
+            ] {
+                assert!(!allowed(code, Some(detail.clone())), "{code} {detail}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_conflict_reply_has_the_fixed_shape() {
+        let reply: Value = serde_json::from_str(constraint_reply(ConstraintKind::Check, 3).get())
+            .unwrap_or_else(|error| unreachable!("a reply is JSON: {error}"));
+        assert_eq!(
+            reply,
+            json!({"ok": false, "error": {
+                "code": "POLICYSQL_CONSTRAINT_VIOLATION",
+                "message": "The statement violates a CHECK constraint.",
+                "path": "/statements/3",
+                "detail": {"constraint": "check"},
+            }})
+        );
+    }
 }

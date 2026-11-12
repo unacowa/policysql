@@ -185,12 +185,13 @@ for (const hooks of [false, true]) test(`post-state FALSE/UNKNOWN, physical cons
   assert.deepEqual(outcomes.unknown, outcomes.false);
   // Regression pin of the current public error classes (#27 review). A failed
   // post-state check is reported as a schema mismatch; physical NOT NULL and
-  // trigger failures surface as the database error class without details.
+  // trigger failures are database constraint violations (409, ADR 0030) whose
+  // message and detail carry no database text.
   assert.deepEqual(outcomes, {
     false: { status: 422, code: "POLICYSQL_SCHEMA_MISMATCH" },
     unknown: { status: 422, code: "POLICYSQL_SCHEMA_MISMATCH" },
-    not_null: { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" },
-    trigger: { status: 503, code: "POLICYSQL_DATABASE_UNAVAILABLE" },
+    not_null: { status: 409, code: "POLICYSQL_CONSTRAINT_VIOLATION" },
+    trigger: { status: 409, code: "POLICYSQL_CONSTRAINT_VIOLATION" },
     later: { status: 422, code: "POLICYSQL_EXPECTATION_FAILED" },
   });
 });

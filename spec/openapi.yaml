@@ -739,6 +739,25 @@ components:
                 the envelope, or a complexity refusal by the database). It is detected before COMMIT,
                 so nothing was committed and the request is a rejection; an interactive transaction
                 closes as failed. Retrying the same request does not help.
+
+                POLICYSQL_CONSTRAINT_VIOLATION (409, path /statements/<i>, detail.constraint, a fixed
+                message per kind) means the database refused a statement for a constraint (UNIQUE or
+                PRIMARY KEY, NOT NULL, FOREIGN KEY, CHECK, a trigger's RAISE(ABORT)). It is detected
+                before COMMIT while the transaction is still open and rolled back, so nothing was
+                committed and the request is a rejection; an interactive transaction closes as failed.
+                Exception: a schema whose ON CONFLICT ROLLBACK or RAISE(ROLLBACK) makes the database
+                close the transaction is 503 POLICYSQL_DATABASE_UNAVAILABLE, and a deferred foreign
+                key that fails at COMMIT is an unknown outcome.
             message: { type: string }
             path: { type: [string, 'null'] }
+            detail:
+              type: object
+              additionalProperties: false
+              description: >-
+                Machine-readable values fixed per code (ADR 0030). Present only for the codes that
+                define one; today POLICYSQL_CONSTRAINT_VIOLATION.
+              properties:
+                constraint:
+                  type: string
+                  enum: [unique, not_null, foreign_key, check, other]
             requestId: { type: string }

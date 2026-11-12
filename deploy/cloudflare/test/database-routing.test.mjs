@@ -149,7 +149,7 @@ test("ordinary atomic writes isolate identical keys, replay once, and roll back 
   assert.equal(replay.status, 200);
   assert.equal(replay.body.transactionId, results[0].body.transactionId);
   assert.equal((await h.request("a", "/v1/transactions:execute", envelope(insert("different")))).status, 409);
-  assert.equal((await h.request("a", "/v1/transactions:execute", envelope(insert("rollback"), insert("seed")), "late-failure-key-001")).status, 503);
+  assert.equal((await h.request("a", "/v1/transactions:execute", envelope(insert("rollback"), insert("seed")), "late-failure-key-001")).status, 409);
   assert.equal(h.rows("a").some((row) => row.id === "rollback"), false);
   assert.equal(h.rows("b").some((row) => row.id === "rollback"), false);
   for (const tenant of ["a", "b"]) assert.equal(h.databases.get(tenant).database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, 1);
@@ -202,7 +202,9 @@ for (const hooks of [false, true]) {
   test(`unkeyed requests roll back on late SQL errors (DO=${hooks})`, async (t) => {
     const h = await harness(t, { hooks, idempotencyTable: false });
     const result = await h.request("a", "/v1/transactions:execute", envelope(insert("rollback"), insert("seed")), null);
-    assert.equal(result.status, 503);
+    // A duplicate primary key is a constraint violation, refused before COMMIT (ADR 0030).
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error.code, "POLICYSQL_CONSTRAINT_VIOLATION");
     assert.equal(h.rows("a").some((row) => row.id === "rollback"), false);
     assert.equal(h.events.some(({ sql }) => /policysql_idempotency/i.test(sql)), false);
     assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
@@ -639,7 +641,8 @@ test("revoking an active connection credential fails without reconnecting", asyn
 test("DO atomic SQL failure rolls back every preceding item on the selected database", async (t) => {
   const h = await harness(t);
   const response = await h.request("b", "/v1/transactions:execute", envelope(insert("rolled_back"), insert("seed")));
-  assert.equal(response.status, 503);
+  assert.equal(response.status, 409);
+  assert.equal(response.body.error.code, "POLICYSQL_CONSTRAINT_VIOLATION");
   assert.equal(h.rows("b").some((row) => row.id === "rolled_back"), false);
   assert.equal(h.hooksSeen.length, 0);
 });

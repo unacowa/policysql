@@ -2,6 +2,7 @@
 // is safe to show an untrusted client, and an RFC 6901 pointer into the request body. It
 // carries no transport status: the HTTP adapter maps the code to a status in its single
 // table (src/http/status.ts), and a non-HTTP caller reads the code.
+import type { ErrorDetail } from "./error-detail.ts";
 
 /** An operation's failure as data: what every engine operation returns instead of a value. */
 export type OperationError = {
@@ -9,16 +10,20 @@ export type OperationError = {
   message: string;
   /** RFC 6901 pointer into the request body, or null when no field is at fault. */
   path: string | null;
+  /** Machine-readable values fixed per code (ADR 0030). */
+  detail?: ErrorDetail;
 };
 
 export class EngineError extends Error {
   readonly code: string;
   readonly path: string | null;
+  readonly detail?: ErrorDetail;
 
-  constructor(code: string, message: string, path: string | null = null) {
+  constructor(code: string, message: string, path: string | null = null, detail?: ErrorDetail) {
     super(message);
     this.code = code;
     this.path = path;
+    if (detail !== undefined) this.detail = detail;
   }
 }
 
@@ -55,7 +60,7 @@ export const binaryLimitExceeded = () => new EngineError(
 
 /** The public form of any thrown value: an EngineError as is, anything else as INTERNAL. */
 export const operationError = (error: unknown): OperationError => error instanceof EngineError
-  ? { code: error.code, message: error.message, path: error.path }
+  ? { code: error.code, message: error.message, path: error.path, ...(error.detail === undefined ? {} : { detail: error.detail }) }
   : { code: "POLICYSQL_INTERNAL", message: "The request could not be completed.", path: null };
 
 /** Core's `{ error: { code, message, path } }` result as an EngineError, or null for a success. */

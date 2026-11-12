@@ -111,7 +111,7 @@ export type CompiledResponse = {
  */
 export type CoreEnvelope = {
   readonly ok?: boolean;
-  readonly error?: { readonly code: string; readonly message?: string; readonly path?: string | null };
+  readonly error?: { readonly code: string; readonly message?: string; readonly path?: string | null; readonly detail?: unknown };
   readonly fault?: string;
   readonly auth?: unknown;
   readonly estimates?: unknown;

@@ -15,7 +15,10 @@ export const jsonResponse = (body: unknown, status = 200, headers: Record<string
 
 /** An operation error in the public error shape, with the status from the single table. */
 export const errorResponse = (error: OperationError, requestId: string) => jsonResponse({
-  error: { code: error.code, message: error.message, path: error.path, requestId },
+  error: {
+    code: error.code, message: error.message, path: error.path,
+    ...(error.detail === undefined ? {} : { detail: error.detail }), requestId,
+  },
 }, statusFor(error.code));
 
 /** A representation's validator: the active snapshot, quoted as an HTTP entity tag. */

@@ -515,6 +515,44 @@ fn a_verdict_while_a_callback_executes_waits_for_the_connection() {
     assert_eq!(engine.compiler.live_handles(), 0);
 }
 
+/// ADR 0030: a callback query runs a SELECT only, so the class `constraint` cannot be true
+/// there; it is `POLICYSQL_INTERNAL`, never a 409 or a logged violation.
+#[test]
+fn a_constraint_class_in_a_callback_query_is_internal() {
+    let mut engine = checked();
+    validating(&mut engine);
+    let token = engine.token();
+    engine.callback(&token, SELECT);
+    engine.resolve_callback(true, "unknown");
+    let effect = engine.callback_outstanding.take().unwrap_or_default();
+    assert_eq!(effect["type"], "execute");
+    engine.feed(&json!({
+        "type": "executeFailed", "id": effect["id"], "class": "constraint",
+        "statement": 0, "constraint": "unique", "databaseCode": "SQLITE_CONSTRAINT",
+    }));
+    let callback = engine
+        .observed
+        .callback_replies
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(code(&callback), Some("POLICYSQL_INTERNAL"), "{callback}");
+    assert!(callback["error"].get("detail").is_none(), "{callback}");
+    assert!(
+        !engine
+            .transcript
+            .iter()
+            .any(|line| line.output.contains("database_constraint_violation")),
+        "no violation is logged for a callback"
+    );
+    assert!(
+        engine.transcript.iter().any(|line| line
+            .output
+            .contains("\"event\":\"database_error_unclassified\"")),
+        "the 500 is traceable by its database code"
+    );
+}
+
 #[test]
 fn expiry_while_a_callback_executes_rolls_back_after_it() {
     let mut engine = checked();

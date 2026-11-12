@@ -78,6 +78,9 @@ Configure alerts in the production account for:
   baton, after SQLite closed the transaction) logs no recovery event and leaves no lock. A BEGIN
   reply whose headers never arrived has no baton,
   so that residual produces no event; a write lock that appears without one may come from it;
+- `database_constraint_violation` with `constraint` `other` rising above its baseline: Turso may
+  have changed the text of its messages, or a trigger was added (check the release smoke too). A
+  constraint violation is a 409, so it is not part of the 5xx rate;
 - JWKS, cost-admission, or Turso availability errors for three consecutive minutes;
 - any wrapper `rate_limiter_missing` or `rate_limiter_failed` event, and a sustained 429
   `POLICYSQL_RATE_LIMITED` rate above the seven-day baseline (separately for the client

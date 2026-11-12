@@ -40,8 +40,8 @@ use super::super::compiler::{
     Compiler, Operation, RawResult, ResultBudget, StatementLimits, Validated,
 };
 use super::super::io::{
-    self, Class, Code, DriverCall, DriverResult, Effect, Event, ObserveContext, ObservedStatement,
-    core_error_reply, error_reply, value_reply,
+    self, Class, Code, DriverCall, DriverResult, Effect, ErrorDetail, Event, ObserveContext,
+    ObservedStatement, core_error_reply, error_reply, value_reply,
 };
 use super::super::state::{
     AtomicIds, AtomicRun, AtomicStatement, AtomicUsage, Binding, CommitChecks, Connection,
@@ -338,9 +338,12 @@ const fn commit_failure(class: Class) -> Code {
         Class::Timeout => Code::DatabaseTimeout,
         Class::Unavailable => Code::DatabaseUnavailable,
         Class::NotCommitted => Code::Unavailable,
-        // A complexity refusal is a statement-request outcome: a COMMIT is never classified
-        // this way (ADR 0027), so it is as unexpected here as `limit`.
-        Class::Rejected | Class::Unknown | Class::Limit | Class::Complex => Code::Internal,
+        // A complexity refusal or a constraint violation is a statement-request outcome: a
+        // COMMIT is never classified this way (ADR 0027, ADR 0030), so it is as unexpected here
+        // as `limit`. A deferred foreign key that fails at COMMIT stays an unknown outcome.
+        Class::Rejected | Class::Unknown | Class::Limit | Class::Complex | Class::Constraint => {
+            Code::Internal
+        }
     }
 }
 
@@ -356,14 +359,22 @@ const fn commit_failure(class: Class) -> Code {
 /// bound, a stalled body) leaves that possibility open, so an envelope with such a statement is
 /// never a definite 413 (ADR 0007, issue #97). The check is conservative: a later write that
 /// would not have committed still answers the unknown outcome.
+///
+/// A constraint violation is a definite refusal whatever follows the failed statement: the
+/// adapter reports the class only after the conditional batch and the baton showed that nothing
+/// after it ran and the transaction is still open (ADR 0030). On the idempotency lookup or
+/// insert it is `POLICYSQL_INTERNAL`, like `limit`.
 fn execute_failure(task: &Task, class: Class, later_write: bool) -> Code {
     match (task, class) {
         // A stored response over the lookup bound (a row written before the bounds existed, or
         // under a larger hard maximum) is the outcome of a request that may have committed, so
         // reading it failed with an unknown outcome, never a definite 413 (ADR 0007, ADR 0027).
-        (Task::AtomicLookup | Task::AtomicInsert, Class::Limit | Class::Complex) => Code::Internal,
+        (
+            Task::AtomicLookup | Task::AtomicInsert,
+            Class::Limit | Class::Complex | Class::Constraint,
+        ) => Code::Internal,
         (Task::AtomicExecute, Class::Limit) if later_write => Code::Internal,
-        _ => Code::for_class(class),
+        _ => Code::for_execute(class),
     }
 }
 
@@ -603,7 +614,7 @@ impl<C: Compiler> Step<'_, C> {
                 .map(|value| value_reply(&io::to_raw(value))),
             Some(Value::Bool(false)) => exact_object(reply, &["ok", "error"], &[])
                 .and_then(|fields| fields.get("error"))
-                .and_then(|error| exact_object(error, &["code", "message", "path"], &[]))
+                .and_then(|error| exact_object(error, &["code", "message", "path"], &["detail"]))
                 .filter(|error| {
                     error
                         .get("code")
@@ -618,6 +629,10 @@ impl<C: Compiler> Step<'_, C> {
                                     })
                             })
                         })
+                        && error
+                            .get("code")
+                            .and_then(Value::as_str)
+                            .is_some_and(|code| ErrorDetail::allowed(code, error.get("detail")))
                         && error.get("message").is_some_and(Value::is_string)
                         && error
                             .get("path")
@@ -1016,6 +1031,7 @@ impl<C: Compiler> Step<'_, C> {
                     statement,
                     database_code,
                     cause,
+                    constraint,
                     ..
                 },
             ) => {
@@ -1033,6 +1049,7 @@ impl<C: Compiler> Step<'_, C> {
                         statement: *statement,
                         database_code: database_code.as_deref(),
                         cause: cause.as_deref(),
+                        constraint: constraint.as_deref(),
                         versions,
                     },
                 );

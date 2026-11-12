@@ -134,10 +134,63 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 }
 
 #[test]
-fn abi_18_names_the_step_machine_with_the_keyed_compile_outcome() {
+fn abi_19_names_the_step_machine_with_the_constraint_outcome() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 18);
-    assert!(owner.runtime.snapshot().ends_with(":abi-18"));
+    assert_eq!(owner.runtime.abi_version(), 19);
+    assert!(owner.runtime.snapshot().ends_with(":abi-19"));
+}
+
+/// #145 at the ABI boundary: the real `step_json` reads an `executeFailed` of class `constraint`
+/// and answers 409 `POLICYSQL_CONSTRAINT_VIOLATION` with `error.detail` and the log event.
+#[test]
+fn a_constraint_class_is_a_conflict_with_detail_and_a_logged_record() {
+    let mut owner = begun();
+    let mut output = owner.statement(
+        r#"{"sequence":1,"sql":"INSERT INTO counters (id) VALUES (:id)","params":{"id":"x"}}"#,
+    );
+    let mut guard = 0;
+    while output["effects"]
+        .as_array()
+        .and_then(|effects| effects.last())
+        .is_some_and(|effect| effect["type"] != "execute")
+    {
+        output = owner.succeed(&output);
+        guard += 1;
+        assert!(guard < 8, "an execute is awaited: {output}");
+    }
+    let id = output["effects"][output["effects"]
+        .as_array()
+        .map_or(0, |effects| effects.len() - 1)]["id"]
+        .clone();
+    let mut output = owner.step(&json!({
+        "type": "executeFailed", "id": id, "class": "constraint", "statement": 0,
+        "constraint": "not_null", "databaseCode": "SQLITE_CONSTRAINT",
+    }));
+    let mut texts = vec![output["raw"].as_str().unwrap_or_default().to_owned()];
+    let mut reply = Value::Null;
+    for _ in 0..8 {
+        if let Some(effect) = output["effects"]
+            .as_array()
+            .and_then(|effects| effects.iter().find(|effect| effect["type"] == "respond"))
+        {
+            reply = effect["reply"].clone();
+            break;
+        }
+        output = owner.succeed(&output);
+        texts.push(output["raw"].as_str().unwrap_or_default().to_owned());
+    }
+    assert_eq!(
+        reply["error"]["code"], "POLICYSQL_CONSTRAINT_VIOLATION",
+        "{reply}"
+    );
+    assert_eq!(reply["error"]["detail"], json!({"constraint": "not_null"}));
+    assert_eq!(reply["error"]["path"], "/statements/0");
+    assert_eq!(
+        reply["error"]["message"],
+        "The statement violates a NOT NULL constraint."
+    );
+    let all = texts.join("\n");
+    assert!(all.contains("database_constraint_violation"), "{all}");
 }
 
 /// #85 path 1 with the real compiler: a keyed execute whose compile fails (here an operation

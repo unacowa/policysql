@@ -20,7 +20,12 @@
 //
 // Only statement batch step errors are classified. BEGIN, COMMIT, and ROLLBACK are not, so a COMMIT is
 // never reported as a complexity failure (ADR 0007).
+//
+// A constraint violation is classified in database-constraint.ts. `statementFailure` is called
+// only for a reply that kept its baton (turso-http.ts), so the transaction is still open and
+// nothing after the failed step ran (ADR 0030).
 import { EngineError } from "./errors.ts";
+import { SqlConstraintError, constraintKind } from "./database-constraint.ts";
 
 /** One allowlist entry: a message prefix and the fixed cause name core logs for it. */
 export type ComplexityEntry = Readonly<{ prefix: string; cause: string; smokeVerified: boolean }>;
@@ -74,7 +79,8 @@ export class SqlComplexityError extends Error {
 }
 
 /**
- * A statement the database refused for any other reason: a 503 as before. `databaseCode` is
+ * A statement the database refused for neither complexity nor a constraint, and any refusal in
+ * a reply that ended the stream: a 503 as before. `databaseCode` is
  * the Hrana `code` only (never the message), restricted to `[A-Z0-9_]{1,64}`, for the
  * `database_error_unclassified` log.
  */
@@ -112,5 +118,7 @@ export const unclassifiedFailure = (error: unknown): DatabaseStatementError => {
 export const statementFailure = (error: unknown, index: number): Error => {
   const cause = complexityCause(error);
   if (cause !== null) return new SqlComplexityError(index, cause);
+  const constraint = constraintKind(error);
+  if (constraint !== null) return new SqlConstraintError(index, constraint);
   return unclassifiedFailure(error);
 };

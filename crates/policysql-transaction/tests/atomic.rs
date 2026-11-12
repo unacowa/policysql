@@ -492,6 +492,206 @@ fn a_complexity_refusal_is_too_complex_on_the_envelope_and_never_on_commit_or_th
     );
 }
 
+/// ADR 0030: the database's constraint violation (`constraint` with the statement index and a
+/// kind) is the client's 409 `POLICYSQL_CONSTRAINT_VIOLATION` on the envelope, rolled back before
+/// COMMIT, with a fixed message and `detail` per kind and a log record with fixed keys;
+/// `POLICYSQL_INTERNAL` on the idempotency lookup or insert; and never a COMMIT's outcome.
+#[test]
+fn a_constraint_violation_is_a_conflict_on_the_envelope_and_never_on_commit_or_the_idempotency_row()
+{
+    // Effects of a keyed write: checkBinding, open, lookup, envelope, insert, commit.
+    for (successes, expected) in [
+        (2, "POLICYSQL_INTERNAL"),
+        (3, "POLICYSQL_CONSTRAINT_VIOLATION"),
+        (4, "POLICYSQL_INTERNAL"),
+    ] {
+        let mut engine = Engine::atomic(false);
+        engine.feed(&execute_request(&insert("p1"), Some(KEY)));
+        for _ in 0..successes {
+            engine.resolve(true, "unknown");
+        }
+        let effect = engine.outstanding.take().unwrap_or(Value::Null);
+        engine.feed(&json!({
+            "type": "executeFailed", "id": effect["id"], "class": "constraint",
+            "statement": 0, "constraint": "unique", "databaseCode": "SQLITE_CONSTRAINT",
+        }));
+        let log = engine
+            .transcript
+            .last()
+            .map(|line| line.output.clone())
+            .unwrap_or_default();
+        engine.settle();
+        let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+        assert_eq!(
+            code(&reply),
+            Some(expected),
+            "after {successes} effects: {reply}"
+        );
+        if expected == "POLICYSQL_CONSTRAINT_VIOLATION" {
+            assert_eq!(reply["error"]["path"], "/statements/0");
+            assert_eq!(
+                reply["error"]["message"],
+                "The statement violates a unique constraint."
+            );
+            assert_eq!(reply["error"]["detail"], json!({"constraint": "unique"}));
+            assert!(
+                log.contains("\"event\":\"database_constraint_violation\""),
+                "{log}"
+            );
+            assert!(log.contains("\"constraint\":\"unique\""), "{log}");
+            assert!(
+                log.contains("\"databaseCode\":\"SQLITE_CONSTRAINT\""),
+                "{log}"
+            );
+            assert!(log.contains("\"statementIndex\":0"), "{log}");
+            assert!(!log.contains("database_error_unclassified"), "{log}");
+        } else {
+            assert!(reply["error"].get("detail").is_none(), "{reply}");
+            assert!(!log.contains("database_constraint_violation"), "{log}");
+            // The 500 is traceable: the database's code only, as `database_error_unclassified`.
+            assert!(
+                log.contains("\"event\":\"database_error_unclassified\""),
+                "{log}"
+            );
+            assert!(log.contains("\"code\":\"SQLITE_CONSTRAINT\""), "{log}");
+        }
+        assert_eq!(engine.observed.commits_emitted, 0);
+        assert_eq!(engine.observed.rollbacks_emitted, 1);
+        assert_eq!(engine.idempotency_rows, Vec::<[String; 3]>::new());
+        assert_eq!(engine.compiler.live_handles(), 0);
+    }
+    // A COMMIT is never classified as a constraint violation, deferred foreign key or not.
+    let mut engine = Engine::atomic(false);
+    engine.feed(&execute_request(&insert("p1"), None));
+    for _ in 0..3 {
+        engine.resolve(true, "unknown");
+    }
+    engine.resolve(false, "constraint");
+    engine.settle();
+    assert_eq!(
+        code(engine.last_reply().unwrap_or(&Value::Null)),
+        Some("POLICYSQL_INTERNAL")
+    );
+    // The same class on every other effect is never a 409 (open, binding check, forward).
+    for failing in 0..2 {
+        let mut engine = Engine::atomic(false);
+        engine.feed(&execute_request(&insert("p1"), Some(KEY)));
+        for _ in 0..failing {
+            engine.resolve(true, "unknown");
+        }
+        engine.resolve(false, "constraint");
+        engine.settle();
+        let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+        assert_eq!(code(&reply), Some("POLICYSQL_INTERNAL"), "{reply}");
+        assert_eq!(engine.observed.commits_emitted, 0);
+    }
+}
+
+/// The kind and the index come from the event and are bounded: an unknown or empty name, or no
+/// name, is `other`; an index at or over the envelope limit is the first statement.
+#[test]
+fn the_kind_and_the_index_of_a_constraint_violation_are_bounded() {
+    let kinds = [
+        (json!("unique"), "unique", "unique"),
+        (json!("not_null"), "not_null", "NOT NULL"),
+        (json!("foreign_key"), "foreign_key", "foreign key"),
+        (json!("check"), "check", "CHECK"),
+        (json!("other"), "other", "database constraint"),
+        (json!("primary_key"), "other", "database constraint"),
+        (json!(""), "other", "database constraint"),
+        (json!("UNIQUE"), "other", "database constraint"),
+        (Value::Null, "other", "database constraint"),
+    ];
+    for (name, kind, text) in kinds {
+        let mut engine = Engine::atomic(false);
+        engine.feed(&execute_request(&insert("p1"), None));
+        engine.resolve(true, "unknown");
+        engine.resolve(true, "unknown");
+        let effect = engine.outstanding.take().unwrap_or(Value::Null);
+        engine.feed(&json!({
+            "type": "executeFailed", "id": effect["id"], "class": "constraint", "constraint": name,
+        }));
+        engine.settle();
+        let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+        assert_eq!(
+            code(&reply),
+            Some("POLICYSQL_CONSTRAINT_VIOLATION"),
+            "{name}: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["detail"],
+            json!({"constraint": kind}),
+            "{name}"
+        );
+        assert!(
+            reply["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(text)),
+            "{name}: {reply}"
+        );
+        assert_eq!(reply["error"]["path"], "/statements/0");
+    }
+    // No `constraint` field at all.
+    let mut engine = Engine::atomic(false);
+    engine.feed(&execute_request(&insert("p1"), None));
+    engine.resolve(true, "unknown");
+    engine.resolve(true, "unknown");
+    let effect = engine.outstanding.take().unwrap_or(Value::Null);
+    engine.feed(&json!({"type": "executeFailed", "id": effect["id"], "class": "constraint"}));
+    engine.settle();
+    assert_eq!(
+        engine
+            .last_reply()
+            .map(|reply| reply["error"]["detail"].clone()),
+        Some(json!({"constraint": "other"}))
+    );
+    // An index over the envelope limit is the first statement; one inside it is kept.
+    for (statement, path) in [
+        (4_000_000_000_u64, "/statements/0"),
+        (8, "/statements/0"),
+        (7, "/statements/7"),
+        (1, "/statements/1"),
+    ] {
+        let mut engine = Engine::atomic(false);
+        engine.feed(&execute_request(&insert("p1"), None));
+        engine.resolve(true, "unknown");
+        engine.resolve(true, "unknown");
+        let effect = engine.outstanding.take().unwrap_or(Value::Null);
+        engine.feed(&json!({
+            "type": "executeFailed", "id": effect["id"], "class": "constraint",
+            "statement": statement, "constraint": "check",
+        }));
+        engine.settle();
+        assert_eq!(
+            engine
+                .last_reply()
+                .map(|reply| reply["error"]["path"].clone()),
+            Some(json!(path))
+        );
+    }
+    // The log's database code is the safe form or UNKNOWN, never the raw text.
+    for (reported, logged) in [
+        ("SQLITE_CONSTRAINT", "\"SQLITE_CONSTRAINT\""),
+        ("has space\n", "\"UNKNOWN\""),
+    ] {
+        let mut engine = Engine::atomic(false);
+        engine.feed(&execute_request(&insert("p1"), None));
+        engine.resolve(true, "unknown");
+        engine.resolve(true, "unknown");
+        let effect = engine.outstanding.take().unwrap_or(Value::Null);
+        engine.feed(&json!({
+            "type": "executeFailed", "id": effect["id"], "class": "constraint",
+            "constraint": "unique", "databaseCode": reported,
+        }));
+        let log = engine
+            .transcript
+            .last()
+            .map(|line| line.output.clone())
+            .unwrap_or_default();
+        assert!(log.contains(&format!("\"databaseCode\":{logged}")), "{log}");
+    }
+}
+
 #[test]
 fn an_envelope_that_could_trigger_a_check_is_forwarded_and_its_reply_relayed() {
     let mut engine = Engine::atomic(false);
@@ -529,6 +729,122 @@ fn an_envelope_that_could_trigger_a_check_is_forwarded_and_its_reply_relayed() {
     engine.forward_reply = json!({"ok": false, "error": {"code": "POLICYSQL_COMMIT_CHECK_REJECTED", "message": "m", "path": null}});
     let rejected = engine.run(&execute_request(&audit("a3"), None));
     assert_eq!(code(&rejected), Some("POLICYSQL_COMMIT_CHECK_REJECTED"));
+}
+
+/// ADR 0030: a forwarded owner reply carries `detail` only as the table of its code allows.
+#[test]
+fn a_forwarded_reply_keeps_a_valid_detail_and_rejects_a_forged_one() {
+    let violation = |detail: Option<Value>| {
+        let mut error = json!({
+            "code": "POLICYSQL_CONSTRAINT_VIOLATION", "message": "m", "path": "/statements/0",
+        });
+        if let Some(detail) = detail {
+            error["detail"] = detail;
+        }
+        json!({"ok": false, "error": error})
+    };
+    let valid = violation(Some(json!({"constraint": "unique"})));
+    let mut engine = Engine::atomic(false);
+    engine.forward_reply = valid.clone();
+    let reply = engine.run(&execute_request(&audit("a1"), None));
+    assert_eq!(reply, valid, "a valid detail is relayed as it is");
+    for forged in [
+        violation(None),
+        violation(Some(json!({}))),
+        violation(Some(json!({"constraint": "unique", "column": "x"}))),
+        violation(Some(json!({"constraint": "primary_key"}))),
+        violation(Some(json!({"constraint": null}))),
+        violation(Some(json!(["unique"]))),
+        violation(Some(json!("unique"))),
+        violation(Some(Value::Null)),
+        json!({"ok": false, "error": {
+            "code": "POLICYSQL_FORBIDDEN_COLUMN", "message": "m", "path": null,
+            "detail": {"constraint": "unique"},
+        }}),
+        json!({"ok": false, "error": {
+            "code": "POLICYSQL_FORBIDDEN_COLUMN", "message": "m", "path": null, "detail": null,
+        }}),
+        json!({"ok": false, "error": {
+            "code": "POLICYSQL_FORBIDDEN_COLUMN", "message": "m", "path": null, "detail": {},
+        }}),
+        json!({"ok": false, "error": {
+            "code": "POLICYSQL_CONSTRAINT_VIOLATION", "message": "m", "path": null,
+            "detail": {"constraint": "unique"}, "extra": 1,
+        }}),
+    ] {
+        let mut engine = Engine::atomic(false);
+        engine.forward_reply = forged.clone();
+        let reply = engine.run(&execute_request(&audit("a2"), None));
+        assert_eq!(
+            code(&reply),
+            Some("POLICYSQL_INTERNAL"),
+            "{forged} -> {reply}"
+        );
+        let logged = engine
+            .transcript
+            .iter()
+            .any(|line| line.output.contains("owner_reply_rejected"));
+        assert!(logged, "{forged}: the rejection is logged");
+    }
+    // A code outside the table without a detail still passes.
+    engine.forward_reply = json!({"ok": false, "error": {"code": "POLICYSQL_FORBIDDEN_COLUMN", "message": "m", "path": null}});
+    let plain = engine.run(&execute_request(&audit("a3"), None));
+    assert_eq!(code(&plain), Some("POLICYSQL_FORBIDDEN_COLUMN"));
+}
+
+/// A forward that fails with the class `constraint` is an adapter fault, not a 409.
+#[test]
+fn a_constraint_class_on_a_failed_forward_is_internal() {
+    let mut engine = Engine::atomic(false);
+    engine.feed(&execute_request(&audit("a1"), Some(KEY)));
+    engine.resolve(true, "unknown");
+    let forward = engine.outstanding.clone().unwrap_or_default();
+    assert_eq!(forward["type"], "forward");
+    engine.resolve(false, "constraint");
+    engine.settle();
+    let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+    assert_eq!(code(&reply), Some("POLICYSQL_INTERNAL"), "{reply}");
+    assert!(reply["error"].get("detail").is_none(), "{reply}");
+}
+
+/// The owner placement's execute path has the same rule: a constraint violation of the envelope
+/// is a 409, on no other effect.
+#[test]
+fn the_owner_answers_a_constraint_violation_of_the_envelope_and_of_nothing_else() {
+    for failing in 0..11 {
+        let mut engine = owner_engine();
+        engine.feed(&atomic_input(&audit("a1"), None));
+        for _ in 0..failing {
+            if engine.resolve(true, "unknown").is_none() {
+                break;
+            }
+        }
+        let Some(effect) = engine.outstanding.clone() else {
+            continue;
+        };
+        let envelope = effect["type"] == "execute";
+        engine.resolve(false, "constraint");
+        engine.settle();
+        let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+        if envelope {
+            assert_eq!(
+                code(&reply),
+                Some("POLICYSQL_CONSTRAINT_VIOLATION"),
+                "effect {failing}: {reply}"
+            );
+        } else {
+            assert_ne!(
+                code(&reply),
+                Some("POLICYSQL_CONSTRAINT_VIOLATION"),
+                "effect {failing} ({}): {reply}",
+                effect["type"]
+            );
+        }
+        // Only a failure of the envelope itself stops short of COMMIT.
+        if envelope {
+            assert_eq!(engine.observed.commits_emitted, 0);
+        }
+    }
 }
 
 /// `TimerFired` beside the outstanding client-lane effect (the timer lane is not serialized).

@@ -20,18 +20,19 @@ use serde_json::{Value, json};
 const KEY: &str = "request-key-0001";
 const KEY_HASH: &str = "0123456789abcdef0123456789abcdef00000000000000000000000000000000";
 const FINGERPRINT: &str = "f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00d";
-const CLASSES: [&str; 6] = [
+const CLASSES: [&str; 7] = [
     "timeout",
     "unavailable",
     "rejected",
     "not_committed",
     "unknown",
     "limit",
+    "constraint",
 ];
 
 /// The codes the client takes as a definite rejection of `execute` (`REJECTIONS` in
 /// `packages/client/protocol.js`).
-const REJECTIONS: [&str; 26] = [
+const REJECTIONS: [&str; 27] = [
     "POLICYSQL_UNAUTHENTICATED",
     "POLICYSQL_AUTHENTICATION_FAILED",
     "POLICYSQL_FORBIDDEN_ACCESS",
@@ -53,6 +54,7 @@ const REJECTIONS: [&str; 26] = [
     "POLICYSQL_TRANSACTION_CONFLICT",
     "POLICYSQL_TRANSACTION_UNAVAILABLE",
     "POLICYSQL_COMMIT_CHECK_REJECTED",
+    "POLICYSQL_CONSTRAINT_VIOLATION",
     "POLICYSQL_LIMIT_EXCEEDED",
     "POLICYSQL_EXPECTATION_FAILED",
     "POLICYSQL_SCHEMA_MISMATCH",

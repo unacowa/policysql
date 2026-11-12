@@ -174,6 +174,126 @@ fn a_database_complexity_refusal_closes_the_transaction_with_the_fixed_code() {
     );
 }
 
+/// ADR 0030: a statement the database refused for a constraint (outcome class `constraint`) is a
+/// 409 `POLICYSQL_CONSTRAINT_VIOLATION` at its path with the kind as `detail` and a fixed message,
+/// the transaction closes as failed and is rolled back, and the log names only fixed fields.
+#[test]
+fn a_database_constraint_violation_closes_the_transaction_with_the_conflict_code() {
+    let mut engine = begun("write");
+    engine.feed(&command(
+        "statement",
+        &statement_text(1, "INSERT INTO projects (id) VALUES (:id)"),
+    ));
+    engine.resolve(true, "unknown");
+    let effect = engine.outstanding.take().unwrap_or(Value::Null);
+    assert_eq!(effect["type"], "execute");
+    engine.feed(&json!({
+        "type": "executeFailed", "id": effect["id"], "class": "constraint",
+        "statement": 0, "constraint": "foreign_key", "databaseCode": "SQLITE_CONSTRAINT",
+    }));
+    let log = engine
+        .transcript
+        .last()
+        .map(|line| line.output.clone())
+        .unwrap_or_default();
+    engine.settle();
+    let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+    assert_eq!(
+        code(&reply),
+        Some("POLICYSQL_CONSTRAINT_VIOLATION"),
+        "{reply}"
+    );
+    assert_eq!(
+        reply["error"]["message"],
+        "The statement violates a foreign key constraint."
+    );
+    assert_eq!(reply["error"]["path"], "/statements/0");
+    assert_eq!(
+        reply["error"]["detail"],
+        json!({"constraint": "foreign_key"})
+    );
+    assert_eq!(phase_of(engine.store.as_deref()).as_deref(), Some("failed"));
+    assert!(
+        log.contains("\"event\":\"database_constraint_violation\""),
+        "{log}"
+    );
+    assert!(log.contains("\"constraint\":\"foreign_key\""), "{log}");
+    assert!(!log.contains("database_error_unclassified"), "{log}");
+    assert!(!log.contains("INSERT"), "{log}");
+    // Later commands see an unavailable transaction, a commit included.
+    for (kind, text) in [
+        ("statement", statement_text(2, "SELECT id FROM projects")),
+        ("commit", sequence_text(2)),
+    ] {
+        let later = engine.run(&command(kind, &text));
+        assert_eq!(
+            code(&later),
+            Some("POLICYSQL_TRANSACTION_UNAVAILABLE"),
+            "{kind}: {later}"
+        );
+    }
+}
+
+/// The class `constraint` on any other effect is an adapter fault: never a 409, and a COMMIT's
+/// failure stays an unknown outcome.
+#[test]
+fn the_constraint_class_is_never_a_conflict_on_any_effect_but_a_statement() {
+    // Begin: checkBinding, open.
+    for failing in 0..2 {
+        let mut engine = Engine::new();
+        engine.feed(&begin("write"));
+        for _ in 0..failing {
+            engine.resolve(true, "unknown");
+        }
+        engine.resolve(false, "constraint");
+        engine.settle();
+        let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+        assert_ne!(
+            code(&reply),
+            Some("POLICYSQL_CONSTRAINT_VIOLATION"),
+            "{reply}"
+        );
+        assert!(reply["error"].get("detail").is_none(), "{reply}");
+    }
+    // A statement's binding check.
+    let mut engine = begun("write");
+    engine.feed(&command(
+        "statement",
+        &statement_text(1, "SELECT id FROM projects"),
+    ));
+    engine.resolve(false, "constraint");
+    engine.settle();
+    let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+    assert_ne!(
+        code(&reply),
+        Some("POLICYSQL_CONSTRAINT_VIOLATION"),
+        "{reply}"
+    );
+    // A commit: the transaction's outcome is unknown, however the database words it.
+    let mut engine = begun("write");
+    engine.feed(&command("commit", &sequence_text(1)));
+    let mut seen = false;
+    for _ in 0..8 {
+        let Some(effect) = engine.outstanding.clone() else {
+            break;
+        };
+        if effect["type"] == "commit" {
+            seen = true;
+            engine.resolve(false, "constraint");
+            break;
+        }
+        engine.resolve(true, "unknown");
+    }
+    assert!(seen, "a COMMIT was sent");
+    engine.settle();
+    let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+    assert_eq!(
+        code(&reply),
+        Some("POLICYSQL_COMMIT_OUTCOME_UNKNOWN"),
+        "{reply}"
+    );
+}
+
 /// A database code that no outcome class names is logged as `database_error_unclassified` with
 /// the code only; an unsafe code is replaced, and the failure stays the database's 503.
 #[test]

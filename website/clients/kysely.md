@@ -208,7 +208,7 @@ metadata は結果変換前の rows に対応します。列名変更や行の�
 
 ## エラーと終了処理
 
-`PolicySqlError` は `code`、`status` と検証した公開応答 `response` を保持します。サーバーの message・path・requestId を独自の固定文言に置き換えません。Transport 呼び出し後の通信断・不正応答などで実行結果を確定できない場合は `PolicySqlOutcomeUnknownError` を返し、元例外を `cause` に保持します。既知の code／status と構造を検証できた拒否は通常の公開エラーとして伝えます。未知のエラーや汎用5xxは未実行の証明にしません。
+`PolicySqlError` は `code`、`status`、`detail`（ある場合）と検証した公開応答 `response` を保持します。サーバーの message・path・requestId を独自の固定文言に置き換えません。Transport 呼び出し後の通信断・不正応答などで実行結果を確定できない場合は `PolicySqlOutcomeUnknownError` を返し、元例外を `cause` に保持します。既知の code／status と構造を検証できた拒否は通常の公開エラーとして伝えます。未知のエラーや汎用5xxは未実行の証明にしません。
 
 Transport 呼び出し前の中断では元の `AbortSignal.reason` を返します。利用者 callback／注入関数の例外にはアプリケーションの情報が含まれ得ます。ログ出力や外部への公開方針はアプリケーションが管理します。
 

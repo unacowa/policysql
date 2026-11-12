@@ -7,6 +7,7 @@ import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
 import { redirectResponses } from "./helpers/redirects.mjs";
 import { batchReply, okResults, requestSqls, runBatch } from "./helpers/hrana.mjs";
 import { DatabaseStatementError, SqlComplexityError } from "../src/database-complexity.ts";
+import { SqlConstraintError } from "../src/database-constraint.ts";
 
 // The read cap core passes with each execute (ADR 0027); these tests choose their own.
 const READ_CAP = 2_097_152;
@@ -511,8 +512,13 @@ test("C1-C3: the first error of a batch is classified by its own step", async ()
   assert.ok(middle instanceof SqlComplexityError && middle.statement === 1 && middle.complexityCause === "columns");
   const first = await run([COMPLEXITY, null, null]);
   assert.ok(first instanceof SqlComplexityError && first.statement === 0);
+  // A constraint violation of a reply that kept its baton: the transaction is open and nothing after it ran (ADR 0030).
   const constraint = await run([null, CONSTRAINT, null]);
-  assert.ok(constraint instanceof DatabaseStatementError && constraint.databaseCode === "SQLITE_CONSTRAINT");
+  assert.ok(constraint instanceof SqlConstraintError && constraint.statement === 1 && constraint.constraint === "unique");
+  assert.equal(constraint.databaseCode, "SQLITE_CONSTRAINT");
+  assert.equal(constraint instanceof DatabaseStatementError, false);
+  assert.equal(JSON.stringify(constraint).includes("projects"), false);
+  assert.equal(constraint.message.includes("projects") || constraint.message.includes("UNIQUE"), false);
   const odd = await run([null, { code: "sqlite_x", message: "x" }, null]);
   assert.ok(odd instanceof DatabaseStatementError && odd.databaseCode === "UNKNOWN");
 });

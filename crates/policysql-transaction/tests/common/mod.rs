@@ -755,10 +755,13 @@ impl Engine {
                     .any(|row| row[0] == text("key_hash"))
                 {
                     // `key_hash` is the table's PRIMARY KEY (examples/database-routing/
-                    // idempotency.sql): a second row fails, which the adapter reports as
-                    // `unavailable`.
+                    // idempotency.sql): a second row fails with a constraint violation, which
+                    // the adapter reports as the class `constraint` (ADR 0030). Core answers
+                    // `POLICYSQL_INTERNAL` for it on this row: the keyed request's outcome is
+                    // unknown (it was `unavailable`, a 503, before #145).
                     self.observed.duplicate_inserts += 1;
-                    json!({"type": "executeFailed", "id": id, "class": "unavailable"})
+                    json!({"type": "executeFailed", "id": id, "class": "constraint",
+                        "statement": 0, "constraint": "unique", "databaseCode": "SQLITE_CONSTRAINT"})
                 } else {
                     self.pending_rows.push([
                         text("key_hash"),

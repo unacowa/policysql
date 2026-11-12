@@ -1,5 +1,5 @@
 import { Kysely, CamelCasePlugin, type InsertResult, type UpdateResult, type DeleteResult } from 'kysely'
-import { PolicySqlClient, createHttpTransport, type PolicySqlTransport, type HttpTransportOptions, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
+import { PolicySqlClient, createHttpTransport, type PolicySqlTransport, type HttpTransportOptions, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlConstraintKind, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
 import { PolicySqlDialect, policyOptions } from '@unacowa/policysql/kysely'
 
 const minimal: PolicySqlClientOptions = { transport: createHttpTransport({ endpoint: 'https://gateway.test' }) }
@@ -57,6 +57,11 @@ async function queries() {
 void queries
 
 new PolicySqlError('Failed', 'POLICYSQL_REQUEST_FAILED', 409)
+const failed = new PolicySqlError('Failed', 'POLICYSQL_CONSTRAINT_VIOLATION', 409, { detail: { constraint: 'unique' } })
+const constraint: PolicySqlConstraintKind | undefined = failed.detail?.constraint
+void constraint
+// @ts-expect-error a constraint kind is one of the fixed values
+new PolicySqlError('Failed', 'POLICYSQL_CONSTRAINT_VIOLATION', 409, { detail: { constraint: 'primary_key' } })
 new PolicySqlOutcomeUnknownError({ phase: 'commit', transactionId: 'tx_123', sequence: 1 })
 // @ts-expect-error error codes are required strings
 new PolicySqlError('Failed', { cause: new Error() })

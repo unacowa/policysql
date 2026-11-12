@@ -358,6 +358,49 @@ test("rejection pairs follow the public status table: 403 PRESET_COLUMN is defin
   }
 });
 
+test("CONSTRAINT_VIOLATION is a definite 409 rejection of a statement, with its detail; elsewhere it is unknown (#145)", async () => {
+  const violation = (detail) => ({ error: { code: "POLICYSQL_CONSTRAINT_VIOLATION", message: "The statement violates a unique constraint.", path: "/statements/0", requestId: "req_test", ...(detail === undefined ? {} : { detail }) } });
+  const detail = { constraint: "unique" };
+  const h = setup({}, () => async () => ({ status: 409, body: violation(detail) }));
+  await assert.rejects(h.client.execute(select), error => {
+    assert.ok(error instanceof PolicySqlError);
+    assert.equal(error instanceof PolicySqlOutcomeUnknownError, false);
+    assert.equal(error.code, "POLICYSQL_CONSTRAINT_VIOLATION");
+    assert.equal(error.status, 409);
+    assert.deepEqual(error.detail, detail);
+    assert.equal(Object.isFrozen(error.detail), true);
+    assert.deepEqual(error.response.body.error.detail, detail);
+    return true;
+  });
+  // A code without a detail has none on the error.
+  const plain = setup({}, () => async () => ({ status: 403, body: errorBody("POLICYSQL_PRESET_COLUMN") }));
+  await assert.rejects(plain.client.execute(select), error => error.detail === undefined && !Object.hasOwn(error, "detail"));
+  // The client does not read the detail's content: a later server may add fields, and the branch is the code and the status.
+  const wider = setup({}, () => async () => ({ status: 409, body: violation({ constraint: "unique", column: "x", count: 2 }) }));
+  await assert.rejects(wider.client.execute(select), error => !(error instanceof PolicySqlOutcomeUnknownError) && error.detail.column === "x");
+  // A detail that is not a plain object is a protocol error: the outcome is unknown.
+  for (const bad of ["unique", ["unique"], null, 1, true]) {
+    const forged = setup({}, () => async () => ({ status: 409, body: violation(bad) }));
+    await assert.rejects(forged.client.execute(select), error => error instanceof PolicySqlOutcomeUnknownError && error.cause !== undefined, JSON.stringify(bad));
+  }
+  // The code is a rejection of a statement only: as the answer to begin, commit, or rollback it cannot establish an outcome.
+  const started = setup({}, () => async () => ({ status: 409, body: violation(detail) }));
+  await assert.rejects(started.client.beginTransaction(), error => error instanceof PolicySqlOutcomeUnknownError);
+  const gateway = mockGateway();
+  const wrap = (kind) => async (url, init) => (new URL(url).pathname.endsWith(`/${kind}`)
+    ? Response.json(violation(detail), { status: 409 })
+    : gateway.fetchImpl(url, init));
+  for (const kind of ["commit", "rollback"]) {
+    const client = new PolicySqlClient({ transport: createHttpTransport({ endpoint: "https://gateway.test", fetchImpl: wrap(kind) }) });
+    const tx = await client.beginTransaction();
+    await assert.rejects(tx[kind](), error => error instanceof PolicySqlOutcomeUnknownError, kind);
+    await tx.dispose();
+  }
+  // Another status for the same code is not a rejection.
+  const other = setup({}, () => async () => ({ status: 422, body: violation(detail) }));
+  await assert.rejects(other.client.execute(select), error => error instanceof PolicySqlOutcomeUnknownError);
+});
+
 test("a key the server rejects as malformed (400 IDEMPOTENCY_KEY_INVALID) is a definite rejection, not an unknown outcome", async () => {
   const body = errorBody("POLICYSQL_IDEMPOTENCY_KEY_INVALID");
   const h = setup({}, () => async () => ({ status: 400, body }));

@@ -24,18 +24,22 @@ export const STATEMENT_BATCH_TABLES = Object.freeze([
 
 // The three ways a statement fails inside a write transaction. `seeded`: a row committed first
 // that the second statement then duplicates; otherwise the second statement trips the trigger.
+// `constraint`: the kind the transport classifies (ADR 0030), which it does only for a reply that
+// kept its baton, so the transaction was still open: the default ABORT is a `unique` violation,
+// and where SQLite closed the transaction itself Turso ended the stream and nothing is classified.
 const FAILURES = Object.freeze([
-  { table: "smoke_conflict_rollback", seeded: true },
-  { table: "smoke_conflict_abort", seeded: true },
-  { table: "smoke_raise_rollback", seeded: false },
+  { table: "smoke_conflict_rollback", seeded: true, constraint: null },
+  { table: "smoke_conflict_abort", seeded: true, constraint: "unique" },
+  { table: "smoke_raise_rollback", seeded: false, constraint: null },
 ]);
 
 /**
- * `transport` is a `TursoHttpTransport` to the real database. `databaseCode` and `complexityCause`
- * read the library's `DatabaseStatementError.databaseCode` and `SqlComplexityError.complexityCause`
- * from a failure (null when it is neither), so the smoke imports nothing from `src/`.
+ * `transport` is a `TursoHttpTransport` to the real database. `databaseCode`, `complexityCause`, and
+ * `constraint` read the library's `databaseCode` (of a `DatabaseStatementError` or a
+ * `SqlConstraintError`), `SqlComplexityError.complexityCause`, and `SqlConstraintError.constraint`
+ * from a failure (null when it is none of them), so the smoke imports nothing from `src/`.
  */
-export const statementBatchSmoke = async ({ transport, databaseCode, complexityCause }) => {
+export const statementBatchSmoke = async ({ transport, databaseCode, complexityCause, constraint }) => {
   const failures = [];
   const expect = (condition, name) => { if (!condition) failures.push(name); };
   const report = { tables: {}, complexity: null, success: null };
@@ -76,10 +80,10 @@ export const statementBatchSmoke = async ({ transport, databaseCode, complexityC
     return read.error ? null : read.value;
   };
 
-  for (const { table, seeded } of FAILURES) {
+  for (const { table, seeded, constraint: expected } of FAILURES) {
     const base = unique(table);
     const [first, second, third] = [`${base}_a`, `${base}_dup`, `${base}_b`];
-    const entry = { code: null, rowsAfter: null, rollback: null };
+    const entry = { code: null, constraint: null, rowsAfter: null, rollback: null };
     report.tables[table] = entry;
     if (seeded) expect(await commit(table, second), `${table}: the row to duplicate was committed`);
     const run = await attempt("write", (connection) => connection.execute([
@@ -90,6 +94,8 @@ export const statementBatchSmoke = async ({ transport, databaseCode, complexityC
     entry.rollback = run.rollback ?? null;
     entry.code = run.error ? databaseCode(run.error) : null;
     expect(run.error !== undefined && entry.code === "SQLITE_CONSTRAINT", `${table}: the envelope is refused as a constraint failure`);
+    entry.constraint = run.error ? constraint(run.error) : null;
+    expect(entry.constraint === expected, `${table}: the constraint failure is classified only where the transaction stayed open`);
     // Where SQLite closed the transaction itself, Turso ended the stream and the library sends no
     // rollback for it; everywhere the rollback must still resolve.
     expect(entry.rollback === "ok", `${table}: the rollback resolved`);
