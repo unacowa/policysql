@@ -717,6 +717,10 @@ today.
   `POLICYSQL_COMMIT_CHECK_REJECTED` carries `detail.reason`; `Task::Verdict` carries the verdict with
   its reason instead of a boolean. `step_json` returns different replies for existing inputs, so
   `ABI_VERSION` is 23 and the owner wire version is `"5"`.
+- **Limit names (#145 pull request F, ABI 24).** No state or event changes; `Code::LimitExceeded`
+  and `Code::TransactionLimit` carry the Capabilities key of the limit the machine checked, and
+  `step_json` returns replies with `detail.limit` for existing inputs, so `ABI_VERSION` is 24 and
+  the owner wire version is `"6"`.
 
 
 ## Migration

@@ -64,7 +64,7 @@ compile happened (the Worker, the Durable Object that owns a transaction, and Ex
 `requestId` as the `request_rejected` of the same request:
 
 ```json
-{"event":"rejection_reason","requestId":"req_…","statementIndex":0,"code":"POLICYSQL_FORBIDDEN_COLUMN","reason":"bind.UnknownColumn","shape":null,"schemaVersion":"…","policyVersion":"…","abiVersion":23}
+{"event":"rejection_reason","requestId":"req_…","statementIndex":0,"code":"POLICYSQL_FORBIDDEN_COLUMN","reason":"bind.UnknownColumn","shape":null,"schemaVersion":"…","policyVersion":"…","abiVersion":24}
 ```
 
 `reason` is `<stage>.<variant>`. The stages tell where the statement stopped: `bind` (the client's
@@ -93,6 +93,10 @@ while the deadline timer firing first makes the reason `unavailable`). A 500
 `POLICYSQL_DATABASE_ERROR` whose failure event carries no database code (a custom transport that
 throws the engine's `POLICYSQL_DATABASE_ERROR` without one) has no `database_error_unclassified`
 record; the shipped transport always sends the code.
+
+A 413 names its limit in `detail.limit` (the Capabilities key, #145 pull request F); one without it
+is a derived bound (the raw result bound, an adapter's read cap) or a fixed one. Compare
+`maxResultBytes`, `maxJsonValues`, and `maxBytesPerValue` with the result to find which.
 
 ## Monitoring and alerts
 

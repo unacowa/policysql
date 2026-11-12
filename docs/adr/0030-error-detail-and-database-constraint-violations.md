@@ -416,8 +416,9 @@ those of section Consequences: an active interactive transaction is closed with 
 
 ### Left to later pull requests
 
-Pull request E is closed (the amendment below). Pull request F: `limit` and the `path` of
-`INVALID_REQUEST`; and the candidates listed under "Left out" of the amendment below.
+Pull requests E and F are closed (the amendments below), and with them proposal 5 of #145 (`limit`;
+the `path` of `INVALID_REQUEST` was considered and left as it is). What remains is the candidates
+listed under "Left out" of the last amendment.
 
 ## Amendment (#145 pull request E)
 
@@ -560,5 +561,101 @@ existing rule). The consequences are those of section Consequences.
 
 The difference between the callback count limit and the documented validator code (#158). A `path` of
 `DATABASE_ERROR`. A statement number or the response's code in `database_error_unclassified`. A
-`Busy` message equal to its code's text. Pull request F: `limit` and the `path` of
-`INVALID_REQUEST`.
+`Busy` message equal to its code's text. Pull request F (`limit`, and the `path` of
+`INVALID_REQUEST`, which it left out): see the amendment below.
+
+## Amendment (#145 pull request F)
+
+Proposal 5 of #145: the limit codes name the limit. This closes proposal 5; no part of #145 is left
+to a later pull request except the candidates under "Left out".
+
+### Table rows
+
+| Code | `detail` |
+| --- | --- |
+| `POLICYSQL_LIMIT_EXCEEDED` | optional `{ "limit": <one of ten> }`: `maxRows`, `maxResultBytes`, `maxResponseBytes`, `maxStatements`, `maxJsonValues`, `maxBytesPerValue`, `maxParameters`, `maxExpressionDepth`, `maxProjections`, `maxJoins` |
+| `POLICYSQL_REQUEST_TOO_LARGE` | optional `{ "limit": <one of three> }`: `maxRequestBytes`, `maxJsonValues`, `maxSqlBytes` |
+| `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` | optional `{ "limit": <one of four> }`: `maxStatements`, `maxResultBytes`, `maxCallbackRowsPerCheck`, `maxCallbackBytesPerCheck` |
+
+The rule is one: **the place that checked a limit names it, by its Capabilities key, and only that
+place.** A place that checks a bound without a Capabilities key sends no `detail`, so the three rows
+are optional, like `INVALID_SQL`'s `span`. A forged owner reply that drops the `detail` loses
+information and nothing else. The places without a name:
+
+| Place | Why it has none |
+| --- | --- |
+| The compile input bound (`REQUEST_TOO_LARGE`) | derived from `maxRequestBytes`, which the engine checked first; naming it would point a client at a limit it did not cross |
+| The raw result bound (`LIMIT_EXCEEDED`) | a sum of several limits (`2 x maxResultBytes + 64 x cells + 512 x statements + metadata + 1,024`); naming one is a guess |
+| The adapter class `limit` | a BLOB over `maxBytesPerValue` and the transport's derived read cap arrive as the same class; telling them apart needs a field on `executeFailed` and on the TypeScript transport, the core event and its check |
+| The durable record bound (`TRANSACTION_LIMIT_EXCEEDED`) | a fixed constant, not in Capabilities |
+| An invalid `LIMIT` clause (`LIMIT -1`) | not a limit; filed as a classification question |
+| `TooManyPolicies` | activation only; it never reaches a client |
+
+So the same BLOB limit is `maxBytesPerValue` where a value was counted in a reply (the driver
+transport's marker, a parameter, a result cell the runtime validates) and has no name where the
+HTTP transport met it while reading. Both are 413 and a client treats them alike.
+
+### What a value is
+
+The leaf of a Capabilities key: `limits.<name>` for `LIMIT_EXCEEDED` and `REQUEST_TOO_LARGE`,
+`transactions.<name>` for `TRANSACTION_LIMIT_EXCEEDED`. `maxStatements` and `maxResultBytes` exist in
+both groups; the code says which. The number is not returned: the place often holds a remainder, not
+the configured value (an atomic envelope's later statement has what the earlier ones left); during a
+deploy the Capabilities a client read and the deployment that answered can differ, while a name is
+stable; and the table stays an enumeration. A client reads the number from Capabilities. When several
+limits are crossed at once the first in the fixed order of checks wins (an atomic envelope's rows,
+then its bytes), which is the order the former combined condition had.
+
+### What it lets a client infer
+
+`detail.limit` is a function of the client's request, the deployment's configuration (public in
+Capabilities), and the policy-protected result, never of rows the role cannot see.
+
+- Request side (body, SQL, parameters, statement count, binder limits): decided from the client's
+  own bytes before the database is read. A binder limit and a column that does not resolve: the
+  binder stops at its first failure, so where both answers have the same code they are the same
+  answer. Where the codes differ (a hidden column is reached and the walk goes on to the third
+  parameter; a missing column stops the walk first) the code already told them apart (#154), and
+  the limit adds nothing (`a_limit_is_the_same_answer_for_a_hidden_column_and_a_missing_one`).
+- Result side: the rows, bytes, values and cells counted are those of the statement the policy
+  protected (the policy's filter is in the SQL; a hidden conditional cell must be NULL, so its size
+  is not counted), so the name is a function of the visible result. A test runs two databases that
+  differ only in rows of another tenant and reads the same name. A client could already learn the
+  same from queries that stay inside the limits (`LIMIT`/`OFFSET`, fewer columns).
+- A commit check's callback limits go to the validator, a trusted component that already received
+  the rows; the client gets the check's `limit` reason as before (and the rows-or-bytes split is not
+  shown to it).
+
+### `INVALID_REQUEST` path
+
+Left as it is. A serde error has no position, and getting one takes a dependency or a walk of the
+JSON. Where a field is known, its pointer is not in the fixed forms (`/statements/<n>`,
+`/statements/<n>/sql`) that the boundary tables allow for `cause.path`. `RuntimeError::EnvelopeAt`
+(an empty SQL) cannot be reached from a client: the binder refuses a blank statement first, as
+`INVALID_SQL`.
+
+### Rejected alternatives
+
+- Naming the limit a derived bound comes from (the compile input as `maxRequestBytes`; the raw bound
+  as `maxResultBytes`): it points at a limit that was not crossed.
+- A field on the adapter's `limit` class to tell the BLOB limit from the read cap: it widens the
+  TypeScript transport, the core event and its check for a value the client can derive.
+- The configured number next to the name (see What a value is).
+- The qualified name (`limits.maxRows`): the code decides the group, and a client would have to
+  strip the prefix.
+- One list for all three codes: it would accept a forged `{ "code": "TRANSACTION_LIMIT_EXCEEDED",
+  "detail": { "limit": "maxRows" } }`.
+
+### Versions
+
+ABI 24 (the snapshot is `...:abi-24`) and owner wire `"6"`: the owner reply gains a `detail` on three
+codes, and an older Worker reads it as `owner_reply_rejected`; a reply of another version is not
+read. Consequences are those of section Consequences (an interactive transaction answers 409
+`TRANSACTION_UNAVAILABLE` to its next command; a keyed atomic retry replays).
+
+### Left out
+
+Naming the unnamed bounds. The `path` of `INVALID_REQUEST` and `/statements/<i>/expect/affectedRows`
+for a `SELECT` with an `expect` (it needs a wider `cause.path` form). Moving `LIMIT -1` to another
+code. `maxCallbackQueriesPerCheck` as a `TRANSACTION_LIMITS` value once the validator-facing code
+for it is made the same (#158).

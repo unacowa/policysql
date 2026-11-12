@@ -86,6 +86,13 @@ limits").
 | `maxProjections` | `max_projections` | 128 | 1 to 2,000 | binder: result columns of one `SELECT` or `RETURNING` in the client's SQL; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
 | `maxJoins` | `max_joins` | 8 | 1 to 63 | binder: joins in one `FROM` of the client's SQL; over it is 413 `POLICYSQL_LIMIT_EXCEEDED` |
 
+A 413 carries `detail.limit`, the Capabilities key of the limit (#145 pull request F). It is the
+Capabilities name, not the `RuntimeLimits` key: `maxTransactionStatements` is
+`transactions.maxStatements`, `maxTransactionResultBytes` is `transactions.maxResultBytes` (and
+`transactions.maxCallbackBytesPerCheck` for callbacks), `maxCallbackRows` is
+`transactions.maxCallbackRowsPerCheck`. A derived bound (the raw result bound, the compile input),
+the durable-record bound, and a limit the database adapter reports as the class `limit` carry none.
+
 The limits checked by the compile (`maxSqlBytes`, `maxParameters`, `maxExpressionDepth`,
 `maxProjections`, `maxJoins`) answer a keyed atomic execute with 500 `POLICYSQL_OUTCOME_UNKNOWN`
 (the unknown outcome, the limit's code and path in `detail.cause`) when they fail, because the compile runs before the idempotency lookup and the
