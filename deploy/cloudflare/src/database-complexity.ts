@@ -99,10 +99,18 @@ export const complexityCause = (error: unknown): string | null => {
   return COMPLEXITY_ALLOWLIST.find((entry) => text.startsWith(entry.prefix))?.cause ?? null;
 };
 
-/** The failure of statement `index` of a pipeline, from its Hrana error object. */
+/**
+ * A database failure that is never a complexity refusal: only the Hrana error object's `code` is
+ * read, and only when it has the safe shape; its message is never read.
+ */
+export const unclassifiedFailure = (error: unknown): DatabaseStatementError => {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return new DatabaseStatementError(typeof code === "string" && SAFE_CODE.test(code) ? code : "UNKNOWN");
+};
+
+/** The failure of step `index` of a statement batch, from its Hrana error object. */
 export const statementFailure = (error: unknown, index: number): Error => {
   const cause = complexityCause(error);
   if (cause !== null) return new SqlComplexityError(index, cause);
-  const code = (error as { code?: unknown } | null | undefined)?.code;
-  return new DatabaseStatementError(typeof code === "string" && SAFE_CODE.test(code) ? code : "UNKNOWN");
+  return unclassifiedFailure(error);
 };

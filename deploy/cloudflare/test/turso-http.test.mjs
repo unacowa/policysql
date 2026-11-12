@@ -520,7 +520,7 @@ test("C1-C3: the first error of a batch is classified by its own step", async ()
 // Every shape below is something a conforming server never sends. The transport trusts none of
 // them: each is a plain 503, never a classified refusal, and a write may have run after the refusal.
 const protocolViolations = {
-  "a top-level error carrying a complexity message": () => ({ type: "error", error: COMPLEXITY }),
+  "a top-level error that is not an object": () => ({ type: "error", error: "too many columns in result set" }),
   "an execute reply to a batch request": () => ({ type: "ok", response: { type: "execute", result: okStep() } }),
   "no response object": () => ({ type: "ok" }),
   "no step_results": () => ({ type: "ok", response: { type: "batch", result: { step_errors: [null, null, null] } } }),
@@ -545,9 +545,22 @@ const protocolViolations = {
 };
 // The shapes where a statement after the refusal ran or errored: a write may have committed.
 const ranAfterRefusal = ["a step that ran after the error", "a second error after the first"];
+// The reply shapes that break the conditional-batch contract once the first error is known: each is
+// logged once with its fixed reason (#144).
+const loggedViolations = {
+  "a step before the error that did not run": "step_before_error_not_run",
+  "a result on the step that errored": "error_step_has_result",
+  "a step that ran after the error": "step_after_error_ran",
+  "a second error after the first": "step_after_error_ran",
+  "an error that is a string": "error_not_object",
+  "an error that is a number": "error_not_object",
+  "an error that is an array": "error_not_object",
+};
 
 for (const [name, reply] of Object.entries(protocolViolations)) {
-  test(`N1: ${name} is an unclassified 503 and the rollback continues from the reply's baton`, async () => {
+  test(`N1: ${name} is an unclassified 503 and the rollback continues from the reply's baton`, async (t) => {
+    const lines = [];
+    t.mock.method(console, "log", (...args) => lines.push(args.map(String).join(" ")));
     const batons = [];
     let serial = 0;
     const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "violation", async (_url, init) => {
@@ -568,6 +581,15 @@ for (const [name, reply] of Object.entries(protocolViolations)) {
     // R1: the stream continues with the baton of the reply that was a violation (#97).
     await transaction.rollback();
     assert.deepEqual(batons, [null, "b0", "next-1"]);
+    // S3: a broken contract is logged with a fixed reason and nothing of the reply.
+    const violations = lines.flatMap((line) => { try { const record = JSON.parse(line); return record.event === "database_protocol_violation" ? [record] : []; } catch { return []; } });
+    if (Object.hasOwn(loggedViolations, name)) {
+      assert.deepEqual(violations, [{ event: "database_protocol_violation", requestId: "violation", reason: loggedViolations[name] }]);
+    } else {
+      assert.deepEqual(violations, [], "no violation event for a shape that is not a broken contract after an error");
+    }
+    const everything = lines.join("\n");
+    for (const text of ["b0", "next-1", "too many columns", "SQLite", "INSERT", "UNIQUE"]) assert.equal(everything.includes(text), false, text);
   });
 }
 
@@ -581,4 +603,23 @@ test("B1: a refusal followed by a step that ran is never a definite rejection", 
       name,
     );
   }
+});
+
+test("S2: a batch that fails as a whole keeps its code, is never a complexity refusal, and its message is not read", async () => {
+  const run = async (error) => {
+    const transport = batchTransport(() => ({ type: "error", error }));
+    const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
+    return transaction.execute(threeStatements, { maxResponseBytes: READ_CAP }).then(() => null, (failure) => failure);
+  };
+  const complexity = await run(COMPLEXITY);
+  assert.ok(complexity instanceof DatabaseStatementError && !(complexity instanceof SqlComplexityError));
+  assert.equal(complexity.databaseCode, "SQLITE_UNKNOWN");
+  assert.equal(complexity.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+  const busy = await run({ code: "SQLITE_BUSY", message: "database is locked" });
+  assert.equal(busy.databaseCode, "SQLITE_BUSY");
+  const unsafe = await run({ code: "sqlite busy: secret", message: "x" });
+  assert.ok(unsafe instanceof DatabaseStatementError);
+  assert.equal(unsafe.databaseCode, "UNKNOWN");
+  const none = await run({ message: "no code" });
+  assert.equal(none.databaseCode, "UNKNOWN");
 });

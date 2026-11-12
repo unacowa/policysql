@@ -50,6 +50,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         assert.equal(response.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
         await h.flush();
         assert.deepEqual(databaseIds(h), ["seed"], "neither the statement before nor the one after the error is kept");
+        assert.equal(ran(h, "first"), true, "the statement before the error did reach the database (so `ran` can see arguments)");
         assert.equal(ran(h, "third"), false, "the statement after the error never reached the database");
         assert.deepEqual(events(h.lines, "database_error_unclassified").map((record) => record.code), ["SQLITE_CONSTRAINT"]);
       });
@@ -85,7 +86,9 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     });
   }
 
-  // D1: the two placements answer and end the same.
+  // D1: the two placements answer and end the same. A differential test only: it does not catch the
+  // regression by itself (without the condition both placements break in the same way); the
+  // scenario tests above do.
   test(`${ownerAdapter}: both placements answer alike and leave the same rows for every scenario`, async (t) => {
     const seen = new Map();
     for (const [placement, hooks] of PLACEMENTS) {

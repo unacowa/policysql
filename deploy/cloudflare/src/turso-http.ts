@@ -5,7 +5,7 @@ import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.t
 import { discardBody, fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { BodyTooLargeError, readBoundedText } from "./bounded-body.ts";
-import { statementFailure } from "./database-complexity.ts";
+import { statementFailure, unclassifiedFailure } from "./database-complexity.ts";
 
 // The statement batch reply carries result rows: its read cap comes with each call (core's compiled
 // raw result bound, ADR 0027). Control replies (BEGIN, COMMIT, ROLLBACK, close) carry no result data,
@@ -39,6 +39,13 @@ const withReplyBaton = <T extends Error>(error: T, body: unknown): T => {
 // lock, may remain until the server expires the stream (ADR 0027, "Baton recovery").
 const logStreamRecovery = (requestId: string, outcome: string) => {
   console.log(JSON.stringify({ event: "database_stream_recovery", requestId, outcome }));
+};
+// A batch reply that breaks the conditional-batch contract (a step after the first error ran or
+// errored, a step before it did not run, a malformed error) is logged once with a fixed reason: a
+// write may have committed after the refusal, and this is the only signal of it. Never the baton,
+// a message, or SQL.
+const logProtocolViolation = (requestId: string, reason: string) => {
+  console.log(JSON.stringify({ event: "database_protocol_violation", requestId, reason }));
 };
 const databaseFailure = () =>
   new EngineError("POLICYSQL_DATABASE_UNAVAILABLE", "The database is temporarily unavailable.");
@@ -200,7 +207,10 @@ type BatchOutcome =
 // is not exactly "steps before the first error ran, the error step errored, nothing after it ran"
 // is a protocol violation, a plain 503 (never a classified refusal). A later step that ran, or a
 // second error, means a write may have committed after the refusal (#144).
-const readBatch = (entry: unknown, count: number): BatchOutcome => {
+const readBatch = (entry: unknown, count: number, requestId: string): BatchOutcome => {
+  // A top-level error is the whole batch failing (not a statement's step error): its code is kept
+  // for the log, its message is never read, so it cannot classify as a complexity refusal.
+  if (isRecord(entry) && entry.type === "error" && isRecord(entry.error)) throw unclassifiedFailure(entry.error);
   const response = isRecord(entry) && entry.type === "ok" && isRecord(entry.response) ? entry.response : undefined;
   if (response?.type !== "batch" || !isRecord(response.result)) throw databaseFailure();
   const { step_results: stepResults, step_errors: stepErrors } = response.result;
@@ -208,10 +218,15 @@ const readBatch = (entry: unknown, count: number): BatchOutcome => {
   if (stepResults.length !== count || stepErrors.length !== count) throw databaseFailure();
   const refused = stepErrors.findIndex((error) => error !== null);
   if (refused === -1) return { refused: null, results: stepResults };
+  const violation = (reason: string): never => {
+    logProtocolViolation(requestId, reason);
+    throw databaseFailure();
+  };
   for (let index = 0; index < count; index += 1) {
-    if (index < refused && !isRecord(stepResults[index])) throw databaseFailure();
-    if (index === refused && (stepResults[index] !== null || !isRecord(stepErrors[index]))) throw databaseFailure();
-    if (index > refused && (stepResults[index] !== null || stepErrors[index] !== null)) throw databaseFailure();
+    if (index < refused && !isRecord(stepResults[index])) violation("step_before_error_not_run");
+    if (index === refused && stepResults[index] !== null) violation("error_step_has_result");
+    if (index === refused && !isRecord(stepErrors[index])) violation("error_not_object");
+    if (index > refused && (stepResults[index] !== null || stepErrors[index] !== null)) violation("step_after_error_ran");
   }
   return { refused, error: stepErrors[refused] as Record<string, unknown> };
 };
@@ -430,7 +445,7 @@ class TursoHttpTransaction {
     // The first error decides, and its message is read only to classify it
     // (src/database-complexity.ts). readBatch has checked that nothing ran after it; a reply that
     // does not show that is a protocol violation and a plain 503.
-    const outcome = readBatch(body.results[0], statements.length);
+    const outcome = readBatch(body.results[0], statements.length, this.transport.requestId);
     if (outcome.refused !== null) throw statementFailure(outcome.error, outcome.refused);
     const results = outcome.results.map((result) => decodeStmtResult(result, this.maxBytes));
     this.usage.push(...results.map((result) => result.usage));
