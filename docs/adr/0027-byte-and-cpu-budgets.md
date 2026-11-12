@@ -561,7 +561,10 @@ causes added to the fixed cause names are `function_arguments`, `compound_terms`
 conditional Hrana batch: each step runs only when the step before it succeeded. A reply that does
 not show that nothing ran after the first error is a protocol violation and 503. The first
 refusal is therefore classified (the earlier rule, "the one error of its reply and its statement
-the last", is removed). The reason: when SQLite closes the transaction on an error (`ON CONFLICT
+the last", is removed). Real Turso ends the stream (`baton: null`) when SQLite closed the
+transaction itself; the batch reply is read all the same, so that refusal keeps its code. A reply
+that breaks the contract is logged once as `database_protocol_violation` with a fixed reason
+(never the baton, a message, or SQL), and a batch that fails as a whole keeps only its code. The reason: when SQLite closes the transaction on an error (`ON CONFLICT
 ROLLBACK`, `RAISE(ROLLBACK)`), a later write committed in autocommit (reproduced on real Turso).
 Core keeps the rule for an **unreadable reply** (#97) because it does not know whether a custom
 transport stops at the first error: an atomic
