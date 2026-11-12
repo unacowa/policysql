@@ -64,13 +64,15 @@ compile happened (the Worker, the Durable Object that owns a transaction, and Ex
 `requestId` as the `request_rejected` of the same request:
 
 ```json
-{"event":"rejection_reason","requestId":"req_…","statementIndex":0,"code":"POLICYSQL_FORBIDDEN_COLUMN","reason":"bind.UnknownColumn","shape":null,"schemaVersion":"…","policyVersion":"…","abiVersion":21}
+{"event":"rejection_reason","requestId":"req_…","statementIndex":0,"code":"POLICYSQL_FORBIDDEN_COLUMN","reason":"bind.UnknownColumn","shape":null,"schemaVersion":"…","policyVersion":"…","abiVersion":22}
 ```
 
 `reason` is `<stage>.<variant>`. The stages tell where the statement stopped: `bind` (the client's
-SQL: `bind.UnknownColumn` does not exist, `bind.Unsupported` with `shape` the construct), `policy`
-(the policy: `policy.ForbiddenColumn` is a column the role cannot read, `policy.MissingPolicy` and
-`policy.InvalidPredicate` are a policy that is missing or broken, `policy.MissingSessionValue` is a
+SQL: `bind.UnknownColumn` does not exist, `bind.UnknownResource` is a name that does not exist or a
+resource the role has no policy on (the two are not told apart; to tell them, read the role's policy
+with Explain and the Catalog endpoint), `bind.Unsupported` with `shape` the construct), `policy`
+(the policy: `policy.ForbiddenColumn` is a column the role cannot read, `policy.MissingPolicy` is a resource the role has a policy on, but not for this operation, and
+`policy.InvalidPredicate` is a policy that is broken, `policy.MissingSessionValue` is a
 session without a value the policy needs), `compile` (the parameters against the policy's statement),
 `emit` and `verify` (the policy's statement was refused: a bug or an unsupported combination),
 `gateway`, `request` (limits and shape), `parameter` (a value that does not fit), `result` (the

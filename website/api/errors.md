@@ -64,8 +64,8 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_RESERVED_PARAMETER` | 400 | server用のparameter名を使用した |
 | `POLICYSQL_IDEMPOTENCY_KEY_INVALID` | 400 | `Idempotency-Key`が空または書式不正（16〜128文字のASCII英数字と`. _ : - + / =`以外を含む、長さが範囲外、header重複によるカンマ結合）。keyの省略では発生しない。DB処理の前に拒否するため、再送しても成功しない |
 | `POLICYSQL_FORBIDDEN_ACCESS` | 403 | `PolicySQL-Role`がtrusted sessionの`roles`にない、またはendpointに必要なaccessがない。`Idempotency-Key`付きのAtomic Executeでは500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる（deployでaccessまたはroleを失った主体による、commit済みwriteの再送かもしれないため。bodyは読まず、DB処理も行わない）。対話型transactionのcommitでは403のまま返り、これはADR 0007 #104の意図的な例外（session gateはownerより前に実行され、拒否されたsessionでownerのcommit記録を照会するとtransactionの存在やCOMMITの有無が漏れるため）。以前に送ったCOMMITが適用されなかったことを意味しない |
-| `POLICYSQL_MISSING_POLICY` | 403 | 適用可能なpolicyがない。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
-| `POLICYSQL_FORBIDDEN_OPERATION` | 403 | operationが許可されていない。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
+| `POLICYSQL_MISSING_POLICY` | 403 | このoperationを許すpolicyがない、またはその名前のresourceがない。2つは区別しない（そのroleがpolicyを持たないresourceは、存在しない名前と同じ応答）。`x.col`の`x`が文のどのtableでもない場合もこのcode。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
+| `POLICYSQL_FORBIDDEN_OPERATION` | 403 | policyが文の形を拒否した（集計・窓が許可されていない、sessionにpolicyが必要とする値がない など）。存在しないresourceはこのcodeではない。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
 | `POLICYSQL_FORBIDDEN_COLUMN` | 403 | 利用できないcolumnを参照した。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
 | `POLICYSQL_FORBIDDEN_COLUMN_CONTEXT` | 403 | 条件付き出力列をprojection以外で参照した。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
 | `POLICYSQL_PRESET_COLUMN` | 403 | clientがserver-owned columnを指定した。`Idempotency-Key`付きのAtomic Executeではcompile時に500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる。unkeyedのAtomic ExecuteとExplainではこのcode |
@@ -230,6 +230,7 @@ const text = new TextDecoder().decode(bytes.subarray(span.start, span.end));
 次の情報はclient responseへ含めません。
 
 - 非公開resourceやcolumnの一覧
+- roleがpolicyを持たないresourceの存在（名前・column・型を含め、存在しないresourceと区別できない応答にする。roleがpolicyを持つresourceの存在は、そのpolicyが許す情報として区別できる）
 - policy predicateの内容
 - sessionのsecretやserver-owned parameter値
 - database credential

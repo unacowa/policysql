@@ -131,7 +131,7 @@ Correlated subqueryから外側queryを参照する場合は、`p.id`のよう�
 
 ### Protected tableのshadowing
 
-catalogに保護対象の`posts`が登録されている場合、同じ名前のCTEは使用できません。
+roleがpolicyを持つresourceと同じ名前のCTEは使用できません。以下の例は、memberが`posts`にpolicyを持つ前提です。roleが使えないresourceの名前は、そのroleには存在しない名前と同じ扱いで、CTE名に使えます（CTE名は生成SQLに出ません）。
 
 ```sql
 WITH posts AS (
