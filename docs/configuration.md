@@ -185,7 +185,9 @@ transaction closes as `failed` and is rolled back, and later commands answer 409
 `POLICYSQL_TRANSACTION_UNAVAILABLE`. A constraint violation is 409 `POLICYSQL_CONSTRAINT_VIOLATION` with `detail.constraint` and is logged
 as `database_constraint_violation` (ADR 0030). A database error that no allowlist entry names stays 503
 `POLICYSQL_DATABASE_UNAVAILABLE` and is logged as `database_error_unclassified` with the Hrana
-`code` only. The log events `sql_too_complex` (statement index, schema and policy versions, ABI
+`code` only. The same event, with the code only, is also logged when a constraint violation is not
+the client's statement (the idempotency lookup or insert, or a commit-check callback) and the
+response is 500 `POLICYSQL_INTERNAL`. The log events `sql_too_complex` (statement index, schema and policy versions, ABI
 version, fixed cause), `database_constraint_violation` (statement index, schema and policy
 versions, fixed kind, the database's code; no name or text), `emitted_sql_reparse_failed`, and
 `database_error_unclassified` never

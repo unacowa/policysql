@@ -143,9 +143,11 @@ extended code, the refusal returns to 503 (the exact match of the code), and the
   gets 409 `unique` when another tenant has that `code` and 422 `POLICYSQL_SCHEMA_MISMATCH` when it
   does not.
 - The ABI is 19, so the snapshot (`…:abi-19`) changes with this deployment. An interactive
-  transaction begun under the earlier snapshot can still be committed or have its commit retried
-  (ADR 0007), but any other command needs the current snapshot; a keyed atomic retry replays when
-  only the snapshot differs (ADR 0007).
+  transaction that is still active under the earlier snapshot is closed with 409
+  `POLICYSQL_TRANSACTION_UNAVAILABLE` on its next command, including its first COMMIT, and is
+  rolled back. A COMMIT that was already sent, and an exact retry of the last completed command,
+  are still answered (ADR 0007). A keyed atomic retry replays when only the snapshot differs
+  (ADR 0007).
 
 ## Rejected alternatives
 
