@@ -256,7 +256,16 @@ pub fn run(
     generated: &Generated,
     tamper: Tamper<'_>,
 ) -> (Option<BoundStatement>, Outcome) {
-    let bound = match SqliteFrontend::default().bind(&generated.sql, &world.catalog) {
+    // As production does (#145 pull request D): the SQL is bound against the resources the role
+    // has a policy on.
+    let resources = bundle
+        .resources_by_role()
+        .remove(world.session.role())
+        .unwrap_or_default();
+    let binding = world
+        .catalog
+        .restricted(|resource| resources.contains(&resource.id));
+    let bound = match SqliteFrontend::default().bind(&generated.sql, &binding) {
         Ok(bound) => bound,
         Err(error) => {
             return (

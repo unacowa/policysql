@@ -2573,6 +2573,92 @@ resources:
         assert_eq!(by_role.get(&role("stranger")), None);
     }
 
+    /// Roles with a policy of one operation only, on different resources: each role's set holds
+    /// exactly its own resource, whatever the operation (#145 pull request D).
+    #[test]
+    fn resources_by_role_covers_every_operation_and_keeps_roles_apart() {
+        let text = |name: &str| {
+            ResourceName::new(name).unwrap_or_else(|error| unreachable!("valid name: {error}"))
+        };
+        let resource = |id: u64, name: &str| {
+            ResourceDescriptor::new(
+                ResourceId::new(id).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+                text(name),
+                ["id", "tenant_id", "name"].map(|column| {
+                    (
+                        ColumnName::new(column)
+                            .unwrap_or_else(|error| unreachable!("valid column: {error}")),
+                        descriptor(),
+                    )
+                }),
+            )
+            .unwrap_or_else(|error| unreachable!("valid resource: {error}"))
+        };
+        let catalog = Catalog::new(
+            SnapshotId::new("schema_1")
+                .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
+            [
+                resource(1, "projects"),
+                resource(2, "notes"),
+                resource(3, "unused"),
+            ],
+        )
+        .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"));
+        let bundle = PolicyBundle::activate(
+            "version: 1
+resources:
+  projects:
+    roles:
+      reader:
+        select:
+          columns: [id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+      inserter:
+        insert:
+          columns: [id, name]
+          presets:
+            tenant_id: { session: tenant_id }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id] }
+  notes:
+    roles:
+      updater:
+        update:
+          columns: [name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id] }
+      deleter:
+        delete:
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id] }
+",
+            &catalog,
+            SnapshotId::new("policy_1")
+                .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
+        )
+        .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+        let id = |value: u64| {
+            ResourceId::new(value).unwrap_or_else(|error| unreachable!("valid ID: {error}"))
+        };
+        let expected = BTreeMap::from([
+            ("reader", BTreeSet::from([id(1)])),
+            ("inserter", BTreeSet::from([id(1)])),
+            ("updater", BTreeSet::from([id(2)])),
+            ("deleter", BTreeSet::from([id(2)])),
+        ]);
+        let expected = expected
+            .into_iter()
+            .map(|(role, resources)| {
+                (
+                    RoleName::new(role).unwrap_or_else(|error| unreachable!("valid role: {error}")),
+                    resources,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(bundle.resources_by_role(), expected);
+    }
+
     #[test]
     fn composes_fixture_policy_with_caller_predicate_and_limit() {
         let policy = include_str!(

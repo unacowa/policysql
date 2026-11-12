@@ -640,13 +640,15 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
     // A resource the role has no policy on is not in the Catalog its SQL is bound against, so it
     // is the same input as a name that does not exist (#145 pull request D): every resource
     // template is answered alike, except the CTEs named like it, which both compile.
-    const BOTH_ACCEPTED: [&str; 2] = [
+    const BOTH_ACCEPTED: [&str; 4] = [
         "WITH {R} AS (SELECT id FROM projects) SELECT id FROM {R}",
         "WITH {R} AS (SELECT id FROM projects) SELECT {R}.id FROM {R}",
+        "WITH {R} AS (SELECT id FROM projects) SELECT p.id FROM {R} AS p",
+        "SELECT {R}.id FROM projects AS {R}",
     ];
     // Different codes: the statement is refused by the policy for a reason of its own
     // (aggregation, windows and JSON collections are off) after the binder resolved every
-    // column against the whole Catalog, so a hidden column reaches that refusal and a missing
+    // column of the role's resources, so a hidden column reaches that refusal and a missing
     // one does not (#154).
     const POLICY_ORDER_CODE_SPLITS: [&str; 5] = [
         "SELECT id, count(*) FROM projects GROUP BY {C}",
@@ -655,7 +657,7 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "SELECT id FROM projects GROUP BY id HAVING {C} = :v",
         "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.{C}, '$') AS j",
     ];
-    // Different codes: the binder and the decoding of the values run against the whole
+    // Different codes: the binder and the decoding of the values run against the role's Binding
     // Catalog before the policy, so the type of a hidden column shows in the code
     // (`INVALID_PARAMETER` for a literal or value of another type, `FORBIDDEN_COLUMN` for a
     // column that does not exist). Documented in the ADR 0030 amendment and the security model;
@@ -795,6 +797,13 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "WITH {R} AS (SELECT id FROM projects) SELECT id FROM {R}",
         "WITH {R} AS (SELECT id FROM projects) SELECT {R}.id FROM {R}",
         "SELECT json_group_array(j.value) AS items FROM {R} AS r, json_each(r.id, '$') AS j",
+        "SELECT {R}.id FROM projects",
+        "SELECT {R}.id FROM projects AS {R}",
+        "SELECT id FROM \"{R}\"",
+        "WITH {R} AS (SELECT id FROM {R}) SELECT id FROM {R}",
+        "WITH {R} AS (SELECT id FROM projects) SELECT p.id FROM {R} AS p",
+        "WITH c AS (SELECT id FROM {R}) SELECT p.id FROM projects p JOIN c ON c.id = p.id",
+        "DELETE FROM projects WHERE EXISTS (SELECT 1 FROM {R} r WHERE r.id = projects.id)",
     ];
     assert!(column_templates.len() + resource_templates.len() >= 55);
     let answer = |template: &str, token: &str, name: &str, endpoint: &str| {
@@ -823,15 +832,17 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
             }
         }
     }
+    // The names are also written in capitals: a name is looked up without regard to case.
+    let mut named: Vec<(&str, &str, &str, &str)> = cases
+        .into_iter()
+        .map(|(template, token, hidden)| (template, token, hidden, "no_such_column"))
+        .collect();
     for template in &resource_templates {
-        cases.push((template, "{R}", "hidden"));
+        named.push((template, "{R}", "hidden", "no_such_table"));
+        named.push((template, "{R}", "HIDDEN", "NO_SUCH_TABLE"));
     }
-    for (template, token, hidden) in cases {
-        let absent = if token == "{C}" {
-            "no_such_column"
-        } else {
-            "no_such_table"
-        };
+    let mut only_missing: BTreeSet<&str> = BTreeSet::new();
+    for (template, token, hidden, absent) in named {
         for endpoint in ["execute", "explain"] {
             let (seen_answer, missing) = (
                 answer(template, token, hidden, endpoint),
@@ -844,7 +855,8 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
                 );
                 Pair::BothAccepted
             } else if missing.get("error").is_none() {
-                unreachable!("{endpoint} {template}: only the missing name compiles: {missing}")
+                only_missing.insert(template);
+                continue;
             } else if seen_answer.get("error").is_none() {
                 Pair::HiddenAccepted
             } else if code(&seen_answer) != code(&missing) {
@@ -862,6 +874,11 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         lists.iter().flat_map(|list| list.iter().copied()).collect()
     };
     let got = |pair: Pair| -> BTreeSet<&str> { seen.get(&pair).cloned().unwrap_or_default() };
+    assert_eq!(
+        only_missing,
+        BTreeSet::new(),
+        "a name that does not exist never compiles where a hidden one is refused"
+    );
     assert_eq!(
         got(Pair::DetailSplit),
         BTreeSet::new(),
@@ -886,7 +903,7 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         listed(&[&BOTH_ACCEPTED]),
         "a hidden resource and a missing one both compile exactly where listed"
     );
-    assert!(checked >= 332, "{checked}");
+    assert!(checked >= 438, "{checked}");
 }
 
 /// A request over several statements, for one endpoint.

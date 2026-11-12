@@ -86,3 +86,140 @@ fn the_parent_itself_is_a_name_that_does_not_exist_to_the_role() {
         assert_eq!(output["error"].get("detail"), None, "{output}");
     }
 }
+
+// Roles that each have a policy on a different resource, or on one operation only: the Catalog a
+// role's SQL is bound against is the role's own, not the union of the roles' (#145 pull request D).
+
+const ROLES_CATALOG: &str = r"
+version: 1
+resources:
+  a_only:
+    source: { table: a_only }
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      name: { type: string }
+  b_only:
+    source: { table: b_only }
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      name: { type: string }
+";
+
+const ROLES_POLICY: &str = r"
+version: 1
+resources:
+  a_only:
+    roles:
+      a:
+        select:
+          columns: [id, name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          limit: 100
+      updater:
+        update:
+          columns: [name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id] }
+      deleter:
+        delete:
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id] }
+  b_only:
+    roles:
+      b:
+        select:
+          columns: [id, name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          limit: 100
+";
+
+fn compile_as(role: &str, sql: &str) -> Value {
+    let runtime = super::PolicySqlRuntime::new(
+        ROLES_CATALOG,
+        ROLES_POLICY,
+        "schema_roles",
+        "policy_roles",
+        r#"{"max_rows":100,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":8}"#,
+    )
+    .unwrap_or_else(|_| unreachable!("valid runtime"));
+    let auth = json!({
+        "principal": "test:user", "subject": "u", "role": role, "roles": [role],
+        "access": ["execute", "explain"], "session": {"tenant_id": "tenant_a"},
+    })
+    .to_string();
+    let params = if sql.contains(":v") {
+        json!({"v": "x"})
+    } else {
+        json!({})
+    };
+    let request = json!({"statements": [{"sql": sql, "params": params}]}).to_string();
+    serde_json::from_str(&runtime.compile_json(&auth, &request, "execute"))
+        .unwrap_or_else(|_| unreachable!("runtime output is JSON"))
+}
+
+#[test]
+fn a_resource_another_role_has_a_policy_on_is_a_name_that_does_not_exist_to_this_role() {
+    for (role, own, other) in [("a", "a_only", "b_only"), ("b", "b_only", "a_only")] {
+        for template in [
+            "SELECT nope FROM {R}",
+            "SELECT * FROM {R}",
+            "SELECT id FROM {R} WHERE id = 1",
+            "SELECT id FROM {R} WHERE tenant_id = TRUE",
+            "SELECT id FROM {R} ORDER BY nope",
+            "UPDATE {R} SET nope = :v",
+            "DELETE FROM {R} WHERE nope = :v",
+        ] {
+            let of_other = compile_as(role, &template.replace("{R}", other));
+            let missing = compile_as(role, &template.replace("{R}", "no_such_table"));
+            assert_eq!(
+                of_other["error"]["code"], "POLICYSQL_MISSING_POLICY",
+                "{role} {template}: {of_other}"
+            );
+            assert_eq!(of_other["error"], missing["error"], "{role} {template}");
+        }
+        // Its own resource keeps its column checks.
+        let output = compile_as(role, &format!("SELECT nope FROM {own}"));
+        assert_eq!(
+            output["error"]["code"], "POLICYSQL_FORBIDDEN_COLUMN",
+            "{role}: {output}"
+        );
+        // A CTE named like the other role's resource is a name that does not exist, and compiles;
+        // one named like its own is refused.
+        let cte = compile_as(
+            role,
+            &format!("WITH {other} AS (SELECT id FROM {own}) SELECT id FROM {other}"),
+        );
+        assert!(cte.get("error").is_none(), "{role}: {cte}");
+        let own_cte = compile_as(
+            role,
+            &format!("WITH {own} AS (SELECT id FROM {own}) SELECT id FROM {own}"),
+        );
+        assert_eq!(
+            own_cte["error"]["code"], "POLICYSQL_UNSUPPORTED_SQL",
+            "{role}: {own_cte}"
+        );
+    }
+}
+
+#[test]
+fn a_role_with_only_an_update_or_only_a_delete_policy_can_name_the_resource() {
+    let updated = compile_as("updater", "UPDATE a_only SET name = :v");
+    assert!(updated.get("error").is_none(), "{updated}");
+    let deleted = compile_as("deleter", "DELETE FROM a_only");
+    assert!(deleted.get("error").is_none(), "{deleted}");
+    // Nothing else is theirs: no select policy, and no policy on the other resource.
+    for (role, sql) in [
+        ("updater", "SELECT id FROM a_only"),
+        ("updater", "UPDATE b_only SET name = :v"),
+        ("deleter", "DELETE FROM b_only"),
+    ] {
+        let output = compile_as(role, sql);
+        assert_eq!(
+            output["error"]["code"], "POLICYSQL_MISSING_POLICY",
+            "{role} {sql}: {output}"
+        );
+    }
+}

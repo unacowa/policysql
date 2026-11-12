@@ -84,8 +84,10 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
   }
 
   // #145 pull request D: a resource the role has no policy on is a name that does not exist. The
-  // example policy's `projects` is given to another role, so for `member` it is a resource
-  // without a policy, next to a name that is not in the Catalog at all.
+  // example policy's `projects` is given to another role, so `member` has no policy at all (the
+  // example has one resource): this goes through the empty Catalog a role without a policy binds
+  // against. The roles that each have a policy on a different resource are in
+  // `crates/policysql-wasm/src/resource_tests.rs`.
   const hidden = (policy) => policy.replace("      member:", "      other:");
   const HIDDEN_CASES = [
     ["SELECT id FROM {R}", {}],
