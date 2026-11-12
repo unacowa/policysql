@@ -235,7 +235,7 @@ return createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", 
 
 - 複数の上限を同時に超えたときは、決まった検査の順で最初に当たったものを返します（たとえばatomic executeの累計は行数が先で、結果bytesが後です）。
 - `detail`は任意です。PolicySQLが上限そのものを検査した場所でだけ付きます。上限から導いた値（DBの生の応答の上限、compileの入力の上限）、固定の定数（durable record）、adapterが「上限」とだけ分類して名前を言わない失敗には付きません。同じBLOBの上限超過でも、応答の中で値を数えた場所では`maxBytesPerValue`が付き、transportが読み取りの途中で検出した場所では付かないことがあります。どちらも413で、扱いは同じです。
-- 結果の上限（`maxRows`、`maxResultBytes`、`maxJsonValues`、`maxBytesPerValue`）が数えるのは、保護された文が返した結果です。SELECTでは、そのroleに見える行だけを数え、見えない行の数や大きさでどの名前になるかは変わりません。INSERT・UPDATE・DELETEでは、変更した行（`RETURNING`の行と、行ごとの内部の検査列のcell）を数えます。`RETURNING`がなくても、変更した行の数で`maxJsonValues`に当たることがあります。変更した行の数は、`RETURNING`の有無にかかわらず、応答の件数として読める観測の範囲です。
+- 結果の上限（`maxRows`、`maxResultBytes`、`maxJsonValues`、`maxBytesPerValue`）が数えるのは、保護された文が返した結果です。SELECTでは、そのroleに見える行だけを数え、見えない行の数や大きさでどの名前になるかは変わりません。INSERT・UPDATE・DELETEでは、変更した行（`RETURNING`の行と、policyに`check`があるときは行ごとの内部の検査列のcell）を数えます。`check`があれば、`RETURNING`がなくても、変更した行の数で`maxJsonValues`に当たることがあります。変更した行の数は、`RETURNING`の有無にかかわらず、応答の件数として読める観測の範囲です。
 
 ### `complexity`（`POLICYSQL_SQL_TOO_COMPLEX`）
 

@@ -629,8 +629,9 @@ Capabilities), and the policy-protected result, never of rows the role cannot se
   two databases that differ only in rows of another tenant, and only in the hidden cell of a
   conditional column, and read the same name. A client could already learn the same from queries
   that stay inside the limits (`LIMIT`/`OFFSET`, fewer columns). For `INSERT`, `UPDATE` and `DELETE`
-  the count is of the rows the statement changed: `RETURNING` rows, and one internal check cell per
-  row, so `maxJsonValues` can be crossed by the number of changed rows even without `RETURNING`
+  the count is of the rows the statement changed: `RETURNING` rows, and, when the policy has a `check`,
+  one internal check cell per row, so `maxJsonValues` can be crossed by the number of changed rows
+  even without `RETURNING`
   (and `maxRows` or `maxResultBytes` by the `RETURNING` rows, which an update or delete filter wider
   than the select filter can make rows the role cannot select). The number of changed rows is what
   the affected-row count already gives (P3), so the name adds no fact.
