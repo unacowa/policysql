@@ -28,6 +28,7 @@ fn compile(runtime: &super::PolicySqlRuntime, sql: &str, params: &Value, endpoin
         AUTH,
         &json!({"statements":[{"sql":sql,"params":params}]}).to_string(),
         endpoint,
+        crate::TEST_CONTEXT,
     ))
     .unwrap_or_else(|_| unreachable!("runtime output is JSON"))
 }

@@ -97,6 +97,53 @@ impl ReferenceSqlite {
         Ok(Self { connection })
     }
 
+    /// Runs trusted test SQL against the reference database, binding `parameters` to `?1`, `?2`,
+    /// ...; every cell comes back by its SQLite storage class. For the checks a test makes about
+    /// what a protected statement wrote, never for client SQL.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on a database error or a parameter that has no SQLite value.
+    pub fn trusted_rows(
+        &self,
+        sql: &str,
+        parameters: &[LogicalValue],
+    ) -> Result<Vec<Vec<LogicalValue>>, ReferenceError> {
+        let mut statement = self
+            .connection
+            .prepare(sql)
+            .map_err(|_| ReferenceError::Database)?;
+        let values = parameters
+            .iter()
+            .map(encode)
+            .collect::<Result<Vec<_>, _>>()?;
+        let width = statement.column_count();
+        let mut query = statement
+            .query(rusqlite::params_from_iter(values))
+            .map_err(|_| ReferenceError::Database)?;
+        let mut rows = Vec::new();
+        while let Some(row) = query.next().map_err(|_| ReferenceError::Database)? {
+            rows.push(
+                (0..width)
+                    .map(|index| {
+                        Ok(
+                            match row.get_ref(index).map_err(|_| ReferenceError::Database)? {
+                                ValueRef::Null => LogicalValue::Null,
+                                ValueRef::Integer(value) => LogicalValue::Int64(value),
+                                ValueRef::Real(value) => LogicalValue::Number(value),
+                                ValueRef::Text(value) => LogicalValue::String(
+                                    String::from_utf8_lossy(value).into_owned(),
+                                ),
+                                ValueRef::Blob(value) => LogicalValue::Bytes(value.to_vec()),
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>, ReferenceError>>()?,
+            );
+        }
+        Ok(rows)
+    }
+
     /// Executes only a profile-verified SELECT and validates row shape, storage class, and limits.
     ///
     /// # Errors
@@ -1102,6 +1149,11 @@ pub fn write_report(report: &CoverageReport, output_root: &Path) -> Result<(), C
 
 #[cfg(test)]
 mod tests {
+
+    fn context() -> policysql_core::CompileContext {
+        policysql_core::CompileContext::new(1_793_366_096_789)
+            .unwrap_or_else(|| unreachable!("the test time is in range"))
+    }
     use super::{
         CaseManifest, ExecutionEvidence, ExpectedDisposition, FixtureExecutionEvidence, OracleRow,
         OracleSession, OracleValue, RecordingExecutor, ReferenceSqlite, RejectionExpectation,
@@ -1943,8 +1995,12 @@ resources:
             )
             .unwrap_or_else(|error| unreachable!("fixture policy: {error}"));
             let protected = match directory {
-                "insert-values" => bundle.compile_insert(&statement, &mutation_session()),
-                "update-filtered" => bundle.compile_update(&statement, &mutation_session()),
+                "insert-values" => {
+                    bundle.compile_insert(&statement, &mutation_session(), &context())
+                }
+                "update-filtered" => {
+                    bundle.compile_update(&statement, &mutation_session(), &context())
+                }
                 "delete-filtered" => bundle.compile_delete(&statement, &mutation_session()),
                 _ => unreachable!("closed mutation fixture list"),
             }
@@ -1953,8 +2009,12 @@ resources:
                 .bind(&read_fixture(&root, "negative-control.sql"), &catalog)
             {
                 let denied = match directory {
-                    "insert-values" => bundle.compile_insert(&negative, &mutation_session()),
-                    "update-filtered" => bundle.compile_update(&negative, &mutation_session()),
+                    "insert-values" => {
+                        bundle.compile_insert(&negative, &mutation_session(), &context())
+                    }
+                    "update-filtered" => {
+                        bundle.compile_update(&negative, &mutation_session(), &context())
+                    }
                     "delete-filtered" => bundle.compile_delete(&negative, &mutation_session()),
                     _ => unreachable!("closed mutation fixture list"),
                 };
@@ -1996,6 +2056,232 @@ resources:
         }
     }
 
+    #[derive(serde::Deserialize)]
+    struct FixtureContext {
+        #[serde(rename = "nowMs")]
+        now_ms: u64,
+    }
+
+    /// The Catalog of a fixture whose manifest uses `string`, `instant`, `datetime`, and `int64`;
+    /// a temporal type fixes its format, as the runtime does.
+    fn typed_fixture_catalog(root: &Path, snapshot: &SnapshotId) -> Catalog {
+        let raw: FixtureCatalog =
+            serde_yaml::from_str(&read_fixture(root, "catalog-manifest.yaml"))
+                .unwrap_or_else(|error| unreachable!("fixture Catalog parses: {error}"));
+        let resources = raw
+            .resources
+            .into_iter()
+            .enumerate()
+            .map(|(index, (resource_name, resource))| {
+                let columns = resource.columns.into_iter().map(|(name, column)| {
+                    let (logical_type, representation, format) = match column.r#type.as_str() {
+                        "string" => (LogicalType::String, ValueRepresentation::String, None),
+                        "instant" => (
+                            LogicalType::Instant,
+                            ValueRepresentation::String,
+                            Some("rfc3339"),
+                        ),
+                        "datetime" => (
+                            LogicalType::DateTime,
+                            ValueRepresentation::String,
+                            Some("sqlite-datetime"),
+                        ),
+                        "int64" => (LogicalType::Int64, ValueRepresentation::String, None),
+                        other => unreachable!("unsupported fixture type: {other}"),
+                    };
+                    (
+                        ColumnName::new(name)
+                            .unwrap_or_else(|error| unreachable!("fixture column: {error}")),
+                        ValueDescriptor {
+                            logical_type,
+                            representation,
+                            nullable: column.nullable,
+                            format: format.map(str::to_owned),
+                            storage: None,
+                            constraints: None,
+                            json_schema: None,
+                        },
+                    )
+                });
+                ResourceDescriptor::new(
+                    ResourceId::new(u64::try_from(index + 1).unwrap_or(u64::MAX))
+                        .unwrap_or_else(|error| unreachable!("fixture resource ID: {error}")),
+                    ResourceName::new(resource_name)
+                        .unwrap_or_else(|error| unreachable!("fixture resource: {error}")),
+                    columns,
+                )
+                .unwrap_or_else(|error| unreachable!("fixture descriptor: {error}"))
+            })
+            .collect::<Vec<_>>();
+        Catalog::new(snapshot.clone(), resources)
+            .unwrap_or_else(|error| unreachable!("fixture Catalog: {error}"))
+    }
+
+    /// `mutation/update-now-preset` (ADR 0031): the golden SQL, the server parameters, the
+    /// reference SQLite's RETURNING row, the time spelled by SQLite's own calendar, and the
+    /// other tenant's row left alone.
+    #[allow(clippy::too_many_lines)]
+    fn now_preset_fixture() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/sqlite-turso-v1/mutation/update-now-preset");
+        let snapshot = SnapshotId::new("mutation_update_now_preset")
+            .unwrap_or_else(|error| unreachable!("valid snapshot: {error}"));
+        let catalog = typed_fixture_catalog(&root, &snapshot);
+        let bundle = PolicyBundle::activate(
+            &read_fixture(&root, "policy.yaml"),
+            &catalog,
+            snapshot.clone(),
+        )
+        .unwrap_or_else(|error| unreachable!("fixture policy: {error}"));
+        let raw_context: FixtureContext =
+            serde_json::from_str(&read_fixture(&root, "context.json"))
+                .unwrap_or_else(|error| unreachable!("fixture context: {error}"));
+        let context = policysql_core::CompileContext::new(raw_context.now_ms)
+            .unwrap_or_else(|| unreachable!("the fixture time is in range"));
+        let mut raw_session: FixtureSession =
+            serde_json::from_str(&read_fixture(&root, "session.json"))
+                .unwrap_or_else(|error| unreachable!("fixture session: {error}"));
+        let subject = raw_session
+            .values
+            .remove("subject_id")
+            .unwrap_or_else(|| unreachable!("fixture subject"));
+        let session = TrustedSession::new(
+            RoleName::new(raw_session.role)
+                .unwrap_or_else(|error| unreachable!("fixture role: {error}")),
+            subject,
+            raw_session.values,
+        )
+        .unwrap_or_else(|error| unreachable!("trusted fixture session: {error}"));
+
+        // Negative: the client cannot assign a `now` column.
+        let negative = SqliteFrontend::default()
+            .bind(&read_fixture(&root, "negative-control.sql"), &catalog)
+            .unwrap_or_else(|error| unreachable!("negative control binds: {error}"));
+        assert_eq!(
+            bundle.compile_update(&negative, &session, &context).err(),
+            Some(PolicyError::ForbiddenColumn)
+        );
+
+        let statement = SqliteFrontend::default()
+            .bind(&read_fixture(&root, "input.sql"), &catalog)
+            .unwrap_or_else(|error| unreachable!("fixture binds: {error}"));
+        let protected = bundle
+            .compile_update(&statement, &session, &context)
+            .unwrap_or_else(|error| unreachable!("fixture compiles: {error}"));
+        let verified = compile_verified_update(
+            &protected.plan,
+            &catalog,
+            fixture_parameters(&root),
+            ExecutionLimits {
+                max_rows: 100,
+                max_result_bytes: 10_000,
+                timeout_ms: 1_000,
+                max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
+            },
+            snapshot,
+        )
+        .unwrap_or_else(|error| unreachable!("fixture verifies: {error}"));
+        assert_eq!(
+            verified.protected_sql(),
+            read_fixture(&root, "expected/protected.sql").trim()
+        );
+        let server: BTreeMap<&str, &LogicalValue> = verified
+            .server_parameters()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value))
+            .collect();
+        assert_eq!(
+            server,
+            BTreeMap::from([
+                (
+                    "__policysql_now_epoch_ms",
+                    &LogicalValue::Int64(1_793_366_096_789)
+                ),
+                (
+                    "__policysql_now_rfc3339",
+                    &LogicalValue::String("2026-10-30T13:14:56.789Z".to_owned())
+                ),
+                (
+                    "__policysql_session_subject_id",
+                    &LogicalValue::String("user_1".to_owned())
+                ),
+                (
+                    "__policysql_session_tenant_id",
+                    &LogicalValue::String("tenant_1".to_owned())
+                ),
+            ])
+        );
+
+        // Differential: the reference SQLite runs the sealed statement.
+        let database = ReferenceSqlite::new(
+            &read_fixture(&root, "schema.sql"),
+            &read_fixture(&root, "seed.sql"),
+        )
+        .unwrap_or_else(|error| unreachable!("reference database: {error}"));
+        let result = database
+            .execute(&verified)
+            .unwrap_or_else(|error| unreachable!("mutation executes: {error}"));
+        // `result.json` spells a safe `int64` as a JSON number, as the public API does.
+        let expected: serde_json::Value =
+            serde_json::from_str(&read_fixture(&root, "expected/result.json"))
+                .unwrap_or_else(|error| unreachable!("fixture result: {error}"));
+        let wire_rows: Vec<serde_json::Value> = result
+            .rows
+            .iter()
+            .map(|row| {
+                serde_json::Value::Object(
+                    result
+                        .columns
+                        .iter()
+                        .zip(row)
+                        .map(|(column, value)| {
+                            (
+                                column.clone(),
+                                match value {
+                                    LogicalValue::String(value) => value.clone().into(),
+                                    LogicalValue::Int64(value) => (*value).into(),
+                                    other => unreachable!("unexpected result value {other:?}"),
+                                },
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(expected["columns"], serde_json::json!(result.columns));
+        assert_eq!(expected["rows"], serde_json::Value::Array(wire_rows));
+        // SQLite's own calendar spells the same instant, and the `int64` is stored as INTEGER.
+        let ms = LogicalValue::Int64(raw_context.now_ms.try_into().unwrap_or(i64::MAX));
+        assert_eq!(
+            database.trusted_rows(
+                "SELECT updated_at = strftime('%Y-%m-%dT%H:%M:%S', ?1 / 1000, 'unixepoch') || printf('.%03dZ', ?1 % 1000), \
+                 updated_ms = ?1, typeof(updated_ms) FROM projects WHERE id = 'p1'",
+                &[ms],
+            )
+            .unwrap_or_else(|error| unreachable!("trusted query: {error}")),
+            vec![vec![
+                LogicalValue::Int64(1),
+                LogicalValue::Int64(1),
+                LogicalValue::String("integer".to_owned())
+            ]]
+        );
+        // Bypass: the other tenant's row keeps the seed's time columns.
+        assert_eq!(
+            database
+                .trusted_rows(
+                    "SELECT name, updated_by, updated_at, updated_ms FROM projects WHERE id = 'p2'",
+                    &[],
+                )
+                .unwrap_or_else(|error| unreachable!("trusted query: {error}")),
+            vec![vec![
+                LogicalValue::String("Hidden".to_owned()),
+                LogicalValue::String("other".to_owned()),
+                LogicalValue::String("2000-01-01T00:00:00.000Z".to_owned()),
+                LogicalValue::Int64(0)
+            ]]
+        );
+    }
+
     /// Compiles `statement` with the policy entry point for its kind, requires a rejection, and
     /// compares the public code `policysql-gateway` maps the policy error to.
     fn assert_policy_rejection(
@@ -2006,8 +2292,8 @@ resources:
         expected_code: &str,
     ) {
         let error = match statement {
-            BoundStatement::Insert(_) => bundle.compile_insert(statement, session),
-            BoundStatement::Update(_) => bundle.compile_update(statement, session),
+            BoundStatement::Insert(_) => bundle.compile_insert(statement, session, &context()),
+            BoundStatement::Update(_) => bundle.compile_update(statement, session, &context()),
             BoundStatement::Delete(_) => bundle.compile_delete(statement, session),
             _ => bundle.compile_select(statement, session),
         }
@@ -2240,7 +2526,7 @@ resources:
                 .bind_document(sql, &catalog)
                 .unwrap_or_else(|error| unreachable!("fixture binds: {error}"));
             let mut output = bundle
-                .compile_update(&document.statement, &mutation_session())
+                .compile_update(&document.statement, &mutation_session(), &context())
                 .unwrap_or_else(|error| unreachable!("fixture compiles: {error}"));
             output.plan.string_literals.client = document.string_literals;
             compile_verified_update(
@@ -2366,6 +2652,7 @@ resources:
         protected_fixture_matches_reference_sqlite_result();
         expanded_read_fixtures_match_golden_sql_and_reference_sqlite();
         mutation_fixtures_match_golden_sql_and_reference_sqlite();
+        now_preset_fixture();
         verify_denied_security_fixtures();
         string_literal_security_fixture();
 

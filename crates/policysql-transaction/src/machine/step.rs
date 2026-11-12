@@ -6,7 +6,9 @@
 //! pending, invalid volatile state) goes through [`Step::fail_closed`], which never turns
 //! `committing` into a definite rejection.
 
-use super::compiler::{Compiler, CoreError, Operation, RawResult, ResultBudget, Validated};
+use super::compiler::{
+    CompileFacts, Compiler, CoreError, Operation, RawResult, ResultBudget, Validated,
+};
 use super::io::{
     self, CheckReason, Class, Code, ConstraintKind, DriverCall, DriverResult, Effect, ErrorDetail,
     Event, HostFacts, ObserveContext, ResultLimitName, TransactionLimitName, error_reply,
@@ -2218,7 +2220,8 @@ impl<C: Compiler> Step<'_, C> {
             }],
         })
         .map_err(|_| internal())?;
-        self.compiler.compile(auth, &envelope)
+        self.compiler
+            .compile(auth, &envelope, &CompileFacts::of(self.host))
     }
 
     /// Whether a statement may repeat `last`, judged by compiling it (released at once): a

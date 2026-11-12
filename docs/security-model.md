@@ -79,11 +79,11 @@ Known gap: a negative value for a client `LIMIT` parameter is accepted today and
 
 ### P2: write confinement
 
-An accepted UPDATE or DELETE changes only rows on which, in the pre-state, both the policy `filter` and the client `WHERE` are SQL TRUE; an accepted INSERT changes only the rows it inserts. The statement assigns only columns in the policy's `columns` and the keys of its `presets`; columns it does not assign take database-computed values (residual risk 7). Every preset value is a session value or a policy literal. For INSERT and UPDATE, if any changed row does not make `check` SQL TRUE, the whole statement fails and nothing changes. A delete policy has no `check`.
+An accepted UPDATE or DELETE changes only rows on which, in the pre-state, both the policy `filter` and the client `WHERE` are SQL TRUE; an accepted INSERT changes only the rows it inserts. The statement assigns only columns in the policy's `columns` and the keys of its `presets`; columns it does not assign take database-computed values (residual risk 7). Every preset value is a session value, a policy literal, or the compile's time (`now`: the host fact `now_ms`, [ADR 0031](adr/0031-server-time-presets.md)). For INSERT and UPDATE, if any changed row does not make `check` SQL TRUE, the whole statement fails and nothing changes. A delete policy has no `check`.
 
 ### P3: mutation observation non-interference
 
-For an accepted INSERT, UPDATE, or DELETE, `Obs` is a function of `View(D, σ)`, the session, the client's SQL and parameters, and only the following exposures, which the mutation policy chooses to make:
+For an accepted INSERT, UPDATE, or DELETE, `Obs` is a function of `View(D, σ)`, the session, the client's SQL and parameters, the compile's time when a `now` preset is returned, and only the following exposures, which the mutation policy chooses to make:
 
 1. the values of `returning.columns` in the changed rows: as written for INSERT and UPDATE, as they were before deletion for DELETE. An UPDATE shows the pre-state value of a column it does not assign, even when that column is not a select column;
 2. for UPDATE and DELETE, whether the policy `filter` is SQL TRUE on each pre-state row;
@@ -98,7 +98,7 @@ A SELECT that contains an aggregate (an aggregate function, `GROUP BY`, or `HAVI
 
 ### P5: server ownership
 
-The values of session-derived server parameters (`__policysql_session_*`) and of preset columns are determined by the policy and the trusted session alone; they do not depend on the client's SQL or parameter values. The client can neither define nor bind a parameter in the `__policysql_` namespace: client parameter names with that prefix are rejected. Result column names with that prefix are rejected for SELECT, constant SELECT, client `EXISTS` projections, and `RETURNING`. Known gap: the output alias of a JSON collection SELECT is not checked for the prefix (#137; see [Verification status](#verification-status)).
+The values of session-derived server parameters (`__policysql_session_*`) and of preset columns are determined by the policy, the trusted session, and the compile's time (a host fact the client cannot supply) alone, and the values of `now` presets are bound to `__policysql_now_*`; they do not depend on the client's SQL or parameter values. The client can neither define nor bind a parameter in the `__policysql_` namespace: client parameter names with that prefix are rejected. Result column names with that prefix are rejected for SELECT, constant SELECT, client `EXISTS` projections, and `RETURNING`. Known gap: the output alias of a JSON collection SELECT is not checked for the prefix (#137; see [Verification status](#verification-status)).
 
 Server literal parameters (`__policysql_literal_*`) carry string, bytes, and JSON literals from two sources: the client's SQL and the policy (filters, checks, presets). The name does not tell them apart. A literal from the client's SQL is client-chosen by design and outside P5; a literal from the policy is covered by P5. Invariant 11 checks the round trip of client string literals only.
 
@@ -130,10 +130,10 @@ Update this table whenever a child issue of #120 lands. Today every property is 
 | Property | Checked today | Planned |
 | --- | --- | --- |
 | P1 | Fixtures under `tests/fixtures/sqlite-turso-v1/select/` and `security/`; policy-crate unit tests. The testkit's `evaluate_select_filter` evaluates one select `filter` on one hand-written row and is used by two tests. | Non-interference fuzzing (#125), mutant patches (#126), policy-aware verifier (#127), oracle differential for view equivalence (#131), slot coverage (#128, #129), types (#132, #133) |
-| P2 | Mutation fixtures (`tests/fixtures/sqlite-turso-v1/mutation/`) and unit tests | #127, #131 |
+| P2 | Mutation fixtures (`tests/fixtures/sqlite-turso-v1/mutation/`, including `update-now-preset`), `deploy/cloudflare/test/now.test.mjs`, and unit tests | #127, #131 |
 | P3 | Unit test `mutation_where_is_limited_to_observable_columns`; fixtures `security/mutation-forbidden-filter-column` and `security/mutation-delete-forbidden-filter-column` | #125, #126; lint for the #118 scope (#134) |
 | P4 | Unit test `aggregate_and_window_gates_cover_every_position_and_joined_resource`; fixtures `security/aggregate-*` and `security/window-joined-resource` | #125, #126 |
-| P5 | Core and parser unit tests for the reserved namespace; fixture `security/server-parameter-collision` | #127 |
+| P5 | Core and parser unit tests for the reserved namespace; fixtures `security/server-parameter-collision` and `mutation/update-now-preset`; `deploy/cloudflare/test/now.test.mjs` | #127 |
 
 Known gaps:
 

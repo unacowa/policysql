@@ -8,7 +8,7 @@ export const policysqlruntime_begin_body_json: (a: number, b: number, c: number)
 export const policysqlruntime_catalog_json: (a: number, b: number, c: number) => [number, number];
 export const policysqlruntime_check_body_json: (a: number, b: number, c: number) => [number, number];
 export const policysqlruntime_commit_checks_enabled: (a: number) => number;
-export const policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+export const policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
 export const policysqlruntime_cost_estimate_json: (a: number, b: number, c: number) => [number, number];
 export const policysqlruntime_identity_json: (a: number, b: number, c: number) => [number, number];
 export const policysqlruntime_limits_json: (a: number) => [number, number];

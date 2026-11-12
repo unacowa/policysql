@@ -146,6 +146,11 @@ fn text(value: &str) -> LogicalValue {
     LogicalValue::String(value.to_owned())
 }
 
+fn context() -> policysql_core::CompileContext {
+    policysql_core::CompileContext::new(1_793_366_096_789)
+        .unwrap_or_else(|| unreachable!("the test time is in range"))
+}
+
 /// Binds, applies policy and seals one mutation; every failure is a rejection.
 fn compile(
     check: &str,
@@ -160,9 +165,9 @@ fn compile(
         .map_err(|error| format!("bind: {error}"))?;
     let insert = sql.starts_with("INSERT");
     let output = if insert {
-        bundle.compile_insert(&statement, &session())
+        bundle.compile_insert(&statement, &session(), &context())
     } else {
-        bundle.compile_update(&statement, &session())
+        bundle.compile_update(&statement, &session(), &context())
     }
     .map_err(|error| format!("policy: {error}"))?;
     let parameters = parameters

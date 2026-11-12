@@ -49,7 +49,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         assert.equal(record.code, code);
         assert.equal(record.reason, reason);
         assert.equal(record.statementIndex, 0);
-        assert.equal(record.abiVersion, 24);
+        assert.equal(record.abiVersion, 25);
         assert.deepEqual(Object.keys(record).sort(), ["abiVersion", "code", "event", "policyVersion", "reason", "requestId", "schemaVersion", "shape", "statementIndex"]);
         assert.ok(/^[a-z]+\.[A-Za-z]+$/u.test(record.reason), record.reason);
         // The reason is never in the answer.

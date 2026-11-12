@@ -1,0 +1,17 @@
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, name, updated_at, updated_ms]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+        update:
+          columns: [name]
+          presets:
+            updated_by: { session: subject_id }
+            updated_at: { now: {} }
+            updated_ms: { now: {} }
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, name, updated_at, updated_ms] }

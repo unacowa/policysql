@@ -38,7 +38,7 @@
 
 use super::super::MAX_TIME_MS;
 use super::super::compiler::{
-    Compiler, Operation, RawResult, ResultBudget, StatementLimits, Validated,
+    CompileFacts, Compiler, Operation, RawResult, ResultBudget, StatementLimits, Validated,
 };
 use super::super::io::{
     self, CheckReason, Class, Code, DriverCall, DriverResult, Effect, ErrorDetail, Event,
@@ -480,27 +480,31 @@ impl<C: Compiler> Step<'_, C> {
             serde_json::from_str(operation.get()).map_err(|_| Fault("request_operation"))?;
         let request = ExecuteRequest::read(&operation).map_err(|_| Fault("request_operation"))?;
         let auth_text = canonical::to_canonical(&request.auth);
-        let compiled = match self.compiler.compile(&auth_text, request.body) {
-            Ok(compiled) => compiled,
-            Err(error) => {
-                self.log_core_error(&error);
-                // A keyed execute may be the retry of a write that committed before a
-                // deployment changed the policy, the schema, or the snapshot: the compile
-                // error is one the client takes as a definite rejection, which ADR 0007
-                // forbids when COMMIT may have been sent (#85 path 1). Nothing is looked up
-                // or run; the answer is the unknown outcome (500 `POLICYSQL_OUTCOME_UNKNOWN`)
-                // with this compile's code and path as `detail.cause`, and a later retry under
-                // a snapshot that compiles it again replays its row. An unkeyed request has no
-                // replay contract, so its compile error stays definite.
-                let reply = if request.key.is_some() {
-                    io::outcome_unknown_reply(&error)
-                } else {
-                    core_error_reply(&error)
-                };
-                self.abort(reply);
-                return Ok(());
-            }
-        };
+        let compiled =
+            match self
+                .compiler
+                .compile(&auth_text, request.body, &CompileFacts::of(self.host))
+            {
+                Ok(compiled) => compiled,
+                Err(error) => {
+                    self.log_core_error(&error);
+                    // A keyed execute may be the retry of a write that committed before a
+                    // deployment changed the policy, the schema, or the snapshot: the compile
+                    // error is one the client takes as a definite rejection, which ADR 0007
+                    // forbids when COMMIT may have been sent (#85 path 1). Nothing is looked up
+                    // or run; the answer is the unknown outcome (500 `POLICYSQL_OUTCOME_UNKNOWN`)
+                    // with this compile's code and path as `detail.cause`, and a later retry under
+                    // a snapshot that compiles it again replays its row. An unkeyed request has no
+                    // replay contract, so its compile error stays definite.
+                    let reply = if request.key.is_some() {
+                        io::outcome_unknown_reply(&error)
+                    } else {
+                        core_error_reply(&error)
+                    };
+                    self.abort(reply);
+                    return Ok(());
+                }
+            };
         self.allocated.push(compiled.handle);
         self.volatile_mut().handles.push(compiled.handle);
         let write = !compiled.read_only();
@@ -715,25 +719,29 @@ impl<C: Compiler> Step<'_, C> {
         let input: Value = serde_json::from_str(input.get()).map_err(|_| Fault("atomic_input"))?;
         let parsed = AtomicInput::read(&input, self.owner).map_err(|_| Fault("atomic_input"))?;
         let auth_text = canonical::to_canonical(&parsed.auth);
-        let compiled = match self.compiler.compile(&auth_text, parsed.body) {
-            Ok(compiled) => compiled,
-            Err(error) => {
-                self.log_core_error(&error);
-                // As in the engine (the `request` kind): a keyed input may be the retry of a
-                // write that committed under an earlier deployment, so an owner compile
-                // failure (the Worker and this owner disagree on the policy though their
-                // snapshot strings match, or the input is retried after a policy change) is
-                // the unknown outcome (500 `POLICYSQL_OUTCOME_UNKNOWN`, this compile's code and
-                // path as `detail.cause`), never a definite compile rejection (#85 path 1).
-                let reply = if parsed.idempotency.is_some() {
-                    io::outcome_unknown_reply(&error)
-                } else {
-                    core_error_reply(&error)
-                };
-                self.abort(reply);
-                return Ok(());
-            }
-        };
+        let compiled =
+            match self
+                .compiler
+                .compile(&auth_text, parsed.body, &CompileFacts::of(self.host))
+            {
+                Ok(compiled) => compiled,
+                Err(error) => {
+                    self.log_core_error(&error);
+                    // As in the engine (the `request` kind): a keyed input may be the retry of a
+                    // write that committed under an earlier deployment, so an owner compile
+                    // failure (the Worker and this owner disagree on the policy though their
+                    // snapshot strings match, or the input is retried after a policy change) is
+                    // the unknown outcome (500 `POLICYSQL_OUTCOME_UNKNOWN`, this compile's code and
+                    // path as `detail.cause`), never a definite compile rejection (#85 path 1).
+                    let reply = if parsed.idempotency.is_some() {
+                        io::outcome_unknown_reply(&error)
+                    } else {
+                        core_error_reply(&error)
+                    };
+                    self.abort(reply);
+                    return Ok(());
+                }
+            };
         self.allocated.push(compiled.handle);
         self.volatile_mut().handles.push(compiled.handle);
         // The owner placement runs write envelopes only (`transaction-owner.ts`).

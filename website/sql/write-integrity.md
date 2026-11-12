@@ -75,6 +75,49 @@ update:
 
 presetは入力値を黙って上書きするdefault値ではありません。client-owned columnとserver-owned columnの境界を強制する機能です。
 
+### サーバーの時刻（now）
+
+`now: {}`は、PolicySQLがcompileした時刻をpreset値にします。作成日時や更新日時を、clientの時計に頼らず記録できます。
+
+```yaml
+insert:
+  columns: [title, status]
+  presets:
+    author_id:
+      session: subject_id
+    created_at:
+      now: {}
+update:
+  columns: [title, status]
+  presets:
+    updated_by:
+      session: subject_id
+    updated_at:
+      now: {}
+```
+
+生成されるSQLでは、時刻はserver-owned parameterとして渡されます。SQLの文面に時刻は入りません。
+
+```sql
+UPDATE "posts" SET "title" = :title, "updated_by" = :__policysql_session_subject_id, "updated_at" = :__policysql_now_rfc3339 WHERE ...
+```
+
+値の形は、columnのCatalog上の型で決まります。
+
+| Catalogの型 | 値の例（UTC） |
+| --- | --- |
+| `instant`（format `rfc3339`） | `2026-10-30T13:14:56.789Z` |
+| `datetime`（format `sqlite-datetime`） | `2026-10-30 13:14:56`（SQLiteの`CURRENT_TIMESTAMP`と同じ形。ミリ秒は切り捨て） |
+| `int64`、`integer` | `1793366096789`（epochミリ秒） |
+
+これ以外の型のcolumnには`now`を使えず、policyを有効化できません。`string` columnに使うには、Catalogでcolumnを`instant`か`datetime`にします。`constraints`を付けたcolumnにも使えません。constraintが時刻を受け付けるかどうかは時刻しだいで、有効化の時点では決められないためです。
+
+- **誰の時計か**: PolicySQLを動かすサーバー（Cloudflareでは、WorkerとDurable Object）の時計です。databaseの時計ではありません。
+- **揃い方**: 1回のAtomic Executeの全statement・全行で同じ値です。対話型transactionは、statementごとに、そのstatementを処理したときの時刻です。同じ値が要る書き込みは、1つのAtomic Executeにまとめます。
+- **再送**: `Idempotency-Key`付きの再送で、最初の実行がcommit済みなら、保存した応答（最初の時刻）を返します。commitされていなければ、新しい時刻で実行します。
+- **注意**: 分解能はミリ秒で、`datetime`は秒に切り捨てます。サーバーの時計は単調とは限らないので、同じrowを続けて更新したとき、値が戻ることがあります。`filter`、`check`、`visible_if`では使えません。
+- **使わない方法**: wrapperがsessionに時刻を入れて`session:`で書く方法は使えません。要求ごとに変わる値がsessionに入ると、`Idempotency-Key`付きの再送が別の要求になります。databaseのtriggerで書く方法は、`RETURNING`に反映されません。
+
 同じoperationの`columns`と`presets`に同じcolumnを定義したpolicyは有効化できません。client SQLにpreset columnが現れた場合も、値を比較せず`POLICYSQL_PRESET_COLUMN`で拒否します。
 
 ## Operation check

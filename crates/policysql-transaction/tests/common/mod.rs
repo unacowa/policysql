@@ -4,8 +4,8 @@
 
 use policysql_transaction::machine::io::ErrorDetail;
 use policysql_transaction::machine::{
-    Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, ResultBudget,
-    StatementLimits, StatementSummary, TriggeredCheck, Validated, step_json,
+    CompileFacts, Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult,
+    ResultBudget, StatementLimits, StatementSummary, TriggeredCheck, Validated, step_json,
 };
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
@@ -88,6 +88,8 @@ pub struct FakeCompiler {
     /// The checks a trigger runs (by default `consistency`, as role `auditor`, 1,000 ms).
     pub checks: Vec<TriggeredCheck>,
     pub compiles: Cell<usize>,
+    /// The `facts` each compile received, in order (ADR 0031).
+    pub contexts: RefCell<Vec<CompileFacts>>,
     /// The statement limits every compiled statement gets.
     pub limits: Option<StatementLimits>,
     /// The cost catalog id every compiled statement names (`None` keeps the transcripts of
@@ -113,6 +115,7 @@ impl FakeCompiler {
                 timeout_ms: 1_000,
             }],
             compiles: Cell::new(0),
+            contexts: RefCell::default(),
             limits: None,
             explain_resource: None,
             reject: None,
@@ -152,8 +155,14 @@ impl Compiler for FakeCompiler {
         &self.snapshot
     }
 
-    fn compile(&self, auth_json: &str, envelope_json: &str) -> Result<Compiled, CoreError> {
+    fn compile(
+        &self,
+        auth_json: &str,
+        envelope_json: &str,
+        facts: &CompileFacts,
+    ) -> Result<Compiled, CoreError> {
         self.compiles.set(self.compiles.get() + 1);
+        self.contexts.borrow_mut().push(facts.clone());
         if let Some(error) = &self.reject {
             return Err(error.clone());
         }

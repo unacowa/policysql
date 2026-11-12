@@ -212,7 +212,8 @@
       "maxProperties": 1,
       "properties": {
         "session": { "$ref": "#/$defs/identifier" },
-        "literal": {}
+        "literal": {},
+        "now": { "type": "object", "additionalProperties": false, "maxProperties": 0 }
       }
     },
     "presets": {

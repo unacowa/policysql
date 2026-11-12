@@ -46,7 +46,7 @@ fn compile(sql: &str) -> Value {
     )
     .unwrap_or_else(|_| unreachable!("valid runtime"));
     let request = json!({"statements": [{"sql": sql, "params": {}}]}).to_string();
-    serde_json::from_str(&runtime.compile_json(AUTH, &request, "execute"))
+    serde_json::from_str(&runtime.compile_json(AUTH, &request, "execute", crate::TEST_CONTEXT))
         .unwrap_or_else(|_| unreachable!("runtime output is JSON"))
 }
 
@@ -156,7 +156,7 @@ fn compile_as(role: &str, sql: &str) -> Value {
         json!({})
     };
     let request = json!({"statements": [{"sql": sql, "params": params}]}).to_string();
-    serde_json::from_str(&runtime.compile_json(&auth, &request, "execute"))
+    serde_json::from_str(&runtime.compile_json(&auth, &request, "execute", crate::TEST_CONTEXT))
         .unwrap_or_else(|_| unreachable!("runtime output is JSON"))
 }
 

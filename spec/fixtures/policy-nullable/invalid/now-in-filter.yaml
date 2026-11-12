@@ -1,0 +1,13 @@
+resource: projects
+
+roles:
+  member:
+    update:
+      columns: [name]
+      filter:
+        updated_at:
+          lt:
+            now: {}
+      check:
+        id:
+          neq: none

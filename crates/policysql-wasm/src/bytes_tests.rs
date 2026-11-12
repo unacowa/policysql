@@ -75,6 +75,7 @@ fn null_bytes_parameters_follow_the_nullable_assignment_proof() {
             auth,
             &json!({"statements":[{"sql":sql,"params":params}]}).to_string(),
             endpoint,
+            crate::TEST_CONTEXT,
         ))
         .unwrap_or_else(|_| unreachable!())
     };
@@ -277,6 +278,7 @@ fn oversized_physical_blob_is_a_limit_error_at_the_result_abi() {
             auth,
             &json!({"statements":[{"sql":"SELECT state FROM projects","params":{}}]}).to_string(),
             "execute",
+            crate::TEST_CONTEXT,
         ))
         .unwrap_or_else(|_| unreachable!());
         let handle = compiled["executionHandle"]
@@ -322,6 +324,7 @@ fn oversized_raw_result_of_in_limit_blobs_is_a_limit_error() {
         auth,
         &json!({"statements":[{"sql":"SELECT state FROM projects","params":{}}]}).to_string(),
         "execute",
+        crate::TEST_CONTEXT,
     ))
     .unwrap_or_else(|_| unreachable!());
     let handle = compiled["executionHandle"]

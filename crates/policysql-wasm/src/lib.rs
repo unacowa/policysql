@@ -2,9 +2,9 @@
 
 use policysql_catalog::{Catalog, ResourceDescriptor};
 use policysql_core::{
-    ClientParameterName, ColumnName, ConstraintScalar, ExpectationKind, JsonSchemaType,
-    JsonValueSchema, LimitName, LogicalType, LogicalValue, ResourceId, ResourceName, SnapshotId,
-    StorageClass, ValueConstraints, ValueDescriptor, ValueRepresentation,
+    ClientParameterName, ColumnName, CompileContext, ConstraintScalar, ExpectationKind,
+    JsonSchemaType, JsonValueSchema, LimitName, LogicalType, LogicalValue, ResourceId,
+    ResourceName, SnapshotId, StorageClass, ValueConstraints, ValueDescriptor, ValueRepresentation,
 };
 use policysql_execution::{ComplexityCause, ExecutionLimits};
 use policysql_gateway::{
@@ -114,7 +114,10 @@ use wasm_bindgen::prelude::*;
 /// checks that limit itself; a derived or fixed bound and the adapter class `limit` carry none;
 /// `check_body_json` and `begin_body_json` errors may carry `detail`; a forwarded owner reply is
 /// checked against those rows. No identity value changed.
-const ABI_VERSION: u32 = 24;
+/// 25: issue #162: `compile_json` takes a fourth argument, the request context JSON
+/// `{"nowMs": <integer>}`, and a preset may be `{ now: {} }` (the compile's time, ADR 0031);
+/// the machine's `Compiler::compile` takes the step's `now_ms`. No identity value changed.
+const ABI_VERSION: u32 = 25;
 /// The fixed JSON levels the machine adds when it wraps an interactive command in the
 /// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
 /// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must
@@ -134,6 +137,8 @@ mod step;
 mod bytes_tests;
 #[cfg(test)]
 mod detail_tests;
+#[cfg(test)]
+mod now_tests;
 #[cfg(test)]
 mod nullable_tests;
 #[cfg(test)]
@@ -201,6 +206,29 @@ struct PhysicalColumn {
     declared_type: String,
     nullable: bool,
 }
+
+/// The engine's request context (`compile_json`'s fourth argument, ADR 0031). #163 adds
+/// `entropy`; any other member is refused.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CompileContextInput {
+    now_ms: u64,
+}
+
+/// The longest context JSON read; the engine's own value is far shorter.
+const MAX_CONTEXT_JSON_BYTES: usize = 256;
+
+fn parse_compile_context(context_json: &str) -> Option<CompileContext> {
+    if context_json.len() > MAX_CONTEXT_JSON_BYTES {
+        return None;
+    }
+    let input: CompileContextInput = serde_json::from_str(context_json).ok()?;
+    CompileContext::new(input.now_ms)
+}
+
+/// The context the runtime tests compile with: 2026-10-30T13:14:56.789Z.
+#[cfg(test)]
+pub(crate) const TEST_CONTEXT: &str = r#"{"nowMs":1793366096789}"#;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -759,8 +787,16 @@ impl PolicySqlRuntime {
         verified_auth_json: &str,
         request_json: &str,
         permission: &str,
+        context_json: &str,
     ) -> String {
-        match self.compile(verified_auth_json, request_json, permission) {
+        // The context is the engine's own value, never the client's: a malformed one is a 500.
+        let Some(context) = parse_compile_context(context_json) else {
+            return serialize_or_internal(&ErrorEnvelope {
+                error: error_body(RuntimeError::Internal),
+                log: None,
+            });
+        };
+        match self.compile(verified_auth_json, request_json, permission, &context) {
             Ok((mut response, compiled)) => {
                 if let Some(compiled) = compiled {
                     match self.store_plan(compiled) {
@@ -1432,6 +1468,7 @@ impl PolicySqlRuntime {
         verified_auth_json: &str,
         request_json: &str,
         permission: &str,
+        context: &CompileContext,
     ) -> Result<(CompileResponse, Option<policysql_gateway::CompiledEnvelope>), RuntimeError> {
         // The derived bounds of ADR 0027. The auth is our own value (see `catalog`): over its
         // bound is a 500. The body is the client's: the engine already enforced
@@ -1498,7 +1535,7 @@ impl PolicySqlRuntime {
             .collect::<Result<Vec<_>, _>>()?;
         let compiled = self
             .gateway
-            .compile_envelope(&auth, endpoint, Some(&self.snapshot), &requests)
+            .compile_envelope(&auth, endpoint, Some(&self.snapshot), &requests, context)
             .map_err(runtime_gateway_error)?;
         let transaction_mode =
             if compiled.statements.iter().all(|statement| {
@@ -3458,13 +3495,13 @@ resources:
         let accepted = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE status = :status","params":{"status":"active"}}]}"#,
-            "explain",
+            "explain", crate::TEST_CONTEXT
         );
         assert!(!accepted.contains("\"error\""), "{accepted}");
         let rejected = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE status = :status","params":{"status":"deleted"}}]}"#,
-            "explain",
+            "explain", crate::TEST_CONTEXT
         );
         assert!(
             rejected.contains("POLICYSQL_INVALID_PARAMETER"),
@@ -3518,7 +3555,7 @@ resources:
         let output = runtime().compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"expected":{"schemaVersion":"schema_test","policyVersion":"policy_test"},"statements":[{"sql":"SELECT id, name FROM projects WHERE status = :status","params":{"status":"active"}}]}"#,
-            "explain",
+            "explain", crate::TEST_CONTEXT
         );
         let value: serde_json::Value = serde_json::from_str(&output)
             .unwrap_or_else(|error| unreachable!("valid response JSON: {error}"));
@@ -3539,7 +3576,7 @@ resources:
         let output = runtime().compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT 1 AS value","params":{}}]}"#,
-            "explain",
+            "explain", crate::TEST_CONTEXT
         );
         let value: serde_json::Value = serde_json::from_str(&output)
             .unwrap_or_else(|error| unreachable!("valid response JSON: {error}"));
@@ -3577,7 +3614,7 @@ resources:
         let output = runtime.compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"INSERT INTO projects (id, name, status) VALUES (:id, :name, :status)","params":{"id":"p1","name":"one","status":"active"}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         let compiled: serde_json::Value = serde_json::from_str(&output)
             .unwrap_or_else(|error| unreachable!("valid JSON: {error}"));
@@ -3595,7 +3632,7 @@ resources:
         let output = runtime().compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE status = :status LIMIT :limit","params":{}}]}"#,
-            "explain",
+            "explain", crate::TEST_CONTEXT
         );
         let value: serde_json::Value = serde_json::from_str(&output)
             .unwrap_or_else(|error| unreachable!("valid response JSON: {error}"));
@@ -3620,6 +3657,7 @@ resources:
             &canonical,
             r#"{"statements":[{"sql":"SELECT id FROM projects","params":{}}]}"#,
             "execute",
+            crate::TEST_CONTEXT,
         );
         assert!(!compiled.contains("\"error\""), "{compiled}");
 
@@ -3663,21 +3701,21 @@ resources:
         let debug = runtime().compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute","debug"],"session":{"tenant_id":"tenant_1"}}"#,
             request,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         assert!(!debug.contains("POLICYSQL_FORBIDDEN_ACCESS"), "{debug}");
 
         let denied = runtime().compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["catalog"],"session":{"tenant_id":"tenant_1"}}"#,
             request,
-            "explain",
+            "explain", crate::TEST_CONTEXT
         );
         assert!(denied.contains("POLICYSQL_FORBIDDEN_ACCESS"));
 
         let stale = runtime().compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"expected":{"schemaVersion":"stale","policyVersion":"policy_test"},"statements":[{"sql":"SELECT id FROM projects","params":{}}]}"#,
-            "explain",
+            "explain", crate::TEST_CONTEXT
         );
         assert!(stale.contains("POLICYSQL_STALE_OPERATION"));
     }
@@ -3715,7 +3753,7 @@ resources:
                 serde_json::to_string(sql)
                     .unwrap_or_else(|error| unreachable!("SQL string serializes: {error}"))
             );
-            let output = runtime.compile_json(auth, &request, "execute");
+            let output = runtime.compile_json(auth, &request, "execute", crate::TEST_CONTEXT);
             assert!(output.contains(code), "expected {code} for {sql}: {output}");
             assert!(output.contains(r#""path":"/statements/0""#));
             assert!(!output.contains("executionHandle"));
@@ -3725,7 +3763,7 @@ resources:
         let output = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT id FROM projects","params":{}},{"sql":"SELECT tenant_id FROM projects","params":{}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         let error: serde_json::Value = serde_json::from_str(&output)
             .unwrap_or_else(|parse_error| unreachable!("safe error parses: {parse_error}"));
@@ -3739,7 +3777,7 @@ resources:
         let compiled = runtime.compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT id, name FROM projects","params":{}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         let value: serde_json::Value = serde_json::from_str(&compiled)
             .unwrap_or_else(|error| unreachable!("valid response JSON: {error}"));
@@ -3768,7 +3806,7 @@ resources:
         let compiled = runtime.compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE id = :id","params":{"id":"p1"},"expect":{"rowCount":0}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         let value: serde_json::Value = serde_json::from_str(&compiled)
             .unwrap_or_else(|error| unreachable!("valid response JSON: {error}"));
@@ -3806,7 +3844,7 @@ resources:
         let output = runtime().compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT a.id FROM projects AS a JOIN projects AS b ON a.id = b.id","params":{}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         assert!(
             output.contains("POLICYSQL_UNSUPPORTED_SQL"),
@@ -3861,7 +3899,7 @@ resources:
         let accepted = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE metadata = :metadata","params":{"metadata":{"tags":["safe"]}}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         let compiled: serde_json::Value = serde_json::from_str(&accepted)
             .unwrap_or_else(|error| unreachable!("compiled JSON parses: {error}"));
@@ -3872,7 +3910,7 @@ resources:
         let explained = runtime.compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["explain"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE metadata = :metadata","params":{}}]}"#,
-            "explain",
+            "explain", crate::TEST_CONTEXT
         );
         let explained: serde_json::Value = serde_json::from_str(&explained)
             .unwrap_or_else(|error| unreachable!("Explain JSON parses: {error}"));
@@ -3884,7 +3922,7 @@ resources:
         let rejected = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT id FROM projects WHERE status = :status","params":{"status":{"nested":true}}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         assert!(rejected.contains("POLICYSQL_INVALID_PARAMETER"));
         assert!(rejected.contains(r#""path":"/statements/0""#));
@@ -3932,7 +3970,7 @@ resources:
         let execute = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT json_extract(metadata, :path) AS value FROM projects","params":{"path":"$.score"}}]}"#,
-            "explain",
+            "explain", crate::TEST_CONTEXT
         );
         let execute: serde_json::Value = serde_json::from_str(&execute)
             .unwrap_or_else(|error| unreachable!("valid JSON: {error}"));
@@ -3944,7 +3982,7 @@ resources:
         let explain = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT json_extract(metadata, :path) AS value FROM projects","params":{}}]}"#,
-            "explain",
+            "explain", crate::TEST_CONTEXT
         );
         let explain: serde_json::Value = serde_json::from_str(&explain)
             .unwrap_or_else(|error| unreachable!("valid JSON: {error}"));
@@ -3998,7 +4036,7 @@ resources:
         let output = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, :path) AS j WHERE p.id = :id","params":{"path":"$","id":"p1"}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         let compiled: serde_json::Value = serde_json::from_str(&output)
             .unwrap_or_else(|error| unreachable!("valid JSON: {error}"));
@@ -4024,7 +4062,7 @@ resources:
         let denied = runtime.compile_json(
             auth,
             r#"{"statements":[{"sql":"SELECT json_group_array(j.key) AS items FROM projects AS p, json_each(p.metadata, :path) AS j","params":{"path":"$"}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         assert!(denied.contains("POLICYSQL_UNSUPPORTED_SQL"));
     }
@@ -4035,7 +4073,7 @@ resources:
         let output = runtime.compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"INSERT INTO projects (id, name, status) VALUES (:id, :name, :status) RETURNING id, name, status","params":{"id":"new_1","name":"New","status":"active"}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         let compiled: serde_json::Value = serde_json::from_str(&output)
             .unwrap_or_else(|error| unreachable!("valid response JSON: {error}"));
@@ -4058,7 +4096,7 @@ resources:
         let output = runtime.compile_json(
             r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
             r#"{"statements":[{"sql":"INSERT INTO projects (id, name, status) VALUES (:id, :name, :status) RETURNING id, name, status","params":{"id":"new_1","name":"New","status":"active"}},{"sql":"INSERT INTO projects (id, name, status) VALUES (:id, :name, :status) RETURNING id, name, status","params":{"id":"new_2","name":"New","status":"active"}}]}"#,
-            "execute",
+            "execute", crate::TEST_CONTEXT
         );
         let compiled: serde_json::Value = serde_json::from_str(&output)
             .unwrap_or_else(|error| unreachable!("valid response JSON: {error}"));
@@ -4310,18 +4348,33 @@ resources:
                 ]})
                 .to_string()
             };
-            let accepted = parse_json(&runtime.compile_json(AUTH, &request(&at_limit), "execute"));
+            let accepted = parse_json(&runtime.compile_json(
+                AUTH,
+                &request(&at_limit),
+                "execute",
+                crate::TEST_CONTEXT,
+            ));
             assert!(accepted.get("error").is_none(), "{accepted}");
             // One byte over, and not valid SQL: the length is judged first, so it is 413 and
             // never a parse error (400).
             let over = format!("{}x", "?".repeat(max_sql));
-            let rejected = parse_json(&runtime.compile_json(AUTH, &request(&over), "execute"));
+            let rejected = parse_json(&runtime.compile_json(
+                AUTH,
+                &request(&over),
+                "execute",
+                crate::TEST_CONTEXT,
+            ));
             assert_eq!(rejected["error"]["code"], "POLICYSQL_REQUEST_TOO_LARGE");
             assert_eq!(rejected["error"]["path"], "/statements/1/sql");
             // The limit counts UTF-8 bytes, not characters.
             let multibyte = format!("{}{}", "SELECT 1 /*", "é".repeat(max_sql / 2));
             assert!(multibyte.len() > max_sql && multibyte.chars().count() <= max_sql);
-            let rejected = parse_json(&runtime.compile_json(AUTH, &request(&multibyte), "execute"));
+            let rejected = parse_json(&runtime.compile_json(
+                AUTH,
+                &request(&multibyte),
+                "execute",
+                crate::TEST_CONTEXT,
+            ));
             assert_eq!(rejected["error"]["code"], "POLICYSQL_REQUEST_TOO_LARGE");
         }
     }
@@ -4336,15 +4389,22 @@ resources:
         };
         let at_limit = body(65_536);
         assert_eq!(at_limit.len(), 65_536);
-        let accepted = parse_json(&runtime.compile_json(AUTH, &at_limit, "execute"));
+        let accepted =
+            parse_json(&runtime.compile_json(AUTH, &at_limit, "execute", crate::TEST_CONTEXT));
         assert!(accepted.get("error").is_none(), "{accepted}");
         // The bound is the auth, the body limit, and 1,024 bytes of framing: the engine has
         // already refused a body over the limit, so core answers only for what no limit admits.
         let bound = policysql_transaction::bounds::compile_input_bytes(65_536) - AUTH.len();
-        let rejected = parse_json(&runtime.compile_json(AUTH, &body(bound + 1), "execute"));
+        let rejected = parse_json(&runtime.compile_json(
+            AUTH,
+            &body(bound + 1),
+            "execute",
+            crate::TEST_CONTEXT,
+        ));
         assert_eq!(rejected["error"]["code"], "POLICYSQL_REQUEST_TOO_LARGE");
         assert!(rejected["error"]["path"].is_null());
-        let still_ok = parse_json(&runtime.compile_json(AUTH, &body(bound), "execute"));
+        let still_ok =
+            parse_json(&runtime.compile_json(AUTH, &body(bound), "execute", crate::TEST_CONTEXT));
         assert!(still_ok.get("error").is_none(), "{still_ok}");
     }
 
@@ -4473,6 +4533,7 @@ resources:
                 &auth,
                 r#"{"statements":[{"sql":"SELECT id FROM projects","params":{}}]}"#,
                 "execute",
+                crate::TEST_CONTEXT,
             ));
             // No policy for the long role: a policy answer, never a size or bound answer.
             for code in [
@@ -4516,6 +4577,7 @@ resources:
             &over,
             r#"{"statements":[{"sql":"SELECT id FROM projects","params":{}}]}"#,
             "execute",
+            crate::TEST_CONTEXT,
         ));
         assert_eq!(compiled["error"]["code"], "POLICYSQL_INTERNAL");
         let catalog = parse_json(&runtime.catalog_json(&over));
@@ -4537,6 +4599,7 @@ resources:
             AUTH,
             &serde_json::json!({"statements": [{"sql": sql, "params": params}]}).to_string(),
             "execute",
+            crate::TEST_CONTEXT,
         )
     }
 
@@ -4640,10 +4703,11 @@ resources:
         };
         assert!(
             !runtime
-                .compile_json(AUTH, &request(2), "execute")
+                .compile_json(AUTH, &request(2), "execute", crate::TEST_CONTEXT)
                 .contains("error")
         );
-        let refused = parse_json(&runtime.compile_json(AUTH, &request(3), "execute"));
+        let refused =
+            parse_json(&runtime.compile_json(AUTH, &request(3), "execute", crate::TEST_CONTEXT));
         assert_eq!(refused["error"]["code"], "POLICYSQL_SQL_TOO_COMPLEX");
         assert_eq!(refused["error"]["path"], "/statements/2");
     }

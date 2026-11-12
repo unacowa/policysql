@@ -25,8 +25,8 @@ mod step;
 pub mod time;
 
 pub use compiler::{
-    Compiled, Compiler, CoreError, DriverStatement, Operation, RawResult, ResultBudget,
-    StatementLimits, StatementSummary, TriggeredCheck, Validated,
+    CompileFacts, Compiled, Compiler, CoreError, DriverStatement, Operation, RawResult,
+    ResultBudget, StatementLimits, StatementSummary, TriggeredCheck, Validated,
 };
 pub use io::{Class, Effect, Event, HostFacts};
 pub use state::{

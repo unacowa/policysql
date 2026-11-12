@@ -40,6 +40,7 @@ const TABLE_ALIAS: &str = "__policysql_t0";
 const CHECK_COLUMN: &str = "__policysql_check";
 const VISIBILITY_COLUMN_PREFIX: &str = "__policysql_visibility_";
 const LITERAL_PARAMETER_PREFIX: &str = "__policysql_literal_";
+const NOW_PARAMETER_PREFIX: &str = "__policysql_now_";
 
 /// Type marker binding candidates, verifiers, and executors to the `SQLite` profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1336,6 +1337,12 @@ pub fn compile_verified_insert(
         EmitError::InvariantViolation("INSERT affected-row invariant is missing".to_owned())
     })?;
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
+    verify_now_assignments(
+        &plan.statement,
+        &emitted.server_parameters,
+        catalog,
+        limits.max_bytes_per_value,
+    )?;
     let analysis = analyze_client_parameters(&plan.statement, catalog);
     validate_client_parameters(
         &analysis,
@@ -1385,6 +1392,74 @@ pub fn compile_verified_insert(
     VerifiedExecutionPlan::verify(candidate, &verifier).map_err(CompileError::Verification)
 }
 
+/// Whether the column a `__policysql_now_*` parameter is assigned to is one the parameter's name
+/// may fill: the table of ADR 0031, read from the Catalog's descriptor and not from the plan.
+fn now_name_fits(suffix: &str, descriptor: &ValueDescriptor) -> bool {
+    if descriptor.constraints.is_some() {
+        return false;
+    }
+    matches!(
+        (
+            suffix,
+            descriptor.logical_type,
+            descriptor.format.as_deref()
+        ),
+        ("rfc3339", LogicalType::Instant, Some("rfc3339"))
+            | (
+                "sqlite_datetime",
+                LogicalType::DateTime,
+                Some("sqlite-datetime")
+            )
+            | ("epoch_ms", LogicalType::Int64, None | Some("int64"))
+            | ("epoch_ms", LogicalType::Integer, None)
+    )
+}
+
+/// The second check of a server-owned time (ADR 0031), independent of the policy crate: every
+/// INSERT/UPDATE assignment whose whole value is a `__policysql_now_*` server parameter names one
+/// of the three known shapes, targets a column the Catalog's own descriptor (not the plan's
+/// claim) admits for that shape, has no `constraints`, and carries a value of the descriptor's
+/// logical type that satisfies the Catalog contract.
+fn verify_now_assignments(
+    statement: &BoundStatement,
+    server_parameters: &BTreeMap<ServerParameterName, LogicalValue>,
+    catalog: &Catalog,
+    max_bytes_per_value: usize,
+) -> Result<(), EmitError> {
+    let assignments: Vec<&policysql_ir::BoundAssignment> = match statement {
+        BoundStatement::Insert(insert) => insert.rows.iter().flatten().collect(),
+        BoundStatement::Update(update) => update.assignments.iter().collect(),
+        _ => return Ok(()),
+    };
+    for assignment in assignments {
+        let BoundExpr::ServerParameter { name, .. } = &assignment.value else {
+            continue;
+        };
+        let Some(suffix) = name.as_str().strip_prefix(NOW_PARAMETER_PREFIX) else {
+            continue;
+        };
+        let violation = || {
+            EmitError::InvariantViolation(
+                "server-owned time violates the column contract".to_owned(),
+            )
+        };
+        let value = server_parameters.get(name).ok_or_else(violation)?;
+        let descriptor = parameter_contracts::column_descriptor(catalog, &assignment.column)
+            .ok_or_else(violation)?;
+        if !now_name_fits(suffix, descriptor)
+            || !parameter_contracts::logical_value_matches(
+                value,
+                descriptor.logical_type,
+                max_bytes_per_value,
+            )
+            || !policysql_core::value_satisfies_contract(value, descriptor, max_bytes_per_value)
+        {
+            return Err(violation());
+        }
+    }
+    Ok(())
+}
+
 /// Emits, independently renders, re-parses, and seals a protected UPDATE.
 ///
 /// # Errors
@@ -1401,6 +1476,12 @@ pub fn compile_verified_update(
         return Err(EmitError::UnsupportedStatement.into());
     }
     let emitted = TypedSqliteEmitter.emit(plan, catalog)?;
+    verify_now_assignments(
+        &plan.statement,
+        &emitted.server_parameters,
+        catalog,
+        limits.max_bytes_per_value,
+    )?;
     let analysis = analyze_client_parameters(&plan.statement, catalog);
     validate_client_parameters(
         &analysis,
@@ -2212,6 +2293,11 @@ impl From<EmitError> for CompileError {
 
 #[cfg(test)]
 mod tests {
+
+    fn context() -> policysql_core::CompileContext {
+        policysql_core::CompileContext::new(1_793_366_096_789)
+            .unwrap_or_else(|| unreachable!("the test time is in range"))
+    }
     use super::{
         PROFILE_ID, SqliteInvariantVerifier, SqliteProfile, TypedSqliteEmitter,
         compile_verified_delete, compile_verified_insert, compile_verified_select,
@@ -2831,7 +2917,7 @@ resources:
         )
         .unwrap_or_else(|error| unreachable!("valid session: {error}"));
         let protected = policy
-            .compile_insert(&statement, &session)
+            .compile_insert(&statement, &session, &context())
             .unwrap_or_else(|error| unreachable!("INSERT authorizes: {error}"));
         let parameters = BTreeMap::from([
             (
@@ -2866,7 +2952,11 @@ resources:
                 &catalog,
             )
             .unwrap_or_else(|error| unreachable!("preset bypass binds: {error}"));
-        assert!(policy.compile_insert(&bypass, &session).is_err());
+        assert!(
+            policy
+                .compile_insert(&bypass, &session, &context())
+                .is_err()
+        );
     }
 
     #[test]
@@ -2895,7 +2985,7 @@ resources:
             )
             .unwrap_or_else(|error| unreachable!("UPDATE binds: {error}"));
         let update = bundle
-            .compile_update(&update, &session)
+            .compile_update(&update, &session, &context())
             .unwrap_or_else(|error| unreachable!("UPDATE policy compiles: {error}"));
         let parameters = BTreeMap::from([
             (
@@ -3104,5 +3194,543 @@ resources:
             literal_values(&verified),
             BTreeSet::from(["'legacy'".to_owned()])
         );
+    }
+
+    /// ADR 0031: the second check of a server-owned time, on plans the policy crate sealed and
+    /// a test then corrupted.
+    mod now_assignments {
+        use super::{
+            BTreeMap, Catalog, ClientParameterName, ColumnName, LogicalType, LogicalValue,
+            PolicyBundle, ResourceDescriptor, ResourceId, ResourceName, RoleName, SqliteFrontend,
+            TrustedSession, ValueDescriptor, ValueRepresentation, compile_verified_insert,
+            compile_verified_update, context, limits, snapshot,
+        };
+        use crate::{CompileError, EmitError};
+        use policysql_core::ServerParameterName;
+        use policysql_ir::{BoundExpr, BoundStatement, ProtectedPlan};
+
+        fn typed(
+            logical_type: LogicalType,
+            representation: ValueRepresentation,
+            format: Option<&str>,
+        ) -> ValueDescriptor {
+            ValueDescriptor {
+                logical_type,
+                representation,
+                nullable: false,
+                format: format.map(str::to_owned),
+                storage: None,
+                constraints: None,
+                json_schema: None,
+            }
+        }
+
+        fn catalog() -> Catalog {
+            catalog_with(
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                ),
+                typed(LogicalType::Int64, ValueRepresentation::String, None),
+            )
+        }
+
+        /// The Catalog the policy crate activated against, with `updated_at` and `updated_ms`
+        /// replaced: a plan is then sealed against a Catalog that differs from the plan's claim.
+        fn catalog_with(updated_at: ValueDescriptor, updated_ms: ValueDescriptor) -> Catalog {
+            let string = || typed(LogicalType::String, ValueRepresentation::String, None);
+            let columns = [
+                ("id", string()),
+                ("tenant_id", string()),
+                ("name", string()),
+                ("updated_at", updated_at),
+                (
+                    "touched_on",
+                    typed(
+                        LogicalType::DateTime,
+                        ValueRepresentation::String,
+                        Some("sqlite-datetime"),
+                    ),
+                ),
+                ("updated_ms", updated_ms),
+            ];
+            let resource = ResourceDescriptor::new(
+                ResourceId::new(1).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+                ResourceName::new("projects")
+                    .unwrap_or_else(|error| unreachable!("valid resource: {error}")),
+                columns.map(|(name, descriptor)| {
+                    (
+                        ColumnName::new(name)
+                            .unwrap_or_else(|error| unreachable!("valid column: {error}")),
+                        descriptor,
+                    )
+                }),
+            )
+            .unwrap_or_else(|error| unreachable!("valid descriptor: {error}"));
+            Catalog::new(snapshot(), [resource])
+                .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"))
+        }
+
+        fn sealed(catalog: &Catalog) -> ProtectedPlan {
+            let bundle = PolicyBundle::activate(
+                "version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, name]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+        update:
+          columns: [name]
+          presets:
+            updated_at: { now: {} }
+            touched_on: { now: {} }
+            updated_ms: { now: {} }
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+",
+                catalog,
+                snapshot(),
+            )
+            .unwrap_or_else(|error| unreachable!("now policy activates: {error}"));
+            let session = TrustedSession::new(
+                RoleName::new("member").unwrap_or_else(|error| unreachable!("valid role: {error}")),
+                "user_1",
+                BTreeMap::from([("tenant_id".to_owned(), "tenant_1".to_owned())]),
+            )
+            .unwrap_or_else(|error| unreachable!("valid session: {error}"));
+            let statement = SqliteFrontend::default()
+                .bind("UPDATE projects SET name = :name WHERE id = :id", catalog)
+                .unwrap_or_else(|error| unreachable!("UPDATE binds: {error}"));
+            bundle
+                .compile_update(&statement, &session, &context())
+                .unwrap_or_else(|error| unreachable!("UPDATE compiles: {error}"))
+                .plan
+        }
+
+        fn parameters() -> BTreeMap<ClientParameterName, LogicalValue> {
+            ["id", "name"]
+                .map(|name| {
+                    (
+                        ClientParameterName::new(name)
+                            .unwrap_or_else(|error| unreachable!("valid parameter: {error}")),
+                        LogicalValue::String("x".to_owned()),
+                    )
+                })
+                .into()
+        }
+
+        fn name(suffix: &str) -> ServerParameterName {
+            ServerParameterName::from_trusted_suffix(suffix)
+                .unwrap_or_else(|error| unreachable!("valid name: {error}"))
+        }
+
+        fn seal(catalog: &Catalog, plan: &ProtectedPlan) -> Result<(), CompileError> {
+            compile_verified_update(plan, catalog, parameters(), limits(), snapshot()).map(|_| ())
+        }
+
+        fn violation(result: &Result<(), CompileError>) {
+            assert!(
+                matches!(
+                    result,
+                    Err(CompileError::Emit(EmitError::InvariantViolation(message)))
+                        if message == "server-owned time violates the column contract"
+                ),
+                "{result:?}"
+            );
+        }
+
+        #[test]
+        fn a_correct_pairing_seals() {
+            let catalog = catalog();
+            assert!(seal(&catalog, &sealed(&catalog)).is_ok());
+        }
+
+        #[test]
+        fn a_value_of_the_wrong_format_for_its_column_is_refused() {
+            let catalog = catalog();
+            let mut plan = sealed(&catalog);
+            // The instant spelling in a `sqlite-datetime` column.
+            plan.server_values.insert(
+                name("now_sqlite_datetime"),
+                LogicalValue::String("2026-10-30T13:14:56.789Z".to_owned()),
+            );
+            violation(&seal(&catalog, &plan));
+        }
+
+        #[test]
+        fn a_value_of_the_wrong_type_for_its_column_is_refused() {
+            let catalog = catalog();
+            let mut plan = sealed(&catalog);
+            // The epoch parameter (an `Int64`) assigned to the `instant` column.
+            let BoundStatement::Update(update) = &mut plan.statement else {
+                unreachable!("an UPDATE stays an UPDATE");
+            };
+            let assignment = update
+                .assignments
+                .iter_mut()
+                .find(|assignment| assignment.column.logical_type == LogicalType::Instant)
+                .unwrap_or_else(|| unreachable!("the instant preset is assigned"));
+            assignment.value = BoundExpr::ServerParameter {
+                name: name("now_epoch_ms"),
+                logical_type: LogicalType::Instant,
+            };
+            violation(&seal(&catalog, &plan));
+        }
+
+        /// Points the first assignment `pick` accepts at the server parameter `suffix`.
+        fn reassign(
+            plan: &mut ProtectedPlan,
+            pick: impl Fn(&policysql_ir::BoundAssignment) -> bool,
+            suffix: &str,
+        ) {
+            let BoundStatement::Update(update) = &mut plan.statement else {
+                unreachable!("an UPDATE stays an UPDATE");
+            };
+            let assignment = update
+                .assignments
+                .iter_mut()
+                .find(|assignment| pick(assignment))
+                .unwrap_or_else(|| unreachable!("the assignment exists"));
+            assignment.value = BoundExpr::ServerParameter {
+                name: name(suffix),
+                logical_type: assignment.column.logical_type,
+            };
+        }
+
+        #[test]
+        fn a_plan_is_checked_against_the_catalog_and_not_against_its_own_claim() {
+            // The plan was made for an `int64` `updated_ms`; this Catalog has a `string` one.
+            let plan = sealed(&catalog());
+            let other = catalog_with(
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                ),
+                typed(LogicalType::String, ValueRepresentation::String, None),
+            );
+            violation(&seal(&other, &plan));
+        }
+
+        #[test]
+        fn the_catalogs_integer_type_is_a_pairing_for_the_epoch() {
+            let plan = sealed(&catalog());
+            let integer = catalog_with(
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                ),
+                typed(LogicalType::Integer, ValueRepresentation::Number, None),
+            );
+            assert!(seal(&integer, &plan).is_ok());
+        }
+
+        #[test]
+        fn a_time_name_in_a_string_column_is_refused() {
+            let catalog = catalog();
+            let mut plan = sealed(&catalog);
+            // `name` is a `string` column: no time is ever guessed into it.
+            reassign(
+                &mut plan,
+                |assignment| assignment.column.logical_type == LogicalType::String,
+                "now_rfc3339",
+            );
+            violation(&seal(&catalog, &plan));
+        }
+
+        #[test]
+        fn a_time_name_for_another_shape_than_its_column_is_refused() {
+            let catalog = catalog();
+            // The instant spelling in the `int64` column: the name table and the value's type each
+            // stop it (the name table alone stops a time in a `string` column, above).
+            let mut plan = sealed(&catalog);
+            reassign(
+                &mut plan,
+                |assignment| assignment.column.logical_type == LogicalType::Int64,
+                "now_rfc3339",
+            );
+            violation(&seal(&catalog, &plan));
+            // The epoch with a `String` value in the `int64` column: only the value's type
+            // stops it (an `int64` column has no format).
+            let mut plan = sealed(&catalog);
+            plan.server_values.insert(
+                name("now_epoch_ms"),
+                LogicalValue::String("1793366096789".to_owned()),
+            );
+            violation(&seal(&catalog, &plan));
+        }
+
+        #[test]
+        fn an_unknown_time_name_is_refused() {
+            let catalog = catalog();
+            let mut plan = sealed(&catalog);
+            plan.server_values.insert(
+                name("now_other"),
+                LogicalValue::String("2026-10-30T13:14:56.789Z".to_owned()),
+            );
+            reassign(
+                &mut plan,
+                |assignment| assignment.column.logical_type == LogicalType::Instant,
+                "now_other",
+            );
+            violation(&seal(&catalog, &plan));
+        }
+
+        #[test]
+        fn a_catalog_column_with_constraints_takes_no_time() {
+            let plan = sealed(&catalog());
+            let constrained = catalog_with(
+                ValueDescriptor {
+                    constraints: Some(policysql_core::ValueConstraints {
+                        min_length: Some(1),
+                        ..policysql_core::ValueConstraints::default()
+                    }),
+                    ..typed(
+                        LogicalType::Instant,
+                        ValueRepresentation::String,
+                        Some("rfc3339"),
+                    )
+                },
+                typed(LogicalType::Int64, ValueRepresentation::String, None),
+            );
+            violation(&seal(&constrained, &plan));
+        }
+
+        fn session() -> TrustedSession {
+            TrustedSession::new(
+                RoleName::new("member").unwrap_or_else(|error| unreachable!("valid role: {error}")),
+                "user_1",
+                BTreeMap::from([("tenant_id".to_owned(), "tenant_1".to_owned())]),
+            )
+            .unwrap_or_else(|error| unreachable!("valid session: {error}"))
+        }
+
+        /// An INSERT and an UPDATE plan, both with `presets` (YAML lines of the preset columns).
+        fn sealed_pair(catalog: &Catalog, presets: &str) -> (ProtectedPlan, ProtectedPlan) {
+            let bundle = PolicyBundle::activate(
+                &format!(
+                    "version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, name]
+          filter: {{ tenant_id: {{ eq: {{ session: tenant_id }} }} }}
+        insert:
+          columns: [id, name]
+          presets:
+            tenant_id: {{ session: tenant_id }}
+{presets}
+          check: {{ tenant_id: {{ eq: {{ session: tenant_id }} }} }}
+        update:
+          columns: [name]
+          presets:
+{presets}
+          filter: {{ tenant_id: {{ eq: {{ session: tenant_id }} }} }}
+          check: {{ tenant_id: {{ eq: {{ session: tenant_id }} }} }}
+"
+                ),
+                catalog,
+                snapshot(),
+            )
+            .unwrap_or_else(|error| unreachable!("now policy activates: {error}"));
+            let bind = |sql: &str| {
+                SqliteFrontend::default()
+                    .bind(sql, catalog)
+                    .unwrap_or_else(|error| unreachable!("{sql} binds: {error}"))
+            };
+            let insert = bundle
+                .compile_insert(
+                    &bind("INSERT INTO projects (id, name) VALUES (:id, :name)"),
+                    &session(),
+                    &context(),
+                )
+                .unwrap_or_else(|error| unreachable!("INSERT compiles: {error}"))
+                .plan;
+            let update = bundle
+                .compile_update(
+                    &bind("UPDATE projects SET name = :name WHERE id = :id"),
+                    &session(),
+                    &context(),
+                )
+                .unwrap_or_else(|error| unreachable!("UPDATE compiles: {error}"))
+                .plan;
+            (insert, update)
+        }
+
+        fn seal_insert(catalog: &Catalog, plan: &ProtectedPlan) -> Result<(), CompileError> {
+            compile_verified_insert(plan, catalog, parameters(), limits(), snapshot()).map(|_| ())
+        }
+
+        const ALL_THREE: &str = "            updated_at: { now: {} }
+            touched_on: { now: {} }
+            updated_ms: { now: {} }";
+
+        #[test]
+        fn an_insert_is_checked_before_it_is_sealed() {
+            let catalog = catalog();
+            let (insert, _) = sealed_pair(&catalog, ALL_THREE);
+            assert!(seal_insert(&catalog, &insert).is_ok());
+            // `compile_verified_insert` makes its own call of the check; each corruption below is
+            // refused there.
+            let mut wrong_value = insert.clone();
+            wrong_value.server_values.insert(
+                name("now_epoch_ms"),
+                LogicalValue::String("1793366096789".to_owned()),
+            );
+            violation(&seal_insert(&catalog, &wrong_value));
+            let mut wrong_name = insert.clone();
+            let BoundStatement::Insert(statement) = &mut wrong_name.statement else {
+                unreachable!("an INSERT stays an INSERT");
+            };
+            let assignment = statement
+                .rows
+                .iter_mut()
+                .flatten()
+                .find(|assignment| assignment.column.logical_type == LogicalType::String)
+                .unwrap_or_else(|| unreachable!("a string column is assigned"));
+            assignment.value = BoundExpr::ServerParameter {
+                name: name("now_rfc3339"),
+                logical_type: LogicalType::String,
+            };
+            violation(&seal_insert(&catalog, &wrong_name));
+            let string_ms = catalog_with(
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                ),
+                typed(LogicalType::String, ValueRepresentation::String, None),
+            );
+            violation(&seal_insert(&string_ms, &insert));
+        }
+
+        #[test]
+        fn the_value_is_checked_against_the_catalogs_type_and_not_the_plans_claim() {
+            let catalog = catalog();
+            let mut plan = sealed(&catalog);
+            // The plan claims the `int64` column is a `string` one and carries a `String`.
+            let BoundStatement::Update(update) = &mut plan.statement else {
+                unreachable!("an UPDATE stays an UPDATE");
+            };
+            let assignment = update
+                .assignments
+                .iter_mut()
+                .find(|assignment| assignment.column.logical_type == LogicalType::Int64)
+                .unwrap_or_else(|| unreachable!("the int64 preset is assigned"));
+            assignment.column.logical_type = LogicalType::String;
+            plan.server_values.insert(
+                name("now_epoch_ms"),
+                LogicalValue::String("1793366096789".to_owned()),
+            );
+            violation(&seal(&catalog, &plan));
+        }
+
+        fn stamp_catalog(stamp: ValueDescriptor) -> Catalog {
+            let string = || typed(LogicalType::String, ValueRepresentation::String, None);
+            let resource = ResourceDescriptor::new(
+                ResourceId::new(1).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+                ResourceName::new("projects")
+                    .unwrap_or_else(|error| unreachable!("valid resource: {error}")),
+                [
+                    ("id", string()),
+                    ("tenant_id", string()),
+                    ("name", string()),
+                    ("stamp", stamp),
+                ]
+                .map(|(name, descriptor)| {
+                    (
+                        ColumnName::new(name)
+                            .unwrap_or_else(|error| unreachable!("valid column: {error}")),
+                        descriptor,
+                    )
+                }),
+            )
+            .unwrap_or_else(|error| unreachable!("valid descriptor: {error}"));
+            Catalog::new(snapshot(), [resource])
+                .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"))
+        }
+
+        #[test]
+        fn the_table_of_types_and_formats_is_the_one_activation_accepts() {
+            let stamp = "            stamp: { now: {} }";
+            let instant = || {
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                )
+            };
+            let datetime = || {
+                typed(
+                    LogicalType::DateTime,
+                    ValueRepresentation::String,
+                    Some("sqlite-datetime"),
+                )
+            };
+            let int64 = |format: Option<&str>| {
+                typed(LogicalType::Int64, ValueRepresentation::String, format)
+            };
+            let integer = |format: Option<&str>| {
+                typed(LogicalType::Integer, ValueRepresentation::Number, format)
+            };
+            // Each pairing activates, and its INSERT and UPDATE seal against the same Catalog.
+            // `twin` is the same column with a format the table does not list: the plan made
+            // for the pairing must not seal against it (only the table stops a time there).
+            for (accepted, twin) in [
+                (
+                    instant(),
+                    Some(typed(
+                        LogicalType::Instant,
+                        ValueRepresentation::String,
+                        None,
+                    )),
+                ),
+                (
+                    datetime(),
+                    Some(typed(
+                        LogicalType::DateTime,
+                        ValueRepresentation::String,
+                        None,
+                    )),
+                ),
+                // `base64` is a format the value contract lets any value through.
+                (int64(None), Some(int64(Some("base64")))),
+                (int64(Some("int64")), None),
+                (integer(None), Some(integer(Some("int64")))),
+            ] {
+                let label = format!("{:?}/{:?}", accepted.logical_type, accepted.format);
+                let catalog = stamp_catalog(accepted);
+                let (insert, update) = sealed_pair(&catalog, stamp);
+                assert!(seal_insert(&catalog, &insert).is_ok(), "{label} INSERT");
+                assert!(seal(&catalog, &update).is_ok(), "{label} UPDATE");
+                if let Some(twin) = twin {
+                    let other = stamp_catalog(twin);
+                    violation(&seal_insert(&other, &insert));
+                    violation(&seal(&other, &update));
+                }
+            }
+        }
+
+        #[test]
+        fn a_time_parameter_without_a_value_is_refused() {
+            let catalog = catalog();
+            let mut plan = sealed(&catalog);
+            plan.server_values.remove(&name("now_rfc3339"));
+            // The emitter refuses the unbound name before `verify_now_assignments` runs.
+            let result = seal(&catalog, &plan);
+            assert!(
+                matches!(
+                    result,
+                    Err(CompileError::Emit(EmitError::MissingServerParameter(_)))
+                ),
+                "{result:?}"
+            );
+        }
     }
 }

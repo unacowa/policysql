@@ -1,0 +1,16 @@
+resource: projects
+
+roles:
+  member:
+    update:
+      columns: [name]
+      presets:
+        updated_at:
+          now:
+            format: rfc3339
+      filter:
+        id:
+          neq: none
+      check:
+        id:
+          neq: none

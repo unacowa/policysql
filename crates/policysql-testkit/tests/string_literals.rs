@@ -163,8 +163,19 @@ fn compile(sql: &str) -> Result<VerifiedExecutionPlan<SqliteProfile>, GatewayErr
         expected_row_count: None,
     }];
     gateway
-        .compile_envelope(&auth, EndpointPermission::Execute, None, &request)
+        .compile_envelope(
+            &auth,
+            EndpointPermission::Execute,
+            None,
+            &request,
+            &context(),
+        )
         .map(|mut envelope| envelope.statements.remove(0).plan)
+}
+
+fn context() -> policysql_core::CompileContext {
+    policysql_core::CompileContext::new(1_793_366_096_789)
+        .unwrap_or_else(|| unreachable!("the test time is in range"))
 }
 
 fn database(hidden: bool) -> Connection {

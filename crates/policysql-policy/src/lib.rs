@@ -2,8 +2,9 @@
 
 use policysql_catalog::{Catalog, ColumnDescriptor, ResourceDescriptor};
 use policysql_core::{
-    ColumnId, CoreError, LogicalType, LogicalValue, OperationKind, PolicyId, ResultName, RoleName,
-    ServerParameterName, SessionKey, SnapshotId, TrustedSession,
+    ColumnId, CompileContext, CoreError, LogicalType, LogicalValue, OperationKind, PolicyId,
+    ResultName, RoleName, ServerParameterName, SessionKey, SnapshotId, TrustedSession,
+    ValueDescriptor,
 };
 use policysql_ir::{
     BoundAssignment, BoundColumn, BoundExpr, BoundJsonCollectionSelect, BoundProjection,
@@ -109,6 +110,54 @@ enum PolicyOperand {
     Session(SessionKey),
     Literal(LogicalValue),
     Column(BoundColumn),
+    /// The compile's time, a preset value only (ADR 0031).
+    Now(NowShape),
+}
+
+/// How a `now` preset spells the compile's time, fixed at activation from the column's
+/// logical type and format (ADR 0031).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NowShape {
+    Rfc3339Millis,
+    SqliteDateTime,
+    EpochMillis,
+}
+
+impl NowShape {
+    /// The shape a column takes; `None` rejects the column (default deny).
+    fn for_column(descriptor: &ValueDescriptor) -> Option<Self> {
+        match (descriptor.logical_type, descriptor.format.as_deref()) {
+            (LogicalType::Instant, Some("rfc3339")) => Some(Self::Rfc3339Millis),
+            (LogicalType::DateTime, Some("sqlite-datetime")) => Some(Self::SqliteDateTime),
+            (LogicalType::Int64, None | Some("int64")) | (LogicalType::Integer, None) => {
+                Some(Self::EpochMillis)
+            }
+            _ => None,
+        }
+    }
+
+    /// The server parameter suffix; one name per shape so that two shapes never share a key.
+    const fn parameter_suffix(self) -> &'static str {
+        match self {
+            Self::Rfc3339Millis => "now_rfc3339",
+            Self::SqliteDateTime => "now_sqlite_datetime",
+            Self::EpochMillis => "now_epoch_ms",
+        }
+    }
+
+    fn value(self, now_ms: u64) -> Result<LogicalValue, PolicyError> {
+        match self {
+            Self::Rfc3339Millis => Ok(LogicalValue::String(policysql_core::time::rfc3339_millis(
+                now_ms,
+            ))),
+            Self::SqliteDateTime => Ok(LogicalValue::String(
+                policysql_core::time::sqlite_datetime(now_ms),
+            )),
+            Self::EpochMillis => i64::try_from(now_ms)
+                .map(LogicalValue::Int64)
+                .map_err(|_| PolicyError::InvariantViolation("now epoch milliseconds".to_owned())),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -699,6 +748,7 @@ impl PolicyBundle {
         &self,
         statement: &BoundStatement,
         session: &TrustedSession,
+        context: &CompileContext,
     ) -> Result<CompileOutput, PolicyError> {
         let BoundStatement::Insert(insert) = statement else {
             return Err(PolicyError::UnsupportedCapability);
@@ -739,10 +789,11 @@ impl PolicyBundle {
                         logical_type: *logical_type,
                         usage: ColumnUsage::Write,
                     },
-                    value: instantiate_operand(
+                    value: instantiate_preset(
                         operand,
                         *logical_type,
                         session,
+                        context,
                         &mut server_values,
                     )?,
                 });
@@ -782,6 +833,7 @@ impl PolicyBundle {
         &self,
         statement: &BoundStatement,
         session: &TrustedSession,
+        context: &CompileContext,
     ) -> Result<CompileOutput, PolicyError> {
         let BoundStatement::Update(update) = statement else {
             return Err(PolicyError::UnsupportedCapability);
@@ -827,7 +879,13 @@ impl PolicyBundle {
                     logical_type: *logical_type,
                     usage: ColumnUsage::Write,
                 },
-                value: instantiate_operand(operand, *logical_type, session, &mut server_values)?,
+                value: instantiate_preset(
+                    operand,
+                    *logical_type,
+                    session,
+                    context,
+                    &mut server_values,
+                )?,
             });
         }
         let filter = instantiate_predicate(&policy.filter, session, &mut server_values)?;
@@ -1088,12 +1146,7 @@ fn activate_insert(
         if columns.contains(&column.id) {
             return Err(PolicyError::PresetColumnOverlap);
         }
-        let operand = parse_preset(
-            &value,
-            resource,
-            column.value.logical_type,
-            max_bytes_per_value,
-        )?;
+        let operand = parse_preset(&value, resource, column, max_bytes_per_value)?;
         if matches!(operand, PolicyOperand::Column(_)) {
             return Err(PolicyError::InvalidPredicate);
         }
@@ -1130,12 +1183,7 @@ fn activate_update(
         if columns.contains(&column.id) {
             return Err(PolicyError::PresetColumnOverlap);
         }
-        let operand = parse_preset(
-            &value,
-            resource,
-            column.value.logical_type,
-            max_bytes_per_value,
-        )?;
+        let operand = parse_preset(&value, resource, column, max_bytes_per_value)?;
         if matches!(operand, PolicyOperand::Column(_)) {
             return Err(PolicyError::InvalidPredicate);
         }
@@ -1366,9 +1414,17 @@ fn parse_comparison(
 fn parse_preset(
     value: &Value,
     resource: &ResourceDescriptor,
-    expected: LogicalType,
+    column: &ColumnDescriptor,
     max_bytes_per_value: usize,
 ) -> Result<PolicyOperand, PolicyError> {
+    let expected = column.value.logical_type;
+    if let Some(body) = value
+        .as_mapping()
+        .filter(|mapping| mapping.len() == 1)
+        .and_then(|mapping| mapping_value(mapping, "now"))
+    {
+        return parse_now(body, &column.value).map(PolicyOperand::Now);
+    }
     if expected != LogicalType::Bytes {
         return parse_operand(value, resource, expected);
     }
@@ -1387,6 +1443,18 @@ fn parse_preset(
             policysql_core::bytes::DecodeError::TooLarge => PolicyError::BytesPresetTooLarge,
             policysql_core::bytes::DecodeError::InvalidEncoding => PolicyError::IncompatibleOperand,
         })
+}
+
+/// `now: {}`: only an empty mapping, on a column the shape table accepts and without
+/// `constraints` (whether a constraint accepts the time depends on the time).
+fn parse_now(body: &Value, descriptor: &ValueDescriptor) -> Result<NowShape, PolicyError> {
+    if !body.as_mapping().is_some_and(Mapping::is_empty) {
+        return Err(PolicyError::InvalidPredicate);
+    }
+    if descriptor.constraints.is_some() {
+        return Err(PolicyError::IncompatibleOperand);
+    }
+    NowShape::for_column(descriptor).ok_or(PolicyError::IncompatibleOperand)
 }
 
 fn parse_operand(
@@ -1417,6 +1485,10 @@ fn parse_operand(
         }
         if let Some(literal) = mapping_value(mapping, "literal") {
             return Ok(PolicyOperand::Literal(literal_for_type(literal, expected)?));
+        }
+        // `now` is a preset value only (ADR 0031); a predicate operand is #167.
+        if mapping_value(mapping, "now").is_some() {
+            return Err(PolicyError::UnsupportedCapability);
         }
         return Err(PolicyError::InvalidPredicate);
     }
@@ -2161,7 +2233,40 @@ fn instantiate_operand(
         }
         PolicyOperand::Literal(value) => Ok(BoundExpr::Literal(value.clone())),
         PolicyOperand::Column(column) => Ok(BoundExpr::Column(column.clone())),
+        PolicyOperand::Now(_) => Err(PolicyError::InvariantViolation(
+            "now outside a preset".to_owned(),
+        )),
     }
+}
+
+/// A preset value: `now` binds the compile's time under its shape's name; every other operand
+/// is [`instantiate_operand`].
+fn instantiate_preset(
+    operand: &PolicyOperand,
+    expected: LogicalType,
+    session: &TrustedSession,
+    context: &CompileContext,
+    server_values: &mut BTreeMap<ServerParameterName, LogicalValue>,
+) -> Result<BoundExpr, PolicyError> {
+    let PolicyOperand::Now(shape) = operand else {
+        return instantiate_operand(operand, expected, session, server_values);
+    };
+    let name = ServerParameterName::from_trusted_suffix(shape.parameter_suffix())
+        .map_err(|_| PolicyError::InvariantViolation("now parameter name".to_owned()))?;
+    let value = shape.value(context.now_ms())?;
+    if server_values
+        .get(&name)
+        .is_some_and(|bound| bound != &value)
+    {
+        return Err(PolicyError::InvariantViolation(
+            "now parameter rebound".to_owned(),
+        ));
+    }
+    server_values.insert(name.clone(), value);
+    Ok(BoundExpr::ServerParameter {
+        name,
+        logical_type: expected,
+    })
 }
 
 fn apply_policy_limit(select: &mut BoundSelect, policy_limit: Option<u64>) {
@@ -2474,6 +2579,11 @@ mod tests {
         OracleRow, OracleSession, OracleValue, TruthValue, evaluate_select_filter,
     };
     use std::collections::{BTreeMap, BTreeSet};
+
+    fn context() -> policysql_core::CompileContext {
+        policysql_core::CompileContext::new(1_793_366_096_789)
+            .unwrap_or_else(|| unreachable!("the test time is in range"))
+    }
 
     fn descriptor() -> ValueDescriptor {
         ValueDescriptor {
@@ -3239,7 +3349,9 @@ resources:
                 .bind(sql, &parent_catalog())
                 .ok()?;
             Some(match &statement {
-                BoundStatement::Update(_) => bundle.compile_update(&statement, &member).map(|_| ()),
+                BoundStatement::Update(_) => bundle
+                    .compile_update(&statement, &member, &context())
+                    .map(|_| ()),
                 BoundStatement::Delete(_) => bundle.compile_delete(&statement, &member).map(|_| ()),
                 _ => bundle.compile_select(&statement, &member).map(|_| ()),
             })
@@ -3371,7 +3483,9 @@ resources:
                 .bind(sql, &catalog())
                 .unwrap_or_else(|error| unreachable!("{sql} binds: {error}"));
             match &statement {
-                BoundStatement::Update(_) => bundle.compile_update(&statement, &session(role)),
+                BoundStatement::Update(_) => {
+                    bundle.compile_update(&statement, &session(role), &context())
+                }
                 BoundStatement::Delete(_) => bundle.compile_delete(&statement, &session(role)),
                 _ => unreachable!("mutation statement"),
             }
@@ -3463,8 +3577,12 @@ resources:
                 .ok()?;
             Some(
                 match &statement {
-                    BoundStatement::Insert(_) => bundle.compile_insert(&statement, &member),
-                    BoundStatement::Update(_) => bundle.compile_update(&statement, &member),
+                    BoundStatement::Insert(_) => {
+                        bundle.compile_insert(&statement, &member, &context())
+                    }
+                    BoundStatement::Update(_) => {
+                        bundle.compile_update(&statement, &member, &context())
+                    }
                     BoundStatement::Delete(_) => bundle.compile_delete(&statement, &member),
                     _ => bundle.compile_select(&statement, &member),
                 }
@@ -3585,6 +3703,478 @@ resources:
                 }
                 None => assert!(!binds, "expected the binder to accept: {sql}"),
             }
+        }
+    }
+
+    /// ADR 0031: the `now` preset.
+    mod now_presets {
+        use super::{PolicyBundle, PolicyError, context, session};
+        use policysql_catalog::{Catalog, ResourceDescriptor};
+        use policysql_core::{
+            ColumnName, CompileContext, LogicalType, LogicalValue, ResourceId, ResourceName,
+            ServerParameterName, SnapshotId, StorageClass, ValueConstraints, ValueDescriptor,
+            ValueRepresentation,
+        };
+        use policysql_core::{RoleName, TrustedSession};
+        use policysql_ir::{BoundExpr, BoundStatement};
+        use policysql_parser::SqliteFrontend;
+        use std::collections::BTreeMap;
+
+        fn typed(
+            logical_type: LogicalType,
+            representation: ValueRepresentation,
+            format: Option<&str>,
+        ) -> ValueDescriptor {
+            ValueDescriptor {
+                logical_type,
+                representation,
+                nullable: false,
+                format: format.map(str::to_owned),
+                storage: None::<StorageClass>,
+                constraints: None,
+                json_schema: None,
+            }
+        }
+
+        fn string() -> ValueDescriptor {
+            typed(LogicalType::String, ValueRepresentation::String, None)
+        }
+
+        fn catalog_with(columns: Vec<(&str, ValueDescriptor)>) -> Catalog {
+            let resource = ResourceDescriptor::new(
+                ResourceId::new(1).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+                ResourceName::new("projects")
+                    .unwrap_or_else(|error| unreachable!("valid name: {error}")),
+                columns.into_iter().map(|(name, descriptor)| {
+                    (
+                        ColumnName::new(name)
+                            .unwrap_or_else(|error| unreachable!("valid column: {error}")),
+                        descriptor,
+                    )
+                }),
+            )
+            .unwrap_or_else(|error| unreachable!("valid resource: {error}"));
+            Catalog::new(
+                SnapshotId::new("schema_1")
+                    .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
+                [resource],
+            )
+            .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"))
+        }
+
+        fn stamped_catalog() -> Catalog {
+            catalog_with(vec![
+                ("id", string()),
+                ("tenant_id", string()),
+                ("name", string()),
+                ("updated_by", string()),
+                (
+                    "updated_at",
+                    typed(
+                        LogicalType::Instant,
+                        ValueRepresentation::String,
+                        Some("rfc3339"),
+                    ),
+                ),
+                (
+                    "touched_on",
+                    typed(
+                        LogicalType::DateTime,
+                        ValueRepresentation::String,
+                        Some("sqlite-datetime"),
+                    ),
+                ),
+                (
+                    "updated_ms",
+                    typed(LogicalType::Int64, ValueRepresentation::String, None),
+                ),
+            ])
+        }
+
+        fn activate_on(yaml: &str, catalog: &Catalog) -> Result<PolicyBundle, PolicyError> {
+            PolicyBundle::activate(
+                yaml,
+                catalog,
+                SnapshotId::new("policy_1")
+                    .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
+            )
+        }
+
+        const STAMP_POLICY: &str = "version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, name, updated_at]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+        insert:
+          columns: [id, name]
+          presets:
+            tenant_id: { session: tenant_id }
+            updated_by: { session: subject_id }
+            updated_at: { now: {} }
+            touched_on: { now: {} }
+            updated_ms: { now: {} }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, name, updated_at] }
+        update:
+          columns: [name]
+          presets:
+            updated_at: { now: {} }
+            touched_on: { now: {} }
+            updated_ms: { now: {} }
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+";
+
+        fn at(now_ms: u64) -> CompileContext {
+            CompileContext::new(now_ms).unwrap_or_else(|| unreachable!("in range"))
+        }
+
+        fn name(suffix: &str) -> ServerParameterName {
+            ServerParameterName::from_trusted_suffix(suffix)
+                .unwrap_or_else(|error| unreachable!("valid name: {error}"))
+        }
+
+        fn bind(sql: &str) -> BoundStatement {
+            SqliteFrontend::default()
+                .bind(sql, &stamped_catalog())
+                .unwrap_or_else(|error| unreachable!("{sql} binds: {error}"))
+        }
+
+        const MULTI_ROW_INSERT: &str = "INSERT INTO projects (id, name) VALUES (:id, :name), (:id2, :name) RETURNING id, name, updated_at";
+
+        #[test]
+        fn a_multi_row_insert_binds_one_time_per_shape_under_one_name() {
+            let bundle = activate_on(STAMP_POLICY, &stamped_catalog())
+                .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+            let output = bundle
+                .compile_insert(&bind(MULTI_ROW_INSERT), &session("member"), &context())
+                .unwrap_or_else(|error| unreachable!("INSERT compiles: {error}"));
+            assert_eq!(
+                output.plan.server_values.get(&name("now_rfc3339")),
+                Some(&LogicalValue::String("2026-10-30T13:14:56.789Z".to_owned()))
+            );
+            assert_eq!(
+                output.plan.server_values.get(&name("now_sqlite_datetime")),
+                Some(&LogicalValue::String("2026-10-30 13:14:56".to_owned()))
+            );
+            assert_eq!(
+                output.plan.server_values.get(&name("now_epoch_ms")),
+                Some(&LogicalValue::Int64(1_793_366_096_789))
+            );
+            let BoundStatement::Insert(insert) = &output.plan.statement else {
+                unreachable!("an INSERT stays an INSERT");
+            };
+            assert_eq!(insert.rows.len(), 2);
+            for row in &insert.rows {
+                let names: Vec<&str> = row
+                    .iter()
+                    .filter_map(|assignment| match &assignment.value {
+                        BoundExpr::ServerParameter { name, .. }
+                            if name.as_str().starts_with("__policysql_now_") =>
+                        {
+                            Some(name.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    names,
+                    [
+                        "__policysql_now_rfc3339",
+                        "__policysql_now_sqlite_datetime",
+                        "__policysql_now_epoch_ms"
+                    ]
+                );
+            }
+        }
+
+        #[test]
+        fn another_time_changes_the_values_and_not_the_names_or_the_statement() {
+            let bundle = activate_on(STAMP_POLICY, &stamped_catalog())
+                .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+            let compile = |now_ms| {
+                bundle
+                    .compile_update(
+                        &bind("UPDATE projects SET name = :name WHERE id = :id"),
+                        &session("member"),
+                        &at(now_ms),
+                    )
+                    .unwrap_or_else(|error| unreachable!("UPDATE compiles: {error}"))
+            };
+            let first = compile(1_793_366_096_789);
+            let second = compile(0);
+            assert_eq!(first.plan.statement, second.plan.statement);
+            assert_eq!(
+                first.plan.server_values.keys().collect::<Vec<_>>(),
+                second.plan.server_values.keys().collect::<Vec<_>>()
+            );
+            assert_ne!(first.plan.server_values, second.plan.server_values);
+            assert_eq!(
+                second.plan.server_values.get(&name("now_rfc3339")),
+                Some(&LogicalValue::String("1970-01-01T00:00:00.000Z".to_owned()))
+            );
+        }
+
+        /// A policy with `stamp` as the one preset of the INSERT only, or of the UPDATE only.
+        fn insert_policy_with(stamp: &str, operation: &str) -> String {
+            let rule = match operation {
+                "insert" => format!(
+                    "        insert:
+          columns: [id]
+          presets:
+            stamp: {stamp}
+          check: {{ id: {{ neq: none }} }}
+"
+                ),
+                "update" => format!(
+                    "        update:
+          columns: [id]
+          presets:
+            stamp: {stamp}
+          filter: {{ id: {{ neq: none }} }}
+          check: {{ id: {{ neq: none }} }}
+"
+                ),
+                other => unreachable!("unknown operation {other}"),
+            };
+            format!("version: 1\nresources:\n  projects:\n    roles:\n      member:\n{rule}")
+        }
+
+        fn stamp_catalog(descriptor: ValueDescriptor) -> Catalog {
+            catalog_with(vec![("id", string()), ("stamp", descriptor)])
+        }
+
+        #[test]
+        fn activation_follows_the_shape_table() {
+            let constrained = ValueDescriptor {
+                constraints: Some(ValueConstraints {
+                    min_length: Some(1),
+                    ..ValueConstraints::default()
+                }),
+                ..typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                )
+            };
+            let accepted = [
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                ),
+                typed(
+                    LogicalType::DateTime,
+                    ValueRepresentation::String,
+                    Some("sqlite-datetime"),
+                ),
+                typed(LogicalType::Int64, ValueRepresentation::String, None),
+                typed(
+                    LogicalType::Int64,
+                    ValueRepresentation::String,
+                    Some("int64"),
+                ),
+                typed(LogicalType::Integer, ValueRepresentation::Number, None),
+            ];
+            // The INSERT and the UPDATE are activated apart, so that each is held to the table.
+            for operation in ["insert", "update"] {
+                for descriptor in accepted.clone() {
+                    let label = format!(
+                        "{operation} {:?}/{:?}",
+                        descriptor.logical_type, descriptor.format
+                    );
+                    assert!(
+                        activate_on(
+                            &insert_policy_with("{ now: {} }", operation),
+                            &stamp_catalog(descriptor)
+                        )
+                        .is_ok(),
+                        "{label}"
+                    );
+                }
+            }
+            let rejected = [
+                typed(LogicalType::String, ValueRepresentation::String, None),
+                typed(
+                    LogicalType::String,
+                    ValueRepresentation::String,
+                    Some("uuid"),
+                ),
+                typed(
+                    LogicalType::String,
+                    ValueRepresentation::String,
+                    Some("email"),
+                ),
+                typed(
+                    LogicalType::Date,
+                    ValueRepresentation::String,
+                    Some("iso-date"),
+                ),
+                typed(LogicalType::Number, ValueRepresentation::Number, None),
+                typed(LogicalType::Boolean, ValueRepresentation::Boolean, None),
+                typed(LogicalType::Json, ValueRepresentation::Json, None),
+                typed(LogicalType::Bytes, ValueRepresentation::Base64, None),
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("sqlite-datetime"),
+                ),
+                typed(LogicalType::DateTime, ValueRepresentation::String, None),
+                constrained,
+            ];
+            for operation in ["insert", "update"] {
+                for descriptor in rejected.clone() {
+                    let label = format!(
+                        "{operation} {:?}/{:?}",
+                        descriptor.logical_type, descriptor.format
+                    );
+                    assert_eq!(
+                        activate_on(
+                            &insert_policy_with("{ now: {} }", operation),
+                            &stamp_catalog(descriptor)
+                        )
+                        .err(),
+                        Some(PolicyError::IncompatibleOperand),
+                        "{label}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn only_an_empty_mapping_is_a_now_preset() {
+            let catalog = stamped_catalog();
+            for stamp in [
+                "{ now: true }",
+                "{ now: null }",
+                "{ now: 1 }",
+                "{ now: x }",
+                "{ now: [] }",
+                "{ now: { format: rfc3339 } }",
+                "{ now: {}, literal: x }",
+            ] {
+                for operation in ["insert", "update"] {
+                    let yaml = insert_policy_with(stamp, operation).replace("stamp", "updated_at");
+                    assert_eq!(
+                        activate_on(&yaml, &catalog).err(),
+                        Some(PolicyError::InvalidPredicate),
+                        "{operation} {stamp}"
+                    );
+                }
+            }
+            let overlap = STAMP_POLICY.replace(
+                "columns: [id, name]
+          presets",
+                "columns: [id, name, updated_at]
+          presets",
+            );
+            assert_eq!(
+                activate_on(&overlap, &catalog).err(),
+                Some(PolicyError::PresetColumnOverlap)
+            );
+        }
+
+        #[test]
+        fn a_predicate_never_takes_now() {
+            let catalog = stamped_catalog();
+            let now = "{ now: {} }";
+            for filter in [
+                format!(
+                    "select:\n          columns: [id]\n          filter: {{ updated_at: {{ lt: {now} }} }}"
+                ),
+                format!(
+                    "select:\n          columns:\n            - id\n            - name: name\n              visible_if: {{ updated_at: {{ lt: {now} }} }}\n              on_deny: null\n          filter: {{ tenant_id: {{ eq: {{ session: tenant_id }} }} }}"
+                ),
+                format!(
+                    "update:\n          columns: [name]\n          filter: {{ updated_at: {{ lt: {now} }} }}\n          check: {{ id: {{ neq: none }} }}"
+                ),
+                format!(
+                    "update:\n          columns: [name]\n          filter: {{ id: {{ neq: none }} }}\n          check: {{ updated_at: {{ lt: {now} }} }}"
+                ),
+                format!("delete:\n          filter: {{ updated_at: {{ lt: {now} }} }}"),
+                format!(
+                    "insert:\n          columns: [id]\n          check: {{ updated_at: {{ lt: {now} }} }}"
+                ),
+            ] {
+                let yaml = format!(
+                    "version: 1\nresources:\n  projects:\n    roles:\n      member:\n        {filter}\n"
+                );
+                assert_eq!(
+                    activate_on(&yaml, &catalog).err(),
+                    Some(PolicyError::UnsupportedCapability),
+                    "{filter}"
+                );
+            }
+            // Inside `exists.where` too, at every placement an `exists` can stand.
+            let exists = "{ exists: { resource: posts, on: { id: post_id }, where: { tenant_id: { eq: { now: {} } } } } }";
+            for placement in ["select", "visible_if", "insert", "update", "update_check"] {
+                assert_eq!(
+                    super::activate_parent(&super::comments_policy(placement, exists)).err(),
+                    Some(PolicyError::UnsupportedCapability),
+                    "exists.where at {placement}"
+                );
+            }
+            let in_list = "version: 1\nresources:\n  projects:\n    roles:\n      member:\n        select:\n          columns: [id]\n          filter: { updated_at: { in: [{ now: {} }] } }\n";
+            assert_eq!(
+                activate_on(in_list, &catalog).err(),
+                Some(PolicyError::IncompatibleOperand)
+            );
+        }
+
+        #[test]
+        fn a_session_key_named_now_is_a_separate_parameter_from_the_time() {
+            let yaml = STAMP_POLICY.replace(
+                "            updated_by: { session: subject_id }\n            updated_at: { now: {} }\n            touched_on: { now: {} }\n            updated_ms: { now: {} }\n          check: { tenant_id: { eq: { session: tenant_id } } }\n          returning",
+                "            updated_by: { session: now }\n            updated_at: { now: {} }\n            touched_on: { now: {} }\n            updated_ms: { now: {} }\n          check: { tenant_id: { eq: { session: tenant_id } } }\n          returning",
+            );
+            assert_ne!(yaml, STAMP_POLICY, "the replacement took effect");
+            let bundle = activate_on(&yaml, &stamped_catalog())
+                .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+            let session = TrustedSession::new(
+                RoleName::new("member").unwrap_or_else(|error| unreachable!("valid role: {error}")),
+                "user_1",
+                BTreeMap::from([
+                    ("tenant_id".to_owned(), "tenant_1".to_owned()),
+                    ("now".to_owned(), "1999-01-01T00:00:00.000Z".to_owned()),
+                ]),
+            )
+            .unwrap_or_else(|error| unreachable!("valid session: {error}"));
+            let output = bundle
+                .compile_insert(&bind(MULTI_ROW_INSERT), &session, &context())
+                .unwrap_or_else(|error| unreachable!("INSERT compiles: {error}"));
+            assert_eq!(
+                output.plan.server_values.get(&name("session_now")),
+                Some(&LogicalValue::String("1999-01-01T00:00:00.000Z".to_owned()))
+            );
+            assert_eq!(
+                output.plan.server_values.get(&name("now_rfc3339")),
+                Some(&LogicalValue::String("2026-10-30T13:14:56.789Z".to_owned()))
+            );
+            assert_ne!(name("session_now").as_str(), name("now_rfc3339").as_str());
+        }
+
+        #[test]
+        fn a_client_cannot_assign_a_now_column() {
+            let bundle = activate_on(STAMP_POLICY, &stamped_catalog())
+                .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+            let update = bind("UPDATE projects SET updated_at = :t WHERE id = :id");
+            assert_eq!(
+                bundle
+                    .compile_update(&update, &session("member"), &context())
+                    .err(),
+                Some(PolicyError::ForbiddenColumn)
+            );
+            let insert =
+                bind("INSERT INTO projects (id, name, updated_ms) VALUES (:id, :name, :t)");
+            assert_eq!(
+                bundle
+                    .compile_insert(&insert, &session("member"), &context())
+                    .err(),
+                Some(PolicyError::ForbiddenColumn)
+            );
         }
     }
 }

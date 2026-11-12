@@ -135,6 +135,7 @@ fn compile(runtime: &PolicySqlRuntime, shape: &Shape) -> (u64, Vec<Physical>, bo
         AUTH,
         &json!({"statements":[{"sql": shape.sql, "params": shape.params}]}).to_string(),
         "execute",
+        crate::TEST_CONTEXT,
     ))
     .unwrap_or_else(|_| unreachable!());
     let handle = output["executionHandle"]
@@ -663,6 +664,7 @@ fn the_column_descriptors_of_every_statement_fit_the_envelope_bound() {
         AUTH,
         &json!({"statements": statements}).to_string(),
         "execute",
+        crate::TEST_CONTEXT,
     ))
     .unwrap_or_else(|_| unreachable!());
     let handle = output["executionHandle"]

@@ -432,7 +432,7 @@ JOIN、GROUP/HAVING、windowをadvertisedへ移す前に、deployment capability
 
 - INSERT（`statement.insert.values`。P2として別に扱う）。
 - JSON collection（`source.json-table.collection`、`expression.aggregate.json-group-array`、`result.json-array-schema`）。
-- preset列を持つポリシー（`policy.mutation.preset`）、実行器のトランザクションのロールバック（`execution.transaction.rollback`）、operation check失敗時のロールバックそのもの（観測は失敗として扱うだけで、本番のロールバックは再現しない）。
+- preset列を持つポリシー（`policy.mutation.preset`、`policy.mutation.preset-now`）、実行器のトランザクションのロールバック（`execution.transaction.rollback`）、operation check失敗時のロールバックそのもの（観測は失敗として扱うだけで、本番のロールバックは再現しない）。
 - 負のLIMIT / OFFSET（#136）。policy limitが効くことの主張の違反で、非干渉の違反ではないため、このテストの検査では原理的に見えない。
 - UPDATE / DELETEのfilterがselectのfilterより広いポリシー（#118）。P3の範囲外。常設のポリシーケースは両者を同じにし、#118の現状は`known_gap_118_wider_mutation_filter`が期待値つきで記録する。
 - 書き込みで隠れていた行や値が見えるようになるポリシー（#140）: 書ける列が`visible_if`に入る、変更できるresourceが他のresourceの`exists`の対象になる。常設のポリシーケースは仕様どおりこの形を含む（`logic`のcommentsは`body`、`parent`のpostsはDELETE可、`limited`のpostsは`status`）が、書き込み後の可視ビュー全体を比べるのは`stable_views`が真のresourceだけで、ほかは(a)の観測（書き込み前に見えていたものに限る）で比べる。この形で(a)は一致し(b)が分かれることを、`known_gap_140_*`が期待値つきで記録する。
