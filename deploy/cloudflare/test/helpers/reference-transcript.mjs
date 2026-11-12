@@ -13,25 +13,37 @@
 // must assert the machine's behavior directly instead.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { COMMIT_CHECK_REASONS } from "../../src/error-detail.ts";
+import { COMMIT_CHECK_REASONS, EXCEEDED_LIMITS, REQUEST_LIMITS, TRANSACTION_LIMITS } from "../../src/error-detail.ts";
 
-// #145 pull request E added `detail.reason` to POLICYSQL_COMMIT_CHECK_REJECTED; the recorded
-// replies predate it. The step side's reason is checked against the list and then compared
-// without it: a differential normalizer keeps only code, message and path, so it calls
-// `checkedReason` on every error it drops the detail of, and the test pins the reasons it saw.
-/** The reasons the step side gave, for the test to pin at its end. */
-export const observedCheckReasons = new Set();
+// #145 pull requests E and F added a detail to these codes; the recorded replies predate it. The
+// step side's detail is checked against the code's list and then compared without it: a
+// differential normalizer keeps only code, message and path, so it calls `checkedDetail` on every
+// error it drops the detail of, and the test pins the values it saw. `optional` rows may also
+// carry no detail (a bound without a Capabilities key).
+const RECORDED_WITHOUT_DETAIL = Object.freeze({
+  POLICYSQL_COMMIT_CHECK_REJECTED: Object.freeze({ key: "reason", values: COMMIT_CHECK_REASONS, optional: false }),
+  POLICYSQL_LIMIT_EXCEEDED: Object.freeze({ key: "limit", values: EXCEEDED_LIMITS, optional: true }),
+  POLICYSQL_REQUEST_TOO_LARGE: Object.freeze({ key: "limit", values: REQUEST_LIMITS, optional: true }),
+  POLICYSQL_TRANSACTION_LIMIT_EXCEEDED: Object.freeze({ key: "limit", values: TRANSACTION_LIMITS, optional: true }),
+});
+/** The details the step side gave, `"<code> <value>"`, for the test to pin at its end (`<code> -` when it carried none). */
+export const observedDetails = new Set();
 /**
- * The reason of a commit-check rejection (`error` is the reply's `error`), or null for another
- * code. Anything but exactly `{ reason: <one of COMMIT_CHECK_REASONS> }` fails the comparison.
+ * Checks the detail of an error (`error` is the reply's `error`) whose code is in the table:
+ * exactly `{ <key>: <one of the code's values> }`, or none where the row is optional. Anything
+ * else fails the comparison. Returns the value, or null for a code outside the table.
  */
-export const checkedReason = (error) => {
-  if (error.code !== "POLICYSQL_COMMIT_CHECK_REJECTED") return null;
-  const keys = Object.keys(error.detail ?? {});
-  assert.deepEqual(keys, ["reason"], `a commit check rejection carries exactly a reason: ${JSON.stringify(error.detail)}`);
-  assert.ok(COMMIT_CHECK_REASONS.includes(error.detail.reason), `a known reason: ${error.detail.reason}`);
-  observedCheckReasons.add(error.detail.reason);
-  return error.detail.reason;
+export const checkedDetail = (error) => {
+  const row = Object.hasOwn(RECORDED_WITHOUT_DETAIL, error.code) ? RECORDED_WITHOUT_DETAIL[error.code] : undefined;
+  if (row === undefined) return null;
+  if (error.detail === undefined && row.optional) {
+    observedDetails.add(`${error.code} -`);
+    return null;
+  }
+  assert.deepEqual(Object.keys(error.detail ?? {}), [row.key], `${error.code} carries exactly a ${row.key}: ${JSON.stringify(error.detail)}`);
+  assert.ok(row.values.includes(error.detail[row.key]), `a known ${row.key}: ${error.detail[row.key]}`);
+  observedDetails.add(`${error.code} ${error.detail[row.key]}`);
+  return error.detail[row.key];
 };
 
 /** A JSON value as the transcript stores it (`undefined` members dropped, `-0` as `0`). */

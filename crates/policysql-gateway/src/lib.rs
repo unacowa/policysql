@@ -2,7 +2,8 @@
 
 use policysql_catalog::Catalog;
 use policysql_core::{
-    ClientParameterName, ExpectationKind, LogicalValue, RoleName, SnapshotId, TrustedSession,
+    ClientParameterName, ExpectationKind, LimitName, LogicalValue, RoleName, SnapshotId,
+    TrustedSession,
 };
 use policysql_execution::{
     ComplexityCause, DatabaseExecutor, ExecutionLimits, VerificationError, VerifiedExecutionPlan,
@@ -431,6 +432,8 @@ pub enum RejectionDetail {
     Span(SourceSpan),
     Parameter(ParameterReason),
     Expectation(ExpectationKind),
+    /// `LIMIT_EXCEEDED`: the configured limit the binder checked (#145 pull request F).
+    Limit(LimitName),
 }
 
 /// A rejection: the public kind and detail, plus the internal reason that is only logged.
@@ -564,10 +567,17 @@ pub const fn classify_bind_error(error: &BindError) -> Rejection {
         BindError::InvalidLiteral => {
             parameter_rejection(ParameterReason::Literal, "bind.InvalidLiteral")
         }
-        BindError::ProjectionLimit => Rejection::plain(Kind::LimitExceeded, "bind.ProjectionLimit"),
-        BindError::JoinLimit => Rejection::plain(Kind::LimitExceeded, "bind.JoinLimit"),
-        BindError::ParameterLimit => Rejection::plain(Kind::LimitExceeded, "bind.ParameterLimit"),
-        BindError::ExpressionDepth => Rejection::plain(Kind::LimitExceeded, "bind.ExpressionDepth"),
+        BindError::ProjectionLimit => {
+            limit_rejection(LimitName::MaxProjections, "bind.ProjectionLimit")
+        }
+        BindError::JoinLimit => limit_rejection(LimitName::MaxJoins, "bind.JoinLimit"),
+        BindError::ParameterLimit => {
+            limit_rejection(LimitName::MaxParameters, "bind.ParameterLimit")
+        }
+        BindError::ExpressionDepth => {
+            limit_rejection(LimitName::MaxExpressionDepth, "bind.ExpressionDepth")
+        }
+        // Not a configured limit (the `LIMIT` clause's value is invalid): no `detail.limit`.
         BindError::InvalidLimit => Rejection::plain(Kind::LimitExceeded, "bind.InvalidLimit"),
         BindError::UnknownResource => Rejection::plain(Kind::MissingPolicy, "bind.UnknownResource"),
         BindError::Unsupported(feature, shape) => Rejection {
@@ -600,6 +610,14 @@ const fn parameter_rejection(reason: ParameterReason, internal: &'static str) ->
     )
 }
 
+const fn limit_rejection(limit: LimitName, internal: &'static str) -> Rejection {
+    Rejection::with_detail(
+        RejectionKind::LimitExceeded,
+        RejectionDetail::Limit(limit),
+        internal,
+    )
+}
+
 const fn feature_rejection(feature: UnsupportedFeature, internal: &'static str) -> Rejection {
     Rejection::with_detail(
         RejectionKind::UnsupportedSql,
@@ -627,6 +645,7 @@ pub const fn policy_rejection(error: &PolicyError) -> Rejection {
         PolicyError::PresetColumnOverlap => {
             Rejection::plain(Kind::PresetColumn, "policy.PresetColumnOverlap")
         }
+        // Activation only, never a client's request: no `detail.limit`.
         PolicyError::TooManyPolicies => {
             Rejection::plain(Kind::LimitExceeded, "policy.TooManyPolicies")
         }
@@ -749,16 +768,16 @@ mod tests {
     use super::{
         AuthContext, EndpointPermission, Gateway, GatewayError, ParameterReason, Rejection,
         RejectionDetail, RejectionKind, StatementRequest, classify_bind_error, emit_reason,
-        verify_reason,
+        policy_rejection, verify_reason,
     };
     use policysql_catalog::{Catalog, ResourceDescriptor};
     use policysql_core::{
-        ColumnName, LogicalType, ResourceId, ResourceName, RoleName, SnapshotId, TrustedSession,
-        ValueDescriptor, ValueRepresentation,
+        ColumnName, LimitName, LogicalType, ResourceId, ResourceName, RoleName, SnapshotId,
+        TrustedSession, ValueDescriptor, ValueRepresentation,
     };
     use policysql_execution::{DatabaseExecutor, ExecutionLimits, VerifiedExecutionPlan};
     use policysql_parser::{BindError, SourceSpan, UnsupportedFeature};
-    use policysql_policy::PolicyBundle;
+    use policysql_policy::{PolicyBundle, PolicyError};
     use policysql_sqlite::EmitError;
     use policysql_sqlite::SqliteProfile;
     use std::collections::BTreeMap;
@@ -1125,6 +1144,41 @@ resources:
             Rejection::plain(RejectionKind::ForbiddenColumn, "policy.ForbiddenColumn").kind,
             unknown.kind
         );
+    }
+
+    #[test]
+    fn a_binder_limit_names_its_configured_limit_and_a_bad_limit_clause_names_none() {
+        for (error, limit, reason) in [
+            (
+                BindError::ProjectionLimit,
+                LimitName::MaxProjections,
+                "bind.ProjectionLimit",
+            ),
+            (BindError::JoinLimit, LimitName::MaxJoins, "bind.JoinLimit"),
+            (
+                BindError::ParameterLimit,
+                LimitName::MaxParameters,
+                "bind.ParameterLimit",
+            ),
+            (
+                BindError::ExpressionDepth,
+                LimitName::MaxExpressionDepth,
+                "bind.ExpressionDepth",
+            ),
+        ] {
+            let rejection = classify_bind_error(&error);
+            assert_eq!(rejection.kind, RejectionKind::LimitExceeded);
+            assert_eq!(rejection.detail, Some(RejectionDetail::Limit(limit)));
+            assert_eq!(rejection.reason, reason);
+        }
+        // The `LIMIT` clause's value is not a configured limit, and a policy count is checked at
+        // activation only: both are `LIMIT_EXCEEDED` without a `detail.limit`.
+        let invalid = classify_bind_error(&BindError::InvalidLimit);
+        assert_eq!(invalid.kind, RejectionKind::LimitExceeded);
+        assert_eq!(invalid.detail, None);
+        let policies = policy_rejection(&PolicyError::TooManyPolicies);
+        assert_eq!(policies.kind, RejectionKind::LimitExceeded);
+        assert_eq!(policies.detail, None);
     }
 
     #[test]

@@ -3,8 +3,8 @@
 use policysql_catalog::{Catalog, ResourceDescriptor};
 use policysql_core::{
     ClientParameterName, ColumnName, ConstraintScalar, ExpectationKind, JsonSchemaType,
-    JsonValueSchema, LogicalType, LogicalValue, ResourceId, ResourceName, SnapshotId, StorageClass,
-    ValueConstraints, ValueDescriptor, ValueRepresentation,
+    JsonValueSchema, LimitName, LogicalType, LogicalValue, ResourceId, ResourceName, SnapshotId,
+    StorageClass, ValueConstraints, ValueDescriptor, ValueRepresentation,
 };
 use policysql_execution::{ComplexityCause, ExecutionLimits};
 use policysql_gateway::{
@@ -108,7 +108,13 @@ use wasm_bindgen::prelude::*;
 /// class `unavailable`); `POLICYSQL_COMMIT_CHECK_REJECTED` carries `detail.reason` (`denied`,
 /// `unavailable`, `limit`, `unconfigured`, `callback`); a forwarded owner reply is checked against
 /// that row. No identity value changed.
-const ABI_VERSION: u32 = 23;
+/// 24: issue #145 pull request F: `POLICYSQL_LIMIT_EXCEEDED`, `POLICYSQL_REQUEST_TOO_LARGE`, and
+/// `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` carry `detail.limit`, the Capabilities key of the limit
+/// (`limits.<name>`, or `transactions.<name>` for the transaction code), where the failing place
+/// checks that limit itself; a derived or fixed bound and the adapter class `limit` carry none;
+/// `check_body_json` and `begin_body_json` errors may carry `detail`; a forwarded owner reply is
+/// checked against those rows. No identity value changed.
+const ABI_VERSION: u32 = 24;
 /// The fixed JSON levels the machine adds when it wraps an interactive command in the
 /// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
 /// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must
@@ -315,6 +321,9 @@ struct BodyErrorEnvelope {
 struct BodyErrorBody {
     code: &'static str,
     message: &'static str,
+    /// The Capabilities key of the body limit that was crossed (#145 pull request F).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<Box<ErrorDetail>>,
 }
 
 fn body_error(error: BodyErrorBody) -> String {
@@ -1024,6 +1033,9 @@ fn check_body(
         return Err(BodyErrorBody {
             code: "POLICYSQL_REQUEST_TOO_LARGE",
             message: "Request body exceeds the size limit.",
+            detail: Some(Box::new(ErrorDetail::limit(
+                LimitName::MaxRequestBytes.name(),
+            ))),
         });
     }
     let max_values = usize::try_from(limits.max_json_values).unwrap_or(usize::MAX);
@@ -1032,14 +1044,19 @@ fn check_body(
         Err(policysql_transaction::StrictError::TooManyValues) => Err(BodyErrorBody {
             code: "POLICYSQL_REQUEST_TOO_LARGE",
             message: "Request body has too many JSON values.",
+            detail: Some(Box::new(ErrorDetail::limit(
+                LimitName::MaxJsonValues.name(),
+            ))),
         }),
         Err(policysql_transaction::StrictError::TooDeep) => Err(BodyErrorBody {
             code: "POLICYSQL_JSON_TOO_DEEP",
             message: "Request body nests too deeply.",
+            detail: None,
         }),
         Err(policysql_transaction::StrictError::LoneSurrogate) => Err(BodyErrorBody {
             code: "POLICYSQL_INVALID_REQUEST",
             message: "Request body is not valid UTF-8.",
+            detail: None,
         }),
         Err(
             policysql_transaction::StrictError::Syntax
@@ -1047,6 +1064,7 @@ fn check_body(
         ) => Err(BodyErrorBody {
             code: "POLICYSQL_INVALID_REQUEST",
             message: "Request body is not valid JSON.",
+            detail: None,
         }),
     }
 }
@@ -1057,6 +1075,7 @@ fn invalid_request_body() -> BodyErrorBody {
     BodyErrorBody {
         code: "POLICYSQL_INVALID_REQUEST",
         message: "The request is invalid.",
+        detail: None,
     }
 }
 
@@ -1157,6 +1176,7 @@ impl PolicySqlRuntime {
         // checked before a byte is parsed, against what the earlier statements left.
         let raw_bytes = u64::try_from(raw_result_json.len()).unwrap_or(u64::MAX);
         if raw_bytes > budget.raw_bytes {
+            // The raw bound is derived from several limits: no `detail.limit`.
             return Err(rejected(RejectionKind::LimitExceeded, "result.RawBytes"));
         }
         let raw: RawExecuteResult =
@@ -1185,6 +1205,7 @@ impl PolicySqlRuntime {
     ) -> Result<ValidatedExecuteResult, RuntimeError> {
         let raw_bytes = raw_result_bytes(&raw);
         if raw_bytes > budget.raw_bytes {
+            // The raw bound is derived from several limits: no `detail.limit`.
             return Err(rejected(RejectionKind::LimitExceeded, "result.RawBytes"));
         }
         self.validate_result_parts(
@@ -1235,7 +1256,7 @@ impl PolicySqlRuntime {
         // JSON-typed cell.
         let values_limit = budget.values;
         let mut values = u64::try_from(columns.len()).unwrap_or(u64::MAX);
-        let over_limit = || rejected(RejectionKind::LimitExceeded, "result.Values");
+        let over_limit = || limit_exceeded(LimitName::MaxJsonValues, "result.Values");
         if values > values_limit {
             return Err(over_limit());
         }
@@ -1288,8 +1309,8 @@ impl PolicySqlRuntime {
                     shape: None,
                 })
             }
-            policysql_turso::AdapterError::LimitExceeded => {
-                rejected(RejectionKind::LimitExceeded, "result.Limit")
+            policysql_turso::AdapterError::LimitExceeded(limit) => {
+                limit_exceeded(limit, "result.Limit")
             }
             policysql_turso::AdapterError::CheckFailed => RuntimeError::CheckFailedAt(index),
             _ => RuntimeError::RemoteResult,
@@ -1425,6 +1446,7 @@ impl PolicySqlRuntime {
         if verified_auth_json.len().saturating_add(request_json.len())
             > policysql_transaction::bounds::compile_input_bytes(max_request_bytes)
         {
+            // Derived from `max_request_bytes` (and the auth's bound): no `detail.limit`.
             return Err(RuntimeError::RequestTooLarge);
         }
         let endpoint = endpoint_permission(permission)?;
@@ -1443,8 +1465,8 @@ impl PolicySqlRuntime {
         if u64::try_from(raw_request.statements.len()).unwrap_or(u64::MAX)
             > self.limits.max_statements
         {
-            return Err(rejected(
-                RejectionKind::LimitExceeded,
+            return Err(limit_exceeded(
+                LimitName::MaxStatements,
                 "request.StatementLimit",
             ));
         }
@@ -2602,7 +2624,7 @@ fn logical_value(
                 .map(LogicalValue::Bytes)
                 .map_err(|error| match error {
                     policysql_core::bytes::DecodeError::TooLarge => {
-                        rejected(RejectionKind::LimitExceeded, "parameter.BytesTooLarge")
+                        limit_exceeded(LimitName::MaxBytesPerValue, "parameter.BytesTooLarge")
                     }
                     policysql_core::bytes::DecodeError::InvalidEncoding => {
                         invalid_parameter("parameter.BytesEncoding")
@@ -2643,6 +2665,15 @@ const fn rejected(kind: RejectionKind, reason: &'static str) -> RuntimeError {
     RuntimeError::Rejected(Rejection::plain(kind, reason))
 }
 
+/// A `LIMIT_EXCEEDED` whose public detail names the configured limit (#145 pull request F).
+const fn limit_exceeded(limit: LimitName, reason: &'static str) -> RuntimeError {
+    RuntimeError::Rejected(Rejection::with_detail(
+        RejectionKind::LimitExceeded,
+        RejectionDetail::Limit(limit),
+        reason,
+    ))
+}
+
 /// An `INVALID_PARAMETER` whose public detail is `reason`.
 const fn parameter_error(reason: ParameterReason, internal: &'static str) -> RuntimeError {
     RuntimeError::Rejected(Rejection::with_detail(
@@ -2677,7 +2708,7 @@ fn logical_result_value(
             .map(LogicalValue::Bytes)
             .map_err(|error| match error {
                 policysql_core::bytes::DecodeError::TooLarge => {
-                    rejected(RejectionKind::LimitExceeded, "result.BytesTooLarge")
+                    limit_exceeded(LimitName::MaxBytesPerValue, "result.BytesTooLarge")
                 }
                 policysql_core::bytes::DecodeError::InvalidEncoding => RuntimeError::RemoteResult,
             });
@@ -3052,7 +3083,7 @@ fn error_body(runtime_error: RuntimeError) -> ErrorBody {
             code: "POLICYSQL_REQUEST_TOO_LARGE",
             message: "A statement's SQL exceeds the size limit.",
             path: Some(format!("/statements/{index}/sql")),
-            detail: None,
+            detail: Some(ErrorDetail::limit(LimitName::MaxSqlBytes.name())),
         },
         RuntimeError::Rejected(rejection) => rejection_body(rejection, None),
         RuntimeError::RejectedAt(rejection, index) => rejection_body(rejection, Some(index)),
@@ -3117,6 +3148,7 @@ fn rejection_detail(detail: RejectionDetail) -> Option<ErrorDetail> {
         }
         RejectionDetail::Parameter(reason) => Some(ErrorDetail::reason(reason.name())),
         RejectionDetail::Expectation(kind) => Some(ErrorDetail::expectation(kind.name())),
+        RejectionDetail::Limit(limit) => Some(ErrorDetail::limit(limit.name())),
     }
 }
 
@@ -4152,6 +4184,9 @@ resources:
                 }
                 RejectionKind::ExpectationFailed => {
                     Some(RejectionDetail::Expectation(ExpectationKind::RowCount))
+                }
+                RejectionKind::LimitExceeded => {
+                    Some(RejectionDetail::Limit(policysql_core::LimitName::MaxJoins))
                 }
                 _ => None,
             },

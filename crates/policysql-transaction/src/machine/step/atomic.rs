@@ -42,7 +42,7 @@ use super::super::compiler::{
 };
 use super::super::io::{
     self, CheckReason, Class, Code, DriverCall, DriverResult, Effect, ErrorDetail, Event,
-    ObserveContext, ObservedStatement, core_error_reply, error_reply, value_reply,
+    ObserveContext, ObservedStatement, ResultLimitName, core_error_reply, error_reply, value_reply,
 };
 use super::super::state::{
     AtomicIds, AtomicRun, AtomicStatement, AtomicUsage, Binding, CommitChecks, Connection,
@@ -353,7 +353,8 @@ const fn commit_failure(class: Class) -> Code {
 }
 
 /// What a failed atomic `Execute` answers. A limit on the envelope's own results is the
-/// client's `POLICYSQL_LIMIT_EXCEEDED`; on the idempotency lookup or insert it is
+/// client's `POLICYSQL_LIMIT_EXCEEDED` (no `detail.limit` when the adapter's class `limit` says it:
+/// the class does not name the bound); on the idempotency lookup or insert it is
 /// `POLICYSQL_INTERNAL`: the outcome of a keyed request that may have committed could not be
 /// read, which is never a rejection.
 ///
@@ -1389,10 +1390,24 @@ impl<C: Compiler> Step<'_, C> {
         let max_rows = strictest(&atomic.statements, |limits| limits.max_rows);
         let max_bytes = strictest(&atomic.statements, |limits| limits.max_result_bytes);
         let max_ms = strictest(&atomic.statements, |limits| limits.timeout_ms);
-        if u64::try_from(rows).unwrap_or(u64::MAX) > max_rows
-            || u64::try_from(bytes).unwrap_or(u64::MAX) > max_bytes
-        {
-            return self.close(lane, Phase::Failed, Some(error_reply(Code::LimitExceeded)));
+        // Rows first, then bytes: the order of the former `||` (#145 pull request F).
+        if u64::try_from(rows).unwrap_or(u64::MAX) > max_rows {
+            return self.close(
+                lane,
+                Phase::Failed,
+                Some(error_reply(Code::LimitExceeded(Some(
+                    ResultLimitName::Rows,
+                )))),
+            );
+        }
+        if u64::try_from(bytes).unwrap_or(u64::MAX) > max_bytes {
+            return self.close(
+                lane,
+                Phase::Failed,
+                Some(error_reply(Code::LimitExceeded(Some(
+                    ResultLimitName::ResultBytes,
+                )))),
+            );
         }
         if self.host.now_ms.saturating_sub(atomic.started_at_ms) > max_ms {
             return self.close(lane, Phase::Failed, Some(error_reply(Code::Timeout)));
@@ -1447,7 +1462,13 @@ impl<C: Compiler> Step<'_, C> {
             .unwrap_or(u64::MAX)
             .saturating_add(bounds::RESPONSE_RESERVE_BYTES as u64);
         if measured > self.limits.max_response_bytes {
-            return self.close(lane, Phase::Failed, Some(error_reply(Code::LimitExceeded)));
+            return self.close(
+                lane,
+                Phase::Failed,
+                Some(error_reply(Code::LimitExceeded(Some(
+                    ResultLimitName::ResponseBytes,
+                )))),
+            );
         }
         let progress = self.atomic_run()?;
         if progress.placement == Placement::Direct {

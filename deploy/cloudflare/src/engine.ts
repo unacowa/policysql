@@ -112,10 +112,10 @@ const invalidRequest = () => new EngineError("POLICYSQL_INVALID_REQUEST", "The r
 // definite 413/400 (ADR 0007, #100, ADR 0030). Every other body rejection
 // (syntax, a duplicate key, a lone surrogate, a missing body, a wrong content type) was invalid
 // under every deployment and stays definite.
-const deploymentDependentBodyCode = (error: unknown): string | null => {
+const deploymentDependentBodyError = (error: unknown): EngineError | null => {
   if (!(error instanceof EngineError)) return null;
   return error.code === "POLICYSQL_REQUEST_TOO_LARGE" || error.code === "POLICYSQL_JSON_TOO_DEEP"
-    ? error.code
+    ? error
     : null;
 };
 
@@ -395,10 +395,11 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         // (ADR 0007, #100, ADR 0030). A malformed key
         // could never have committed, and an unkeyed request has no replay contract, so both
         // keep the definite answer. The body read stays bounded by the same limit as before.
-        const rejection = validIdempotencyKey(fields.idempotencyKey) ? deploymentDependentBodyCode(error) : null;
+        const rejection = validIdempotencyKey(fields.idempotencyKey) ? deploymentDependentBodyError(error) : null;
         if (rejection !== null) {
-          console.log(JSON.stringify({ event: "keyed_body_limit_unknown", requestId, rejection }));
-          throw outcomeUnknownError(rejection);
+          console.log(JSON.stringify({ event: "keyed_body_limit_unknown", requestId, rejection: rejection.code }));
+          // The cause is what the unkeyed request answers: the limit's name included.
+          throw outcomeUnknownError(rejection.code, rejection.detail ?? null);
         }
         throw error;
       }

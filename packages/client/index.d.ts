@@ -84,6 +84,14 @@ export type PolicySqlComplexity =
 /** Which declared expectation `POLICYSQL_EXPECTATION_FAILED` reports. The actual count is never returned. */
 export type PolicySqlExpectation = 'affectedRows' | 'rowCount'
 /**
+ * A key of Capabilities `limits` (`POLICYSQL_LIMIT_EXCEEDED`, `POLICYSQL_REQUEST_TOO_LARGE`) or of
+ * `transactions` (`POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`). The configured number is read from Capabilities.
+ */
+export type PolicySqlLimit =
+  | 'maxRows' | 'maxResultBytes' | 'maxResponseBytes' | 'maxStatements' | 'maxJsonValues'
+  | 'maxBytesPerValue' | 'maxParameters' | 'maxExpressionDepth' | 'maxProjections' | 'maxJoins'
+  | 'maxRequestBytes' | 'maxSqlBytes' | 'maxCallbackRowsPerCheck' | 'maxCallbackBytesPerCheck'
+/**
  * Machine-readable values fixed per error code. Branch on `code`, not on the presence of a field.
  * `span` is half-open UTF-8 byte offsets into the statement's `sql`.
  */
@@ -102,6 +110,11 @@ export interface PolicySqlErrorDetail {
   readonly complexity?: PolicySqlComplexity
   /** On `POLICYSQL_EXPECTATION_FAILED`. */
   readonly expectation?: PolicySqlExpectation
+  /**
+   * On `POLICYSQL_LIMIT_EXCEEDED` and `POLICYSQL_REQUEST_TOO_LARGE`, a key of Capabilities `limits`; on
+   * `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`, of `transactions`. Absent for a bound without a key.
+   */
+  readonly limit?: PolicySqlLimit
   /**
    * On `POLICYSQL_OUTCOME_UNKNOWN`: the code, path and detail the request would have been
    * refused with, had it carried no key. `detail` is `null` when that code has none.

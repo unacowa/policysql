@@ -58,20 +58,23 @@ const unchanged = (h, before, label) => {
   assert.deepEqual(h.ownerNames(), before.owners, `${label}: no owner was created`);
   for (const name of before.owners) assert.equal(h.ownerInputs(name).length, before.inputs[name], `${label}: nothing was forwarded to ${name}`);
 };
-const unknown = (response, label, causeCode = "POLICYSQL_REQUEST_TOO_LARGE") => {
+const BYTES = Object.freeze({ limit: "maxRequestBytes" });
+const VALUES = Object.freeze({ limit: "maxJsonValues" });
+// The cause is what the unkeyed request answers, `detail.limit` included (#145 pull request F).
+const unknown = (response, label, causeCode = "POLICYSQL_REQUEST_TOO_LARGE", causeDetail = causeCode === "POLICYSQL_REQUEST_TOO_LARGE" ? BYTES : null) => {
   assert.equal(response.status, 500, `${label}: ${JSON.stringify(response.body).slice(0, 300)}`);
   assert.equal(response.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN", label);
   assert.equal(response.body.error.message, "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.", label);
   assert.equal(response.body.error.path, null, label);
-  assert.deepEqual(response.body.error.detail, { cause: { code: causeCode, path: null, detail: null } }, label);
+  assert.deepEqual(response.body.error.detail, { cause: { code: causeCode, path: null, detail: causeDetail } }, label);
   assert.deepEqual(Object.keys(response.body), ["error"], `${label}: no stored result, trace, or internal field`);
   assert.equal(response.body.results, undefined, `${label}: the stored result is not returned`);
   assert.equal(response.body.debug, undefined, `${label}: no trace is returned`);
 };
-const definite = (response, status, code, label) => {
+const definite = (response, status, code, label, detail = undefined) => {
   assert.equal(response.status, status, `${label}: ${JSON.stringify(response.body).slice(0, 300)}`);
   assert.equal(response.body.error.code, code, label);
-  assert.equal(response.body.error.detail, undefined, `${label}: no detail`);
+  assert.deepEqual(response.body.error.detail, detail, `${label}: ${detail === undefined ? "no detail" : "the limit's name"}`);
   assert.equal(response.body.results, undefined, `${label}: no result`);
 };
 
@@ -118,7 +121,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       assert.ok(events.some((event) => event.event === "keyed_body_limit_unknown"), "the body-limit event");
       const rejected = events.filter((event) => event.event === "request_rejected").at(-1);
       assert.equal(rejected.code, "POLICYSQL_OUTCOME_UNKNOWN");
-      assert.deepEqual(rejected.cause, { code: "POLICYSQL_REQUEST_TOO_LARGE", path: null, detail: null });
+      assert.deepEqual(rejected.cause, { code: "POLICYSQL_REQUEST_TOO_LARGE", path: null, detail: BYTES });
       unchanged(h, before, "lowered maxRequestBytes");
       assert.equal(rowCount(h, "lowered_bytes"), 1, "never executed twice");
 
@@ -127,9 +130,9 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       // 413 and run nothing.
       unknown(await h.request("a", EXECUTE, { statements: [insertWithState("lowered_fresh", name)] }, `lowered-bytes-fresh-${placement}-01`), "fresh key");
       definite(await h.request("a", EXECUTE, { statements: [insertWithState("lowered_unkeyed", name)] }, null),
-        413, "POLICYSQL_REQUEST_TOO_LARGE", "unkeyed");
+        413, "POLICYSQL_REQUEST_TOO_LARGE", "unkeyed", BYTES);
       definite(await h.request("a", EXECUTE, { statements: [insertWithState("lowered_malformed", name)] }, "short"),
-        413, "POLICYSQL_REQUEST_TOO_LARGE", "malformed key");
+        413, "POLICYSQL_REQUEST_TOO_LARGE", "malformed key", BYTES);
       for (const id of ["lowered_fresh", "lowered_unkeyed", "lowered_malformed"]) assert.equal(rowCount(h, id), 0, id);
       unchanged(h, before, "controls");
 
@@ -182,16 +185,16 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       limits.maxJsonValues = 1_024;
       h.redeploy({});
       const retry = await h.request("a", EXECUTE, body, key);
-      unknown(retry, "lowered maxJsonValues");
+      unknown(retry, "lowered maxJsonValues", "POLICYSQL_REQUEST_TOO_LARGE", VALUES);
       unchanged(h, before, "lowered maxJsonValues");
       assert.equal(rowCount(h, "lowered_values"), 1);
 
       // A fresh key is unknown; no key and a malformed key keep the definite 413.
-      unknown(await h.request("a", EXECUTE, { statements: [insertWithMetadata("lowered_values_fresh", metadata)] }, `lowered-values-fresh-${placement}-1`), "fresh key");
+      unknown(await h.request("a", EXECUTE, { statements: [insertWithMetadata("lowered_values_fresh", metadata)] }, `lowered-values-fresh-${placement}-1`), "fresh key", "POLICYSQL_REQUEST_TOO_LARGE", VALUES);
       definite(await h.request("a", EXECUTE, { statements: [insertWithMetadata("lowered_values_unkeyed", metadata)] }, null),
-        413, "POLICYSQL_REQUEST_TOO_LARGE", "unkeyed");
+        413, "POLICYSQL_REQUEST_TOO_LARGE", "unkeyed", VALUES);
       definite(await h.request("a", EXECUTE, { statements: [insertWithMetadata("lowered_values_malformed", metadata)] }, "short"),
-        413, "POLICYSQL_REQUEST_TOO_LARGE", "malformed key");
+        413, "POLICYSQL_REQUEST_TOO_LARGE", "malformed key", VALUES);
       for (const id of ["lowered_values_fresh", "lowered_values_unkeyed", "lowered_values_malformed"]) assert.equal(rowCount(h, id), 0, id);
       unchanged(h, before, "controls");
 

@@ -773,6 +773,71 @@ fn statement_limit_and_shape_errors() {
         &statement_text(9, "SELECT id FROM projects"),
     ));
     assert_eq!(code(&ninth), Some("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED"));
+    assert_eq!(
+        ninth["error"]["detail"],
+        json!({"limit": "maxStatements"}),
+        "{ninth}"
+    );
+}
+
+/// #145 pull request F: the other limits an interactive statement meets name the bound that was
+/// crossed, except the adapter's class `limit`, which does not say which bound it was.
+#[test]
+fn an_interactive_statement_names_the_limit_it_crossed() {
+    // The transaction's cumulative response bytes.
+    let mut engine = begun("read");
+    engine.limits.max_transaction_result_bytes = 10;
+    let reply = engine.run(&command(
+        "statement",
+        &statement_text(1, "SELECT id FROM projects"),
+    ));
+    assert_eq!(code(&reply), Some("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED"));
+    assert_eq!(
+        reply["error"]["detail"],
+        json!({"limit": "maxResultBytes"}),
+        "{reply}"
+    );
+    // The marker of a value over `maxBytesPerValue` and the adapter's class `limit`.
+    for (label, marker, expected) in [
+        ("marker", true, Some(json!({"limit": "maxBytesPerValue"}))),
+        ("class", false, None),
+    ] {
+        let mut engine = begun("read");
+        engine.feed(&command(
+            "statement",
+            &statement_text(1, "SELECT id FROM projects"),
+        ));
+        while engine
+            .outstanding
+            .as_ref()
+            .is_some_and(|effect| effect["type"] != "execute")
+        {
+            engine.resolve(true, "unknown");
+        }
+        if marker {
+            let effect = engine
+                .outstanding
+                .take()
+                .unwrap_or_else(|| unreachable!("an execute is awaited"));
+            engine.feed(
+                &json!({"type": "executed", "id": effect["id"], "results": [{
+                    "columns": ["id", "name"], "rows": [[{"type": "invalid", "limit": true}, "x"]],
+                    "rowsAffected": 0,
+                    "usage": {"rowsRead": 1, "rowsWritten": 0, "queryDurationMs": 0.5},
+                }]}),
+            );
+        } else {
+            engine.resolve(false, "limit");
+        }
+        engine.settle();
+        let reply = engine.last_reply().cloned().unwrap_or_default();
+        assert_eq!(
+            code(&reply),
+            Some("POLICYSQL_LIMIT_EXCEEDED"),
+            "{label}: {reply}"
+        );
+        assert_eq!(reply["error"].get("detail").cloned(), expected, "{label}");
+    }
 }
 
 #[test]

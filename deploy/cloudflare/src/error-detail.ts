@@ -35,6 +35,23 @@ export const COMMIT_CHECK_REASONS: readonly string[] = Object.freeze([
   "denied", "unavailable", "limit", "unconfigured", "callback",
 ]);
 
+/**
+ * The values `limit` takes on `POLICYSQL_LIMIT_EXCEEDED`: Capabilities `limits` keys. The same list
+ * as `EXCEEDED_LIMITS` in core (test/error-detail.test.mjs keeps them equal).
+ */
+export const EXCEEDED_LIMITS: readonly string[] = Object.freeze([
+  "maxRows", "maxResultBytes", "maxResponseBytes", "maxStatements", "maxJsonValues",
+  "maxBytesPerValue", "maxParameters", "maxExpressionDepth", "maxProjections", "maxJoins",
+]);
+
+/** The values `limit` takes on `POLICYSQL_REQUEST_TOO_LARGE`: Capabilities `limits` keys; the same list as `REQUEST_LIMITS` in core. */
+export const REQUEST_LIMITS: readonly string[] = Object.freeze(["maxRequestBytes", "maxJsonValues", "maxSqlBytes"]);
+
+/** The values `limit` takes on `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`: Capabilities `transactions` keys; the same list as `TRANSACTION_LIMITS` in core. */
+export const TRANSACTION_LIMITS: readonly string[] = Object.freeze([
+  "maxStatements", "maxResultBytes", "maxCallbackRowsPerCheck", "maxCallbackBytesPerCheck",
+]);
+
 /** The expectations `expectation` names (`POLICYSQL_EXPECTATION_FAILED`). */
 export const EXPECTATIONS: readonly string[] = Object.freeze(["affectedRows", "rowCount"]);
 
@@ -55,6 +72,8 @@ export type ErrorDetail = Readonly<{
   complexity?: string;
   /** `POLICYSQL_EXPECTATION_FAILED`. */
   expectation?: string;
+  /** `POLICYSQL_LIMIT_EXCEEDED`, `POLICYSQL_REQUEST_TOO_LARGE`, `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED`: the Capabilities key of the limit. */
+  limit?: string;
 }>;
 
 /**
@@ -87,12 +106,15 @@ type DetailRow = Readonly<{
 }>;
 
 /** A detail of exactly one key `key`, whose value is one of `values`. */
-const enumerated = (key: "feature" | "reason" | "complexity" | "expectation", values: readonly string[]): DetailRow => ({
+const enumerated = (key: "feature" | "reason" | "complexity" | "expectation" | "limit", values: readonly string[]): DetailRow => ({
   required: true,
   check: (detail) => Object.keys(detail).length === 1 && Object.hasOwn(detail, key)
     && typeof detail[key] === "string" && values.includes(detail[key])
     ? Object.freeze({ [key]: detail[key] as string }) : null,
 });
+
+/** As `enumerated`, but the code may also carry no detail (a bound without a Capabilities key). */
+const optionalEnumerated = (key: "limit", values: readonly string[]): DetailRow => ({ ...enumerated(key, values), required: false });
 
 const isOffset = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_SPAN_OFFSET;
@@ -151,6 +173,10 @@ const DETAIL_ROWS: Readonly<Record<string, DetailRow>> = Object.freeze({
   POLICYSQL_COMMIT_CHECK_REJECTED: enumerated("reason", COMMIT_CHECK_REASONS),
   POLICYSQL_SQL_TOO_COMPLEX: enumerated("complexity", COMPLEXITY_DETAILS),
   POLICYSQL_EXPECTATION_FAILED: enumerated("expectation", EXPECTATIONS),
+  // The limit is optional: only a place that checks a configured limit itself names it.
+  POLICYSQL_LIMIT_EXCEEDED: optionalEnumerated("limit", EXCEEDED_LIMITS),
+  POLICYSQL_REQUEST_TOO_LARGE: optionalEnumerated("limit", REQUEST_LIMITS),
+  POLICYSQL_TRANSACTION_LIMIT_EXCEEDED: optionalEnumerated("limit", TRANSACTION_LIMITS),
 });
 
 /**

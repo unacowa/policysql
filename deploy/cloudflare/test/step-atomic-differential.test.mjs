@@ -31,7 +31,7 @@ import { EngineError } from "../src/errors.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
 import { validateConfig } from "../src/engine-config.ts";
 import { createMemoryTransactionOwners } from "./helpers/memory-owner.mjs";
-import { asRecorded, checkedReason, observedCheckReasons, referenceTranscript } from "./helpers/reference-transcript.mjs";
+import { asRecorded, checkedDetail, observedDetails, referenceTranscript } from "./helpers/reference-transcript.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 
@@ -388,7 +388,7 @@ const randomOwner = (value) => (typeof value?.transactionId === "string" && /^at
 
 const normalizedResult = (result) => {
   if (result.ok) return { ok: true, value: randomOwner(result.value), requestId: result.requestId };
-  checkedReason(result.error);
+  checkedDetail(result.error);
   return { ok: false, code: result.error.code, message: result.error.message, path: result.error.path, requestId: result.requestId };
 };
 
@@ -729,11 +729,11 @@ test(`allowlist request-fingerprint-without-snapshot: ${ALLOWLIST["request-finge
   assert.equal(step.keyHash, ts.keyHash, "the key hash is unchanged");
   assert.deepEqual(step.record.results, ts.record.results);
   const binding = bindingOf(env.runtime);
-  assert.match(binding.snapshot, /:abi-23$/u);
+  assert.match(binding.snapshot, /:abi-24$/u);
   const { snapshot: _snapshot, ...withoutSnapshot } = binding;
   // The recorded side hashed the binding with its release's snapshot (ABI 8); core hashes it
   // without any snapshot.
-  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-23$/u, ":abi-8") }));
+  assert.equal(ts.fingerprint, requestFingerprint(body, { ...binding, snapshot: binding.snapshot.replace(/:abi-24$/u, ":abi-8") }));
   assert.equal(step.fingerprint, requestFingerprint(body, withoutSnapshot));
   assert.notEqual(step.fingerprint, requestFingerprint(body, binding), "nor the current snapshot");
   // The relabeling maps both to the same name: it hides the value and nothing else.
@@ -832,8 +832,15 @@ test("cost_estimate_json evaluates as cost.ts evaluates", async (t) => {
   }
 });
 
-// The step side's commit-check rejections all carried one of the fixed reasons (`checkedReason`),
-// which the comparison drops. The set pinned here is what the scenarios above reach.
-test("the commit-check reasons the step side gave are the ones the scenarios reach (#145 pull request E)", () => {
-  assert.deepEqual([...observedCheckReasons].sort(), ["denied", "unavailable", "unconfigured"]);
+// The step side's commit-check rejections and limit refusals all carried one of the fixed values
+// of their code (`checkedDetail`), which the comparison drops. The set pinned here is what the
+// scenarios above reach.
+test("the details the step side gave are the ones the scenarios reach (#145 pull requests E and F)", () => {
+  assert.deepEqual([...observedDetails].sort(), [
+    "POLICYSQL_COMMIT_CHECK_REJECTED denied",
+    "POLICYSQL_COMMIT_CHECK_REJECTED unavailable",
+    "POLICYSQL_COMMIT_CHECK_REJECTED unconfigured",
+    "POLICYSQL_LIMIT_EXCEEDED maxResultBytes",
+    "POLICYSQL_LIMIT_EXCEEDED maxRows",
+  ]);
 });

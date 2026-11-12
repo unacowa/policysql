@@ -62,17 +62,21 @@ export const internalError = () => new EngineError("POLICYSQL_INTERNAL", "The re
  * `detail.cause` (ADR 0007 #85 and #100, ADR 0030). The message is the same fixed text as core's
  * (`Code::KeyedOutcomeUnknown`).
  */
-export const outcomeUnknownError = (causeCode: string) => new EngineError(
+export const outcomeUnknownError = (causeCode: string, causeDetail: ErrorDetail | null = null) => new EngineError(
   "POLICYSQL_OUTCOME_UNKNOWN",
   "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.",
   null,
   // Both callers refuse before any statement is read, so there is no path to give.
-  { cause: Object.freeze({ code: causeCode, path: null, detail: null }) },
+  // `causeDetail` is the refusal's own detail (a body limit's `limit`), so the cause is what the
+  // unkeyed request answers (ADR 0030).
+  { cause: Object.freeze({ code: causeCode, path: null, detail: causeDetail }) },
 );
 
 // A well-formed BLOB over the per-value limit is a permanent limit condition, not a
 // transient database failure; both database transports use this same category. The
-// HTTP transport also uses it for statement responses over its response-size bound.
+// HTTP transport also uses it for statement responses over its response-size bound. A transport
+// throws it and the failure class `limit` reaches core, which answers `LIMIT_EXCEEDED` without
+// `detail.limit`: the class does not say which bound was crossed (#145 pull request F).
 export const binaryLimitExceeded = () => new EngineError(
   "POLICYSQL_LIMIT_EXCEEDED", "The request or result exceeded a configured limit.",
 );

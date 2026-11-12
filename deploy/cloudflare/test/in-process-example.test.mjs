@@ -86,13 +86,13 @@ test("in-process: failures are codes, never statuses, and body checks run withou
   await failure(p.engine.execute({ bodyText: '{"a":"\ud800"}' }, context), "POLICYSQL_INVALID_REQUEST");
   await failure(p.engine.execute({ bodyText: '{"a":"\\ud800"}' }, context), "POLICYSQL_INVALID_REQUEST");
   await failure(p.engine.execute({ bodyText: '{"a":"\\udc00"}' }, context), "POLICYSQL_INVALID_REQUEST");
-  await failure(p.engine.execute({ bodyText: `"${"x".repeat(1_048_576)}"` }, context), "POLICYSQL_REQUEST_TOO_LARGE");
+  await failure(p.engine.execute({ bodyText: `"${"x".repeat(1_048_576)}"` }, context), "POLICYSQL_REQUEST_TOO_LARGE", { limit: "maxRequestBytes" });
   // Without HTTP the engine sees the same body check; a keyed request is the unknown outcome
   // (the retry may predate a deployment that lowered the limit), and an unkeyed one above stays
   // the definite REQUEST_TOO_LARGE (#100).
   await failure(p.engine.execute({
     bodyText: `"${"x".repeat(1_048_576)}"`, idempotencyKey: "in-process-over-limit-key-1",
-  }, context), "POLICYSQL_OUTCOME_UNKNOWN", { cause: { code: "POLICYSQL_REQUEST_TOO_LARGE", path: null, detail: null } });
+  }, context), "POLICYSQL_OUTCOME_UNKNOWN", { cause: { code: "POLICYSQL_REQUEST_TOO_LARGE", path: null, detail: { limit: "maxRequestBytes" } } });
   await failure(p.engine.execute({ bodyText: statements({ sql: "SELECT id FROM projects", params: {} }), role: "admin" }, context),
     "POLICYSQL_FORBIDDEN_ACCESS");
   await failure(p.engine.catalog({}, { database: p.binding, session: session("tenant_a", ["execute"]) }), "POLICYSQL_FORBIDDEN_ACCESS");

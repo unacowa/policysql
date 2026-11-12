@@ -101,13 +101,17 @@ const context = (extra: Record<string, unknown> = {}) => ({ database: BINDING, s
 const expectFixedHeaders = (response: Response, label: string) => {
   for (const [name, value] of Object.entries(FIXED)) same(response.headers.get(name), value, `${label}: ${name}`);
 };
-const expectError = async (response: Response, status: number, code: string, label: string, requestId?: string) => {
+const expectError = async (response: Response, status: number, code: string, label: string, requestId?: string, detail?: unknown) => {
   same(response.status, status, `${label}: status`);
   expectFixedHeaders(response, label);
   const body = await response.json() as { error?: Record<string, unknown> } | null;
   check(body !== null && typeof body.error === "object", `${label}: error body`);
   const error = body?.error ?? {};
-  same(Object.keys(error).sort(), ["code", "message", "path", "requestId"], `${label}: error fields`);
+  // Without a detail the fields are as they were (no `detail`, in any order). With one, the order is
+  // part of the contract: `detail` sits between `path` and `requestId`.
+  if (detail === undefined) same(Object.keys(error).sort(), ["code", "message", "path", "requestId"], `${label}: error fields`);
+  else same(Object.keys(error), ["code", "message", "path", "detail", "requestId"], `${label}: error fields`);
+  if (detail !== undefined) same(error.detail, detail, `${label}: detail`);
   same(error.code, code, `${label}: code`);
   check(typeof error.message === "string" && error.message !== "", `${label}: message`);
   check(typeof error.requestId === "string" && error.requestId !== "", `${label}: requestId`);
@@ -234,6 +238,9 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
         { code: "POLICYSQL_SQL_TOO_COMPLEX", status: 400, detail: { complexity: "height" }, path: "/statements/0" },
         { code: "POLICYSQL_COMMIT_CHECK_REJECTED", status: 409, detail: { reason: "denied" }, path: null },
         { code: "POLICYSQL_EXPECTATION_FAILED", status: 422, detail: { expectation: "affectedRows" }, path: "/statements/0" },
+        { code: "POLICYSQL_LIMIT_EXCEEDED", status: 413, detail: { limit: "maxRows" }, path: null },
+        { code: "POLICYSQL_REQUEST_TOO_LARGE", status: 413, detail: { limit: "maxSqlBytes" }, path: "/statements/0/sql" },
+        { code: "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", status: 413, detail: { limit: "maxStatements" }, path: null },
         {
           code: "POLICYSQL_OUTCOME_UNKNOWN", status: 500, path: null,
           detail: { cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0", detail: null } },
@@ -241,6 +248,10 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
         {
           code: "POLICYSQL_OUTCOME_UNKNOWN", status: 500, path: null,
           detail: { cause: { code: "POLICYSQL_UNSUPPORTED_SQL", path: "/statements/0", detail: { feature: "star" } } },
+        },
+        {
+          code: "POLICYSQL_OUTCOME_UNKNOWN", status: 500, path: null,
+          detail: { cause: { code: "POLICYSQL_REQUEST_TOO_LARGE", path: null, detail: { limit: "maxRequestBytes" } } },
         },
       ];
       for (const { code, status, detail, path } of cases) {
@@ -300,19 +311,20 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
   {
     name: "body framing: Content-Type, Content-Length, streamed size, and strict UTF-8",
     async run(createMapping) {
-      const cases: Array<[string, () => Request, number, string]> = [
+      const tooLarge = { limit: "maxRequestBytes" };
+      const cases: Array<[string, () => Request, number, string, unknown?]> = [
         ["text/plain", () => post("/v1/transactions:execute", "{}", { "content-type": "text/plain" }), 415, "POLICYSQL_UNSUPPORTED_MEDIA_TYPE"],
         ["no content-type", () => new Request(`${ORIGIN}/v1/transactions:execute`, { method: "POST", body: new Uint8Array([0x7b, 0x7d]) }), 415, "POLICYSQL_UNSUPPORTED_MEDIA_TYPE"],
-        ["declared too large", () => post("/v1/transactions:execute", "{}", { "content-length": String(LIMITS.maxRequestBytes + 1) }), 413, "POLICYSQL_REQUEST_TOO_LARGE"],
-        ["streamed too large", () => post("/v1/transactions:execute", "x".repeat(LIMITS.maxRequestBytes + 1)), 413, "POLICYSQL_REQUEST_TOO_LARGE"],
+        ["declared too large", () => post("/v1/transactions:execute", "{}", { "content-length": String(LIMITS.maxRequestBytes + 1) }), 413, "POLICYSQL_REQUEST_TOO_LARGE", tooLarge],
+        ["streamed too large", () => post("/v1/transactions:execute", "x".repeat(LIMITS.maxRequestBytes + 1)), 413, "POLICYSQL_REQUEST_TOO_LARGE", tooLarge],
         ["malformed UTF-8", () => post("/v1/transactions:execute", new Uint8Array([0x7b, 0x22, 0xc3, 0x28, 0x22, 0x7d])), 400, "POLICYSQL_INVALID_REQUEST"],
         // Duplicate keys, depth, and the value count are core's strict body check (ADR 0027
         // pull request 7): the recording engine has no runtime, so the engine tests cover them.
         ["no body", () => post("/v1/transactions:execute", null), 400, "POLICYSQL_INVALID_REQUEST"],
       ];
-      for (const [label, request, status, code] of cases) {
+      for (const [label, request, status, code, detail] of cases) {
         const { engine } = recordingEngine();
-        await expectError(await createMapping(engine).fetch(request(), context()), status, code, label);
+        await expectError(await createMapping(engine).fetch(request(), context()), status, code, label, undefined, detail);
       }
       const { engine, calls } = recordingEngine();
       await createMapping(engine).fetch(post("/v1/transactions:execute", new TextEncoder().encode('{"a":"é\u{1f600}"}'),

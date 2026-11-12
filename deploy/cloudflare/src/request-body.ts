@@ -32,7 +32,9 @@ export type BodyLimits = { readonly maxRequestBytes: number };
 export type BodyText = string | ((maxBytes: number) => Promise<string>);
 
 export const invalidBody = (message: string) => new EngineError("POLICYSQL_INVALID_REQUEST", message);
-export const bodyTooLarge = () => new EngineError("POLICYSQL_REQUEST_TOO_LARGE", "Request body exceeds the size limit.");
+// `detail.limit` names the Capabilities key of the limit (#145 pull request F).
+const BODY_LIMIT = Object.freeze({ limit: "maxRequestBytes" });
+export const bodyTooLarge = () => new EngineError("POLICYSQL_REQUEST_TOO_LARGE", "Request body exceeds the size limit.", null, BODY_LIMIT);
 
 // With the `u` flag a surrogate pair is one code point outside this class, so only a lone
 // surrogate matches.

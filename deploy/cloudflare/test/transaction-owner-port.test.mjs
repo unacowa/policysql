@@ -8,7 +8,7 @@ import test from "node:test";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
 import { createApp } from "../src/app.ts";
 import { checkedOwnerReply } from "../src/transaction-owner-port.ts";
-import { OUTCOME_CAUSES } from "../src/error-detail.ts";
+import { EXCEEDED_LIMITS, OUTCOME_CAUSES, REQUEST_LIMITS, TRANSACTION_LIMITS } from "../src/error-detail.ts";
 import { durableObjectTransactionOwners, durableObjectTransactionOwnerClass, executionContextTasks } from "../src/adapters/durable-objects.ts";
 import { testBinding, testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { limitsJson } from "./helpers/limits.mjs";
@@ -586,7 +586,7 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
     get: (id) => ({
       async fetch(url, init) {
         sent.push({ name: id.name, url, method: init.method, headers: init.headers, body: JSON.parse(init.body) });
-        const marked = { headers: { "x-policysql-owner-wire": "5" } };
+        const marked = { headers: { "x-policysql-owner-wire": "6" } };
         if (new URL(url).pathname === "/rollback") {
           return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null, requestId: "req" } }, { status: 409, ...marked });
         }
@@ -646,7 +646,7 @@ test("durable-objects: the object class decodes the internal messages and fails 
   const object = new OwnerObject(state, {});
   const name = `tx_${"a".repeat(32)}`;
   const send = (path, body, headers = {}) => object.fetch(new Request(`https://owner${path}`, {
-    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": "5", ...headers }, body,
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": "6", ...headers }, body,
   }));
   for (const [path, body] of [["/begin", "{"], ["/atomic", "null"], ["/statement", "[]"], ["/unknown", "{}"]]) {
     const response = await send(path, body);
@@ -812,7 +812,7 @@ test("durable-objects: an object reply's detail is checked by the Worker, and a 
   const reply = (detail) => ({ error: { code: "POLICYSQL_CONSTRAINT_VIOLATION", message: "m", path: "/statements/0", requestId: "req", ...(detail === undefined ? {} : { detail }) } });
   const answers = [reply({ constraint: "unique" }), reply({ constraint: "unique", column: "x" }), reply({ constraint: "primary_key" }), reply(), reply([]), reply(null), reply("unique")];
   let index = 0;
-  const marked = { "x-policysql-owner-wire": "5" };
+  const marked = { "x-policysql-owner-wire": "6" };
   const namespace = { idFromName: (name) => name, get: () => ({ fetch: async () => Response.json(answers[index++], { status: 409, headers: marked }) }) };
   const app = h.appWith(durableObjectTransactionOwners(namespace));
   const send = async () => {
@@ -854,6 +854,66 @@ test("checkedOwnerReply: a commit check rejection keeps one of its five reasons 
   }
 });
 
+// #145 pull request F: the limit codes take `{ limit }` from their own list, or no detail at all (a
+// bound without a Capabilities key). A forged owner cannot name another code's limit.
+test("checkedOwnerReply: a limit code keeps a limit of its own list or none, and rejects every other detail", () => {
+  const lists = {
+    POLICYSQL_LIMIT_EXCEEDED: EXCEEDED_LIMITS, POLICYSQL_REQUEST_TOO_LARGE: REQUEST_LIMITS,
+    POLICYSQL_TRANSACTION_LIMIT_EXCEEDED: TRANSACTION_LIMITS,
+  };
+  for (const [code, list] of Object.entries(lists)) {
+    assert.deepEqual(checkedOwnerReply(owned(code)), owned(code), `${code}: no detail`);
+    for (const limit of list) {
+      assert.deepEqual(checkedOwnerReply(owned(code, { limit })), owned(code, { limit }), `${code} ${limit}`);
+    }
+    assert.equal(Object.isFrozen(checkedOwnerReply(owned(code, { limit: list[0] })).error.detail), true);
+    const others = Object.values(lists).flat().filter((limit) => !list.includes(limit));
+    for (const limit of others) assert.equal(checkedOwnerReply(owned(code, { limit })), null, `${code} ${limit}`);
+    for (const detail of [{}, { limit: "timeoutMs" }, { limit: "limits.maxRows" }, { limit: "MAXROWS" }, { limit: 100 }, { limit: null },
+      { limit: [list[0]] }, { limit: list[0], value: 100 }, { reason: "names" }, [], "maxRows", null, 1, true]) {
+      assert.equal(checkedOwnerReply(owned(code, detail)), null, `${code} ${JSON.stringify(detail)}`);
+    }
+  }
+  assert.equal(checkedOwnerReply(owned("POLICYSQL_INVALID_PARAMETER", { limit: "maxRows" })), null);
+});
+
+test("durable-objects: a forged limit reply from an object is a safe 500 and a valid one is relayed", async (t) => {
+  const lines = [];
+  t.mock.method(console, "log", (line) => { lines.push(String(line)); });
+  const h = await harness(t, { ownerAdapter: "durable-objects", hooks: false });
+  const reply = (code, detail) => ({ error: { code, message: "m", path: null, requestId: "req", ...(detail === undefined ? {} : { detail }) } });
+  const answers = [
+    reply("POLICYSQL_LIMIT_EXCEEDED", { limit: "maxRows" }), reply("POLICYSQL_LIMIT_EXCEEDED"),
+    reply("POLICYSQL_LIMIT_EXCEEDED", { limit: "maxSqlBytes" }), reply("POLICYSQL_LIMIT_EXCEEDED", { limit: "maxCallbackRowsPerCheck" }),
+    reply("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", { limit: "maxRows" }), reply("POLICYSQL_REQUEST_TOO_LARGE", { limit: "timeoutMs" }),
+    reply("POLICYSQL_LIMIT_EXCEEDED", { limit: "limits.maxRows" }), reply("POLICYSQL_LIMIT_EXCEEDED", { limit: 100 }),
+    reply("POLICYSQL_LIMIT_EXCEEDED", {}), reply("POLICYSQL_LIMIT_EXCEEDED", { limit: "maxRows", value: 100 }),
+  ];
+  let index = 0;
+  const marked = { "x-policysql-owner-wire": "6" };
+  const namespace = { idFromName: (name) => name, get: () => ({ fetch: async () => Response.json(answers[index++], { status: 413, headers: marked }) }) };
+  const app = h.appWith(durableObjectTransactionOwners(namespace));
+  const send = async () => {
+    const response = await app.fetch(new Request("https://worker.test/v1/transactions", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "read" }),
+    }), { database: h.binding("a"), session: h.session("a") }, h.background);
+    return { status: response.status, body: await response.json() };
+  };
+  const first = await send();
+  assert.equal(first.status, 413, JSON.stringify(first.body));
+  assert.deepEqual(first.body.error.detail, { limit: "maxRows" });
+  const second = await send();
+  assert.equal(second.status, 413, "a limit without a name is relayed without detail");
+  assert.equal(second.body.error.detail, undefined);
+  for (let forged = 2; forged < answers.length; forged += 1) {
+    const response = await send();
+    assert.equal(response.status, 500, `forged answer ${forged}: ${JSON.stringify(response.body)}`);
+    assert.equal(response.body.error.code, "POLICYSQL_INTERNAL");
+    assert.equal(response.body.error.detail, undefined);
+  }
+  assert.equal(lines.filter((line) => line.includes("owner_reply_rejected")).length, answers.length - 2);
+});
+
 test("durable-objects: a forged commit check rejection from an object is a safe 500 and a valid one is relayed", async (t) => {
   const lines = [];
   t.mock.method(console, "log", (line) => { lines.push(String(line)); });
@@ -861,7 +921,7 @@ test("durable-objects: a forged commit check rejection from an object is a safe 
   const reply = (detail) => ({ error: { code: "POLICYSQL_COMMIT_CHECK_REJECTED", message: "m", path: null, requestId: "req", ...(detail === undefined ? {} : { detail }) } });
   const answers = [reply({ reason: "denied" }), reply({ reason: "x" }), reply({ reason: "denied", extra: 1 }), reply(), reply({ reason: null }), reply([]), reply("denied")];
   let index = 0;
-  const marked = { "x-policysql-owner-wire": "5" };
+  const marked = { "x-policysql-owner-wire": "6" };
   const namespace = { idFromName: (name) => name, get: () => ({ fetch: async () => Response.json(answers[index++], { status: 409, headers: marked }) }) };
   const app = h.appWith(durableObjectTransactionOwners(namespace));
   const send = async () => {
@@ -971,7 +1031,7 @@ test("durable-objects: a forged outcome-unknown cause from an object is a safe 5
     reply({}),
   ];
   let index = 0;
-  const marked = { "x-policysql-owner-wire": "5" };
+  const marked = { "x-policysql-owner-wire": "6" };
   const namespace = { idFromName: (name) => name, get: () => ({ fetch: async () => Response.json(answers[index++], { status: 500, headers: marked }) }) };
   const app = h.appWith(durableObjectTransactionOwners(namespace));
   const send = async () => {
