@@ -39,13 +39,14 @@
 // logs the skew but keeps its 409.
 //
 // A reply is a 2xx response whose body is the value, or a non-2xx response whose body is
-// `{ error: { code, message, path, requestId } }`. The Worker reads only that distinction. The object sends 201 for a started
+// `{ error: { code, message, path, detail?, requestId } }`. The Worker reads only that distinction. The object sends 201 for a started
 // transaction, 200 for any other value, and an error's public status from the one table in
 // src/http/status.ts. The wire needs no `cloudflare:workers` import (RPC
 // stubs), so the adapter also runs in the Node test harness.
 import { EngineError, internalError, operationError } from "../errors.ts";
 import { stringifyExact } from "../exact-json.ts";
 import { statusFor } from "../http/status.ts";
+import type { ErrorDetail } from "../error-detail.ts";
 import { TransactionOwnerCore } from "../transaction-owner.ts";
 import type { CoreEnvelope } from "../core-wire.ts";
 import type { TransactionOwnerDependencies } from "../transaction-owner.ts";
@@ -60,7 +61,7 @@ const REQUEST_ID_HEADER = "x-policysql-request-id";
 const OWNER_HEADER = "x-policysql-owner";
 const WIRE_HEADER = "x-policysql-owner-wire";
 // Changes whenever any owner wire message changes shape.
-const OWNER_WIRE_VERSION = "1";
+const OWNER_WIRE_VERSION = "2";
 const COMMAND_PATHS: Readonly<Record<OwnerCommandKind, string>> = Object.freeze({
   statement: "/statement", commit: "/commit", rollback: "/rollback",
 });
@@ -91,13 +92,15 @@ const send = async (stub: DurableObjectStub, path: string, body: unknown, header
       code: typeof error?.code === "string" ? error.code : "POLICYSQL_INTERNAL",
       message: typeof error?.message === "string" ? error.message : "The request could not be completed.",
       path: typeof error?.path === "string" ? error.path : null,
+      // Not checked here: the side that reads the reply checks `detail` against its code (ADR 0030).
+      ...(Object.hasOwn(error ?? {}, "detail") ? { detail: error?.detail as ErrorDetail } : {}),
     },
   };
 };
 
 // Object side: a reply as the wire response.
 const replyResponse = (reply: OwnerReply, path: string, requestId: string) => {
-  const failure = reply as { ok: false; error: { code: string; message: string; path: string | null } };
+  const failure = reply as { ok: false; error: { code: string; message: string; path: string | null; detail?: ErrorDetail } };
   return new Response(
     stringifyExact(reply.ok ? reply.value : { error: { ...failure.error, requestId } }),
     {

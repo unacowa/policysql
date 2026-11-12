@@ -23,8 +23,9 @@ description: PolicySQLのerror responseと安全な処理方法です。
 | Field | Description |
 | --- | --- |
 | `code` | programから判定する安定したerror code |
-| `message` | 利用者向けの安全な説明。診断情報を含まない |
+| `message` | codeごとの固定文。DBやparserの文言を含まない |
 | `path` | request body内の問題箇所。特定できない場合は`null` |
+| `detail` | 任意。codeごとに決まった機械可読の値（固定の列挙値と数値だけ。DBやparserの文言・識別子は含まない）。現在は`POLICYSQL_CONSTRAINT_VIOLATION`の`constraint`だけ。分岐の主キーは`code` |
 | `requestId` | server logと照合する識別子 |
 
 clientは`message`ではなく`code`を使って分岐してください。
@@ -63,6 +64,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_TRANSACTION_CONFLICT` | 409 | 対話型transactionのcommandが現在の状態（sequenceなど）と矛盾する |
 | `POLICYSQL_TRANSACTION_UNAVAILABLE` | 409 | transactionが存在しない、利用者に属していない、期限切れ、または失敗状態。COMMITの送信前にbindingまたは期限の確認に失敗した場合も返します（COMMITは送られておらず、rollback済みです） |
 | `POLICYSQL_COMMIT_CHECK_REJECTED` | 409 | commit checkがtransactionを拒否した、または安全に完了できない |
+| `POLICYSQL_CONSTRAINT_VIOLATION` | 409 | 文の実行をDBが制約違反で拒否した（UNIQUE・PRIMARY KEY、NOT NULL、FOREIGN KEY、CHECK、triggerの`RAISE(ABORT)`など）。pathは`/statements/<i>`、`detail.constraint`は`unique`（PRIMARY KEYを含む）・`not_null`・`foreign_key`・`check`・`other`のどれか。messageは種類ごとの固定文。列名・制約名・DBの文言は返さない。COMMITより前に検知し、transactionは開いたままrollbackするため何もcommitされない。clientは拒否（`PolicySqlError`）として扱う。対話型transactionでは`failed`として閉じ、後続のcommandは409 `POLICYSQL_TRANSACTION_UNAVAILABLE`。`Idempotency-Key`付きでも同じで、今回の試行が何もcommitしていないことを意味する（以前の試行がcommitし、keyの記録が保持期間を過ぎて消えた後の再送は、自分が入れた行と重複してこのcodeになり得る）。schemaの`ON CONFLICT ROLLBACK`や`RAISE(ROLLBACK)`でDBがtransactionを閉じた場合は503 `POLICYSQL_DATABASE_UNAVAILABLE`（結果不明）、遅延FKでCOMMITが失敗した場合は結果不明のまま。同じrequestを再送しても成功しない |
 | `POLICYSQL_LIMIT_EXCEEDED` | 413 | requestまたはresult limitを超えた。行数、結果bytes、結果のJSON値の数、databaseの生の応答の上限、streaming transportが応答中にdecodeした結果のBLOB値の上限（buffering providerのBLOBはcoreがresult encodingで検出するため413のまま）、`maxStatements`、応答全体の`maxResponseBytes`を含む。commit前に判断し、envelopeはrollbackして冪等性recordも残さない。ただしatomic executeで2文目以降にwriteを含み、databaseの生の応答、またはstreaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合は、後続のwriteが実行された可能性があるため500 `POLICYSQL_INTERNAL`（結果不明）になる。その例外を除き、再送しても成功しない。さらに、`Idempotency-Key`付きのAtomic Executeでcompile時の入力上限（`maxStatements`、`maxParameters`、`maxExpressionDepth`、`maxProjections`、`maxJoins`、client parameterの`maxBytesPerValue`）に達した場合は500 `POLICYSQL_INTERNAL`（結果不明）になり、unkeyedのAtomic ExecuteとExplainは413のまま。malformed base64はkeyedのAtomic Executeではcompile errorとして500、unkeyedのAtomic ExecuteとExplainでは400 |
 | `POLICYSQL_REQUEST_TOO_LARGE` | 413 | HTTP body（`limits.maxRequestBytes`）、body内のJSON値の数（`limits.maxJsonValues`）、またはSQL text（`limits.maxSqlBytes`、pathは`/statements/<i>/sql`）が受付上限を超えた。HTTP bodyと`maxJsonValues`はcompileより前のbody checkで拒否する。ただし`Idempotency-Key`付きのAtomic Executeでは、deployで上限を引き下げた後にcommit済みwriteの再送が来る可能性があるため、500 `POLICYSQL_INTERNAL`（結果不明）になる（unkeyed、またはkeyが不正なrequestは413）。`maxSqlBytes`はcompile時に検出するため、`Idempotency-Key`付きのAtomic Executeでは同じく500（結果不明）、unkeyedのAtomic ExecuteとExplainでは413。unkeyedとkey不正の413、および`maxSqlBytes`のunkeyed 413は、再送しても成功しないためclientは拒否（`PolicySqlRejectedError`）として扱う。keyedの500は結果不明（`PolicySqlOutcomeUnknownError`）で、rollbackとみなさず同じkey・同じbodyで再送する |
 | `POLICYSQL_UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type`が`application/json`でない |
@@ -142,6 +144,9 @@ return createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", 
 - database credential
 - commit checkのhook認証情報とopaque capability
 - remote databaseのraw error
+- DBの制約名・表名・列名、triggerの文言
+
+DBの制約違反は、種類（固定の列挙値）だけを返します。
 
 運用者は`requestId`を使い、アクセス制限されたserver logで詳細を調査します。
 

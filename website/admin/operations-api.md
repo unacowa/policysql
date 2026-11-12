@@ -29,7 +29,7 @@ clientの操作は、文脈、session、DB binding、本文の順に確認しま
 
 ```ts
 { ok: true, value, requestId }
-{ ok: false, error: { code, message, path }, requestId }
+{ ok: false, error: { code, message, path, detail? }, requestId }
 // catalog / capabilities
 { ok: true, notModified: false, snapshot, value, requestId }
 { ok: true, notModified: true, snapshot, requestId }

@@ -222,6 +222,23 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
     },
   },
   {
+    name: "an error's detail is served between path and requestId, as the engine returned it",
+    async run(createMapping) {
+      const detail = { constraint: "unique" };
+      for (const route of ROUTE_CASES) {
+        const { engine } = recordingEngine(() => ({
+          ok: false, error: { code: "POLICYSQL_CONSTRAINT_VIOLATION", message: "safe message", path: "/statements/0", detail }, requestId: "req_detail",
+        }));
+        const response = await createMapping(engine).fetch(route.request(), context());
+        same(response.status, 409, `${route.label}: detail status`);
+        expectFixedHeaders(response, `${route.label} detail`);
+        const text = await response.text();
+        same(Object.keys((JSON.parse(text) as { error: object }).error), ["code", "message", "path", "detail", "requestId"], `${route.label}: detail field order`);
+        same((JSON.parse(text) as { error: { detail: unknown } }).error.detail, detail, `${route.label}: detail`);
+      }
+    },
+  },
+  {
     name: "Catalog and Capabilities carry the snapshot as a strong ETag and answer a matching If-None-Match with 304",
     async run(createMapping) {
       for (const path of ["/v1/catalog", "/v1/capabilities"]) {

@@ -5,6 +5,7 @@ export class PolicySqlError extends Error {
     this.code = code;
     if (status !== undefined) this.status = status;
     if (options?.response !== undefined) this.response = options.response;
+    if (options?.detail !== undefined) this.detail = Object.freeze(options.detail);
   }
 }
 
@@ -91,7 +92,15 @@ export const readResponse = (response) => {
   if (!object(error) || typeof error.code !== "string" || !/^POLICYSQL_[A-Z0-9_]+$/.test(error.code) ||
     typeof error.message !== "string" || !(error.path === null || typeof error.path === "string") ||
     typeof error.requestId !== "string") throw protocolError({ response: snapshot });
-  return { ...snapshot, error: new PolicySqlError(error.message, error.code, response.status, { response: snapshot }) };
+  // `detail` is a plain object or absent. Its keys and values are not checked: the branch is
+  // the code and the status, and a later server version may add fields (ADR 0030).
+  if (Object.hasOwn(error, "detail") && !object(error.detail)) throw protocolError({ response: snapshot });
+  return {
+    ...snapshot,
+    error: new PolicySqlError(error.message, error.code, response.status, {
+      response: snapshot, ...(error.detail === undefined ? {} : { detail: error.detail }),
+    }),
+  };
 };
 
 // Only documented code/status pairs establish rejection. Status alone, unknown
@@ -104,7 +113,8 @@ export const REJECTIONS = new Map([
     "FORBIDDEN_COLUMN_CONTEXT", "PRESET_COLUMN", "TRANSACTION_MODE_VIOLATION"]],
   [400, ["INVALID_REQUEST", "JSON_TOO_DEEP", "INVALID_SQL", "MULTIPLE_STATEMENTS", "UNSUPPORTED_SQL", "DUPLICATE_RESULT_COLUMN",
     "INVALID_PARAMETER", "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER", "IDEMPOTENCY_KEY_INVALID", "SQL_TOO_COMPLEX"]],
-  [409, ["STALE_OPERATION", "IDEMPOTENCY_CONFLICT", "TRANSACTION_CONFLICT", "TRANSACTION_UNAVAILABLE", "COMMIT_CHECK_REJECTED"]],
+  [409, ["STALE_OPERATION", "IDEMPOTENCY_CONFLICT", "TRANSACTION_CONFLICT", "TRANSACTION_UNAVAILABLE", "COMMIT_CHECK_REJECTED",
+    "CONSTRAINT_VIOLATION"]],
   [413, ["LIMIT_EXCEEDED", "REQUEST_TOO_LARGE", "TRANSACTION_LIMIT_EXCEEDED"]],
   [422, ["EXPECTATION_FAILED", "SCHEMA_MISMATCH"]],
 ]);
@@ -113,7 +123,7 @@ const sqlRejections = new Set([
   "MISSING_POLICY", "FORBIDDEN_OPERATION", "FORBIDDEN_COLUMN", "FORBIDDEN_COLUMN_CONTEXT",
   "INVALID_SQL", "MULTIPLE_STATEMENTS", "UNSUPPORTED_SQL", "DUPLICATE_RESULT_COLUMN", "INVALID_PARAMETER",
   "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER", "PRESET_COLUMN", "EXPECTATION_FAILED", "SCHEMA_MISMATCH",
-  "SQL_TOO_COMPLEX",
+  "SQL_TOO_COMPLEX", "CONSTRAINT_VIOLATION",
 ]);
 const rejectsCommand = ({ error, status }, kind) => {
   const code = error.code.slice("POLICYSQL_".length);

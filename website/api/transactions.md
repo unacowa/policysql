@@ -148,7 +148,7 @@ COMMIT を送った後に結果を確定できない場合、commit とその再
 
 ## Failure
 
-statement、policy、check、expect、limitのいずれかが失敗するとtransaction全体をrollbackし、`failed`状態にします。失敗後にstatementを追加できません。
+statement、policy、check、expect、limitのいずれかが失敗するとtransaction全体をrollbackし、`failed`状態にします。失敗後にstatementを追加できません。DBの制約違反は409 `POLICYSQL_CONSTRAINT_VIOLATION`で、transactionは`failed`になります。
 
 validation中は`validating`状態です。この間はcommit-check validatorのSELECTとdecisionだけを受け付け、client commandを拒否します。ownerまたはconnectionを失ったtransactionは別connectionで再構築せず、rollback扱いにします。
 

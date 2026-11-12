@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { COMPLEXITY_ALLOWLIST, COMPLEXITY_CODES, DatabaseStatementError, SqlComplexityError, complexityCause, statementFailure } from "../src/database-complexity.ts";
+import { CONSTRAINT_KINDS, CONSTRAINT_PREFIXES, SqlConstraintError, constraintKind } from "../src/database-constraint.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 import { COMPLEXITY_PROBES, sqlComplexitySmoke } from "../scripts/smoke-complexity.mjs";
 import { CommitNotSentError, EngineError } from "../src/errors.ts";
@@ -81,7 +82,7 @@ test("a match needs code SQLITE_ERROR and a message prefix: other codes, near mi
 });
 
 test("an unmatched statement error is a 503 carrying only a safe database code", () => {
-  for (const [code, expected] of [["SQLITE_CONSTRAINT", "SQLITE_CONSTRAINT"], ["SQLITE_BUSY", "SQLITE_BUSY"], ["has space", "UNKNOWN"],
+  for (const [code, expected] of [["SQLITE_CONSTRAINT_UNIQUE", "SQLITE_CONSTRAINT_UNIQUE"], ["SQLITE_BUSY", "SQLITE_BUSY"], ["has space", "UNKNOWN"],
     ["lower", "UNKNOWN"], ["X".repeat(65), "UNKNOWN"], [undefined, "UNKNOWN"], [7, "UNKNOWN"], ["SQLITE_ERROR\n", "UNKNOWN"]]) {
     const failure = statementFailure({ code, message: "UNIQUE constraint failed: projects.id" }, 0);
     assert.ok(failure instanceof DatabaseStatementError);
@@ -101,6 +102,15 @@ test("the executeFailed event: complex carries the index and cause, an unclassif
   }
   const unclassified = new DatabaseStatementError("SQLITE_CONSTRAINT");
   assert.deepEqual(executeFailedEvent(8, unclassified, failureClass), { type: "executeFailed", id: 8, class: "unavailable", databaseCode: "SQLITE_CONSTRAINT" });
+  // A constraint violation carries the index, the fixed kind, and the code, never text (ADR 0030).
+  const constraint = new SqlConstraintError(1, "unique");
+  for (const classify of [failureClass, directFailureClass]) {
+    assert.deepEqual(executeFailedEvent(10, constraint, classify), {
+      type: "executeFailed", id: 10, class: "constraint", statement: 1, constraint: "unique", databaseCode: "SQLITE_CONSTRAINT",
+    });
+  }
+  assert.equal(directCommitFailureClass(constraint), "unavailable");
+  assert.equal(directCommitFailureClass(new CommitNotSentError(constraint)), "not_committed");
   assert.deepEqual(executeFailedEvent(9, new Error("boom"), directFailureClass), { type: "executeFailed", id: 9, class: "unavailable" });
   // Never produced for a commit, even if a complexity error reached the commit mapping.
   assert.equal(directCommitFailureClass(complex), "unavailable");
@@ -267,8 +277,9 @@ test("the first refused statement of a batch is classified, wherever it is (#144
   assert.ok(last instanceof SqlComplexityError && last.statement === 1);
   // C3: any other database error keeps its code and is not a complexity refusal.
   const constraint = await run({ "SELECT a": ok(), "INSERT b": refusal("SQLite error: UNIQUE constraint failed: t.id", "SQLITE_CONSTRAINT"), "SELECT c": ok() });
-  assert.ok(constraint instanceof DatabaseStatementError && !(constraint instanceof SqlComplexityError));
-  assert.equal(constraint.databaseCode, "SQLITE_CONSTRAINT");
+  assert.ok(constraint instanceof SqlConstraintError && constraint.statement === 1 && constraint.constraint === "unique");
+  const extended = await run({ "SELECT a": ok(), "INSERT b": refusal("SQLite error: UNIQUE constraint failed: t.id", "SQLITE_CONSTRAINT_UNIQUE"), "SELECT c": ok() });
+  assert.ok(extended instanceof DatabaseStatementError && extended.databaseCode === "SQLITE_CONSTRAINT_UNIQUE");
   const odd = await run({ "SELECT a": refusal("SQLite error: x", "sqlite_x"), "SELECT b": ok() });
   assert.ok(odd instanceof DatabaseStatementError);
   assert.equal(odd.databaseCode, "UNKNOWN");
@@ -414,4 +425,55 @@ test("a statement reply that cannot be read: the rollback continues from the rep
     assert.deepEqual(logged, [{ event: "database_stream_recovery", requestId: "header-timeout", outcome: "refused" }]);
     assert.equal(abandoned.open, false);
   }
+});
+
+// ---- constraint violations (#145, ADR 0030) ----
+
+test("constraintKind: only the exact code SQLITE_CONSTRAINT is classified, and the kind comes from the text after the wrapper", () => {
+  for (const code of ["SQLITE_CONSTRAINT_UNIQUE", "SQLITE_CONSTRAINT_PRIMARYKEY", "sqlite_constraint", "SQLITE_CONSTRAINT ", "SQLITE_BUSY", "SQLITE_FULL",
+    "SQLITE_UNKNOWN", "SQLITE_ERROR", "SOMETHING_ELSE", undefined, null, 19, ""]) {
+    assert.equal(constraintKind({ code, message: "SQLite error: UNIQUE constraint failed: t.id" }), null, String(code));
+  }
+  for (const error of [null, undefined, "error", 1, [], {}]) assert.equal(constraintKind(error), null);
+  for (const entry of CONSTRAINT_PREFIXES) {
+    assert.equal(constraintKind({ code: "SQLITE_CONSTRAINT", message: `SQLite error: ${entry.prefix}: t.c` }), entry.constraint, entry.prefix);
+  }
+  assert.deepEqual(CONSTRAINT_PREFIXES.map((entry) => entry.constraint).sort(), ["check", "foreign_key", "not_null", "unique"]);
+  assert.deepEqual([...CONSTRAINT_KINDS].sort(), ["check", "foreign_key", "not_null", "other", "unique"]);
+  // The code matches but the text does not: the kind is `other`, the class is unchanged.
+  for (const message of ["UNIQUE constraint failed: t.id", "sqlite error: UNIQUE constraint failed: t.id", " SQLite error: UNIQUE constraint failed: t.id",
+    "SQLite error: unique constraint failed", "SQLite error:  UNIQUE constraint failed", "SQLite error: smoke guard", "SQLite error: ", "",
+    undefined, null, 7, {}, ["SQLite error: UNIQUE constraint failed"]]) {
+    assert.equal(constraintKind({ code: "SQLITE_CONSTRAINT", message }), "other", String(message));
+    const failure = statementFailure({ code: "SQLITE_CONSTRAINT", message }, 3);
+    assert.ok(failure instanceof SqlConstraintError && failure.statement === 3 && failure.constraint === "other");
+  }
+  // The first prefix decides: a later kind named inside the text is not read.
+  assert.equal(constraintKind({ code: "SQLITE_CONSTRAINT", message: "SQLite error: CHECK constraint failed: x UNIQUE constraint failed" }), "check");
+});
+
+test("a SqlConstraintError holds the index and a fixed kind, never the database's text", () => {
+  const failure = statementFailure({ code: "SQLITE_CONSTRAINT", message: "SQLite error: UNIQUE constraint failed: secret_table.secret_column" }, 2);
+  assert.ok(failure instanceof SqlConstraintError);
+  assert.equal(failure instanceof EngineError, false);
+  for (const text of [JSON.stringify(failure), failure.message, String(failure.stack ?? "").split("\n")[0]]) {
+    assert.equal(/secret|UNIQUE/u.test(text), false, text);
+  }
+  assert.deepEqual(Object.keys(failure).sort(), ["constraint", "databaseCode", "statement"]);
+});
+
+test("BEGIN, COMMIT, and ROLLBACK replies that name a constraint are never a SqlConstraintError", async () => {
+  const violation = refusal("SQLite error: UNIQUE constraint failed: t.id", "SQLITE_CONSTRAINT");
+  const instance = transport((request) => {
+    const sql = request.stmt?.sql ?? "";
+    if (/^BEGIN/u.test(sql)) return ok();
+    if (request.type === "close") return { type: "ok", response: { type: "close" } };
+    return violation;
+  });
+  const transaction = await instance.begin("write", 1_000, undefined, limit);
+  await assert.rejects(transaction.commit(), (error) => !(error instanceof SqlConstraintError) && error.code === "POLICYSQL_DATABASE_UNAVAILABLE");
+  const another = await transport((request) => (/^BEGIN/u.test(request.stmt?.sql ?? "") ? ok() : violation)).begin("write", 1_000, undefined, limit);
+  await assert.rejects(another.rollback(), (error) => !(error instanceof SqlConstraintError) && error.code === "POLICYSQL_DATABASE_UNAVAILABLE");
+  await assert.rejects(transport(() => violation).begin("write", 1_000, undefined, limit),
+    (error) => !(error instanceof SqlConstraintError) && error.code === "POLICYSQL_DATABASE_UNAVAILABLE");
 });

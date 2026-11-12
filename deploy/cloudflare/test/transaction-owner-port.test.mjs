@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
 import { createApp } from "../src/app.ts";
+import { checkedOwnerReply } from "../src/transaction-owner-port.ts";
 import { durableObjectTransactionOwners, durableObjectTransactionOwnerClass, executionContextTasks } from "../src/adapters/durable-objects.ts";
 import { testBinding, testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { limitsJson } from "./helpers/limits.mjs";
@@ -584,7 +585,7 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
     get: (id) => ({
       async fetch(url, init) {
         sent.push({ name: id.name, url, method: init.method, headers: init.headers, body: JSON.parse(init.body) });
-        const marked = { headers: { "x-policysql-owner-wire": "1" } };
+        const marked = { headers: { "x-policysql-owner-wire": "2" } };
         if (new URL(url).pathname === "/rollback") {
           return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null, requestId: "req" } }, { status: 409, ...marked });
         }
@@ -644,7 +645,7 @@ test("durable-objects: the object class decodes the internal messages and fails 
   const object = new OwnerObject(state, {});
   const name = `tx_${"a".repeat(32)}`;
   const send = (path, body, headers = {}) => object.fetch(new Request(`https://owner${path}`, {
-    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": "1", ...headers }, body,
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": "2", ...headers }, body,
   }));
   for (const [path, body] of [["/begin", "{"], ["/atomic", "null"], ["/statement", "[]"], ["/unknown", "{}"]]) {
     const response = await send(path, body);
@@ -771,4 +772,62 @@ test("durable-objects: the object's replies show the client what the Worker does
   const replayConflict = await forwarded("atomic key reuse", "/atomic",
     () => h.request("a", "/v1/transactions:execute", { statements: [insert("atomic_other")] }, "rollout-atomic-key-01"), { atomic: true });
   assert.equal(replayConflict.status, 409);
+});
+
+// ADR 0030: `detail` crosses the owner boundary only as the table of its code allows.
+const owned = (code, detail) => ({ ok: false, error: { code, message: "m", path: "/statements/0", ...(detail === undefined ? {} : { detail }) } });
+
+test("checkedOwnerReply: detail is kept for the code that defines it and rejected everywhere else", () => {
+  const violation = (detail) => owned("POLICYSQL_CONSTRAINT_VIOLATION", detail);
+  for (const constraint of ["unique", "not_null", "foreign_key", "check", "other"]) {
+    assert.deepEqual(checkedOwnerReply(violation({ constraint })), violation({ constraint }));
+  }
+  const reply = checkedOwnerReply(violation({ constraint: "unique" }));
+  assert.equal(Object.isFrozen(reply.error.detail), true);
+  // The code's detail is required, and exactly its shape.
+  for (const detail of [undefined, {}, { constraint: "unique", column: "x" }, { constraint: "primary_key" }, { constraint: "UNIQUE" }, { constraint: null },
+    { constraint: ["unique"] }, { column: "x" }, [], [{ constraint: "unique" }], "unique", null, 1, true]) {
+    assert.equal(checkedOwnerReply(violation(detail)), null, JSON.stringify(detail));
+  }
+  // A code outside the table has no detail at all, whatever it is.
+  for (const detail of [{}, { constraint: "unique" }, [], "x", null, 0]) {
+    assert.equal(checkedOwnerReply(owned("POLICYSQL_FORBIDDEN_COLUMN", detail)), null, JSON.stringify(detail));
+  }
+  assert.deepEqual(checkedOwnerReply(owned("POLICYSQL_FORBIDDEN_COLUMN")), owned("POLICYSQL_FORBIDDEN_COLUMN"));
+  // `detail` as an inherited or prototype-polluted value does not count; a non-plain object is refused.
+  const inherited = Object.create({ constraint: "unique" });
+  assert.equal(checkedOwnerReply(violation(inherited)), null);
+  assert.equal(checkedOwnerReply(violation(new (class Detail { constraint = "unique"; })())), null);
+  assert.deepEqual(checkedOwnerReply(violation(Object.assign(Object.create(null), { constraint: "unique" }))), violation({ constraint: "unique" }));
+  for (const toxic of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+    assert.equal(checkedOwnerReply(owned(`POLICYSQL_${toxic.toUpperCase()}`, { constraint: "unique" })), null, toxic);
+  }
+});
+
+test("durable-objects: an object reply's detail is checked by the Worker, and a forged one is a safe 500", async (t) => {
+  const lines = [];
+  t.mock.method(console, "log", (line) => { lines.push(String(line)); });
+  const h = await harness(t, { ownerAdapter: "durable-objects", hooks: false });
+  const reply = (detail) => ({ error: { code: "POLICYSQL_CONSTRAINT_VIOLATION", message: "m", path: "/statements/0", requestId: "req", ...(detail === undefined ? {} : { detail }) } });
+  const answers = [reply({ constraint: "unique" }), reply({ constraint: "unique", column: "x" }), reply({ constraint: "primary_key" }), reply(), reply([]), reply(null), reply("unique")];
+  let index = 0;
+  const marked = { "x-policysql-owner-wire": "2" };
+  const namespace = { idFromName: (name) => name, get: () => ({ fetch: async () => Response.json(answers[index++], { status: 409, headers: marked }) }) };
+  const app = h.appWith(durableObjectTransactionOwners(namespace));
+  const send = async () => {
+    const response = await app.fetch(new Request("https://worker.test/v1/transactions", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "read" }),
+    }), { database: h.binding("a"), session: h.session("a") }, h.background);
+    return { status: response.status, body: await response.json() };
+  };
+  const first = await send();
+  assert.equal(first.status, 409, JSON.stringify(first.body));
+  assert.deepEqual(first.body.error.detail, { constraint: "unique" });
+  for (let forged = 1; forged < answers.length; forged += 1) {
+    const response = await send();
+    assert.equal(response.status, 500, `forged answer ${forged}: ${JSON.stringify(response.body)}`);
+    assert.equal(response.body.error.code, "POLICYSQL_INTERNAL");
+    assert.equal(response.body.error.detail, undefined);
+  }
+  assert.equal(lines.filter((line) => line.includes("owner_reply_rejected")).length, answers.length - 1);
 });

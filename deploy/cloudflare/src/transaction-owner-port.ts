@@ -3,6 +3,7 @@
 // implements them, and the wrapper supplies that adapter.
 
 import type { OperationError } from "./errors.ts";
+import { checkedErrorDetail } from "./error-detail.ts";
 
 /**
  * An owner's answer to one command: the operation's value, or its error (ADR 0023). The
@@ -156,7 +157,13 @@ export const checkedOwnerReply = (reply: unknown): OwnerReply | null => {
   if (reply.ok === false && isObject(error) &&
     typeof error.code === "string" && ERROR_CODE.test(error.code) &&
     typeof error.message === "string" && (error.path === null || typeof error.path === "string")) {
-    return { ok: false, error: { code: error.code, message: error.message, path: error.path as string | null } };
+    // `detail` is checked against the table of its code; one the code does not allow rejects the reply (ADR 0030).
+    const detail = checkedErrorDetail(error.code, error.detail);
+    if (detail === null) return null;
+    return {
+      ok: false,
+      error: { code: error.code, message: error.message, path: error.path as string | null, ...(detail === undefined ? {} : { detail }) },
+    };
   }
   return null;
 };

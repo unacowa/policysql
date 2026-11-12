@@ -191,7 +191,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(typeof record.requestId, "string");
     assert.equal(typeof record.schemaVersion, "string");
     assert.equal(typeof record.policyVersion, "string");
-    assert.equal(record.abiVersion, 18);
+    assert.equal(record.abiVersion, 19);
     assert.deepEqual(Object.keys(record).sort(), ["abiVersion", "cause", "event", "policyVersion", "requestId", "schemaVersion", "statementIndex"]);
   });
 
@@ -386,14 +386,23 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     const h = await setup(t);
     const insert = (id) => ({ sql: "INSERT INTO projects(id,name,note) VALUES(:id,:name,:note)", params: { id, name: "n", note: "n" } });
     h.logs.length = 0;
-    const duplicate = await post(h, { statements: [insert("seed")] }, EXECUTE, "unclassified-key-000001");
-    assert.equal(duplicate.status, 503, JSON.stringify(duplicate.body));
-    assert.equal(duplicate.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+    // The database refuses the duplicate; the simulated server's answer is replaced by a busy error
+    // (a constraint violation is its own 409 since #145, so it cannot stand for "any other code").
+    h.replaceDatabaseResponse(({ results }) => {
+      for (const entry of results) {
+        const steps = entry.response?.result?.step_errors;
+        if (Array.isArray(steps)) steps.forEach((error, index) => { if (error !== null) steps[index] = { code: "SQLITE_BUSY", message: "SQLite error: database is locked" }; });
+      }
+    });
+    const busy = await post(h, { statements: [insert("seed")] }, EXECUTE, "unclassified-key-000001");
+    assert.equal(busy.status, 503, JSON.stringify(busy.body));
+    assert.equal(busy.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
     const [record] = events(h, "database_error_unclassified");
     assert.deepEqual(Object.keys(record).sort(), ["code", "event", "requestId"]);
-    assert.equal(record.code, "SQLITE_CONSTRAINT");
-    const everything = `${JSON.stringify(duplicate.body)}\n${h.logs.join("\n")}`;
-    for (const text of ["UNIQUE", "projects.id", "constraint failed"]) assert.equal(everything.includes(text), false, text);
+    assert.equal(record.code, "SQLITE_BUSY");
+    const everything = `${JSON.stringify(busy.body)}\n${h.logs.join("\n")}`;
+    for (const text of ["database is locked", "projects.id", "constraint failed"]) assert.equal(everything.includes(text), false, text);
+    assert.equal(events(h, "database_constraint_violation").length, 0);
     assert.equal(events(h, "sql_too_complex").length, 0);
   });
 }
