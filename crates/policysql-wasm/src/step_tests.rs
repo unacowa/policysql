@@ -134,10 +134,10 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 }
 
 #[test]
-fn abi_22_names_the_step_machine_with_the_detail_and_reason_answers() {
+fn abi_23_names_the_step_machine_with_the_detail_and_reason_answers() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 22);
-    assert!(owner.runtime.snapshot().ends_with(":abi-22"));
+    assert_eq!(owner.runtime.abi_version(), 23);
+    assert!(owner.runtime.snapshot().ends_with(":abi-23"));
 }
 
 /// Runs a statement of a begun write transaction up to its `execute`, answers that effect with
