@@ -13,7 +13,7 @@ from whatever it owns and passes it in; env names are the wrapper's convention.
 | `environment` | yes | Deployment name reported by `/healthz` as `environment`. 1-64 of `[A-Za-z0-9_.:-]`. |
 | `publicBaseUrl` | when `commitChecks` has an entry | `https:` origin (no path, query, fragment, or credentials) that validators call back at `/v1/commit-checks/<id>/query`. |
 | `costCatalog` | no | `{ maxEstimatedRowsRead, maxEstimatedRowsWritten, resources: { "<resource id>": { upperRows } } }`, positive integers. Without it, cost observations are logged as `POLICYSQL_COST_UNKNOWN` and open no database work. |
-| `commitChecks` | no | `{ "<policy check id>": { url, hmacSecret } }`. `url` is `https:` without credentials; `hmacSecret` has at least 16 characters. A triggered check without an entry rejects the commit with 409 `POLICYSQL_COMMIT_CHECK_REJECTED` and calls no validator. |
+| `commitChecks` | no | `{ "<policy check id>": { url, hmacSecret } }`. `url` is `https:` without credentials; `hmacSecret` has at least 16 characters. A triggered check without an entry rejects the commit with 409 `POLICYSQL_COMMIT_CHECK_REJECTED` (`detail.reason` `unconfigured`) and calls no validator. |
 
 Any other key is rejected, so a misspelled or legacy setting cannot silently fall back.
 
@@ -183,9 +183,10 @@ emitted statement instead (ADR 0027, "Emitted statement complexity") and answers
 The error is detected before COMMIT, so nothing is committed. In an interactive transaction the
 transaction closes as `failed` and is rolled back, and later commands answer 409
 `POLICYSQL_TRANSACTION_UNAVAILABLE`. A constraint violation is 409 `POLICYSQL_CONSTRAINT_VIOLATION` with `detail.constraint` and is logged
-as `database_constraint_violation` (ADR 0030). A database error that no allowlist entry names stays 503
-`POLICYSQL_DATABASE_UNAVAILABLE` and is logged as `database_error_unclassified` with the Hrana
-`code` only. The same event, with the code only, is also logged when a constraint violation is not
+as `database_constraint_violation` (ADR 0030). A statement the database refused for neither complexity nor a
+constraint is 500 `POLICYSQL_DATABASE_ERROR` (#145 pull request E), and is logged as
+`database_error_unclassified` with the Hrana `code` only; a request that failed as a whole stays
+503 `POLICYSQL_DATABASE_UNAVAILABLE` with the same log. The same event, with the code only, is also logged when a constraint violation is not
 the client's statement (the idempotency lookup or insert, or a commit-check callback) and the
 response is 500 `POLICYSQL_INTERNAL`. The log events `sql_too_complex` (statement index, schema and policy versions, ABI
 version, fixed cause), `database_constraint_violation` (statement index, schema and policy
@@ -321,7 +322,7 @@ them: a database control reply (BEGIN, COMMIT, ROLLBACK, close), where over the 
 `POLICYSQL_DATABASE_UNAVAILABLE`, or for COMMIT an unknown outcome (500 or 503, or
 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` for an interactive COMMIT), never a rejection and never a
 limit (ADR 0007); and a validator (commit-check) reply, where over the bound denies the commit as
-a failed validator.
+a failed validator (`reason` `unavailable`).
 
 Failures, all at construction and before any request is served:
 

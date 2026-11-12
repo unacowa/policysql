@@ -91,7 +91,7 @@ transaction開始後はsnapshotが固定され、statementごとの`expected`は
 | `413` | request body、SQL text、result、対話型transactionの恒久的な上限超過（再送しても成功しない）。ただし`Idempotency-Key`付きのAtomic Executeでbody側の入力上限に達した場合（deployによる引き下げ後のcommit済みwriteの再送かもしれない）と、compile時の`maxSqlBytes`に達した場合（compileがidempotency lookupより先に走る）は500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause`に原因）になる |
 | `422` | type、format、expectationの不成立 |
 | `429` | ラッパーのrate limit（`POLICYSQL_RATE_LIMITED`）のみ。ライブラリは429を返さない |
-| `500` | 安全に公開できない内部失敗。`Idempotency-Key`付きのAtomic ExecuteがDBを読む前に断られた結果不明（`POLICYSQL_OUTCOME_UNKNOWN`）も500 |
+| `500` | 安全に公開できない内部失敗。`Idempotency-Key`付きのAtomic ExecuteがDBを読む前に断られた結果不明（`POLICYSQL_OUTCOME_UNKNOWN`）も500。DBが文を拒否した（`POLICYSQL_DATABASE_ERROR`、結果不明）も500 |
 | `503` | database、transaction owner、commit-check serviceなど一時的な依存先障害 |
 | `504` | compile、database、hookのtimeout |
 

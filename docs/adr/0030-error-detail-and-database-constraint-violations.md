@@ -416,5 +416,139 @@ those of section Consequences: an active interactive transaction is closed with 
 
 ### Left to later pull requests
 
-Pull request E: `DATABASE_ERROR` (proposal 6) and the `reason` of a commit check (proposal 8).
-Pull request F: `limit` and the `path` of `INVALID_REQUEST`.
+Pull request E is closed (the amendment below). Pull request F: `limit` and the `path` of
+`INVALID_REQUEST`; and the candidates listed under "Left out" of the amendment below.
+
+## Amendment (#145 pull request E)
+
+Proposals 6 (`DATABASE_ERROR`) and 8 (the `reason` of a commit check) of #145.
+
+### `POLICYSQL_DATABASE_ERROR` (500)
+
+1. **The code.** `POLICYSQL_DATABASE_ERROR`, HTTP 500, the fixed message "The database refused the
+   statement.", `path` always `null`, no `detail`. It means: the database answered, and refused the
+   statement with an error that is neither a constraint violation nor a complexity refusal. It is
+   not a definite refusal: the official client reads it as an unknown outcome, as it did the 503.
+2. **Only the exception type changes; no new judgment is added.** `DatabaseStatementError` now
+   carries `POLICYSQL_DATABASE_ERROR`. It is what a statement batch's step error becomes when it is
+   neither complexity nor a constraint, and what a reply that ended the stream (#144) becomes: the
+   place is the same (a step error of the batch), and the stream still gives no evidence for a 409.
+   A pipeline request that failed as a whole (a Hrana `type: "error"` result, `readBatch`) is not
+   a statement's refusal, so it is the new `DatabaseRequestError`, which stays 503
+   `POLICYSQL_DATABASE_UNAVAILABLE`, with its code for the log. No allowlist of transient codes is
+   made: a `SQLITE_BUSY` step error is a 500 too (BEGIN IMMEDIATE takes the write lock, so lock
+   contention normally shows up as a failed BEGIN, a 503; this is a guess that the release smoke does
+   not check, and the status does not depend on it).
+3. **A new outcome class `refused`** (core's `Class::Refused`, TypeScript's `FailureClass`). The
+   adapter reports an `EngineError` with this code as `refused`, looked up by code. Unlike
+   `constraint` it carries no obligation: it is never a definite refusal, so reporting it where it
+   does not belong changes nothing a client decides.
+4. **The table.**
+
+| Where | Before | After |
+| --- | --- | --- |
+| a statement step error that is neither complexity nor a constraint, atomic (direct or owner, keyed or not) | 503 + log | 500 `DATABASE_ERROR` + log |
+| the same in an interactive statement | 503 + log, then `failed` | 500 + log, then `failed` (the next command is 409 `TRANSACTION_UNAVAILABLE`) |
+| a refusal in a reply that ended the stream (#144) | 503 + log | 500 + log, never 409 |
+| an extended constraint code (`SQLITE_CONSTRAINT_UNIQUE`, section 10) | 503 + log | 500 + log |
+| the idempotency lookup or insert, a refusal that is neither complexity nor a constraint | 503 + log | 500 `DATABASE_ERROR` + log |
+| the lookup or insert's constraint, complexity or `limit` (section 5) | 500 `INTERNAL` | unchanged |
+| a callback query's step error | 503 to the validator, 409 `COMMIT_CHECK_REJECTED` to the client | 500 `DATABASE_ERROR` to the validator, 409 with `reason: callback` |
+| COMMIT's error reply (a deferred foreign key included) | interactive 503 `COMMIT_OUTCOME_UNKNOWN`, atomic direct 503, atomic owner 500 `INTERNAL` | unchanged (ADR 0007): `commit_failure(Refused)` is `INTERNAL`, `directCommitFailureClass` reports `refused` as `unavailable` |
+| a pipeline request that failed as a whole | 503 + log | unchanged |
+| `RuntimeError::Busy` (the wasm plan table is full) | 503 | unchanged: the database refused nothing, and a retry may pass |
+
+   Section 4's and section 10's "a reply that ended the stream stays 503" and "an extended code
+   returns to 503" now read 500 `DATABASE_ERROR`; what is not classified is the same. `Code::for_class`
+   maps `Refused` to `DatabaseError` on every event. `OUTCOME_CAUSE_CODES` is unchanged (22 codes):
+   `DATABASE_ERROR` depends on the database's state.
+5. **The log.** `database_error_unclassified` is written when the class is `refused`, with the
+   database's code only (`{event, requestId, code}`), once per `DATABASE_ERROR` reply. "Unclassified"
+   keeps its meaning: not classified as complexity or constraint. The 503 request error is still
+   logged as before. `cost_observation_failed` carries `DATABASE_ERROR` as its `code` for a refused
+   cost observation (log only).
+6. **No `path`.** The failed statement's index is known to the transport, but a lookup or insert
+   does not point at the client's statements, so a path would need a branch per task. A candidate for
+   later.
+
+### `detail.reason` of `POLICYSQL_COMMIT_CHECK_REJECTED`
+
+1. **Five values** (`COMMIT_CHECK_REASONS`), each assigned by the branch that rejects, from what
+   the branch already knows:
+
+| Value | Meaning | Branches |
+| --- | --- | --- |
+| `denied` | the validator answered with a well-formed decision with `allowed: false` | the verdict |
+| `unavailable` | no usable answer (not delivered, timeout, non-2xx, a malformed decision) or the validation deadline passed | expiry before or while validating, a connection that is not open, `ValidatorFailed` of any class but `rejected`, `ok: false`, a malformed decision |
+| `limit` | the validator's callback queries read more rows or bytes than the check allows | the callback row and byte limits |
+| `unconfigured` | a check that started has no endpoint, or the hook adapter refused it at the exit | the configured-checks test (interactive and atomic), `ValidatorFailed { class: rejected }` |
+| `callback` | a validator callback query failed for another reason | every other `fail_validation` |
+
+   `limit` and `callback` are the only candidates the callback code can name: the proposal's four
+   values had none for a failed callback query, so `callback` is the fifth.
+2. **`decision_verdict`** replaces `allowed_decision`: `Allowed`, `Denied`, or malformed. The set
+   of decisions that allow is unchanged. A decision without `allowed`, or with a non-boolean
+   `allowed`, was a deny by the final comparison; it is now `unavailable`, since it is not a decision
+   by the documented form. A non-2xx reply is `unavailable` whatever its body.
+3. **`ValidatorFailed.class`** is read: `rejected` is `unconfigured`, anything else `unavailable`.
+4. **The callback count limit** (`sequence > max_transaction_statements`) stays `callback`, and the
+   validator keeps getting `TRANSACTION_CONFLICT` for it. Splitting it would raise the question of the
+   validator-facing code too, so it is left to #158.
+5. **The validator's `error.code` is neither returned nor logged.** It is an untrusted string, and
+   logging it would need a check of its characters and length: logic. The validator keeps its own audit
+   log. This narrows the plan's "log it only".
+6. **The key is `reason`**, as `INVALID_PARAMETER`'s. The value sets are disjoint and the type is
+   the same (a string from an enumeration), so a union of two lists does not break amendment C's
+   reason for naming `complexity` apart (that avoided one key with an object and a string). The
+   branch key stays `code`.
+7. **The type prevents a missing reason.** `Code::CheckRejected(CheckReason)`: a
+   `COMMIT_CHECK_REJECTED` without a reason does not compile, and `error_reply` puts the reason in
+   `detail` through `Code::detail`. A test lists every `Code` through an exhaustive `match` and checks
+   its reply against the table.
+8. **Not changed**: every reason is a 409 `COMMIT_CHECK_REJECTED`, decided before COMMIT, a rejection
+   for `execute` and `commit`. `reason` is information for a retry decision (`denied` and `limit`
+   may repeat, `unavailable` may pass); PolicySQL does not promise it. `Task::Verdict` carries the
+   verdict with its reason (a deny that waits for the connection keeps its reason).
+
+### The detail table
+
+| Code | `detail` |
+| --- | --- |
+| `POLICYSQL_COMMIT_CHECK_REJECTED` | required `{ "reason": <one of five> }` |
+| `POLICYSQL_DATABASE_ERROR` | none (a `detail` is invalid) |
+
+The shared fixture, core's `ErrorDetail::allowed`, the Worker's `checkedErrorDetail`, OpenAPI's
+`ErrorDetail.reason` (the eight parameter reasons, then the five) and the client's
+`PolicySqlCommitCheckReason` are the same lists. The official client's handling does not change:
+`DATABASE_ERROR` is not in `REJECTIONS` (an unknown outcome), `COMMIT_CHECK_REJECTED` is a rejection.
+
+### Observation (`Obs`)
+
+A client now sees whether a failed statement was refused by the database (500) or got no answer
+(503); that the statement failed was visible before, and the code adds only "not an outage". A
+commit-check rejection gives a fixed reason that depends on the validator and on the rows the
+callback session reads: a client can guess that `limit` against `denied` follows the rows it cannot
+see, or that a heavy validator query that times out is `unavailable`. The verdict itself already
+depended on what the validator read. Operators: a validator should deny rather than fail on a data
+condition, and its callback limits should be well above its ordinary reads. See `docs/security-model.md`.
+
+### Rejected alternatives
+
+- An allowlist of transient database codes: it needs real Turso observations and is a judgment.
+- A `path` for `DATABASE_ERROR`: needs a branch per task.
+- Returning or logging the validator's code: needs a check of an untrusted string.
+- A separate key (`checkReason`): the string type is the same; the key adds no safety.
+- Splitting the `||` of the callback count limit: changes the validator-facing code (#158).
+
+### Versions
+
+ABI 23 (the snapshot is `…:abi-23`) and owner wire `"5"`: the owner reply gains a `detail` row, and
+an older Worker reads it as `owner_reply_rejected`; a reply of another version is not read (the
+existing rule). The consequences are those of section Consequences.
+
+### Left out
+
+The difference between the callback count limit and the documented validator code (#158). A `path` of
+`DATABASE_ERROR`. A statement number or a database code in `database_error_unclassified`. A
+`Busy` message equal to its code's text. Pull request F: `limit` and the `path` of
+`INVALID_REQUEST`.

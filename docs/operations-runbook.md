@@ -64,7 +64,7 @@ compile happened (the Worker, the Durable Object that owns a transaction, and Ex
 `requestId` as the `request_rejected` of the same request:
 
 ```json
-{"event":"rejection_reason","requestId":"req_…","statementIndex":0,"code":"POLICYSQL_FORBIDDEN_COLUMN","reason":"bind.UnknownColumn","shape":null,"schemaVersion":"…","policyVersion":"…","abiVersion":22}
+{"event":"rejection_reason","requestId":"req_…","statementIndex":0,"code":"POLICYSQL_FORBIDDEN_COLUMN","reason":"bind.UnknownColumn","shape":null,"schemaVersion":"…","policyVersion":"…","abiVersion":23}
 ```
 
 `reason` is `<stage>.<variant>`. The stages tell where the statement stopped: `bind` (the client's
@@ -79,6 +79,14 @@ session without a value the policy needs), `compile` (the parameters against the
 database's result), `auth`, and `runtime`. `sql_too_complex` and `emitted_sql_reparse_failed` keep
 their own events. A keyed request that answered `POLICYSQL_OUTCOME_UNKNOWN` logs the original
 reason too. The record holds fixed names only, never SQL, an identifier, or a value.
+
+`POLICYSQL_COMMIT_CHECK_REJECTED` carries `detail.reason`: `unconfigured` (see
+`commit_check_unconfigured`; a check id without an endpoint, or an endpoint the hook adapter
+refused), `unavailable` (the validator did not answer in time, answered non-2xx, or sent a body that
+is not a decision; check the validator's own logs and `maxHookDurationMs`), `denied` (the
+validator's decision; its own code is in the validator's logs only), `limit` (the validator's
+callback queries read more rows or bytes than the check allows), `callback` (a callback query
+failed: the validator sees the code in its callback reply).
 
 ## Monitoring and alerts
 
@@ -104,6 +112,13 @@ Configure alerts in the production account for:
   baton, after SQLite closed the transaction) logs no recovery event and leaves no lock. A BEGIN
   reply whose headers never arrived has no baton,
   so that residual produces no event; a write lock that appears without one may come from it;
+- 500 `POLICYSQL_DATABASE_ERROR` is part of the 5xx rate. Join it by `requestId` to
+  `database_error_unclassified`: `SQLITE_UNKNOWN` is typically a table or column the catalog names
+  that the database does not have (schema drift: compare the catalog with the database);
+  `SQL_PARSE_ERROR` or `SQL_INPUT_ERROR` that is not a complexity refusal is SQL PolicySQL emitted
+  that the database cannot read (report it as a bug); `SQLITE_CONSTRAINT` is a schema with
+  `ON CONFLICT ROLLBACK` or `RAISE(ROLLBACK)` (#146); `SQLITE_BUSY` is lock contention.
+  (`SQLITE_UNKNOWN` and `SQL_PARSE_ERROR` were seen against real Turso in #144; `SQLITE_BUSY` is a guess.)
 - `database_constraint_violation` with `constraint` `other` rising above its baseline: Turso may
   have changed the text of its messages, or a trigger was added (check the release smoke too). A
   constraint violation is a 409, so it is not part of the 5xx rate;

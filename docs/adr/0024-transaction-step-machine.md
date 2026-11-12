@@ -305,7 +305,8 @@ enum TxEvent {
 ```
 
 `class` is a closed enum (`timeout`, `unavailable`, `rejected`, `not_committed`, `unknown`, and
-since pull request 8 `limit`, see its notes), `complex` (ADR 0027) and `constraint` (ADR 0030),
+since pull request 8 `limit`, see its notes), `complex` (ADR 0027), `constraint` (ADR 0030) and
+`refused` (ADR 0030, #145 pull request E: `POLICYSQL_DATABASE_ERROR`, never a definite refusal),
 which only `executeFailed` carries. An adapter that cannot classify an error reports
 `unknown`. Core never sees an error message.
 
@@ -710,6 +711,12 @@ today.
 - **Resource unification (#145 pull request D, ABI 22).** No state or event changes; `step_json`
   returns different replies for existing inputs, so `ABI_VERSION` is 22; the owner wire version
   stays `"4"`.
+- **Database refusal and commit-check reason (#145 pull request E, ABI 23).** The class `refused`
+  (an `executeFailed` whose statement the database refused for neither complexity nor a constraint)
+  answers 500 `POLICYSQL_DATABASE_ERROR` on every event but COMMIT (`POLICYSQL_INTERNAL`);
+  `POLICYSQL_COMMIT_CHECK_REJECTED` carries `detail.reason`; `Task::Verdict` carries the verdict with
+  its reason instead of a boolean. `step_json` returns different replies for existing inputs, so
+  `ABI_VERSION` is 23 and the owner wire version is `"5"`.
 
 
 ## Migration
@@ -1118,7 +1125,7 @@ switches atomic execution).
   `Committed` replies the committed response, also when the owner's terminal record cannot be
   stored. `CommitFailed` rolls the connection back (as both TypeScript paths do) and answers by
   class: `timeout` `POLICYSQL_DATABASE_TIMEOUT`, `unavailable` `POLICYSQL_DATABASE_UNAVAILABLE`,
-  anything else `POLICYSQL_INTERNAL`: none is a rejection in the client, so an unkeyed request is
+  anything else (`refused` included) `POLICYSQL_INTERNAL`: none is a rejection in the client, so an unkeyed request is
   reported with the error of the failure as today and a keyed one resolves through its row.
 - **Cost** stays observation ("Cost" above): nothing is admitted or rejected by it. `Observe`
   carries the cost statements of the non-insert statements and `context: {requestId, binding,
@@ -1185,8 +1192,8 @@ production to the machine (`deploy/cloudflare/src/transaction-owner.ts`).
   (`src/exact-json.ts`), so nothing round-trips through a JavaScript number. One awaited effect
   runs per batch, last; its outcome or exception becomes exactly one outcome event with the
   effect's id (`src/step-effects.ts` classifies database failures: a query timeout or
-  `POLICYSQL_DATABASE_TIMEOUT` is `timeout`, `POLICYSQL_DATABASE_UNAVAILABLE` `unavailable`, a
-  rejected binding `rejected`, anything else `unknown`; a COMMIT failure is always `unknown`;
+  `POLICYSQL_DATABASE_TIMEOUT` is `timeout`, `POLICYSQL_DATABASE_UNAVAILABLE` `unavailable`,
+  `POLICYSQL_DATABASE_ERROR` `refused`, a rejected binding `rejected`, anything else `unknown`; a COMMIT failure is always `unknown`;
   a validator call that produced no answer is `timeout` or `unavailable`). `callValidator` runs
   through `callCommitCheckHook` with the endpoint and secret looked up by check id and
   re-checked at the exit (`rejected` when that fails); the HMAC inputs are unchanged, and the
