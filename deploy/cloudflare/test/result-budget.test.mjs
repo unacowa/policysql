@@ -399,12 +399,13 @@ test("the reference wrapper sets the response limit explicitly, and the runtime 
 
 test("the Turso transport fails closed, before any request, without a valid read cap", async () => {
   const { TursoHttpTransport } = await import("../src/turso-http.ts");
+  const { batchReply, okResults, requestSqls } = await import("./helpers/hrana.mjs");
   const sent = [];
   const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "cap", async (_url, init) => {
     const { requests } = JSON.parse(init.body);
-    sent.push(requests[0].stmt?.sql ?? requests[0].type);
+    sent.push(requestSqls(requests)[0]);
     const empty = { type: "ok", response: { type: "execute", result: { cols: [], rows: [], affected_row_count: 0, rows_read: 0, rows_written: 0, query_duration_ms: 0 } } };
-    return Response.json({ baton: "b", results: requests.map(() => empty) });
+    return Response.json({ baton: "b", results: okResults(requests, empty) });
   });
   const transaction = await transport.begin("read", 1_000, undefined, { maxBytesPerValue: 262_144 });
   for (const bad of [undefined, {}, { maxResponseBytes: 0 }, { maxResponseBytes: -1 }, { maxResponseBytes: 1.5 }, { maxResponseBytes: "100" }, { maxResponseBytes: Number.POSITIVE_INFINITY }]) {
@@ -415,12 +416,12 @@ test("the Turso transport fails closed, before any request, without a valid read
   await transaction.execute([{ sql: "SELECT 1" }], { maxResponseBytes: 4_096 });
   assert.deepEqual(sent, ["BEGIN DEFERRED", "SELECT 1"]);
   // A reply of one byte over the cap is a limit, and one of exactly the cap is read.
-  const text = JSON.stringify({ baton: "b", results: [{ type: "ok", response: { type: "execute", result: { cols: [], rows: [], affected_row_count: 0, rows_read: 0, rows_written: 0, query_duration_ms: 0 } } }] });
+  const text = JSON.stringify({ baton: "b", results: [batchReply([{ type: "ok", response: { type: "execute", result: { cols: [], rows: [], affected_row_count: 0, rows_read: 0, rows_written: 0, query_duration_ms: 0 } } }])] });
   const exact = new TextEncoder().encode(text).byteLength;
   for (const [cap, outcome] of [[exact, "served"], [exact - 1, "limit"]]) {
     const t = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "cap", async (_url, init) => {
       const { requests } = JSON.parse(init.body);
-      return requests[0].stmt?.sql.startsWith("BEGIN")
+      return requests[0].type === "execute"
         ? Response.json({ baton: "b", results: [{ type: "ok", response: { type: "execute", result: { cols: [], rows: [], affected_row_count: 0, rows_read: 0, rows_written: 0, query_duration_ms: 0 } } }] })
         : new Response(text);
     });

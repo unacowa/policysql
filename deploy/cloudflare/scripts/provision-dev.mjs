@@ -13,12 +13,13 @@ import { RUNTIME_LIMITS } from "../wrapper/limits.ts";
 import { DEPLOYMENT_VERSION_HEADER, versionTracker, waitForRelease } from "./release-readiness.mjs";
 import { bytesNullSmoke, commitCheckSmoke, sessionGateSmoke } from "./smoke-sections.mjs";
 import { sqlComplexitySmoke } from "./smoke-complexity.mjs";
+import { STATEMENT_BATCH_TABLES, statementBatchSmoke } from "./smoke-batch.mjs";
 import { responseBudgetSmoke } from "./smoke-response.mjs";
 import { idempotencyRetentionSmoke } from "./smoke-retention.mjs";
 import {
   IDEMPOTENCY_CLEANUP_BATCH_SIZE, IDEMPOTENCY_RETENTION_SECONDS,
 } from "../src/idempotency-cleanup.ts";
-import { COMPLEXITY_ALLOWLIST, SqlComplexityError } from "../src/database-complexity.ts";
+import { COMPLEXITY_ALLOWLIST, DatabaseStatementError, SqlComplexityError } from "../src/database-complexity.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 import { SHAPE_TARGET_BYTES, cpuSmoke, referenceScenarioId } from "./smoke-cpu.mjs";
 import { SMOKE_SHAPES } from "./lib/cpu-shapes.mjs";
@@ -440,6 +441,13 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens, schedules
     allowlist: COMPLEXITY_ALLOWLIST,
     classify: (error) => (error instanceof SqlComplexityError ? error.complexityCause : null),
   });
+  // The conditional statement batch (#144): real Turso stops after the first error, even when
+  // SQLite closes the transaction by itself, and a reply keeps the shape the transport requires.
+  const statementBatch = await statementBatchSmoke({
+    transport: new TursoHttpTransport({ url: database.url, authToken: database.token }, "release-smoke-batch"),
+    databaseCode: (error) => (error instanceof DatabaseStatementError ? error.databaseCode : null),
+    complexityCause: (error) => (error instanceof SqlComplexityError ? error.complexityCause : null),
+  });
   // The response budget (ADR 0027): a write whose response exceeds maxResponseBytes is refused
   // before COMMIT against the real database, rolled back, and leaves no idempotency record.
   const responseBudget = await responseBudgetSmoke(sectionContext, {
@@ -471,6 +479,7 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens, schedules
     commitChecks.failures.length > 0 ||
     bytesNull.failures.length > 0 ||
     sqlComplexity.failures.length > 0 ||
+    statementBatch.failures.length > 0 ||
     responseBudget.failures.length > 0 ||
     cpu.failures.length > 0 ||
     retention.failures.length > 0 ||
@@ -522,6 +531,7 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens, schedules
       commitChecks,
       bytesNull,
       sqlComplexity,
+      statementBatch,
       responseBudget,
       cpu,
       retention,
@@ -611,6 +621,7 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens, schedules
     commitChecks: commitChecks.report,
     bytesNull: bytesNull.report,
     sqlComplexity: sqlComplexity.report,
+    statementBatch: statementBatch.report,
     responseBudget: responseBudget.report,
     cpu: cpu.report,
     retention: retention.report,
@@ -720,6 +731,8 @@ async function main() {
     "CREATE TABLE IF NOT EXISTS smoke_values (id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, label TEXT NOT NULL, note TEXT, payload BLOB, doc TEXT) STRICT",
     "DELETE FROM smoke_checks",
     "DELETE FROM smoke_values",
+    // The conditional statement batch section (#144): development-only, emptied on every release.
+    ...STATEMENT_BATCH_TABLES,
     // ADR 0028, from ADR 0026 section 6: `created_at` is filled by the database and is what the
     // Cron cleanup deletes by; the index bounds that scan. Not WITHOUT ROWID (the cleanup
     // selects its batch by rowid).

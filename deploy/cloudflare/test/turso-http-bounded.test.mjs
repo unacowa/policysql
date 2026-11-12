@@ -12,6 +12,7 @@ import { TursoHttpTransport } from "../src/turso-http.ts";
 import { CommitNotSentError } from "../src/errors.ts";
 import { BodyReadError, BodyTooLargeError, readBoundedText } from "../src/bounded-body.ts";
 import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
+import { batchReply, requestSqls } from "./helpers/hrana.mjs";
 
 const MAX_RESPONSE_BYTES = 2_097_152;
 const CONTROL_BYTES = 65_536;
@@ -67,7 +68,7 @@ const padded = (json, bytes) => {
   out.set(encoded);
   return out;
 };
-const statementReply = (bytes) => padded({ baton: "b", results: [result(["name"], [[VALUE]])] }, bytes);
+const statementReply = (bytes) => padded({ baton: "b", results: [batchReply([result(["name"], [[VALUE]])])] }, bytes);
 const beginReply = (bytes) => padded({ baton: "b", results: [result([], [])] }, bytes);
 const closeReply = (bytes) => padded({ baton: null, results: [result([], []), CLOSE] }, bytes);
 const replyFor = { statement: statementReply, begin: beginReply, commit: closeReply };
@@ -78,11 +79,11 @@ const replyFor = { statement: statementReply, begin: beginReply, commit: closeRe
  */
 const transportFor = (target, respond) => new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "bounded", async (_url, init) => {
   const { requests } = JSON.parse(init.body);
-  const sql = requests[0].stmt?.sql ?? "";
+  const sql = requestSqls(requests)[0] ?? "";
   const kind = sql.startsWith("BEGIN") ? "begin" : sql === "COMMIT" || sql === "ROLLBACK" ? "commit" : "statement";
   if (kind === target) return respond(init);
   if (kind === "begin") return Response.json({ baton: "b", results: [result([], [])] });
-  if (kind === "statement") return Response.json({ baton: "b", results: [result(["name"], [["ok"]])] });
+  if (kind === "statement") return Response.json({ baton: "b", results: [batchReply([result(["name"], [["ok"]])])] });
   return Response.json({ baton: null, results: [result([], []), CLOSE] });
 });
 const runBegin = (transport, timeoutMs = 1000) => transport.begin("read", timeoutMs, undefined, runtimeLimit);
@@ -181,7 +182,7 @@ test("#53: a large body with a missing or lying Content-Length is cut at the bou
 test("#53: the bound counts UTF-8 bytes, not UTF-16 code units", async () => {
   // 1,048,576 three-byte characters: about 1 MiB of UTF-16 length, over 3 MiB of bytes. The
   // previous `text.length` check accepted this reply.
-  const json = JSON.stringify({ baton: "b", results: [result(["name"], [["語".repeat(1_048_576)]])] });
+  const json = JSON.stringify({ baton: "b", results: [batchReply([result(["name"], [["語".repeat(1_048_576)]])])] });
   const bytes = encoder.encode(json);
   assert.ok(json.length < MAX_RESPONSE_BYTES && bytes.byteLength > MAX_RESPONSE_BYTES);
   const { state, stream } = tracked(chunked(bytes, 65_536));
@@ -214,7 +215,7 @@ test("#53: a declared Content-Length over the bound is rejected; statement and B
 });
 
 test("#53: malformed UTF-8 is a transport failure (503), never a replacement character or a limit", async () => {
-  const valid = encoder.encode(JSON.stringify({ baton: "b", results: [result(["name"], [["AB"]])] }));
+  const valid = encoder.encode(JSON.stringify({ baton: "b", results: [batchReply([result(["name"], [["AB"]])])] }));
   const at = new TextDecoder().decode(valid).indexOf("AB");
   const replacing = (...bytes) => {
     const out = new Uint8Array(valid.byteLength - 2 + bytes.length);

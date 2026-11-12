@@ -7,6 +7,7 @@ import { createApp as createHandlerCore } from "../src/app.ts";
 import { POLICY_VERSION, SCHEMA_VERSION } from "../src/config.ts";
 import { CONSTRUCTOR_LIMITS } from "./helpers/limits.mjs";
 import { TursoHttpTransport } from "../src/turso-http.ts";
+import { batchReply, requestSqls } from "./helpers/hrana.mjs";
 
 let runtime;
 
@@ -153,16 +154,16 @@ test("returns exact redacted Turso egress SQL only to an authorized developer", 
     assert.equal(this, undefined, "host fetch must not be invoked as a transport method");
     const body = JSON.parse(init.body);
     pipelineBodies.push(body);
-    const sql = body.requests[0]?.stmt?.sql;
+    const sql = requestSqls(body.requests)[0];
     if (sql === "BEGIN DEFERRED") {
       return new Response(JSON.stringify({ baton: "baton_1", results: [result([], [])] }));
     }
     if (sql !== "BEGIN DEFERRED" && sql !== "COMMIT") {
       return new Response(JSON.stringify({
         baton: "baton_2",
-        results: body.requests.map((_request, index) =>
+        results: [batchReply(body.requests[0].batch.steps.map((_step, index) =>
           result(["id", "name"], [[`project_${index + 1}`, `Visible ${index + 1}`]], { rowsRead: 1, queryDurationMs: 0.5 }),
-        ),
+        ))],
       }));
     }
     if (sql === "COMMIT") {
@@ -231,23 +232,29 @@ test("returns exact redacted Turso egress SQL only to an authorized developer", 
   assert.equal(JSON.stringify(body.debug).includes("tenant_1"), false);
   assert.equal(JSON.stringify(body.debug).includes("active"), false);
   assert.equal(pipelineBodies.length, 3);
-  assert.deepEqual(pipelineBodies.map((item) => item.requests.length), [1, 2, 2]);
+  // One conditional batch carries both statements (#144): the second runs only when the first succeeded.
+  assert.deepEqual(pipelineBodies.map((item) => item.requests.length), [1, 1, 2]);
   assert.equal(pipelineBodies[0].baton, undefined);
   assert.equal(pipelineBodies[0].requests[0].stmt.sql, "BEGIN DEFERRED");
   assert.equal(pipelineBodies[1].baton, "baton_1");
-  assert.equal(pipelineBodies[1].requests[0].stmt.sql, expectedProtectedSql);
-  assert.equal(pipelineBodies[1].requests[1].stmt.sql, expectedProtectedSql);
+  assert.equal(pipelineBodies[1].requests[0].type, "batch");
+  const steps = pipelineBodies[1].requests[0].batch.steps;
+  assert.equal(steps.length, 2);
+  assert.equal(steps[0].stmt.sql, expectedProtectedSql);
+  assert.equal(steps[1].stmt.sql, expectedProtectedSql);
+  assert.equal(Object.hasOwn(steps[0], "condition"), false);
+  assert.deepEqual(steps[1].condition, { type: "ok", step: 0 });
   assert.equal(pipelineBodies[2].baton, "baton_2");
   assert.equal(pipelineBodies[2].requests[0].stmt.sql, "COMMIT");
   assert.equal(pipelineBodies[2].requests[1].type, "close");
   assert.equal(
-    pipelineBodies[1].requests[0].stmt.sql.includes("LIMIT :limit"),
+    pipelineBodies[1].requests[0].batch.steps[0].stmt.sql.includes("LIMIT :limit"),
     false,
     "user-provided limit must not pass through unclamped at the egress boundary",
   );
-  assert.equal(pipelineBodies[1].requests[0].stmt.sql.includes("LIMIT MIN (:limit, 100)"), true);
+  assert.equal(pipelineBodies[1].requests[0].batch.steps[0].stmt.sql.includes("LIMIT MIN (:limit, 100)"), true);
   assert.deepEqual(
-    Object.fromEntries(pipelineBodies[1].requests[0].stmt.named_args.map((item) => [item.name, item.value])),
+    Object.fromEntries(pipelineBodies[1].requests[0].batch.steps[0].stmt.named_args.map((item) => [item.name, item.value])),
     {
       status: { type: "text", value: "active" },
       limit: { type: "integer", value: "200" },
@@ -255,7 +262,7 @@ test("returns exact redacted Turso egress SQL only to an authorized developer", 
     },
   );
   assert.deepEqual(
-    Object.fromEntries(pipelineBodies[1].requests[1].stmt.named_args.map((item) => [item.name, item.value])),
+    Object.fromEntries(pipelineBodies[1].requests[0].batch.steps[1].stmt.named_args.map((item) => [item.name, item.value])),
     {
       status: { type: "text", value: "archived" },
       limit: { type: "integer", value: "5" },
@@ -267,7 +274,7 @@ test("returns exact redacted Turso egress SQL only to an authorized developer", 
 test("execution trace requires both deployment enablement and JWT debug access", async () => {
   const fetchImpl = async (_url, init) => {
     const body = JSON.parse(init.body);
-    const sql = body.requests[0]?.stmt?.sql;
+    const sql = requestSqls(body.requests)[0];
     if (sql === "BEGIN DEFERRED") {
       return new Response(JSON.stringify({ baton: "baton_1", results: [result([], [])] }));
     }
@@ -279,7 +286,7 @@ test("execution trace requires both deployment enablement and JWT debug access",
     }
     return new Response(JSON.stringify({
       baton: "baton_2",
-      results: [result(["id"], [["project_1"]])],
+      results: [batchReply([result(["id"], [["project_1"]])])],
     }));
   };
   const requestBody = { statements: [{ sql: "SELECT id FROM projects", params: {} }] };
@@ -368,7 +375,7 @@ for (const variation of selectVariations) {
     const fetchImpl = async (_url, init) => {
       const body = JSON.parse(init.body);
       pipelineBodies.push(body);
-      const sql = body.requests[0]?.stmt?.sql;
+      const sql = requestSqls(body.requests)[0];
       if (sql === "BEGIN DEFERRED") {
         return new Response(JSON.stringify({ baton: "baton_1", results: [result([], [])] }));
       }
@@ -380,7 +387,7 @@ for (const variation of selectVariations) {
       }
       return new Response(JSON.stringify({
         baton: "baton_2",
-        results: [result(variation.columns, variation.rows, { rowsRead: variation.rows.length, queryDurationMs: 0.5 })],
+        results: [batchReply([result(variation.columns, variation.rows, { rowsRead: variation.rows.length, queryDurationMs: 0.5 })])],
       }));
     };
     const response = await executeRequest({
@@ -394,8 +401,8 @@ for (const variation of selectVariations) {
     assert.equal(pipelineBodies.length, 3);
     assert.equal(pipelineBodies[0].requests[0].stmt.sql, "BEGIN DEFERRED");
     assert.equal(pipelineBodies[1].baton, "baton_1");
-    assert.equal(pipelineBodies[1].requests[0].stmt.sql, expectedProtectedSql);
-    variation.assertSql(pipelineBodies[1].requests[0].stmt.sql);
+    assert.equal(pipelineBodies[1].requests[0].batch.steps[0].stmt.sql, expectedProtectedSql);
+    variation.assertSql(pipelineBodies[1].requests[0].batch.steps[0].stmt.sql);
     assert.equal(pipelineBodies[2].baton, "baton_2");
     assert.equal(pipelineBodies[2].requests[0].stmt.sql, "COMMIT");
   });
@@ -407,7 +414,7 @@ test("documented function GLOB alias ordering and OFFSET reach protected Turso e
   const fetchImpl = async (_url, init) => {
     const body = JSON.parse(init.body);
     pipelineBodies.push(body);
-    const sql = body.requests[0]?.stmt?.sql;
+    const sql = requestSqls(body.requests)[0];
     if (sql === "BEGIN DEFERRED") {
       return new Response(JSON.stringify({ baton: "baton_1", results: [result([], [])] }));
     }
@@ -419,7 +426,7 @@ test("documented function GLOB alias ordering and OFFSET reach protected Turso e
     }
     return new Response(JSON.stringify({
       baton: "baton_2",
-      results: [result(["normalized_name"], [["alpha"]], { rowsRead: 3 })],
+      results: [batchReply([result(["normalized_name"], [["alpha"]], { rowsRead: 3 })])],
     }));
   };
   const response = await executeRequest({
@@ -435,7 +442,7 @@ test("documented function GLOB alias ordering and OFFSET reach protected Turso e
   });
   assert.equal(response.status, 200);
   await response.json();
-  const sql = pipelineBodies[1].requests[0].stmt.sql;
+  const sql = pipelineBodies[1].requests[0].batch.steps[0].stmt.sql;
   assert.match(sql, /LOWER\s*\("__policysql_t0"\."name"\) AS "normalized_name"/);
   assert.match(sql, /"name" GLOB :pattern/);
   assert.match(sql, /ORDER BY LOWER\s*\("__policysql_t0"\."name"\) ASC/);
@@ -544,21 +551,21 @@ test("write mutation egress stays inside one BEGIN IMMEDIATE transaction with id
   const fetchImpl = async (_url, init) => {
     const body = JSON.parse(init.body);
     pipelineBodies.push(body);
-    const sql = body.requests[0]?.stmt?.sql;
+    const sql = requestSqls(body.requests)[0];
     if (sql === "BEGIN IMMEDIATE") {
       return new Response(JSON.stringify({ baton: "baton_1", results: [result([], [])] }));
     }
     if (sql.startsWith("SELECT fingerprint, response_json FROM policysql_idempotency")) {
-      return new Response(JSON.stringify({ baton: "baton_2", results: [result(["fingerprint", "response_json"], [])] }));
+      return new Response(JSON.stringify({ baton: "baton_2", results: [batchReply([result(["fingerprint", "response_json"], [])])] }));
     }
     if (sql === expectedProtectedSql) {
       return new Response(JSON.stringify({
         baton: "baton_3",
-        results: [result(["id", "name", "__policysql_check"], [["p1", "Renamed", 1]], { rowsRead: 1, rowsWritten: 1, queryDurationMs: 0.5 })],
+        results: [batchReply([result(["id", "name", "__policysql_check"], [["p1", "Renamed", 1]], { rowsRead: 1, rowsWritten: 1, queryDurationMs: 0.5 })])],
       }));
     }
     if (sql.startsWith("INSERT INTO policysql_idempotency")) {
-      return new Response(JSON.stringify({ baton: "baton_4", results: [result([], [], { rowsWritten: 1, affectedRows: 1 })] }));
+      return new Response(JSON.stringify({ baton: "baton_4", results: [batchReply([result([], [], { rowsWritten: 1, affectedRows: 1 })])] }));
     }
     if (sql === "COMMIT") {
       return new Response(JSON.stringify({
@@ -587,13 +594,13 @@ test("write mutation egress stays inside one BEGIN IMMEDIATE transaction with id
   assert.equal(pipelineBodies.length, 5);
   assert.deepEqual(pipelineBodies.map((item) => item.baton), [undefined, "baton_1", "baton_2", "baton_3", "baton_4"]);
   assert.equal(pipelineBodies[0].requests[0].stmt.sql, "BEGIN IMMEDIATE");
-  assert.equal(pipelineBodies[1].requests[0].stmt.sql, "SELECT fingerprint, response_json FROM policysql_idempotency WHERE key_hash = :key_hash");
-  assert.equal(pipelineBodies[2].requests[0].stmt.sql, expectedProtectedSql);
-  assert.equal(pipelineBodies[3].requests[0].stmt.sql, "INSERT INTO policysql_idempotency (key_hash, fingerprint, response_json) VALUES (:key_hash, :fingerprint, :response_json)");
+  assert.equal(pipelineBodies[1].requests[0].batch.steps[0].stmt.sql, "SELECT fingerprint, response_json FROM policysql_idempotency WHERE key_hash = :key_hash");
+  assert.equal(pipelineBodies[2].requests[0].batch.steps[0].stmt.sql, expectedProtectedSql);
+  assert.equal(pipelineBodies[3].requests[0].batch.steps[0].stmt.sql, "INSERT INTO policysql_idempotency (key_hash, fingerprint, response_json) VALUES (:key_hash, :fingerprint, :response_json)");
   assert.equal(pipelineBodies[4].requests[0].stmt.sql, "COMMIT");
   assert.equal(pipelineBodies[4].requests[1].type, "close");
   assert.deepEqual(
-    Object.fromEntries(pipelineBodies[2].requests[0].stmt.named_args.map((item) => [item.name, item.value])),
+    Object.fromEntries(pipelineBodies[2].requests[0].batch.steps[0].stmt.named_args.map((item) => [item.name, item.value])),
     {
       id: { type: "text", value: "p1" },
       name: { type: "text", value: "Renamed" },
