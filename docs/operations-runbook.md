@@ -41,8 +41,9 @@ pass.
 
 Lowering `maxRequestBytes` or `maxJsonValues`, or deploying an ABI that tightens the JSON depth
 limit (65 to 64 in ABI 16), can make a keyed retry whose body was accepted before its commit hit
-the new limit. The Worker answers 500 `POLICYSQL_INTERNAL` and logs `keyed_body_limit_unknown`
-with the rejected code; that is an unknown outcome, not a failed write. Do not treat it as a
+the new limit. The Worker answers 500 `POLICYSQL_OUTCOME_UNKNOWN` and logs `keyed_body_limit_unknown`
+with the rejected code; that is an unknown outcome, not a failed write. `request_rejected.cause`
+holds the code and path the response carries as `detail.cause`. Do not treat it as a
 rollback and do not delete the idempotency row: nothing ran, the key is not consumed, and a later
 deployment that restores the limit replays the stored response (ADR 0007, #100). The client must
 retry the same key and body. If those retries must replay during the rollout rather than stay

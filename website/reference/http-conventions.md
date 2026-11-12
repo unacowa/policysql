@@ -85,11 +85,11 @@ transaction開始後はsnapshotが固定され、statementごとの`expected`は
 | `201` | 新しいinteractive transactionの開始 |
 | `400` | malformed JSON、SQL、parameter、sequenceなどrequestの不正 |
 | `401` | credentialがない、無効、期限切れ。ライブラリではなくラッパーが返す |
-| `403` | role、resource、operation、column、policyによる拒否 |
+| `403` | role、resource、operation、column、policy、policyの`check`による拒否 |
 | `404` | 公開可能な範囲でtransactionなどが存在しない |
 | `409` | stale snapshot、idempotency conflict、transaction state conflict、commit conflict |
-| `413` | request body、SQL text、result、対話型transactionの恒久的な上限超過（再送しても成功しない）。ただし`Idempotency-Key`付きのAtomic Executeでbody側の入力上限に達した場合（deployによる引き下げ後のcommit済みwriteの再送かもしれない）と、compile時の`maxSqlBytes`に達した場合（compileがidempotency lookupより先に走る）は500 `POLICYSQL_INTERNAL`（結果不明）になる |
-| `422` | type、format、constraint、operation check、expectationの不成立 |
+| `413` | request body、SQL text、result、対話型transactionの恒久的な上限超過（再送しても成功しない）。ただし`Idempotency-Key`付きのAtomic Executeでbody側の入力上限に達した場合（deployによる引き下げ後のcommit済みwriteの再送かもしれない）と、compile時の`maxSqlBytes`に達した場合（compileがidempotency lookupより先に走る）は500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause`に原因）になる |
+| `422` | type、format、expectationの不成立 |
 | `429` | ラッパーのrate limit（`POLICYSQL_RATE_LIMITED`）のみ。ライブラリは429を返さない |
 | `500` | 安全に公開できない内部失敗 |
 | `503` | database、transaction owner、commit-check serviceなど一時的な依存先障害 |

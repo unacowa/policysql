@@ -662,18 +662,18 @@ components:
             maxBytesPerValue:
               type: integer
               minimum: 1
-              description: Maximum decoded bytes of one bytes value (a bytes parameter, a policy preset, a result cell); text and JSON values are not bounded by it. The default is 262144 and the deployment may configure up to 1048576. An upper bound only, not a promise; the smallest applicable limit governs, so a value within it can still be refused by maxRequestBytes (413 POLICYSQL_REQUEST_TOO_LARGE, or 500 POLICYSQL_INTERNAL for a keyed atomic execute) or, when read, by the result limits (413 POLICYSQL_LIMIT_EXCEEDED). A client bytes parameter over the limit, or one that is not canonical padded base64, is a compile failure, returning 413 POLICYSQL_LIMIT_EXCEEDED / 400 POLICYSQL_INVALID_PARAMETER for an unkeyed atomic execute or Explain, and 500 POLICYSQL_INTERNAL (outcome unknown) for a keyed atomic execute, whose compile runs before the idempotency lookup. A result cell over it is 413 POLICYSQL_LIMIT_EXCEEDED and rolls back, except an atomic execute whose envelope contains a write after the first statement and whose result BLOB the streaming transport decodes over the limit; that is 500 POLICYSQL_INTERNAL (outcome unknown), because a later write may have autocommitted; a buffering provider's result encoding stays 413.
+              description: Maximum decoded bytes of one bytes value (a bytes parameter, a policy preset, a result cell); text and JSON values are not bounded by it. The default is 262144 and the deployment may configure up to 1048576. An upper bound only, not a promise; the smallest applicable limit governs, so a value within it can still be refused by maxRequestBytes (413 POLICYSQL_REQUEST_TOO_LARGE, or 500 POLICYSQL_OUTCOME_UNKNOWN for a keyed atomic execute) or, when read, by the result limits (413 POLICYSQL_LIMIT_EXCEEDED). A client bytes parameter over the limit, or one that is not canonical padded base64, is a compile failure, returning 413 POLICYSQL_LIMIT_EXCEEDED / 400 POLICYSQL_INVALID_PARAMETER for an unkeyed atomic execute or Explain, and 500 POLICYSQL_OUTCOME_UNKNOWN (outcome unknown) for a keyed atomic execute, whose compile runs before the idempotency lookup. A result cell over it is 413 POLICYSQL_LIMIT_EXCEEDED and rolls back, except an atomic execute whose envelope contains a write after the first statement and whose result BLOB the streaming transport decodes over the limit; that is 500 POLICYSQL_INTERNAL (outcome unknown), because a later write may have autocommitted; a buffering provider's result encoding stays 413.
             maxRequestBytes:
               type: integer
               minimum: 1
-              description: Maximum UTF-8 bytes of a request body as received, a byte order mark included. A larger body is 413 POLICYSQL_REQUEST_TOO_LARGE; for a keyed atomic execute whose retry may predate a deployment that lowered the limit it is 500 POLICYSQL_INTERNAL (outcome unknown), with nothing looked up, executed, or consumed.
+              description: Maximum UTF-8 bytes of a request body as received, a byte order mark included. A larger body is 413 POLICYSQL_REQUEST_TOO_LARGE; for a keyed atomic execute whose retry may predate a deployment that lowered the limit it is 500 POLICYSQL_OUTCOME_UNKNOWN (outcome unknown), with nothing looked up, executed, or consumed.
             maxJsonValues:
               type: integer
               minimum: 1
               description: >-
                 Maximum JSON values plus object member names in one request body, counted before the
                 body is parsed; a body with more is 413 POLICYSQL_REQUEST_TOO_LARGE, or 500
-                POLICYSQL_INTERNAL (outcome unknown) for a keyed atomic execute, as for
+                POLICYSQL_OUTCOME_UNKNOWN (outcome unknown) for a keyed atomic execute, as for
                 maxRequestBytes. Counted separately on
                 the result side: the raw values of the database's response to one atomic envelope or
                 interactive statement, which include every cell (visibility companion cells and the check
@@ -692,7 +692,7 @@ components:
             maxSqlBytes:
               type: integer
               minimum: 1
-              description: Maximum UTF-8 bytes of one statement's sql. A longer statement is 413 POLICYSQL_REQUEST_TOO_LARGE with path /statements/<i>/sql, before it is parsed; for a keyed atomic execute the compile failure is 500 POLICYSQL_INTERNAL (outcome unknown), because the compile runs before the idempotency lookup.
+              description: Maximum UTF-8 bytes of one statement's sql. A longer statement is 413 POLICYSQL_REQUEST_TOO_LARGE with path /statements/<i>/sql, before it is parsed; for a keyed atomic execute the compile failure is 500 POLICYSQL_OUTCOME_UNKNOWN (outcome unknown), because the compile runs before the idempotency lookup.
             maxParameters:
               type: integer
               minimum: 1
@@ -748,6 +748,19 @@ components:
                 Exception: a schema whose ON CONFLICT ROLLBACK or RAISE(ROLLBACK) makes the database
                 close the transaction is 503 POLICYSQL_DATABASE_UNAVAILABLE, and a deferred foreign
                 key that fails at COMMIT is an unknown outcome.
+
+                POLICYSQL_CHECK_FAILED (403, path /statements/<i>, no detail, a fixed message) means a
+                row the statement changed does not satisfy the policy's check (the check is FALSE or
+                UNKNOWN). It is detected before COMMIT and rolled back, so nothing was committed and the
+                request is a rejection, with or without an Idempotency-Key; an interactive transaction
+                closes as failed. A database CHECK constraint is POLICYSQL_CONSTRAINT_VIOLATION instead.
+
+                POLICYSQL_OUTCOME_UNKNOWN (500, path null, detail.cause) means an atomic execute with an
+                Idempotency-Key was refused before the database was read (a compile, the session gate,
+                or a request body limit), so nothing ran and the key was not consumed, but the same
+                key may have committed under an earlier deployment: the outcome is unknown, not a
+                rejection. detail.cause is the code and path the request would have been refused with
+                had it carried no key. Retry with the same key and body.
             message: { type: string }
             path: { type: [string, 'null'] }
             detail:
@@ -755,9 +768,21 @@ components:
               additionalProperties: false
               description: >-
                 Machine-readable values fixed per code (ADR 0030). Present only for the codes that
-                define one; today POLICYSQL_CONSTRAINT_VIOLATION.
+                define one; today POLICYSQL_CONSTRAINT_VIOLATION and POLICYSQL_OUTCOME_UNKNOWN.
               properties:
                 constraint:
                   type: string
                   enum: [unique, not_null, foreign_key, check, other]
+                cause:
+                  type: object
+                  additionalProperties: false
+                  required: [code, path]
+                  description: The refusal behind POLICYSQL_OUTCOME_UNKNOWN. No code that depends on the database's state is listed.
+                  properties:
+                    code:
+                      type: string
+                      enum: [POLICYSQL_FORBIDDEN_ACCESS, POLICYSQL_STALE_OPERATION, POLICYSQL_INVALID_REQUEST, POLICYSQL_REQUEST_TOO_LARGE, POLICYSQL_JSON_TOO_DEEP, POLICYSQL_INVALID_SQL, POLICYSQL_MULTIPLE_STATEMENTS, POLICYSQL_UNSUPPORTED_SQL, POLICYSQL_MISSING_POLICY, POLICYSQL_FORBIDDEN_OPERATION, POLICYSQL_FORBIDDEN_COLUMN, POLICYSQL_FORBIDDEN_COLUMN_CONTEXT, POLICYSQL_DUPLICATE_RESULT_COLUMN, POLICYSQL_INVALID_PARAMETER, POLICYSQL_AMBIGUOUS_PARAMETER_TYPE, POLICYSQL_RESERVED_PARAMETER, POLICYSQL_PRESET_COLUMN, POLICYSQL_LIMIT_EXCEEDED, POLICYSQL_EXPECTATION_FAILED, POLICYSQL_SQL_TOO_COMPLEX, POLICYSQL_INTERNAL, POLICYSQL_DATABASE_UNAVAILABLE]
+                    path:
+                      type: [string, 'null']
+                      pattern: '^/statements/(0|[1-9][0-9]{0,9})(/sql)?$'
             requestId: { type: string }

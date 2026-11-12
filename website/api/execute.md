@@ -92,7 +92,7 @@ compileした更新がcommit checkの対象になり得る場合は、DOがDBト
 
 - SQL parse、bind、policy、parameter、type validation
 - statement execution（DBの制約違反は409 `POLICYSQL_CONSTRAINT_VIOLATION`）
-- operation check
+- operation check（403 `POLICYSQL_CHECK_FAILED`）
 - `expect`
 - commit check
 - resource limitまたはMVCC commit
