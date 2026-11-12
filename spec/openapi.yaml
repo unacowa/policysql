@@ -817,9 +817,10 @@ components:
                 rejected the transaction, or could not be completed safely. It is decided before COMMIT, so
                 nothing was committed and the request is a rejection whatever the reason: denied (the
                 validator answered allowed: false), unavailable (no usable answer, or the validation
-                deadline passed), limit (the validator's callback queries read more rows or bytes than
-                the check allows), unconfigured (the check has no endpoint in the deployment) or callback
-                (a callback query failed). The validator's own error code is never returned.
+                deadline passed), limit (the check's callback queries together read more rows or result
+                bytes than allowed), unconfigured (the check has no endpoint in the deployment) or callback
+                (a callback query failed, including one that went over a per-statement limit, and the
+                limit on the number of callback queries). The validator's own error code is never returned.
 
                 POLICYSQL_CHECK_FAILED (403, path /statements/<i>, no detail, a fixed message) means a
                 row the statement changed does not satisfy the policy's check (the check is FALSE or

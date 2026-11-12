@@ -84,9 +84,15 @@ reason too. The record holds fixed names only, never SQL, an identifier, or a va
 `commit_check_unconfigured`; a check id without an endpoint, or an endpoint the hook adapter
 refused), `unavailable` (the validator did not answer in time, answered non-2xx, or sent a body that
 is not a decision; check the validator's own logs and `maxHookDurationMs`), `denied` (the
-validator's decision; its own code is in the validator's logs only), `limit` (the validator's
-callback queries read more rows or bytes than the check allows), `callback` (a callback query
-failed: the validator sees the code in its callback reply).
+validator's decision; its own code is in the validator's logs only), `limit` (the check's
+callback queries together read more rows (`maxCallbackRows`) or result bytes than allowed),
+`callback` (a callback query failed: the validator sees the code in its callback reply; one query
+over a per-statement limit (`maxRows`, `maxResultBytes`, a value's bytes) and the query-count limit
+are `callback`, not `limit`; so is a callback that reaches the owner after the validation deadline,
+while the deadline timer firing first makes the reason `unavailable`). A 500
+`POLICYSQL_DATABASE_ERROR` whose failure event carries no database code (a custom transport that
+throws the engine's `POLICYSQL_DATABASE_ERROR` without one) has no `database_error_unclassified`
+record; the shipped transport always sends the code.
 
 ## Monitoring and alerts
 

@@ -239,10 +239,10 @@ role、trusted session、policy version、schema version、transaction handleは
 各項目の`detail.reason`（[エラー](../api/errors)）を添えます。
 
 - hook timeoutまたは接続失敗（`unavailable`）
-- signature、TLS、opaque tokenの検証失敗（tokenは`callback`、TLSは`unavailable`）
+- signature、TLS、opaque tokenの検証失敗（signatureはvalidator側の検証なので、失敗は2xx以外の応答になり`unavailable`。TLSも`unavailable`、tokenは`callback`）
 - `2xx`以外のHTTP response（`unavailable`）
 - malformed JSONまたは未知protocol version（`unavailable`）
-- callback queryのSQL、permission（`callback`）、limit error（行数・bytesは`limit`）
+- callback queryのSQL、permission（`callback`）、limit error（check全体で読んだ行数・result bytesの合計の上限は`limit`。1回のqueryが文ごとの上限を超えた場合とqueryの数の上限は`callback`）
 - callbackの順序違反（`callback`）
 - validatorがdecisionを返す前の切断（`unavailable`）
 - transaction ownerの喪失（拒否ではなく`POLICYSQL_TRANSACTION_UNAVAILABLE`または結果不明。`reason`はない）

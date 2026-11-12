@@ -31,6 +31,8 @@ export const client = ({ call, baseUrl, headers, expected }) => {
 };
 
 export const errorCode = (outcome) => outcome.body?.error?.code ?? null;
+/** The `detail.reason` of a commit-check rejection (a fixed value, never a validator's text), or null. */
+export const reasonOf = (outcome) => outcome.body?.error?.detail?.reason ?? null;
 export const summary = (outcome) => ({ status: outcome.status, code: errorCode(outcome), elapsedMs: outcome.elapsedMs });
 
 const INSERT_PROBE = "INSERT INTO smoke_checks (id, verdict) VALUES (:id, :verdict) RETURNING id, verdict";
@@ -137,6 +139,9 @@ export const commitCheckSmoke = async (context, budgets = {}) => {
   expect(atomicAllow.status === 200 && atomicAllow.body?.meta?.commitChecks === "passed", "atomic allow commits after the check ran and passed");
   const atomicDeny = await api.execute([{ sql: INSERT_PROBE, params: { id: ids.atomicDeny, verdict: "deny" }, expect: { affectedRows: 1 } }]);
   expect(atomicDeny.status === 409 && errorCode(atomicDeny) === "POLICYSQL_COMMIT_CHECK_REJECTED", "atomic deny is rejected");
+  // The reason crosses the Durable Object's wire and the Worker's check (#145 pull request E): a
+  // reason that is dropped on the way would still be a 409 without this.
+  expect(reasonOf(atomicDeny) === "denied", "atomic deny carries the reason `denied`");
 
   const interactive = async (verdict, id) => {
     const begin = await api.begin("write");
@@ -156,6 +161,7 @@ export const commitCheckSmoke = async (context, budgets = {}) => {
   expect(interactiveTimeout.statement.status === 200, "interactive timeout probe statement runs");
   expect(interactiveTimeout.commit.status === 409 && errorCode(interactiveTimeout.commit) === "POLICYSQL_COMMIT_CHECK_REJECTED",
     "interactive commit is rejected when the validator misses the hook deadline");
+  expect(reasonOf(interactiveTimeout.commit) === "unavailable", "the timed-out commit carries the reason `unavailable`");
   // The validator holds its answer for 3 s; the hook deadline is at most 1.5 s.
   expect(interactiveTimeout.commit.elapsedMs >= 1_000, "the timed-out commit waited for the hook deadline");
 
@@ -175,12 +181,15 @@ export const commitCheckSmoke = async (context, budgets = {}) => {
       // Execute also within the statement deadline `timeoutMs` (README, "Release smoke").
       budgets,
       atomicAllow: { ...summary(atomicAllow), commitChecks: atomicAllow.body?.meta?.commitChecks ?? null },
-      atomicDeny: summary(atomicDeny),
+      atomicDeny: { ...summary(atomicDeny), reason: reasonOf(atomicDeny) },
       interactiveAllow: {
         begin: interactiveAllow.begin.status, statement: interactiveAllow.statement.status,
         commit: { ...summary(interactiveAllow.commit), commitChecks: interactiveAllow.commit.body?.meta?.commitChecks ?? null },
       },
-      interactiveTimeout: { begin: interactiveTimeout.begin.status, statement: interactiveTimeout.statement.status, commit: summary(interactiveTimeout.commit) },
+      interactiveTimeout: {
+        begin: interactiveTimeout.begin.status, statement: interactiveTimeout.statement.status,
+        commit: { ...summary(interactiveTimeout.commit), reason: reasonOf(interactiveTimeout.commit) },
+      },
       committedProbes: committed?.length ?? null,
       deniedRowsLeft: committed === null ? null : committed.filter((entry) => !entry.endsWith(":allow")).length,
     },

@@ -480,9 +480,9 @@ Proposals 6 (`DATABASE_ERROR`) and 8 (the `reason` of a commit check) of #145.
 | --- | --- | --- |
 | `denied` | the validator answered with a well-formed decision with `allowed: false` | the verdict |
 | `unavailable` | no usable answer (not delivered, timeout, non-2xx, a malformed decision) or the validation deadline passed | expiry before or while validating, a connection that is not open, `ValidatorFailed` of any class but `rejected`, `ok: false`, a malformed decision |
-| `limit` | the validator's callback queries read more rows or bytes than the check allows | the callback row and byte limits |
+| `limit` | the check's callback queries together read more rows (`max_callback_rows`) or result bytes than allowed | the cumulative callback row and byte limits (`checks.rs`, the one `fail_validation` after `validate`) |
 | `unconfigured` | a check that started has no endpoint, or the hook adapter refused it at the exit | the configured-checks test (interactive and atomic), `ValidatorFailed { class: rejected }` |
-| `callback` | a validator callback query failed for another reason | every other `fail_validation` |
+| `callback` | a validator callback query failed for another reason | every other `fail_validation`: one query over a per-statement limit (`maxRows`, `maxResultBytes`, a BLOB's bytes, an adapter's `limit` class), the query-count limit, a failed compile or binding, a bad token or order |
 
    `limit` and `callback` are the only candidates the callback code can name: the proposal's four
    values had none for a failed callback query, so `callback` is the fifth.
@@ -532,6 +532,16 @@ see, or that a heavy validator query that times out is `unavailable`. The verdic
 depended on what the validator read. Operators: a validator should deny rather than fail on a data
 condition, and its callback limits should be well above its ordinary reads. See `docs/security-model.md`.
 
+A database error that data the policy hides can cause (residual risk 3 of the security model, for a
+client predicate evaluated on a hidden row) used to be a 503 that one request could not tell from an
+outage; it is now a 500 `DATABASE_ERROR` that one request reads. The path is not new, and the
+statement's failure was already visible; this is the same kind of change as the constraint violation's
+409.
+
+A refusal whose `executeFailed` carries no `databaseCode` (a custom transport that throws the
+engine's `POLICYSQL_DATABASE_ERROR` without one) is a 500 without a `database_error_unclassified`
+record; the shipped transport always sends the code.
+
 ### Rejected alternatives
 
 - An allowlist of transient database codes: it needs real Turso observations and is a judgment.
@@ -549,6 +559,6 @@ existing rule). The consequences are those of section Consequences.
 ### Left out
 
 The difference between the callback count limit and the documented validator code (#158). A `path` of
-`DATABASE_ERROR`. A statement number or a database code in `database_error_unclassified`. A
+`DATABASE_ERROR`. A statement number or the response's code in `database_error_unclassified`. A
 `Busy` message equal to its code's text. Pull request F: `limit` and the `path` of
 `INVALID_REQUEST`.

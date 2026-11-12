@@ -133,7 +133,9 @@ export const statementBatchSmoke = async ({ transport, databaseCode, complexityC
   const absentDatabaseCode = absent.error ? databaseCode(absent.error) : null;
   report.refused = { code: refusedCode, databaseCode: absentDatabaseCode };
   expect(refusedCode === "POLICYSQL_DATABASE_ERROR", "a statement the database cannot run is a database refusal");
-  expect(typeof absentDatabaseCode === "string" && /^[A-Z0-9_]+$/u.test(absentDatabaseCode),
+  // `UNKNOWN` is what the transport logs for a code that is missing or not of the safe shape, so
+  // it says Turso stopped sending one (its value is not fixed here).
+  expect(typeof absentDatabaseCode === "string" && /^[A-Z0-9_]+$/u.test(absentDatabaseCode) && absentDatabaseCode !== "UNKNOWN",
     "the database refusal keeps a safe database code for the log");
   expect(absent.rollback === "ok", "the transaction of a database refusal rolled back");
 
