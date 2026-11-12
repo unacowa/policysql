@@ -1797,5 +1797,155 @@
    "feature": "star"
   },
   "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": "denied"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": "unavailable"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": "limit"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": "unconfigured"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": "callback"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": "names"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": "DENIED"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": "denied "
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": 1
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": [
+    "denied"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "reason": "denied",
+   "code": "X"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "constraint": "unique"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": [],
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": "denied",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "denied"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "reason": "callback"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_DATABASE_ERROR",
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_DATABASE_ERROR",
+  "detail": {},
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_DATABASE_ERROR",
+  "detail": {
+   "reason": "denied"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_DATABASE_ERROR",
+  "detail": {
+   "constraint": "other"
+  },
+  "valid": false
  }
 ]

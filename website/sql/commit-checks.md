@@ -217,7 +217,7 @@ callback queryは直列に処理します。直前に完了した`sequence`と�
 
 hookはparameter、preset、session、SQL、database rowを変更できません。decisionはallowまたはdenyだけです。
 
-validatorの`error.code`は監査log用のapplication codeです。public clientへはそのまま転送せず、`POLICYSQL_COMMIT_CHECK_REJECTED`へ正規化します。
+validatorの`error.code`は、validator自身の監査logのための値です。PolicySQLは形だけを確かめ、clientに返さず、記録もしません。clientには`POLICYSQL_COMMIT_CHECK_REJECTED`と`detail.reason: "denied"`が返ります。
 
 ## Opaque capability
 
@@ -236,14 +236,16 @@ role、trusted session、policy version、schema version、transaction handleは
 
 次の場合はfail closedでtransaction全体をrollbackします。
 
-- hook timeoutまたは接続失敗
-- signature、TLS、opaque tokenの検証失敗
-- `2xx`以外のHTTP response
-- malformed JSONまたは未知protocol version
-- callback queryのSQL、permission、limit error
-- callbackの順序違反
-- validatorがdecisionを返す前の切断
-- transaction ownerの喪失
+各項目の`detail.reason`（[エラー](../api/errors)）を添えます。
+
+- hook timeoutまたは接続失敗（`unavailable`）
+- signature、TLS、opaque tokenの検証失敗（signatureはvalidator側の検証なので、失敗は2xx以外の応答になり`unavailable`。TLSも`unavailable`、tokenは`callback`）
+- `2xx`以外のHTTP response（`unavailable`）
+- malformed JSONまたは未知protocol version（`unavailable`）
+- callback queryのSQL、permission（`callback`）、limit error（check全体で読んだ行数・result bytesの合計の上限は`limit`。1回のqueryが文ごとの上限を超えた場合とqueryの数の上限は`callback`）
+- callbackの順序違反（`callback`）
+- validatorがdecisionを返す前の切断（`unavailable`）
+- transaction ownerの喪失（拒否ではなく`POLICYSQL_TRANSACTION_UNAVAILABLE`または結果不明。`reason`はない）
 
 外部validatorは副作用を持たせないでください。Turso DatabaseのMVCC conflictによってtransaction全体がretryされる場合、同じvalidationが複数回実行される可能性があります。課金、通知、job登録などはcommit後のoutboxで処理します。
 

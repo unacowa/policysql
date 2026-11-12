@@ -25,7 +25,7 @@ import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { callCommitCheckHook } from "../src/adapters/commit-check-hook.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
-import { asRecorded, referenceTranscript } from "./helpers/reference-transcript.mjs";
+import { asRecorded, checkedReason, observedCheckReasons, referenceTranscript } from "./helpers/reference-transcript.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 
@@ -332,8 +332,11 @@ const normalizedRecord = (side, value) => {
   const record = JSON.parse(value);
   return { phase: stepPhase(value), nextSequence: record.nextSequence, last: record.last?.response ?? null };
 };
-const normalizedReply = (reply) => reply.ok ? { ok: true, value: reply.value }
-  : { ok: false, code: reply.error.code, message: reply.error.message, path: reply.error.path };
+const normalizedReply = (reply) => {
+  if (reply.ok) return { ok: true, value: reply.value };
+  checkedReason(reply.error);
+  return { ok: false, code: reply.error.code, message: reply.error.message, path: reply.error.path };
+};
 
 const ALLOW = () => Response.json({ version: "1", allowed: true });
 
@@ -1295,4 +1298,10 @@ test("generated commit-check sequences agree", async (t) => {
   }
   t.diagnostic(JSON.stringify(stats));
   assert.ok(stats.validatorCalls >= 25 && stats.callbacks >= 25 && stats.committed >= 10 && stats.rejected >= 10, JSON.stringify(stats));
+});
+
+// The step side's commit-check rejections all carried one of the fixed reasons (`checkedReason`),
+// which the comparison drops. The set pinned here is what the scenarios above reach.
+test("the commit-check reasons the step side gave are the ones the scenarios reach (#145 pull request E)", () => {
+  assert.deepEqual([...observedCheckReasons].sort(), ["callback", "denied", "limit", "unavailable", "unconfigured"]);
 });

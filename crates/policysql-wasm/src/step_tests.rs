@@ -134,16 +134,15 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 }
 
 #[test]
-fn abi_22_names_the_step_machine_with_the_detail_and_reason_answers() {
+fn abi_23_names_the_step_machine_with_the_detail_and_reason_answers() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 22);
-    assert!(owner.runtime.snapshot().ends_with(":abi-22"));
+    assert_eq!(owner.runtime.abi_version(), 23);
+    assert!(owner.runtime.snapshot().ends_with(":abi-23"));
 }
 
-/// #145 at the ABI boundary: the real `step_json` reads an `executeFailed` of class `constraint`
-/// and answers 409 `POLICYSQL_CONSTRAINT_VIOLATION` with `error.detail` and the log event.
-#[test]
-fn a_constraint_class_is_a_conflict_with_detail_and_a_logged_record() {
+/// Runs a statement of a begun write transaction up to its `execute`, answers that effect with
+/// `failed` (an `executeFailed` without its `id`), and returns the reply and every raw log text.
+fn failed_statement(failed: &Value) -> (Value, String) {
     let mut owner = begun();
     let mut output = owner.statement(
         r#"{"sequence":1,"sql":"INSERT INTO counters (id) VALUES (:id)","params":{"id":"x"}}"#,
@@ -162,10 +161,9 @@ fn a_constraint_class_is_a_conflict_with_detail_and_a_logged_record() {
         .as_array()
         .map_or(0, |effects| effects.len() - 1)]["id"]
         .clone();
-    let mut output = owner.step(&json!({
-        "type": "executeFailed", "id": id, "class": "constraint", "statement": 0,
-        "constraint": "not_null", "databaseCode": "SQLITE_CONSTRAINT",
-    }));
+    let mut event = failed.clone();
+    event["id"] = id;
+    let mut output = owner.step(&event);
     let mut texts = vec![output["raw"].as_str().unwrap_or_default().to_owned()];
     let mut reply = Value::Null;
     for _ in 0..8 {
@@ -179,6 +177,17 @@ fn a_constraint_class_is_a_conflict_with_detail_and_a_logged_record() {
         output = owner.succeed(&output);
         texts.push(output["raw"].as_str().unwrap_or_default().to_owned());
     }
+    (reply, texts.join("\n"))
+}
+
+/// #145 at the ABI boundary: the real `step_json` reads an `executeFailed` of class `constraint`
+/// and answers 409 `POLICYSQL_CONSTRAINT_VIOLATION` with `error.detail` and the log event.
+#[test]
+fn a_constraint_class_is_a_conflict_with_detail_and_a_logged_record() {
+    let (reply, all) = failed_statement(&json!({
+        "type": "executeFailed", "class": "constraint", "statement": 0,
+        "constraint": "not_null", "databaseCode": "SQLITE_CONSTRAINT",
+    }));
     assert_eq!(
         reply["error"]["code"], "POLICYSQL_CONSTRAINT_VIOLATION",
         "{reply}"
@@ -189,8 +198,27 @@ fn a_constraint_class_is_a_conflict_with_detail_and_a_logged_record() {
         reply["error"]["message"],
         "The statement violates a NOT NULL constraint."
     );
-    let all = texts.join("\n");
     assert!(all.contains("database_constraint_violation"), "{all}");
+}
+
+/// #145 pull request E at the ABI boundary: the class `refused` is 500 `POLICYSQL_DATABASE_ERROR`
+/// with the fixed message, no path and no detail, logged once with the database's code only.
+#[test]
+fn a_refused_class_is_a_database_error_without_path_or_detail_and_a_logged_code() {
+    let (reply, all) = failed_statement(&json!({
+        "type": "executeFailed", "class": "refused", "databaseCode": "SQLITE_UNKNOWN",
+    }));
+    let error = &reply["error"];
+    assert_eq!(error["code"], "POLICYSQL_DATABASE_ERROR", "{reply}");
+    assert_eq!(error["message"], "The database refused the statement.");
+    assert_eq!(error["path"], Value::Null);
+    assert!(error.get("detail").is_none(), "{reply}");
+    assert_eq!(
+        all.matches("database_error_unclassified").count(),
+        1,
+        "{all}"
+    );
+    assert!(all.contains("SQLITE_UNKNOWN"), "{all}");
 }
 
 /// #85 path 1 with the real compiler: a keyed execute whose compile fails (here an operation

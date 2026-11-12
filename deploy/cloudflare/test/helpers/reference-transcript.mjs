@@ -13,6 +13,26 @@
 // must assert the machine's behavior directly instead.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { COMMIT_CHECK_REASONS } from "../../src/error-detail.ts";
+
+// #145 pull request E added `detail.reason` to POLICYSQL_COMMIT_CHECK_REJECTED; the recorded
+// replies predate it. The step side's reason is checked against the list and then compared
+// without it: a differential normalizer keeps only code, message and path, so it calls
+// `checkedReason` on every error it drops the detail of, and the test pins the reasons it saw.
+/** The reasons the step side gave, for the test to pin at its end. */
+export const observedCheckReasons = new Set();
+/**
+ * The reason of a commit-check rejection (`error` is the reply's `error`), or null for another
+ * code. Anything but exactly `{ reason: <one of COMMIT_CHECK_REASONS> }` fails the comparison.
+ */
+export const checkedReason = (error) => {
+  if (error.code !== "POLICYSQL_COMMIT_CHECK_REJECTED") return null;
+  const keys = Object.keys(error.detail ?? {});
+  assert.deepEqual(keys, ["reason"], `a commit check rejection carries exactly a reason: ${JSON.stringify(error.detail)}`);
+  assert.ok(COMMIT_CHECK_REASONS.includes(error.detail.reason), `a known reason: ${error.detail.reason}`);
+  observedCheckReasons.add(error.detail.reason);
+  return error.detail.reason;
+};
 
 /** A JSON value as the transcript stores it (`undefined` members dropped, `-0` as `0`). */
 export const asRecorded = (value) => value === undefined ? null : JSON.parse(JSON.stringify(value));

@@ -9,6 +9,7 @@
 mod common;
 
 use common::{Engine, LIMITS, begin, code, command, phase_of, rejects_commit, sequence_text};
+use policysql_transaction::machine::io::COMMIT_CHECK_REASONS;
 use policysql_transaction::machine::step_json;
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -61,8 +62,8 @@ enum Action {
 fn action() -> impl Strategy<Value = Action> {
     prop_oneof![
         10 => (prop_oneof![8 => Just(0u8), 1 => Just(1u8), 1 => Just(2u8)], prop_oneof![8 => Just(0i8), 1 => Just(-1i8), 1 => Just(1i8)], prop_oneof![8 => Just(0u8), 1 => Just(1u8), 1 => Just(2u8)], prop::bool::weighted(0.75)).prop_map(|(token, offset, sql, whole)| Action::Callback { token, offset, sql, whole }),
-        6 => (prop::bool::weighted(0.92), 0u8..7).prop_map(|(ok, class)| Action::ResolveCallback { ok, class }),
-        6 => (prop::bool::weighted(0.9), 0u8..7).prop_map(|(ok, class)| Action::Resolve { ok, class }),
+        6 => (prop::bool::weighted(0.92), 0u8..8).prop_map(|(ok, class)| Action::ResolveCallback { ok, class }),
+        6 => (prop::bool::weighted(0.9), 0u8..8).prop_map(|(ok, class)| Action::Resolve { ok, class }),
         4 => (0u8..5).prop_map(Action::Decide),
         2 => Just(Action::Timer),
         2 => prop_oneof![0u16..50, 900u16..1_100, 3_900u16..4_100].prop_map(Action::Advance),
@@ -78,7 +79,7 @@ fn action() -> impl Strategy<Value = Action> {
     ]
 }
 
-const CLASSES: [&str; 7] = [
+const CLASSES: [&str; 8] = [
     "timeout",
     "unavailable",
     "rejected",
@@ -86,6 +87,7 @@ const CLASSES: [&str; 7] = [
     "unknown",
     "limit",
     "constraint",
+    "refused",
 ];
 
 /// What the properties remember across the run.
@@ -293,6 +295,17 @@ fn check(engine: &Engine, watch: &mut Watch) -> Result<(), TestCaseError> {
     }
     watch.callback_replies_seen = engine.observed.callback_replies.len();
     for (kind, reply) in &engine.observed.replies[watch.replies_seen..] {
+        // Every commit-check rejection carries one of the fixed reasons (#145 pull request E),
+        // and no COMMIT was emitted for it.
+        if code(reply) == Some("POLICYSQL_COMMIT_CHECK_REJECTED") {
+            let reason = reply["error"]["detail"]["reason"].as_str().unwrap_or("");
+            prop_assert!(
+                COMMIT_CHECK_REASONS.contains(&reason),
+                "a rejection without a reason: {}",
+                reply
+            );
+            prop_assert!(!watch.commit_emitted, "a check rejection after COMMIT");
+        }
         if kind == "commit:2" {
             if reply["value"]["status"] == "committed" {
                 prop_assert!(engine.observed.committed_fed, "committed before Committed");

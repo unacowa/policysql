@@ -39,6 +39,7 @@ clientは`message`ではなく`code`を使って分岐してください。
 | `POLICYSQL_INVALID_SQL` | `{ "span": { "start": <整数>, "end": <整数> } }` | **ない**。parserが位置を報告しないときは`detail`自体を省く |
 | `POLICYSQL_UNSUPPORTED_SQL` | `{ "feature": <構文> }` | ある |
 | `POLICYSQL_INVALID_PARAMETER` | `{ "reason": <理由> }` | ある |
+| `POLICYSQL_COMMIT_CHECK_REJECTED` | `{ "reason": <理由> }` | ある |
 | `POLICYSQL_SQL_TOO_COMPLEX` | `{ "complexity": <上限> }` | ある |
 | `POLICYSQL_EXPECTATION_FAILED` | `{ "expectation": "affectedRows" または "rowCount" }` | ある |
 | 上記以外のすべてのcode | なし | `detail`は付かない |
@@ -77,18 +78,19 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_IDEMPOTENCY_CONFLICT` | 409 | Atomic Execute（commit checkを行うDO経路を含む）で同じkeyが異なるrequest（payloadまたはDBのgenerationが違う）に使われた。deployでsnapshotが変わっただけの再送は衝突しない |
 | `POLICYSQL_TRANSACTION_CONFLICT` | 409 | 対話型transactionのcommandが現在の状態（sequenceなど）と矛盾する |
 | `POLICYSQL_TRANSACTION_UNAVAILABLE` | 409 | transactionが存在しない、利用者に属していない、期限切れ、または失敗状態。COMMITの送信前にbindingまたは期限の確認に失敗した場合も返します（COMMITは送られておらず、rollback済みです） |
-| `POLICYSQL_COMMIT_CHECK_REJECTED` | 409 | commit checkがtransactionを拒否した、または安全に完了できない |
-| `POLICYSQL_CONSTRAINT_VIOLATION` | 409 | 文の実行をDBが制約違反で拒否した（UNIQUE・PRIMARY KEY、NOT NULL、FOREIGN KEY、CHECK、triggerの`RAISE(ABORT)`など）。pathは`/statements/<i>`、`detail.constraint`は`unique`（PRIMARY KEYを含む）・`not_null`・`foreign_key`・`check`・`other`のどれか。messageは種類ごとの固定文。列名・制約名・DBの文言は返さない。COMMITより前に検知し、transactionは開いたままrollbackするため何もcommitされない。clientは拒否（`PolicySqlError`）として扱う。対話型transactionでは`failed`として閉じ、後続のcommandは409 `POLICYSQL_TRANSACTION_UNAVAILABLE`。`Idempotency-Key`付きでも同じで、今回の試行が何もcommitしていないことを意味する（以前の試行がcommitし、keyの記録が保持期間を過ぎて消えた後の再送は、自分が入れた行と重複してこのcodeになり得る）。schemaの`ON CONFLICT ROLLBACK`や`RAISE(ROLLBACK)`でDBがtransactionを閉じた場合は503 `POLICYSQL_DATABASE_UNAVAILABLE`（結果不明）、遅延FKでCOMMITが失敗した場合は結果不明のまま。データが変わらない限り、同じrequestを再送しても成功しない |
+| `POLICYSQL_COMMIT_CHECK_REJECTED` | 409 | commit checkがtransactionを拒否した、または安全に完了できない。`detail.reason`は`denied`（validatorが拒否）、`unavailable`（validatorの答えがない・不正・期限切れ）、`limit`（checkのcallbackが読んだ行数の合計、またはresult bytesの合計が上限を超えた）、`unconfigured`（checkの接続先が設定にない）、`callback`（callback queryの失敗。1回のqueryが文ごとの上限を超えた場合と、queryの数の上限を含む）。COMMITの前に決まるので何もcommitされず、どのreasonでも確定的な拒否。`denied`と`limit`はデータが変わらない限り再送しても同じになりうる、`unavailable`は再送で通りうる（保証はしない）。validatorが返した`error.code`は返さず、記録もしない |
+| `POLICYSQL_CONSTRAINT_VIOLATION` | 409 | 文の実行をDBが制約違反で拒否した（UNIQUE・PRIMARY KEY、NOT NULL、FOREIGN KEY、CHECK、triggerの`RAISE(ABORT)`など）。pathは`/statements/<i>`、`detail.constraint`は`unique`（PRIMARY KEYを含む）・`not_null`・`foreign_key`・`check`・`other`のどれか。messageは種類ごとの固定文。列名・制約名・DBの文言は返さない。COMMITより前に検知し、transactionは開いたままrollbackするため何もcommitされない。clientは拒否（`PolicySqlError`）として扱う。対話型transactionでは`failed`として閉じ、後続のcommandは409 `POLICYSQL_TRANSACTION_UNAVAILABLE`。`Idempotency-Key`付きでも同じで、今回の試行が何もcommitしていないことを意味する（以前の試行がcommitし、keyの記録が保持期間を過ぎて消えた後の再送は、自分が入れた行と重複してこのcodeになり得る）。schemaの`ON CONFLICT ROLLBACK`や`RAISE(ROLLBACK)`でDBがtransactionを閉じた場合は500 `POLICYSQL_DATABASE_ERROR`（結果不明）、遅延FKでCOMMITが失敗した場合は結果不明のまま。データが変わらない限り、同じrequestを再送しても成功しない |
 | `POLICYSQL_LIMIT_EXCEEDED` | 413 | requestまたはresult limitを超えた。行数、結果bytes、結果のJSON値の数、databaseの生の応答の上限、streaming transportが応答中にdecodeした結果のBLOB値の上限（buffering providerのBLOBはcoreがresult encodingで検出するため413のまま）、`maxStatements`、応答全体の`maxResponseBytes`を含む。commit前に判断し、envelopeはrollbackして冪等性recordも残さない。ただしatomic executeで2文目以降にwriteを含み、databaseの生の応答、またはstreaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合は、後続のwriteが実行された可能性があるため500 `POLICYSQL_INTERNAL`（結果不明）になる。その例外を除き、再送しても成功しない。さらに、`Idempotency-Key`付きのAtomic Executeでcompile時の入力上限（`maxStatements`、`maxParameters`、`maxExpressionDepth`、`maxProjections`、`maxJoins`、client parameterの`maxBytesPerValue`）に達した場合は500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になり、unkeyedのAtomic ExecuteとExplainは413のまま。malformed base64はkeyedのAtomic Executeではcompile errorとして500 `POLICYSQL_OUTCOME_UNKNOWN`（`detail.cause.code`は`POLICYSQL_INVALID_PARAMETER`など）、unkeyedのAtomic ExecuteとExplainでは400 |
 | `POLICYSQL_REQUEST_TOO_LARGE` | 413 | HTTP body（`limits.maxRequestBytes`）、body内のJSON値の数（`limits.maxJsonValues`）、またはSQL text（`limits.maxSqlBytes`、pathは`/statements/<i>/sql`）が受付上限を超えた。HTTP bodyと`maxJsonValues`はcompileより前のbody checkで拒否する。ただし`Idempotency-Key`付きのAtomic Executeでは、deployで上限を引き下げた後にcommit済みwriteの再送が来る可能性があるため、500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる（unkeyed、またはkeyが不正なrequestは413）。`maxSqlBytes`はcompile時に検出するため、`Idempotency-Key`付きのAtomic Executeでは同じく500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明）、unkeyedのAtomic ExecuteとExplainでは413。unkeyedとkey不正の413、および`maxSqlBytes`のunkeyed 413は、再送しても成功しないためclientは拒否（`PolicySqlRejectedError`）として扱う。keyedの500 `POLICYSQL_OUTCOME_UNKNOWN`は結果不明（`PolicySqlOutcomeUnknownError`）で、rollbackとみなさず同じkey・同じbodyで再送する |
 | `POLICYSQL_UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type`が`application/json`でない |
 | `POLICYSQL_EXPECTATION_FAILED` | 422 | transaction operationの期待条件を満たさない。`detail.expectation`は、満たさなかった期待が`affectedRows`と`rowCount`のどちらか。実際の件数は返さない |
 | `POLICYSQL_SCHEMA_MISMATCH` | 422 | database値がcompiled logical contractと一致しない |
-| `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` | 413 | 対話型transactionの恒久的な上限（statement数、累積result bytes）を超えた。commit checkのcallbackの行数・bytes・query数の上限でも発生し、その場合はvalidatorがこのcodeを受け取り、atomic executeや対話型commitは409 `POLICYSQL_COMMIT_CHECK_REJECTED`になる。再送しても成功しない。request rateの制限ではない |
+| `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` | 413 | 対話型transactionの恒久的な上限（statement数、累積result bytes）を超えた。commit checkのcallbackの行数・bytesの上限でも発生し、その場合はvalidatorがこのcodeを受け取り、atomic executeや対話型commitは409 `POLICYSQL_COMMIT_CHECK_REJECTED`（`detail.reason`は`limit`）になる。callbackのquery数の上限は、validatorには409 `POLICYSQL_TRANSACTION_CONFLICT`、commitは409 `POLICYSQL_COMMIT_CHECK_REJECTED`（`reason`は`callback`）になる（validatorに返すcodeは今後揃える予定）。再送しても成功しない。request rateの制限ではない |
 | `POLICYSQL_INTERNAL` | 500 | 公開できない内部エラー。ラッパーが渡したtrusted sessionや文脈の形が不正な場合、またはatomic executeで2文目以降にwriteを含むenvelopeのdatabaseの生の応答、streaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合（結果不明）もこのcode。`Idempotency-Key`付きのAtomic Executeがcompile（`expected`の照合を含む）・session認可・入力上限のbody checkで通らない場合は、このcodeではなく500 `POLICYSQL_OUTCOME_UNKNOWN`になる |
 | `POLICYSQL_OUTCOME_UNKNOWN` | 500 | `Idempotency-Key`付きのAtomic Executeが、DBを読む前のcompile、session認可、body checkの上限で通らなかった。何も実行せず、keyも消費しないが、同じkeyの以前のrequestがdeploy前のpolicy・schema・上限・sessionでcommit済みだったかもしれないため、結果不明として返す（保存済み結果は返さない）。公式clientは、このcodeを受け取ると同じ`POLICYSQL_OUTCOME_UNKNOWN`のcodeを持つ`PolicySqlOutcomeUnknownError`として扱います（意図して同じ意味に揃えています。`error.cause`がこのserverのerrorで、`status`が500、clientが通信断などで自分で作った場合は`status`がありません）。`detail.cause`はkeyなしなら返っていたcodeとpathとdetail（`{ "code": "POLICYSQL_MISSING_POLICY", "path": "/statements/0", "detail": null }`の形。`detail`はそのcodeが`detail`を持たないとき`null`で、持つときはそのcodeの`detail`（たとえば`{ "feature": "star" }`）。codeは固定の列挙で、DBの状態に依存するcodeは含まない）。top-levelの`path`は常に`null`。rollbackとみなさず、同じkey・同じbodyで再送する。clientは結果不明（`PolicySqlOutcomeUnknownError`）として扱い、`error.cause.detail.cause`で原因を、`error.cause.detail.cause.detail`でその原因の`detail`を読める |
 | `POLICYSQL_DATABASE_REQUIRED` | 500 | ラッパーが必須のDB引数を渡していない |
-| `POLICYSQL_DATABASE_UNAVAILABLE` | 503 | database adapterまたはtransaction ownerを利用できない |
+| `POLICYSQL_DATABASE_ERROR` | 500 | DBは応答したが文を拒否した（制約違反でも複雑さでもない。表・列がないschemaのずれ、DBがSQLを読めない、lockの競合、`ON CONFLICT ROLLBACK`・`RAISE(ROLLBACK)`でtransactionを閉じた制約違反など）。messageは固定で、DBの文言やcodeは返さない（運用者は`requestId`で`database_error_unclassified`のcodeを見る）。確定的な拒否ではなく結果不明として扱う（streamが終わった場合は、前の文がcommit済みのことがある）。`Idempotency-Key`付きは同じkey・同じbodyで再送する。idempotencyの記録の読み書きでも出る。対話型transactionでは`failed`として閉じ、後続のcommandは409 `POLICYSQL_TRANSACTION_UNAVAILABLE` |
+| `POLICYSQL_DATABASE_UNAVAILABLE` | 503 | DBから応答がない・読めない、BEGINできない、request全体が失敗した、database adapter（実行中のrequestの上限）またはtransaction ownerを利用できない。一時的な失敗として再送しうる。結果不明 |
 | `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` | 503 | commitを送った後に結果を確定できない（transaction ownerの喪失、ownerの記録の保存失敗、COMMIT中の通信エラー）。commit済みの可能性があるため、拒否ではなく結果不明として扱う |
 | `POLICYSQL_TIMEOUT` | 504 | database実行がtimeoutした |
 | `POLICYSQL_DATABASE_TIMEOUT` | 504 | DB接続準備・実行・commit確認の期限を超えた |
@@ -206,6 +208,18 @@ return createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", 
 | `value` | 送った値が、そのparameterの型や制約に合わない |
 | `names` | 送ったparameter名の集合がSQLのものと違う（不足か余分か） |
 
+### `reason`（`POLICYSQL_COMMIT_CHECK_REJECTED`）
+
+`reason`のkeyは`POLICYSQL_INVALID_PARAMETER`と同じですが、値の一覧はcodeごとに別です。分岐は`code`で行ってください。
+
+| 値 | 意味 |
+| --- | --- |
+| `denied` | validatorが形の正しいdecisionで`allowed: false`を返した |
+| `unavailable` | validatorから使える答えがない（届かない、timeout、2xx以外、形が不正）、またはvalidationの期限が過ぎた |
+| `limit` | checkのcallbackが読んだ行数の合計（`maxCallbackRows`）、またはtransactionのresult bytesの合計が上限を超えた |
+| `unconfigured` | 起動したcheckの接続先がdeploymentの設定にない、または出口で使えない |
+| `callback` | validatorのcallback queryが失敗した。1回のqueryが文ごとの上限（`maxRows`、`maxResultBytes`、値のbytes）を超えた場合と、queryの数の上限を含む（`limit`は累積の上限だけ） |
+
 ### `complexity`（`POLICYSQL_SQL_TOO_COMPLEX`）
 
 `height`（式の高さ）、`recursion`（parserの再帰の深さ）、`columns`（結果列）、`parameters`（host parameter）、`like_pattern`（`LIKE`・`GLOB`のpattern）、`column_metadata`（envelopeのcolumn metadata）、`database_expression_depth`（DBが式を深すぎるとした）、`function_arguments`、`compound_terms`、`join_tables`（DBが複雑さを理由に拒否した）、`database`（DBが原因を示さなかった）。
@@ -236,6 +250,7 @@ const text = new TextDecoder().decode(bytes.subarray(span.start, span.end));
 - database credential
 - commit checkのhook認証情報とopaque capability
 - remote databaseのraw error
+- commit checkのvalidatorが返した`error.code`や本文（返さず、記録もしない。`detail.reason`はPolicySQLが分岐から決める固定の値）
 - DBの制約名・表名・列名、triggerの文言
 - 利用者のSQLの識別子とparameter名（`detail`は固定の列挙値だけ。位置は`INVALID_SQL`の`span`だけで、利用者自身のSQLの中の位置）
 - PolicySQLが生成したSQLの位置（`span`にならない）と、拒否の内部の理由（server logの`rejection_reason`にだけ残る）
@@ -246,4 +261,4 @@ DBの制約違反は、種類（固定の列挙値）だけを返します。
 
 ## Retry
 
-SQL・policy・parameter errorは、同じrequestを再送しても成功しません。requestを修正してください。timeout、rate limit、一時的なadapter error、commit conflictのretryは上限とbackoffを設けます。ライブラリはどのresponseにも`Retry-After`を付けません。ラッパーが429に`Retry-After`を付けた場合は、その秒数以上待ってから再送します。初回からkeyを指定したwriteの再送には、同じidempotency keyと同じpayloadを使用し、結果が確定する前に新しいkeyで再実行しません。keyなしのwriteは重複排除を保証しないため、結果不明時に自動再送すると二重更新になり得ます。`Idempotency-Key`付きのAtomic Executeが500 `POLICYSQL_OUTCOME_UNKNOWN`になった場合（`detail.cause`に今回の原因のcodeとpath）、それは結果不明です（deploy後のcompile・認可の失敗、または入力上限の引き下げ・深さ制限の厳格化を含みます）。500 `POLICYSQL_INTERNAL`でも、後続のwriteの応答が上限を超えた場合は結果不明です。rollbackされたとみなさず、同じkeyと同じpayloadで再送して結果を確定してください。対話型commitが403 `POLICYSQL_FORBIDDEN_ACCESS`または401になった場合も、その拒否は以前に送ったCOMMITの結果を確定しません（ADR 0007 #104）。rollbackされたとみなさず、アプリケーションのデータで確認してください。accessを復旧した後（同じprincipal・subject・role・sessionの値のまま）、同じtransaction ID・sequence・payloadのcommitを再送すると、ownerに保存された結果を確認できます。
+SQL・policy・parameter errorは、同じrequestを再送しても成功しません。requestを修正してください。timeout、rate limit、一時的なadapter error、commit conflictのretryは上限とbackoffを設けます。500 `POLICYSQL_DATABASE_ERROR`も結果不明で、keyedは同じkey・同じpayloadで再送します。schemaのずれなど再送で直らない原因がありうるので、上限とbackoffを設けます。ライブラリはどのresponseにも`Retry-After`を付けません。ラッパーが429に`Retry-After`を付けた場合は、その秒数以上待ってから再送します。初回からkeyを指定したwriteの再送には、同じidempotency keyと同じpayloadを使用し、結果が確定する前に新しいkeyで再実行しません。keyなしのwriteは重複排除を保証しないため、結果不明時に自動再送すると二重更新になり得ます。`Idempotency-Key`付きのAtomic Executeが500 `POLICYSQL_OUTCOME_UNKNOWN`になった場合（`detail.cause`に今回の原因のcodeとpath）、それは結果不明です（deploy後のcompile・認可の失敗、または入力上限の引き下げ・深さ制限の厳格化を含みます）。500 `POLICYSQL_INTERNAL`でも、後続のwriteの応答が上限を超えた場合は結果不明です。rollbackされたとみなさず、同じkeyと同じpayloadで再送して結果を確定してください。対話型commitが403 `POLICYSQL_FORBIDDEN_ACCESS`または401になった場合も、その拒否は以前に送ったCOMMITの結果を確定しません（ADR 0007 #104）。rollbackされたとみなさず、アプリケーションのデータで確認してください。accessを復旧した後（同じprincipal・subject・role・sessionの値のまま）、同じtransaction ID・sequence・payloadのcommitを再送すると、ownerに保存された結果を確認できます。

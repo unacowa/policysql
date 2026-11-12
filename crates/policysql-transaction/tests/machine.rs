@@ -238,6 +238,53 @@ fn a_database_constraint_violation_closes_the_transaction_with_the_conflict_code
     }
 }
 
+/// #145 pull request E: a statement the database refused for neither complexity nor a constraint
+/// (`refused`) is 500 `POLICYSQL_DATABASE_ERROR` with no path and no detail, the transaction closes
+/// as failed and is rolled back, and the log names only the database's code.
+#[test]
+fn a_database_refusal_closes_the_transaction_with_the_database_error_code() {
+    let mut engine = begun("write");
+    engine.feed(&command(
+        "statement",
+        &statement_text(1, "INSERT INTO projects (id) VALUES (:id)"),
+    ));
+    engine.resolve(true, "unknown");
+    let effect = engine.outstanding.take().unwrap_or(Value::Null);
+    assert_eq!(effect["type"], "execute");
+    engine.feed(&json!({
+        "type": "executeFailed", "id": effect["id"], "class": "refused",
+        "databaseCode": "SQLITE_UNKNOWN",
+    }));
+    let log = engine
+        .transcript
+        .last()
+        .map(|line| line.output.clone())
+        .unwrap_or_default();
+    engine.settle();
+    let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+    assert_eq!(code(&reply), Some("POLICYSQL_DATABASE_ERROR"), "{reply}");
+    assert_eq!(reply["error"]["path"], Value::Null);
+    assert!(reply["error"].get("detail").is_none(), "{reply}");
+    assert_eq!(phase_of(engine.store.as_deref()).as_deref(), Some("failed"));
+    assert!(
+        log.contains("\"event\":\"database_error_unclassified\""),
+        "{log}"
+    );
+    assert!(log.contains("\"code\":\"SQLITE_UNKNOWN\""), "{log}");
+    assert!(!log.contains("INSERT"), "{log}");
+    for (kind, text) in [
+        ("statement", statement_text(2, "SELECT id FROM projects")),
+        ("commit", sequence_text(2)),
+    ] {
+        let later = engine.run(&command(kind, &text));
+        assert_eq!(
+            code(&later),
+            Some("POLICYSQL_TRANSACTION_UNAVAILABLE"),
+            "{kind}: {later}"
+        );
+    }
+}
+
 /// The class `constraint` on any other effect is an adapter fault: never a 409, and a COMMIT's
 /// failure stays an unknown outcome.
 #[test]

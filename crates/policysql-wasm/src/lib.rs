@@ -102,7 +102,13 @@ use wasm_bindgen::prelude::*;
 /// `POLICYSQL_MISSING_POLICY` with the message "No policy permits this operation, or the resource
 /// does not exist." (a name that does not exist was `POLICYSQL_FORBIDDEN_OPERATION`); a CTE named
 /// like a resource the role cannot use is no longer refused. No identity value changed.
-const ABI_VERSION: u32 = 22;
+/// 23: issue #145 pull request E: the outcome class `refused` on `executeFailed` (the database
+/// refused a statement for neither complexity nor a constraint, including a reply that ended the
+/// stream) answers 500 `POLICYSQL_DATABASE_ERROR` (was 503 `POLICYSQL_DATABASE_UNAVAILABLE`,
+/// class `unavailable`); `POLICYSQL_COMMIT_CHECK_REJECTED` carries `detail.reason` (`denied`,
+/// `unavailable`, `limit`, `unconfigured`, `callback`); a forwarded owner reply is checked against
+/// that row. No identity value changed.
+const ABI_VERSION: u32 = 23;
 /// The fixed JSON levels the machine adds when it wraps an interactive command in the
 /// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
 /// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must

@@ -75,6 +75,8 @@ export type PolicySqlUnsupportedFeature =
   | 'protected_statement'
 /** Why `POLICYSQL_INVALID_PARAMETER` refused a parameter or value. It never names the parameter. */
 export type PolicySqlParameterReason = 'positional' | 'prefix' | 'name' | 'type' | 'null' | 'literal' | 'value' | 'names'
+/** Why `POLICYSQL_COMMIT_CHECK_REJECTED` rejected the commit: one fixed value, never a validator's text. */
+export type PolicySqlCommitCheckReason = 'denied' | 'unavailable' | 'limit' | 'unconfigured' | 'callback'
 /** The limit `POLICYSQL_SQL_TOO_COMPLEX` reached; `database` when the database named none. */
 export type PolicySqlComplexity =
   | 'height' | 'recursion' | 'columns' | 'parameters' | 'like_pattern' | 'column_metadata'
@@ -91,8 +93,11 @@ export interface PolicySqlErrorDetail {
   readonly feature?: PolicySqlUnsupportedFeature
   /** On `POLICYSQL_INVALID_SQL`, when the parser reports where. */
   readonly span?: { readonly start: number; readonly end: number }
-  /** On `POLICYSQL_INVALID_PARAMETER`. */
-  readonly reason?: PolicySqlParameterReason
+  /**
+   * On `POLICYSQL_INVALID_PARAMETER` (`PolicySqlParameterReason`) and `POLICYSQL_COMMIT_CHECK_REJECTED`
+   * (`PolicySqlCommitCheckReason`). Branch on `code`.
+   */
+  readonly reason?: PolicySqlParameterReason | PolicySqlCommitCheckReason
   /** On `POLICYSQL_SQL_TOO_COMPLEX`. */
   readonly complexity?: PolicySqlComplexity
   /** On `POLICYSQL_EXPECTATION_FAILED`. */

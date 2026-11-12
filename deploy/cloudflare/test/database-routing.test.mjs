@@ -193,8 +193,9 @@ for (const hooks of [false, true]) {
   test(`keyed writes still fail before mutation when the table is missing (DO=${hooks})`, async (t) => {
     const h = await harness(t, { hooks, idempotencyTable: false });
     const result = await h.request("a", "/v1/transactions:execute", envelope(insert("must_not_run")));
-    assert.equal(result.status, 503);
-    assert.equal(result.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+    // The lookup's step error (no such table) is a database refusal, an unknown outcome (#145 pull request E).
+    assert.equal(result.status, 500);
+    assert.equal(result.body.error.code, "POLICYSQL_DATABASE_ERROR");
     assert.equal(h.events.some(({ sql }) => sql.startsWith("INSERT INTO projects")), false);
     assert.ok(h.events.some(({ sql }) => sql === "ROLLBACK"));
     assert.equal(h.hooksSeen.length, 0);

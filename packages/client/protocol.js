@@ -105,6 +105,8 @@ export const readResponse = (response) => {
 
 // Only documented code/status pairs establish rejection. Status alone, unknown
 // errors and exceptions thrown by a Transport cannot establish execution outcome.
+// POLICYSQL_DATABASE_ERROR (500) is not a rejection either: the database refused a statement, but
+// nothing says whether an earlier statement or COMMIT took effect.
 // Every pair is the one in the public status table (website/api/errors.md); a server test
 // checks that. `POLICYSQL_OUTCOME_UNKNOWN` (500) and `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (503) are
 // never a rejection: by default they are an unknown outcome, and `error.cause.detail.cause`

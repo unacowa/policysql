@@ -16,7 +16,7 @@ import { SqlComplexityError } from "./database-complexity.ts";
 import { SqlConstraintError } from "./database-constraint.ts";
 
 /** An outcome class core accepts (ADR 0024 "Events and host facts"). */
-export type FailureClass = "timeout" | "unavailable" | "rejected" | "not_committed" | "unknown" | "limit" | "complex" | "constraint";
+export type FailureClass = "timeout" | "unavailable" | "rejected" | "not_committed" | "unknown" | "limit" | "complex" | "constraint" | "refused";
 
 /**
  * The class of a database or provider failure on an owner: a query timeout is `timeout`, the
@@ -31,6 +31,10 @@ export const failureClass = (error: unknown): FailureClass => {
   if (error instanceof EngineError) {
     if (error.code === "POLICYSQL_DATABASE_TIMEOUT") return "timeout";
     if (error.code === "POLICYSQL_DATABASE_UNAVAILABLE") return "unavailable";
+    // A refusal by the database that is neither complexity nor a constraint (#145 pull request E).
+    // Found by code, so an engine error a user's transport throws with it is the same class; the
+    // class carries no obligation (it is never a definite refusal).
+    if (error.code === "POLICYSQL_DATABASE_ERROR") return "refused";
     if (error.code === "POLICYSQL_DATABASE_BINDING_REJECTED") return "rejected";
     if (error.code === "POLICYSQL_LIMIT_EXCEEDED") return "limit";
   }
@@ -59,9 +63,9 @@ export const commitFailureClass = (error: unknown): FailureClass =>
 /**
  * The `executeFailed` event of a failed `execute` effect. A database complexity refusal is class
  * `complex` with the failed statement's index and a fixed cause name; a constraint violation is
- * class `constraint` with the index and the kind (ADR 0030); a failure the database
- * reported with a code no class names carries that code (only the code) for core's
- * `database_error_unclassified` log. `classify` is the placement's class function.
+ * class `constraint` with the index and the kind (ADR 0030); a refusal no class names (class
+ * `refused`, or `unavailable` for a failed request) carries the database's code (only the code)
+ * for core's `database_error_unclassified` log. `classify` is the placement's class function.
  */
 export const executeFailedEvent = (id: number, error: unknown, classify: (error: unknown) => FailureClass) => {
   if (error instanceof SqlComplexityError) {
@@ -83,10 +87,10 @@ export const executeFailedEvent = (id: number, error: unknown, classify: (error:
 /** The same for the direct placement: any other failure is classified as `directFailureClass`. */
 export const directCommitFailureClass = (error: unknown): FailureClass => {
   if (error instanceof CommitNotSentError) return "not_committed";
-  // A complexity refusal or a constraint violation is a statement outcome, never a COMMIT's
-  // (ADR 0007, ADR 0027, ADR 0030).
+  // A complexity refusal, a constraint violation or a database refusal is a statement outcome,
+  // never a COMMIT's (ADR 0007, ADR 0027, ADR 0030, #145 pull request E).
   const errorClass = directFailureClass(error);
-  return errorClass === "complex" || errorClass === "constraint" ? "unavailable" : errorClass;
+  return errorClass === "complex" || errorClass === "constraint" || errorClass === "refused" ? "unavailable" : errorClass;
 };
 
 const IMMEDIATE = new Set(["respond", "log", "observe", "reset"]);

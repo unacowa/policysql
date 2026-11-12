@@ -293,6 +293,11 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       const atomic = await execute(h, [deferred]);
       assert.ok(atomic.status >= 500, JSON.stringify(atomic.body));
       assert.notEqual(atomic.body.error.code, "POLICYSQL_CONSTRAINT_VIOLATION");
+      // COMMIT's error reply is no statement's refusal, so never a database error either (ADR 0007,
+      // #145 pull request E): direct 503, owner 500 `INTERNAL`, interactive 503 `COMMIT_OUTCOME_UNKNOWN`.
+      assert.notEqual(atomic.body.error.code, "POLICYSQL_DATABASE_ERROR");
+      assert.equal(atomic.body.error.code, hooks ? "POLICYSQL_INTERNAL" : "POLICYSQL_DATABASE_UNAVAILABLE");
+      assert.equal(atomic.status, hooks ? 500 : 503);
       assert.equal(atomic.body.error.detail, undefined);
       const started = await h.request("a", "/v1/transactions", { mode: "write" }, null);
       const base = `/v1/transactions/${started.body.transactionId}`;
@@ -301,6 +306,9 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       const commit = await h.request("a", `${base}/commit`, { sequence: 2 }, null);
       assert.notEqual(commit.body.error?.code, "POLICYSQL_CONSTRAINT_VIOLATION");
       assert.ok(commit.status >= 500, JSON.stringify(commit.body));
+      assert.notEqual(commit.body.error.code, "POLICYSQL_DATABASE_ERROR");
+      assert.equal(commit.body.error.code, "POLICYSQL_COMMIT_OUTCOME_UNKNOWN");
+      assert.equal(commit.status, 503);
       await h.flush();
       assert.equal(h.databases.get("a").database.prepare("SELECT count(*) AS n FROM deferred_children").get().n, 0);
       // The official client takes the atomic failure as an unknown outcome.
@@ -336,7 +344,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       const text = `${JSON.stringify(response.body)}\n${h.logs.join("\n")}`;
       assert.equal(text.includes(fragment), false, `"${fragment.slice(0, 40)}" must not appear`);
     }
-    // The code must match exactly: an extended code with a UNIQUE message stays a 503.
+    // The code must match exactly: an extended code with a UNIQUE message is no constraint violation, only a database refusal (500).
     h.replaceDatabaseResponse(({ results }) => {
       for (const entry of results) {
         const errors = entry.response?.result?.step_errors;
@@ -345,8 +353,8 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     });
     h.logs.length = 0;
     const extended = await execute(h, [parent("p1", "seed-code")]);
-    assert.equal(extended.status, 503);
-    assert.equal(extended.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+    assert.equal(extended.status, 500);
+    assert.equal(extended.body.error.code, "POLICYSQL_DATABASE_ERROR");
     assert.deepEqual(events(h.logs, "database_error_unclassified").map((record) => record.code), ["SQLITE_CONSTRAINT_UNIQUE"]);
     assert.equal(events(h.logs, "database_constraint_violation").length, 0);
   });

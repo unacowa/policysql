@@ -19,8 +19,8 @@ const insert = (id, name = id) => ({ sql: "INSERT INTO projects (id, name) VALUE
  * Each scenario: its schema and an envelope whose second statement fails and whose third must not run.
  * `open`: the transaction is still open after the error, so the reply keeps its baton and the refusal
  * is a definite 409 constraint violation (ADR 0030). Where SQLite closed the transaction itself
- * (`ROLLBACK`), Turso ends the stream and the refusal stays 503: nothing proves the statements ran
- * inside a transaction (#144, #146).
+ * (`ROLLBACK`), Turso ends the stream and the refusal is a 500 `POLICYSQL_DATABASE_ERROR`, never a
+ * 409: nothing proves the statements ran inside a transaction (#144, #146, #145 pull request E).
  */
 const SCENARIOS = {
   "ON CONFLICT ROLLBACK": { schema: CONFLICT_ROLLBACK_SCHEMA, open: false, statements: [insert("first"), insert("seed"), insert("third")] },
@@ -60,8 +60,9 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
           assert.equal(response.body.error.path, "/statements/1");
           assert.deepEqual(response.body.error.detail, { constraint: "unique" });
         } else {
-          assert.equal(response.status, 503, JSON.stringify(response.body));
-          assert.equal(response.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+          assert.equal(response.status, 500, JSON.stringify(response.body));
+          assert.equal(response.body.error.code, "POLICYSQL_DATABASE_ERROR");
+          assert.equal(response.body.error.path, null);
           assert.equal(response.body.error.detail, undefined);
         }
         await h.flush();
@@ -73,16 +74,16 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       });
     }
 
-    // The schemas where SQLite closes the transaction itself stay 503 for a keyed envelope and an
-    // interactive statement too (ADR 0030).
+    // The schemas where SQLite closes the transaction itself are a 500 database error for a keyed
+    // envelope and an interactive statement too, and the same on a retry (ADR 0030).
     for (const [name, { schema, statements }] of Object.entries(SCENARIOS).filter(([, scenario]) => !scenario.open)) {
       test(`${ownerAdapter}/${placement}: ${name} - a keyed envelope that fails leaves no idempotency row, and a retry keeps nothing`, async (t) => {
         const h = await setup(t, hooks, schema);
         const key = "stop-after-error-key-1";
         for (const attempt of [1, 2]) {
           const response = await h.request("a", EXECUTE, { statements }, key);
-          assert.equal(response.status, 503, `attempt ${attempt}: ${JSON.stringify(response.body)}`);
-          assert.equal(response.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+          assert.equal(response.status, 500, `attempt ${attempt}: ${JSON.stringify(response.body)}`);
+          assert.equal(response.body.error.code, "POLICYSQL_DATABASE_ERROR");
           await h.flush();
           assert.deepEqual(databaseIds(h), ["seed"], `attempt ${attempt}`);
           assert.equal(h.databases.get("a").database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n, 0, `attempt ${attempt}`);
@@ -97,8 +98,8 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         const base = `/v1/transactions/${started.body.transactionId}`;
         const failing = statements[1];
         const failed = await h.request("a", `${base}/statements`, { sequence: 1, ...failing }, null);
-        assert.equal(failed.status, 503, JSON.stringify(failed.body));
-        assert.equal(failed.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+        assert.equal(failed.status, 500, JSON.stringify(failed.body));
+        assert.equal(failed.body.error.code, "POLICYSQL_DATABASE_ERROR");
         const next = await h.request("a", `${base}/statements`, { sequence: 2, ...insert("after") }, null);
         assert.equal(next.status, 409, JSON.stringify(next.body));
         assert.equal(next.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");

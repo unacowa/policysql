@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  COMPLEXITY_DETAILS, EXPECTATIONS, MAX_SPAN_OFFSET, PARAMETER_REASONS, UNSUPPORTED_FEATURES, checkedErrorDetail,
+  COMMIT_CHECK_REASONS, COMPLEXITY_DETAILS, EXPECTATIONS, MAX_SPAN_OFFSET, PARAMETER_REASONS, UNSUPPORTED_FEATURES, checkedErrorDetail,
 } from "../src/error-detail.ts";
 
 // `error.detail` of #145 pull request C: the table that core (`ErrorDetail::allowed`) and the
@@ -46,7 +46,7 @@ test("a JSON number such as 1.0 is not in the fixture, because JavaScript cannot
 });
 
 const constantList = (source, name) => {
-  const block = source.match(new RegExp(`${name}: \\[&str; (\\d+)\\] = \\[([^\\]]*)\\];`, "u"));
+  const block = source.match(new RegExp(`${name}: \\[&str; (\\d+)\\] =\\s*\\[([^\\]]*)\\];`, "u"));
   assert.ok(block, `core declares ${name}`);
   const values = [...block[2].matchAll(/"([A-Za-z_]+)"/gu)].map((match) => match[1]);
   assert.equal(values.length, Number(block[1]), `${name} length`);
@@ -73,13 +73,20 @@ test("the enumerations are the same in core, the Worker, OpenAPI, and the client
     ["PARAMETER_REASONS", PARAMETER_REASONS, "reason", "PolicySqlParameterReason"],
     ["COMPLEXITY_DETAILS", COMPLEXITY_DETAILS, "complexity", "PolicySqlComplexity"],
     ["EXPECTATIONS", EXPECTATIONS, "expectation", "PolicySqlExpectation"],
+    ["COMMIT_CHECK_REASONS", COMMIT_CHECK_REASONS, "reason", "PolicySqlCommitCheckReason"],
   ]) {
     const core = constantList(io, constant);
     assert.equal(new Set(core).size, core.length, `${constant}: no duplicates`);
     assert.deepEqual(core, [...worker], `${constant}: core and the Worker`);
-    assert.deepEqual(openapiEnum(property), core, `${constant}: OpenAPI ${property}`);
+    // `reason` is one OpenAPI property for two codes: the parameter reasons, then the commit check's.
+    const openapi = constant === "COMMIT_CHECK_REASONS" ? openapiEnum(property).slice(PARAMETER_REASONS.length) : openapiEnum(property);
+    if (constant === "PARAMETER_REASONS") assert.deepEqual(openapiEnum(property).slice(0, core.length), core, "OpenAPI: the parameter reasons come first");
+    if (constant !== "PARAMETER_REASONS") assert.deepEqual(openapi, core, `${constant}: OpenAPI ${property}`);
     assert.deepEqual(typeUnion(union), core, `${constant}: the client's ${union}`);
   }
+  const reasons = openapiEnum("reason");
+  assert.equal(reasons.length, PARAMETER_REASONS.length + COMMIT_CHECK_REASONS.length, "OpenAPI reason is exactly the two lists");
+  assert.equal(new Set(reasons).size, reasons.length, "the two reason lists share no value");
   const maxSpan = io.match(/pub const MAX_SPAN_OFFSET: u64 = ([0-9_]+);/u);
   assert.ok(maxSpan, "core declares MAX_SPAN_OFFSET");
   assert.equal(Number(maxSpan[1].replaceAll("_", "")), MAX_SPAN_OFFSET);

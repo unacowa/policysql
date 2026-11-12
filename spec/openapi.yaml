@@ -727,7 +727,7 @@ components:
         Machine-readable values fixed per code (ADR 0030). One key, by code: POLICYSQL_CONSTRAINT_VIOLATION
         constraint; POLICYSQL_OUTCOME_UNKNOWN cause; POLICYSQL_UNSUPPORTED_SQL feature;
         POLICYSQL_INVALID_SQL span (absent when the parser reports no position); POLICYSQL_INVALID_PARAMETER
-        reason; POLICYSQL_SQL_TOO_COMPLEX complexity; POLICYSQL_EXPECTATION_FAILED expectation. Every other
+        reason; POLICYSQL_COMMIT_CHECK_REJECTED reason (its own values); POLICYSQL_SQL_TOO_COMPLEX complexity; POLICYSQL_EXPECTATION_FAILED expectation. Every other
         code has no detail. cause.detail never holds a cause.
       properties:
         constraint:
@@ -747,7 +747,10 @@ components:
             end: { type: integer, minimum: 0, maximum: 1048576 }
         reason:
           type: string
-          enum: [positional, prefix, name, type, "null", literal, value, names]
+          description: >-
+            POLICYSQL_INVALID_PARAMETER: one of the first eight; POLICYSQL_COMMIT_CHECK_REJECTED: denied,
+            unavailable, limit, unconfigured, callback.
+          enum: [positional, prefix, name, type, "null", literal, value, names, denied, unavailable, limit, unconfigured, callback]
         complexity:
           type: string
           enum: [height, recursion, columns, parameters, like_pattern, column_metadata, database_expression_depth, function_arguments, compound_terms, join_tables, database]
@@ -799,8 +802,25 @@ components:
                 before COMMIT while the transaction is still open and rolled back, so nothing was
                 committed and the request is a rejection; an interactive transaction closes as failed.
                 Exception: a schema whose ON CONFLICT ROLLBACK or RAISE(ROLLBACK) makes the database
-                close the transaction is 503 POLICYSQL_DATABASE_UNAVAILABLE, and a deferred foreign
-                key that fails at COMMIT is an unknown outcome.
+                close the transaction is 500 POLICYSQL_DATABASE_ERROR (an unknown outcome), and a
+                deferred foreign key that fails at COMMIT is an unknown outcome.
+
+                POLICYSQL_DATABASE_ERROR (500, path null, no detail, a fixed message) means the database
+                answered a statement with an error that is neither a constraint violation nor a
+                complexity refusal (a table or column that is not there, SQL the database cannot read,
+                a lock conflict, a transaction closed by ON CONFLICT ROLLBACK or RAISE(ROLLBACK)). It is
+                not a rejection: the outcome is unknown, so retry a keyed execute with the same key and
+                body. POLICYSQL_DATABASE_UNAVAILABLE (503) means no usable answer arrived. The database's
+                own message and code are never returned.
+
+                POLICYSQL_COMMIT_CHECK_REJECTED (409, path null, detail.reason) means a commit check
+                rejected the transaction, or could not be completed safely. It is decided before COMMIT, so
+                nothing was committed and the request is a rejection whatever the reason: denied (the
+                validator answered allowed: false), unavailable (no usable answer, or the validation
+                deadline passed), limit (the check's callback queries together read more rows or result
+                bytes than allowed), unconfigured (the check has no endpoint in the deployment) or callback
+                (a callback query failed, including one that went over a per-statement limit, and the
+                limit on the number of callback queries). The validator's own error code is never returned.
 
                 POLICYSQL_CHECK_FAILED (403, path /statements/<i>, no detail, a fixed message) means a
                 row the statement changed does not satisfy the policy's check (the check is FALSE or

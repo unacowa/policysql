@@ -8,13 +8,13 @@
 
 use super::compiler::{Compiler, CoreError, Operation, RawResult, ResultBudget, Validated};
 use super::io::{
-    self, Class, Code, ConstraintKind, DriverCall, DriverResult, Effect, ErrorDetail, Event,
-    HostFacts, ObserveContext, error_reply, value_reply,
+    self, CheckReason, Class, Code, ConstraintKind, DriverCall, DriverResult, Effect, ErrorDetail,
+    Event, HostFacts, ObserveContext, error_reply, value_reply,
 };
 use super::state::{
     Binding, Connection, Counters, Durable, Identity, Kind, MAX_DURABLE_BYTES, Mode, Mutation,
-    Pending, Phase, Record, Replay, TX_STATE_VERSION, Task, Unreadable, Usage, Versions, Volatile,
-    Work, WorkLane, awaited_by, hex64,
+    Pending, Phase, Record, Replay, TX_STATE_VERSION, Task, Unreadable, Usage, Verdict, Versions,
+    Volatile, Work, WorkLane, awaited_by, hex64,
 };
 
 mod atomic;
@@ -23,7 +23,7 @@ mod checks;
 use super::{Limits, MAX_SAFE_INTEGER, Output};
 use crate::canonical::{self, Json};
 use crate::identity;
-use checks::allowed_decision;
+use checks::decision_verdict;
 use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
@@ -389,14 +389,15 @@ impl<C: Compiler> Step<'_, C> {
     /// (ADR 0030) points at the failed statement; a failure with a database code that no class
     /// names, and a constraint class that is not a conflict (the idempotency lookup or insert, a
     /// callback), are logged as `database_error_unclassified` with that code only (ADR 0027,
-    /// ADR 0030), never the message.
+    /// ADR 0030), never the message. A database refusal (`refused`, 500
+    /// `POLICYSQL_DATABASE_ERROR`) is logged the same way.
     fn execute_failed_reply(
         &mut self,
         code: Code,
         class: Class,
         detail: FailureDetail<'_>,
     ) -> Box<RawValue> {
-        if matches!(class, Class::Unavailable | Class::Unknown)
+        if matches!(class, Class::Unavailable | Class::Unknown | Class::Refused)
             || (class == Class::Constraint && code != Code::ConstraintViolation)
         {
             if let Some(database_code) = detail.database_code {
@@ -1114,11 +1115,24 @@ impl<C: Compiler> Step<'_, C> {
                 self.validating_persisted(lane, request_id, checks)
             }
             (Task::Validator(checks), Event::ValidatorReplied { ok, decision, .. }) => {
-                let allowed = *ok && allowed_decision(decision);
-                self.verdict_arrived(lane, request_id, checks, allowed)
+                // A non-2xx reply is no answer, whatever its body (the hook adapter does not
+                // read it).
+                let verdict = if *ok {
+                    decision_verdict(decision)
+                } else {
+                    Verdict::Rejected(CheckReason::Unavailable)
+                };
+                self.verdict_arrived(lane, request_id, checks, verdict)
             }
-            (Task::Validator(checks), Event::ValidatorFailed { .. }) => {
-                self.verdict_arrived(lane, request_id, checks, false)
+            (Task::Validator(checks), Event::ValidatorFailed { class, .. }) => {
+                // The hook adapter refused the endpoint at the exit (`rejected`); anything else
+                // is no answer.
+                let reason = if *class == Class::Rejected {
+                    CheckReason::Unconfigured
+                } else {
+                    CheckReason::Unavailable
+                };
+                self.verdict_arrived(lane, request_id, checks, Verdict::Rejected(reason))
             }
             (
                 Task::CommitPersist {

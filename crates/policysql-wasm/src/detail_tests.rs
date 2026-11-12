@@ -450,7 +450,7 @@ fn the_rejection_reason_names_the_stage_and_the_variant_and_no_identifier() {
         assert_eq!(record["statementIndex"], 0, "{sql}");
         assert_eq!(record["schemaVersion"], "schema_detail", "{sql}");
         assert_eq!(record["policyVersion"], "policy_detail", "{sql}");
-        assert_eq!(record["abiVersion"], 22, "{sql}");
+        assert_eq!(record["abiVersion"], 23, "{sql}");
         assert!(
             record["reason"]
                 .as_str()

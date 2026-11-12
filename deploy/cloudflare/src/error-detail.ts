@@ -30,6 +30,11 @@ export const COMPLEXITY_DETAILS: readonly string[] = Object.freeze([
   "database_expression_depth", "function_arguments", "compound_terms", "join_tables", "database",
 ]);
 
+/** The values `reason` takes on `POLICYSQL_COMMIT_CHECK_REJECTED`: the same list as `COMMIT_CHECK_REASONS` in core (test/error-detail.test.mjs keeps them equal). */
+export const COMMIT_CHECK_REASONS: readonly string[] = Object.freeze([
+  "denied", "unavailable", "limit", "unconfigured", "callback",
+]);
+
 /** The expectations `expectation` names (`POLICYSQL_EXPECTATION_FAILED`). */
 export const EXPECTATIONS: readonly string[] = Object.freeze(["affectedRows", "rowCount"]);
 
@@ -44,7 +49,7 @@ export type ErrorDetail = Readonly<{
   feature?: string;
   /** `POLICYSQL_INVALID_SQL`: the offending token in the statement's UTF-8 bytes, `[start, end)`. */
   span?: Readonly<{ start: number; end: number }>;
-  /** `POLICYSQL_INVALID_PARAMETER`. */
+  /** `POLICYSQL_INVALID_PARAMETER` and `POLICYSQL_COMMIT_CHECK_REJECTED`, each from its own list. */
   reason?: string;
   /** `POLICYSQL_SQL_TOO_COMPLEX`. */
   complexity?: string;
@@ -143,6 +148,7 @@ const DETAIL_ROWS: Readonly<Record<string, DetailRow>> = Object.freeze({
   },
   POLICYSQL_UNSUPPORTED_SQL: enumerated("feature", UNSUPPORTED_FEATURES),
   POLICYSQL_INVALID_PARAMETER: enumerated("reason", PARAMETER_REASONS),
+  POLICYSQL_COMMIT_CHECK_REJECTED: enumerated("reason", COMMIT_CHECK_REASONS),
   POLICYSQL_SQL_TOO_COMPLEX: enumerated("complexity", COMPLEXITY_DETAILS),
   POLICYSQL_EXPECTATION_FAILED: enumerated("expectation", EXPECTATIONS),
 });

@@ -25,6 +25,7 @@ const ENGINE_CODES = new Map([
   ["POLICYSQL_DATABASE_BINDING_REJECTED", "database adapter class: the provider rejected the binding"],
   ["POLICYSQL_DATABASE_UNAVAILABLE", "database adapter class: the provider or transport failed"],
   ["POLICYSQL_DATABASE_TIMEOUT", "database adapter class: the deadline passed"],
+  ["POLICYSQL_DATABASE_ERROR", "database adapter class: the database refused a statement (a step error that is neither complexity nor a constraint)"],
   ["POLICYSQL_LIMIT_EXCEEDED", "database adapter class: a value or response over the transport's byte bound"],
   ["POLICYSQL_SCHEMA_MISMATCH", "driver codec: a driver value the codec cannot carry"],
   ["POLICYSQL_COST_ADMISSION_UNAVAILABLE", "a cost observation log record whose connection failed; never a reply"],

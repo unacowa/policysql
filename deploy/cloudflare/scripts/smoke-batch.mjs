@@ -34,15 +34,16 @@ const FAILURES = Object.freeze([
 ]);
 
 /**
- * `transport` is a `TursoHttpTransport` to the real database. `databaseCode`, `complexityCause`, and
- * `constraint` read the library's `databaseCode` (of a `DatabaseStatementError` or a
- * `SqlConstraintError`), `SqlComplexityError.complexityCause`, and `SqlConstraintError.constraint`
- * from a failure (null when it is none of them), so the smoke imports nothing from `src/`.
+ * `transport` is a `TursoHttpTransport` to the real database. `databaseCode`, `complexityCause`,
+ * `constraint`, and `refused` read the library's `databaseCode` (of a `DatabaseStatementError` or a
+ * `SqlConstraintError`), `SqlComplexityError.complexityCause`, `SqlConstraintError.constraint`, and
+ * the code of a `DatabaseStatementError` (`POLICYSQL_DATABASE_ERROR`, #145 pull request E) from a
+ * failure (null when it is none of them), so the smoke imports nothing from `src/`.
  */
-export const statementBatchSmoke = async ({ transport, databaseCode, complexityCause, constraint }) => {
+export const statementBatchSmoke = async ({ transport, databaseCode, complexityCause, constraint, refused }) => {
   const failures = [];
   const expect = (condition, name) => { if (!condition) failures.push(name); };
-  const report = { tables: {}, complexity: null, success: null };
+  const report = { tables: {}, complexity: null, refused: null, success: null };
 
   // A step that cannot begin is a failed probe, not an exception that aborts the section.
   const attempt = async (mode, work) => {
@@ -96,6 +97,12 @@ export const statementBatchSmoke = async ({ transport, databaseCode, complexityC
     expect(run.error !== undefined && entry.code === "SQLITE_CONSTRAINT", `${table}: the envelope is refused as a constraint failure`);
     entry.constraint = run.error ? constraint(run.error) : null;
     expect(entry.constraint === expected, `${table}: the constraint failure is classified only where the transaction stayed open`);
+    // Where the stream ended nothing is classified as a constraint, and the refusal is a database
+    // refusal (500 POLICYSQL_DATABASE_ERROR), never a definite one (#145 pull request E).
+    if (expected === null) {
+      expect(run.error !== undefined && refused(run.error) === "POLICYSQL_DATABASE_ERROR",
+        `${table}: a refusal in a reply that ended the stream is a database refusal`);
+    }
     // Where SQLite closed the transaction itself, Turso ended the stream and the library sends no
     // rollback for it; everywhere the rollback must still resolve.
     expect(entry.rollback === "ok", `${table}: the rollback resolved`);
@@ -113,6 +120,24 @@ export const statementBatchSmoke = async ({ transport, databaseCode, complexityC
   const cause = complexity.error ? complexityCause(complexity.error) : null;
   report.complexity = { cause: cause ?? (complexity.error ? "unmatched" : "accepted"), expected: "columns" };
   expect(cause === "columns", "a refusal in the middle of a batch is classified by its own step");
+
+  // A statement the database cannot run (a table that is not there): a step error that is neither
+  // complexity nor a constraint, so a database refusal. The assertion is on the classification only,
+  // not on the code Turso chooses.
+  const absent = await attempt("read", (connection) => connection.execute([
+    { sql: "SELECT 1" },
+    { sql: `SELECT 1 FROM ${unique("smoke_absent")}` },
+    { sql: "SELECT 2" },
+  ], { maxResponseBytes: READ_CAP }));
+  const refusedCode = absent.error ? refused(absent.error) : null;
+  const absentDatabaseCode = absent.error ? databaseCode(absent.error) : null;
+  report.refused = { code: refusedCode, databaseCode: absentDatabaseCode };
+  expect(refusedCode === "POLICYSQL_DATABASE_ERROR", "a statement the database cannot run is a database refusal");
+  // `UNKNOWN` is what the transport logs for a code that is missing or not of the safe shape, so
+  // it says Turso stopped sending one (its value is not fixed here).
+  expect(typeof absentDatabaseCode === "string" && /^[A-Z0-9_]+$/u.test(absentDatabaseCode) && absentDatabaseCode !== "UNKNOWN",
+    "the database refusal keeps a safe database code for the log");
+  expect(absent.rollback === "ok", "the transaction of a database refusal rolled back");
 
   const ok = await attempt("read", (connection) => connection.execute([
     { sql: "SELECT 1 AS a" },

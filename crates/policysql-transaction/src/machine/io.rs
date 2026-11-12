@@ -102,6 +102,43 @@ pub enum Class {
     /// #144). Only `executeFailed` carries it, with the index of the failed statement and a
     /// `constraint` name.
     Constraint,
+    /// The database answered a statement request with an error that is neither a complexity
+    /// refusal nor a constraint violation (#145 pull request E): `POLICYSQL_DATABASE_ERROR`
+    /// (500). Unlike `constraint` it carries no obligation: it is never a definite refusal, so
+    /// an adapter that reports it on any event changes nothing a client decides.
+    Refused,
+}
+
+/// Why a commit check rejected a commit (#145 pull request E): one fixed value the rejecting
+/// branch already knows. Never a string a validator sent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckReason {
+    /// The validator answered with a well-formed decision that does not allow the commit.
+    Denied,
+    /// No usable answer from the validator (it did not arrive, timed out, was not a 2xx or a
+    /// decision), or the validation deadline passed.
+    Unavailable,
+    /// The validator's callback queries read more rows or bytes than the check allows.
+    Limit,
+    /// A check that started has no endpoint in the deployment's configuration, or the hook
+    /// adapter refused the endpoint at the exit.
+    Unconfigured,
+    /// A validator callback query failed for a reason other than the check's limits.
+    Callback,
+}
+
+impl CheckReason {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+            Self::Unavailable => "unavailable",
+            Self::Limit => "limit",
+            Self::Unconfigured => "unconfigured",
+            Self::Callback => "callback",
+        }
+    }
 }
 
 /// The kind of a constraint violation (ADR 0030): one fixed value per refused statement.
@@ -517,11 +554,14 @@ pub enum Code {
     OutcomeUnknown,
     TransactionLimit,
     ModeViolation,
-    CheckRejected,
+    /// A commit check rejected the commit (409), with the fixed reason as `detail.reason`.
+    CheckRejected(CheckReason),
     Stale,
     BindingRejected,
     DatabaseTimeout,
     DatabaseUnavailable,
+    /// The database refused a statement (class `refused`, #145 pull request E).
+    DatabaseError,
     SchemaMismatch,
     LimitExceeded,
     IdempotencyConflict,
@@ -565,7 +605,7 @@ impl Code {
                 "POLICYSQL_TRANSACTION_MODE_VIOLATION",
                 "A read transaction cannot execute a mutation.",
             ),
-            Self::CheckRejected => (
+            Self::CheckRejected(_) => (
                 "POLICYSQL_COMMIT_CHECK_REJECTED",
                 "A commit check rejected the transaction.",
             ),
@@ -584,6 +624,10 @@ impl Code {
             Self::DatabaseUnavailable => (
                 "POLICYSQL_DATABASE_UNAVAILABLE",
                 "The database is temporarily unavailable.",
+            ),
+            Self::DatabaseError => (
+                "POLICYSQL_DATABASE_ERROR",
+                "The database refused the statement.",
             ),
             Self::SchemaMismatch => (
                 "POLICYSQL_SCHEMA_MISMATCH",
@@ -621,8 +665,19 @@ impl Code {
         }
     }
 
+    /// The detail the machine's own code carries (ADR 0030): a commit check's reason.
+    #[must_use]
+    pub fn detail(self) -> Option<ErrorDetail> {
+        match self {
+            Self::CheckRejected(reason) => Some(ErrorDetail::reason(reason.name())),
+            _ => None,
+        }
+    }
+
     /// The code an adapter class maps to for a database or provider failure (as today:
-    /// `turso.ts` `remoteFailure` and `database.ts`).
+    /// `turso.ts` `remoteFailure` and `database.ts`). `refused` maps to
+    /// `POLICYSQL_DATABASE_ERROR` on every event: it is never a definite refusal, so an adapter
+    /// that reports it elsewhere changes nothing a client decides.
     #[must_use]
     pub const fn for_class(class: Class) -> Self {
         match class {
@@ -634,6 +689,7 @@ impl Code {
             Class::NotCommitted | Class::Unknown | Class::Constraint => Self::Internal,
             Class::Limit => Self::LimitExceeded,
             Class::Complex => Self::SqlTooComplex,
+            Class::Refused => Self::DatabaseError,
         }
     }
 
@@ -745,6 +801,10 @@ pub const COMPLEXITY_DETAILS: [&str; 11] = [
 /// The values `error.detail.expectation` may take (`EXPECTATION_FAILED`).
 pub const EXPECTATIONS: [&str; 2] = ["affectedRows", "rowCount"];
 
+/// The values `error.detail.reason` may take on `COMMIT_CHECK_REJECTED`.
+pub const COMMIT_CHECK_REASONS: [&str; 5] =
+    ["denied", "unavailable", "limit", "unconfigured", "callback"];
+
 /// The largest `error.detail.span` offset: the ceiling of a statement's byte length
 /// (`MAX_SQL_BYTES_CEILING`).
 pub const MAX_SPAN_OFFSET: u64 = 1_048_576;
@@ -781,7 +841,8 @@ pub struct ErrorDetail {
     /// `INVALID_SQL`: the offending token in the statement's UTF-8 bytes, `[start, end)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<Span>,
-    /// `INVALID_PARAMETER`: from [`PARAMETER_REASONS`].
+    /// `INVALID_PARAMETER`: from [`PARAMETER_REASONS`]; `COMMIT_CHECK_REJECTED`: from
+    /// [`COMMIT_CHECK_REASONS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// `SQL_TOO_COMPLEX`: from [`COMPLEXITY_DETAILS`].
@@ -876,6 +937,9 @@ impl ErrorDetail {
                 .is_some_and(|value| Self::enumerated(value, "feature", &UNSUPPORTED_FEATURES)),
             "POLICYSQL_INVALID_PARAMETER" => {
                 detail.is_some_and(|value| Self::enumerated(value, "reason", &PARAMETER_REASONS))
+            }
+            "POLICYSQL_COMMIT_CHECK_REJECTED" => {
+                detail.is_some_and(|value| Self::enumerated(value, "reason", &COMMIT_CHECK_REASONS))
             }
             "POLICYSQL_SQL_TOO_COMPLEX" => detail
                 .is_some_and(|value| Self::enumerated(value, "complexity", &COMPLEXITY_DETAILS)),
@@ -983,9 +1047,11 @@ pub(crate) fn to_raw(value: &impl Serialize) -> Box<RawValue> {
     serde_json::to_string(value).map_or_else(|_| null_raw(), raw)
 }
 
-/// `{"ok":false,"error":{…}}` for one of the machine's own codes.
+/// `{"ok":false,"error":{…}}` for one of the machine's own codes. A code that carries its own
+/// detail (`CheckRejected`) gets it here.
 #[must_use]
 pub fn error_reply(code: Code) -> Box<RawValue> {
+    let detail = code.detail();
     let (code, message) = code.parts();
     to_raw(&ErrorReply {
         ok: false,
@@ -993,7 +1059,7 @@ pub fn error_reply(code: Code) -> Box<RawValue> {
             code,
             message,
             path: None,
-            detail: None,
+            detail: detail.as_ref(),
         },
     })
 }
@@ -1104,10 +1170,10 @@ pub fn value_reply(value: &RawValue) -> Box<RawValue> {
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPLEXITY_CAUSES, COMPLEXITY_DETAILS, Class, Code, ConstraintKind, EXPECTATIONS,
-        ErrorDetail, OUTCOME_CAUSE_CODES, PARAMETER_REASONS, UNSUPPORTED_FEATURES, class_reply,
-        constraint_reply, core_error_reply, error_reply_at_with, is_cause_path,
-        outcome_unknown_reply,
+        COMMIT_CHECK_REASONS, COMPLEXITY_CAUSES, COMPLEXITY_DETAILS, CheckReason, Class, Code,
+        ConstraintKind, EXPECTATIONS, ErrorDetail, OUTCOME_CAUSE_CODES, PARAMETER_REASONS,
+        UNSUPPORTED_FEATURES, class_reply, constraint_reply, core_error_reply, error_reply,
+        error_reply_at_with, is_cause_path, outcome_unknown_reply,
     };
     use crate::machine::compiler::CoreError;
     use serde_json::{Value, json};
@@ -1143,6 +1209,9 @@ mod tests {
             Code::ConstraintViolation
         );
         assert_eq!(Code::for_class(Class::Constraint), Code::Internal);
+        // A database refusal is `DATABASE_ERROR` on every event (#145 pull request E).
+        assert_eq!(Code::for_class(Class::Refused), Code::DatabaseError);
+        assert_eq!(Code::for_execute(Class::Refused), Code::DatabaseError);
         for class in [
             Class::Timeout,
             Class::Unavailable,
@@ -1151,6 +1220,7 @@ mod tests {
             Class::Unknown,
             Class::Limit,
             Class::Complex,
+            Class::Refused,
         ] {
             assert_eq!(Code::for_execute(class), Code::for_class(class));
         }
@@ -1194,6 +1264,161 @@ mod tests {
             ] {
                 assert!(!allowed(code, Some(detail.clone())), "{code} {detail}");
             }
+        }
+    }
+
+    #[test]
+    fn the_commit_check_row_requires_one_reason_of_its_own_list() {
+        let allowed =
+            |code: &str, detail: Option<Value>| ErrorDetail::allowed(code, detail.as_ref());
+        let rejected = "POLICYSQL_COMMIT_CHECK_REJECTED";
+        for reason in COMMIT_CHECK_REASONS {
+            assert!(
+                allowed(rejected, Some(json!({"reason": reason}))),
+                "{reason}"
+            );
+        }
+        for detail in [
+            None,
+            Some(json!({})),
+            Some(json!({"reason": "names"})),
+            Some(json!({"reason": "DENIED"})),
+            Some(json!({"reason": "denied "})),
+            Some(json!({"reason": null})),
+            Some(json!({"reason": 1})),
+            Some(json!({"reason": ["denied"]})),
+            Some(json!({"reason": "denied", "x": 1})),
+            Some(json!({"constraint": "unique"})),
+            Some(json!(["denied"])),
+            Some(json!("denied")),
+            Some(Value::Null),
+        ] {
+            assert!(!allowed(rejected, detail.clone()), "{detail:?}");
+        }
+        // The two `reason` lists do not mix, though they share the key.
+        assert!(!allowed(
+            "POLICYSQL_INVALID_PARAMETER",
+            Some(json!({"reason": "denied"}))
+        ));
+        assert!(allowed(
+            "POLICYSQL_INVALID_PARAMETER",
+            Some(json!({"reason": "names"}))
+        ));
+        // `DATABASE_ERROR` carries no detail.
+        let database_error = "POLICYSQL_DATABASE_ERROR";
+        assert!(allowed(database_error, None));
+        for detail in [
+            json!({}),
+            json!({"reason": "denied"}),
+            json!({"constraint": "other"}),
+        ] {
+            assert!(!allowed(database_error, Some(detail.clone())), "{detail}");
+        }
+    }
+
+    #[test]
+    fn the_check_reasons_are_the_names_of_the_type() {
+        let all = [
+            CheckReason::Denied,
+            CheckReason::Unavailable,
+            CheckReason::Limit,
+            CheckReason::Unconfigured,
+            CheckReason::Callback,
+        ];
+        // A new variant fails to compile here, so the list above and the table follow it.
+        for reason in all {
+            match reason {
+                CheckReason::Denied
+                | CheckReason::Unavailable
+                | CheckReason::Limit
+                | CheckReason::Unconfigured
+                | CheckReason::Callback => {}
+            }
+        }
+        let names: Vec<&str> = all.iter().map(|reason| reason.name()).collect();
+        assert_eq!(names, COMMIT_CHECK_REASONS);
+        assert!(
+            COMMIT_CHECK_REASONS
+                .iter()
+                .all(|reason| !PARAMETER_REASONS.contains(reason)),
+            "the two reason lists share no value"
+        );
+    }
+
+    /// Every code the machine builds by itself answers with the detail its table row allows. A
+    /// new `Code` fails to compile in `exhaustive`, and a code that forgot its detail fails the
+    /// table.
+    #[test]
+    fn every_machine_reply_is_what_the_detail_table_allows() {
+        // `ConstraintViolation` (`constraint_reply`), `SqlTooComplex` (`class_reply` and
+        // `error_reply_at_with`) and `KeyedOutcomeUnknown` (`outcome_unknown_reply`) have
+        // builders of their own, so `error_reply` is not how they are made.
+        const fn exhaustive(code: Code) {
+            match code {
+                Code::Invalid
+                | Code::Conflict
+                | Code::Unavailable
+                | Code::Internal
+                | Code::OutcomeUnknown
+                | Code::TransactionLimit
+                | Code::ModeViolation
+                | Code::CheckRejected(_)
+                | Code::Stale
+                | Code::BindingRejected
+                | Code::DatabaseTimeout
+                | Code::DatabaseUnavailable
+                | Code::DatabaseError
+                | Code::SchemaMismatch
+                | Code::LimitExceeded
+                | Code::IdempotencyConflict
+                | Code::KeyInvalid
+                | Code::Timeout
+                | Code::SqlTooComplex
+                | Code::ConstraintViolation
+                | Code::KeyedOutcomeUnknown
+                | Code::JsonTooDeep => {}
+            }
+        }
+        let mut codes = vec![
+            Code::Invalid,
+            Code::Conflict,
+            Code::Unavailable,
+            Code::Internal,
+            Code::OutcomeUnknown,
+            Code::TransactionLimit,
+            Code::ModeViolation,
+            Code::Stale,
+            Code::BindingRejected,
+            Code::DatabaseTimeout,
+            Code::DatabaseUnavailable,
+            Code::DatabaseError,
+            Code::SchemaMismatch,
+            Code::LimitExceeded,
+            Code::IdempotencyConflict,
+            Code::KeyInvalid,
+            Code::Timeout,
+            Code::JsonTooDeep,
+        ];
+        codes.extend(
+            [
+                CheckReason::Denied,
+                CheckReason::Unavailable,
+                CheckReason::Limit,
+                CheckReason::Unconfigured,
+                CheckReason::Callback,
+            ]
+            .map(Code::CheckRejected),
+        );
+        for code in codes {
+            exhaustive(code);
+            let reply: Value = serde_json::from_str(error_reply(code).get())
+                .unwrap_or_else(|error| unreachable!("a reply is JSON: {error}"));
+            let error = &reply["error"];
+            assert!(
+                ErrorDetail::allowed(error["code"].as_str().unwrap_or(""), error.get("detail")),
+                "{reply}"
+            );
+            assert_eq!(error["code"], code.parts().0);
         }
     }
 
@@ -1425,6 +1650,7 @@ mod tests {
             PARAMETER_REASONS.as_slice(),
             COMPLEXITY_DETAILS.as_slice(),
             EXPECTATIONS.as_slice(),
+            COMMIT_CHECK_REASONS.as_slice(),
         ] {
             let unique: std::collections::BTreeSet<_> = values.iter().collect();
             assert_eq!(unique.len(), values.len());

@@ -232,6 +232,7 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
         { code: "POLICYSQL_INVALID_SQL", status: 400, detail: { span: { start: 7, end: 11 } }, path: "/statements/0" },
         { code: "POLICYSQL_INVALID_PARAMETER", status: 400, detail: { reason: "names" }, path: "/statements/0" },
         { code: "POLICYSQL_SQL_TOO_COMPLEX", status: 400, detail: { complexity: "height" }, path: "/statements/0" },
+        { code: "POLICYSQL_COMMIT_CHECK_REJECTED", status: 409, detail: { reason: "denied" }, path: null },
         { code: "POLICYSQL_EXPECTATION_FAILED", status: 422, detail: { expectation: "affectedRows" }, path: "/statements/0" },
         {
           code: "POLICYSQL_OUTCOME_UNKNOWN", status: 500, path: null,

@@ -5,7 +5,7 @@ import { BinaryLimitError, bytesLimit, decodeBlob, encodeBlob } from "./binary.t
 import { discardBody, fetchNoFollow } from "./redirects.ts";
 import type { OutboundFetch } from "./redirects.ts";
 import { BodyTooLargeError, readBoundedText } from "./bounded-body.ts";
-import { statementFailure, unclassifiedFailure } from "./database-complexity.ts";
+import { requestFailure, statementFailure, unclassifiedFailure } from "./database-complexity.ts";
 
 // The statement batch reply carries result rows: its read cap comes with each call (core's compiled
 // raw result bound, ADR 0027). Control replies (BEGIN, COMMIT, ROLLBACK, close) carry no result data,
@@ -208,9 +208,10 @@ type BatchOutcome =
 // is a protocol violation, a plain 503 (never a classified refusal). A later step that ran, or a
 // second error, means a write may have committed after the refusal (#144).
 const readBatch = (entry: unknown, count: number, requestId: string): BatchOutcome => {
-  // A top-level error is the whole batch failing (not a statement's step error): its code is kept
-  // for the log, its message is never read, so it cannot classify as a complexity refusal.
-  if (isRecord(entry) && entry.type === "error" && isRecord(entry.error)) throw unclassifiedFailure(entry.error);
+  // A top-level error is the whole request failing, not a statement's step error: it stays 503
+  // (`DatabaseRequestError`), its code is kept for the log, its message is never read, so it cannot
+  // classify as a complexity refusal.
+  if (isRecord(entry) && entry.type === "error" && isRecord(entry.error)) throw requestFailure(entry.error);
   const response = isRecord(entry) && entry.type === "ok" && isRecord(entry.response) ? entry.response : undefined;
   if (response?.type !== "batch" || !isRecord(response.result)) throw databaseFailure();
   const { step_results: stepResults, step_errors: stepErrors } = response.result;
@@ -447,7 +448,8 @@ class TursoHttpTransaction {
       // It is read so the refusal keeps its code, but it is classified neither as a complexity
       // refusal nor as a constraint violation: a stream that ended gives no evidence that the steps
       // before the error ran inside a transaction, so the refusal is not definite (#144, ADR 0030).
-      // This one `unclassifiedFailure` is what keeps a 409 `POLICYSQL_CONSTRAINT_VIOLATION` honest;
+      // It is a database refusal (`DatabaseStatementError`, 500 `POLICYSQL_DATABASE_ERROR`), never a
+      // definite one. This one `unclassifiedFailure` is what keeps a 409 `POLICYSQL_CONSTRAINT_VIOLATION` honest;
       // do not align it with `statementFailure` below. Nothing more is sent on the ended stream, and
       // a success without a baton is a plain 503 that is logged (a statement may have run outside
       // a transaction).
