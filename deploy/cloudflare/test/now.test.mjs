@@ -139,7 +139,7 @@ test("Explain compiles with the real time, names the parameters, and never retur
   const text = JSON.stringify(again.body);
   for (let ms = before; ms <= after; ms++) {
     const iso = new Date(ms).toISOString();
-    assert.ok(!text.includes(iso) && !text.includes(iso.slice(0, 19)) && !text.includes(String(ms)), `no ${iso} in the explanation`);
+    assert.ok(!text.includes(iso) && !text.includes(iso.slice(0, 19)) && !text.includes(`${iso.slice(0, 10)} ${iso.slice(11, 19)}`) && !text.includes(String(ms)), `no ${iso} in the explanation`);
   }
 });
 

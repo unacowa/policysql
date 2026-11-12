@@ -3202,8 +3202,8 @@ resources:
         use super::{
             BTreeMap, Catalog, ClientParameterName, ColumnName, LogicalType, LogicalValue,
             PolicyBundle, ResourceDescriptor, ResourceId, ResourceName, RoleName, SqliteFrontend,
-            TrustedSession, ValueDescriptor, ValueRepresentation, compile_verified_update, context,
-            limits, snapshot,
+            TrustedSession, ValueDescriptor, ValueRepresentation, compile_verified_insert,
+            compile_verified_update, context, limits, snapshot,
         };
         use crate::{CompileError, EmitError};
         use policysql_core::ServerParameterName;
@@ -3445,7 +3445,8 @@ resources:
         #[test]
         fn a_time_name_for_another_shape_than_its_column_is_refused() {
             let catalog = catalog();
-            // The instant spelling in the `int64` column: only the name table stops it.
+            // The instant spelling in the `int64` column: the name table and the value's type each
+            // stop it (the name table alone stops a time in a `string` column, above).
             let mut plan = sealed(&catalog);
             reassign(
                 &mut plan,
@@ -3497,6 +3498,223 @@ resources:
                 typed(LogicalType::Int64, ValueRepresentation::String, None),
             );
             violation(&seal(&constrained, &plan));
+        }
+
+        fn session() -> TrustedSession {
+            TrustedSession::new(
+                RoleName::new("member").unwrap_or_else(|error| unreachable!("valid role: {error}")),
+                "user_1",
+                BTreeMap::from([("tenant_id".to_owned(), "tenant_1".to_owned())]),
+            )
+            .unwrap_or_else(|error| unreachable!("valid session: {error}"))
+        }
+
+        /// An INSERT and an UPDATE plan, both with `presets` (YAML lines of the preset columns).
+        fn sealed_pair(catalog: &Catalog, presets: &str) -> (ProtectedPlan, ProtectedPlan) {
+            let bundle = PolicyBundle::activate(
+                &format!(
+                    "version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, name]
+          filter: {{ tenant_id: {{ eq: {{ session: tenant_id }} }} }}
+        insert:
+          columns: [id, name]
+          presets:
+            tenant_id: {{ session: tenant_id }}
+{presets}
+          check: {{ tenant_id: {{ eq: {{ session: tenant_id }} }} }}
+        update:
+          columns: [name]
+          presets:
+{presets}
+          filter: {{ tenant_id: {{ eq: {{ session: tenant_id }} }} }}
+          check: {{ tenant_id: {{ eq: {{ session: tenant_id }} }} }}
+"
+                ),
+                catalog,
+                snapshot(),
+            )
+            .unwrap_or_else(|error| unreachable!("now policy activates: {error}"));
+            let bind = |sql: &str| {
+                SqliteFrontend::default()
+                    .bind(sql, catalog)
+                    .unwrap_or_else(|error| unreachable!("{sql} binds: {error}"))
+            };
+            let insert = bundle
+                .compile_insert(
+                    &bind("INSERT INTO projects (id, name) VALUES (:id, :name)"),
+                    &session(),
+                    &context(),
+                )
+                .unwrap_or_else(|error| unreachable!("INSERT compiles: {error}"))
+                .plan;
+            let update = bundle
+                .compile_update(
+                    &bind("UPDATE projects SET name = :name WHERE id = :id"),
+                    &session(),
+                    &context(),
+                )
+                .unwrap_or_else(|error| unreachable!("UPDATE compiles: {error}"))
+                .plan;
+            (insert, update)
+        }
+
+        fn seal_insert(catalog: &Catalog, plan: &ProtectedPlan) -> Result<(), CompileError> {
+            compile_verified_insert(plan, catalog, parameters(), limits(), snapshot()).map(|_| ())
+        }
+
+        const ALL_THREE: &str = "            updated_at: { now: {} }
+            touched_on: { now: {} }
+            updated_ms: { now: {} }";
+
+        #[test]
+        fn an_insert_is_checked_before_it_is_sealed() {
+            let catalog = catalog();
+            let (insert, _) = sealed_pair(&catalog, ALL_THREE);
+            assert!(seal_insert(&catalog, &insert).is_ok());
+            // `compile_verified_insert` makes its own call of the check; each corruption below is
+            // refused there.
+            let mut wrong_value = insert.clone();
+            wrong_value.server_values.insert(
+                name("now_epoch_ms"),
+                LogicalValue::String("1793366096789".to_owned()),
+            );
+            violation(&seal_insert(&catalog, &wrong_value));
+            let mut wrong_name = insert.clone();
+            let BoundStatement::Insert(statement) = &mut wrong_name.statement else {
+                unreachable!("an INSERT stays an INSERT");
+            };
+            let assignment = statement
+                .rows
+                .iter_mut()
+                .flatten()
+                .find(|assignment| assignment.column.logical_type == LogicalType::String)
+                .unwrap_or_else(|| unreachable!("a string column is assigned"));
+            assignment.value = BoundExpr::ServerParameter {
+                name: name("now_rfc3339"),
+                logical_type: LogicalType::String,
+            };
+            violation(&seal_insert(&catalog, &wrong_name));
+            let string_ms = catalog_with(
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                ),
+                typed(LogicalType::String, ValueRepresentation::String, None),
+            );
+            violation(&seal_insert(&string_ms, &insert));
+        }
+
+        #[test]
+        fn the_value_is_checked_against_the_catalogs_type_and_not_the_plans_claim() {
+            let catalog = catalog();
+            let mut plan = sealed(&catalog);
+            // The plan claims the `int64` column is a `string` one and carries a `String`.
+            let BoundStatement::Update(update) = &mut plan.statement else {
+                unreachable!("an UPDATE stays an UPDATE");
+            };
+            let assignment = update
+                .assignments
+                .iter_mut()
+                .find(|assignment| assignment.column.logical_type == LogicalType::Int64)
+                .unwrap_or_else(|| unreachable!("the int64 preset is assigned"));
+            assignment.column.logical_type = LogicalType::String;
+            plan.server_values.insert(
+                name("now_epoch_ms"),
+                LogicalValue::String("1793366096789".to_owned()),
+            );
+            violation(&seal(&catalog, &plan));
+        }
+
+        fn stamp_catalog(stamp: ValueDescriptor) -> Catalog {
+            let string = || typed(LogicalType::String, ValueRepresentation::String, None);
+            let resource = ResourceDescriptor::new(
+                ResourceId::new(1).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+                ResourceName::new("projects")
+                    .unwrap_or_else(|error| unreachable!("valid resource: {error}")),
+                [
+                    ("id", string()),
+                    ("tenant_id", string()),
+                    ("name", string()),
+                    ("stamp", stamp),
+                ]
+                .map(|(name, descriptor)| {
+                    (
+                        ColumnName::new(name)
+                            .unwrap_or_else(|error| unreachable!("valid column: {error}")),
+                        descriptor,
+                    )
+                }),
+            )
+            .unwrap_or_else(|error| unreachable!("valid descriptor: {error}"));
+            Catalog::new(snapshot(), [resource])
+                .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"))
+        }
+
+        #[test]
+        fn the_table_of_types_and_formats_is_the_one_activation_accepts() {
+            let stamp = "            stamp: { now: {} }";
+            let instant = || {
+                typed(
+                    LogicalType::Instant,
+                    ValueRepresentation::String,
+                    Some("rfc3339"),
+                )
+            };
+            let datetime = || {
+                typed(
+                    LogicalType::DateTime,
+                    ValueRepresentation::String,
+                    Some("sqlite-datetime"),
+                )
+            };
+            let int64 = |format: Option<&str>| {
+                typed(LogicalType::Int64, ValueRepresentation::String, format)
+            };
+            let integer = |format: Option<&str>| {
+                typed(LogicalType::Integer, ValueRepresentation::Number, format)
+            };
+            // Each pairing activates, and its INSERT and UPDATE seal against the same Catalog.
+            // `twin` is the same column with a format the table does not list: the plan made
+            // for the pairing must not seal against it (only the table stops a time there).
+            for (accepted, twin) in [
+                (
+                    instant(),
+                    Some(typed(
+                        LogicalType::Instant,
+                        ValueRepresentation::String,
+                        None,
+                    )),
+                ),
+                (
+                    datetime(),
+                    Some(typed(
+                        LogicalType::DateTime,
+                        ValueRepresentation::String,
+                        None,
+                    )),
+                ),
+                // `base64` is a format the value contract lets any value through.
+                (int64(None), Some(int64(Some("base64")))),
+                (int64(Some("int64")), None),
+                (integer(None), Some(integer(Some("int64")))),
+            ] {
+                let label = format!("{:?}/{:?}", accepted.logical_type, accepted.format);
+                let catalog = stamp_catalog(accepted);
+                let (insert, update) = sealed_pair(&catalog, stamp);
+                assert!(seal_insert(&catalog, &insert).is_ok(), "{label} INSERT");
+                assert!(seal(&catalog, &update).is_ok(), "{label} UPDATE");
+                if let Some(twin) = twin {
+                    let other = stamp_catalog(twin);
+                    violation(&seal_insert(&other, &insert));
+                    violation(&seal(&other, &update));
+                }
+            }
         }
 
         #[test]
