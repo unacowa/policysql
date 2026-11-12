@@ -55,6 +55,29 @@ unknown even after its row expires: expiry removes only the possibility of a rep
 unknown, and the same key and body cannot resolve it. The operator must reconcile that write
 explicitly.
 
+## Reading a rejection
+
+A client sees a code and, for some codes, a fixed `detail` (`feature`, `span`, `reason`,
+`complexity`, `expectation`; [ADR 0030](adr/0030-error-detail-and-database-constraint-violations.md)).
+The reason behind a refusal is only in the log, as the event `rejection_reason`, written where the
+compile happened (the Worker, the Durable Object that owns a transaction, and Explain), with the same
+`requestId` as the `request_rejected` of the same request:
+
+```json
+{"event":"rejection_reason","requestId":"req_…","statementIndex":0,"code":"POLICYSQL_FORBIDDEN_COLUMN","reason":"bind.UnknownColumn","shape":null,"schemaVersion":"…","policyVersion":"…","abiVersion":21}
+```
+
+`reason` is `<stage>.<variant>`. The stages tell where the statement stopped: `bind` (the client's
+SQL: `bind.UnknownColumn` does not exist, `bind.Unsupported` with `shape` the construct), `policy`
+(the policy: `policy.ForbiddenColumn` is a column the role cannot read, `policy.MissingPolicy` and
+`policy.InvalidPredicate` are a policy that is missing or broken, `policy.MissingSessionValue` is a
+session without a value the policy needs), `compile` (the parameters against the policy's statement),
+`emit` and `verify` (the policy's statement was refused: a bug or an unsupported combination),
+`gateway`, `request` (limits and shape), `parameter` (a value that does not fit), `result` (the
+database's result), `auth`, and `runtime`. `sql_too_complex` and `emitted_sql_reparse_failed` keep
+their own events. A keyed request that answered `POLICYSQL_OUTCOME_UNKNOWN` logs the original
+reason too. The record holds fixed names only, never SQL, an identifier, or a value.
+
 ## Monitoring and alerts
 
 Cloudflare invocation logs are enabled at full sampling for this development deployment. Structured

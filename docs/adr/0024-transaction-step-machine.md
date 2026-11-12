@@ -700,6 +700,13 @@ today.
   checked against the same table (ADR 0030, amendment). No state or event changes; `step_json`
   returns different replies for existing inputs, so `ABI_VERSION` is 20 and the owner wire
   version is `"3"`.
+- **Compile detail and `rejection_reason` (#145 pull request C, ABI 21).** The compile and
+  result-validation refusals carry `error.detail` where the public table has a row (`feature`,
+  `span`, `reason`, `complexity`, `expectation`), a database complexity refusal names its
+  `complexity`, a keyed `POLICYSQL_OUTCOME_UNKNOWN`'s `cause` gains `detail`, and the machine writes
+  the log event `rejection_reason` (ADR 0030, amendment). No state or event changes; `step_json`
+  returns different replies for existing inputs, so `ABI_VERSION` is 21 and the owner wire
+  version is `"4"`.
 
 
 ## Migration

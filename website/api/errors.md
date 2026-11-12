@@ -25,10 +25,23 @@ description: PolicySQLのerror responseと安全な処理方法です。
 | `code` | programから判定する安定したerror code |
 | `message` | codeごとの固定文。DBやparserの文言を含まない |
 | `path` | request body内の問題箇所。特定できない場合は`null` |
-| `detail` | 任意。codeごとに決まった機械可読の値（固定の列挙値、数値、requestの文の位置を指す固定形のpath（`/statements/<n>`か`/statements/<n>/sql`）だけ。DBやparserの文言・識別子は含まない）。現在は`POLICYSQL_CONSTRAINT_VIOLATION`の`constraint`と、`POLICYSQL_OUTCOME_UNKNOWN`の`cause`（`code`と`path`）だけ。分岐の主キーは`code` |
+| `detail` | 任意。codeごとに決まった機械可読の値（固定の列挙値、数値、requestの文の位置を指す固定形のpath（`/statements/<n>`か`/statements/<n>/sql`）、利用者自身のSQLの中のバイト位置だけ。DBやparserの文言・識別子・parameter名は含まない）。次の表のcodeだけが持ち、ほかのcodeは持たない。分岐の主キーは`code` |
 | `requestId` | server logと照合する識別子 |
 
 clientは`message`ではなく`code`を使って分岐してください。
+
+`detail`を持つcodeと、その中身は次のとおりです。値の一覧は[detailの値](#detailの値)にあります。
+
+| Code | `detail` | 常にあるか |
+| --- | --- | --- |
+| `POLICYSQL_CONSTRAINT_VIOLATION` | `{ "constraint": <種類> }` | ある |
+| `POLICYSQL_OUTCOME_UNKNOWN` | `{ "cause": { "code": <code>, "path": <path か null>, "detail": <objectか null> } }`（3つのkeyは常にある） | ある |
+| `POLICYSQL_INVALID_SQL` | `{ "span": { "start": <整数>, "end": <整数> } }` | **ない**。parserが位置を報告しないときは`detail`自体を省く |
+| `POLICYSQL_UNSUPPORTED_SQL` | `{ "feature": <構文> }` | ある |
+| `POLICYSQL_INVALID_PARAMETER` | `{ "reason": <理由> }` | ある |
+| `POLICYSQL_SQL_TOO_COMPLEX` | `{ "complexity": <上限> }` | ある |
+| `POLICYSQL_EXPECTATION_FAILED` | `{ "expectation": "affectedRows" または "rowCount" }` | ある |
+| 上記以外のすべてのcode | なし | `detail`は付かない |
 
 HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](../reference/http-conventions)を参照してください。`path`は可能な場合にrequest bodyへのRFC 6901 JSON Pointerを返します。
 
@@ -41,12 +54,12 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | --- | --- | --- |
 | `POLICYSQL_INVALID_REQUEST` | 400 | JSON、必須field、header（`PolicySQL-Role`の複数指定など）が不正 |
 | `POLICYSQL_JSON_TOO_DEEP` | 400 | request bodyのJSONの入れ子が上限（64 level）を超えた。単なるJSON構文エラーではなく原因を表す専用code。DB処理の前に拒否する。`Idempotency-Key`付きのAtomic Executeでは500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる（上限が65から64へ厳しくなり、ABI 16より前のdeployでcommit済みのwriteの再送かもしれないため。bodyは従来と同じ上限までしか読まず、lookup・実行・key消費も行わない）。unkeyedのAtomic Execute、keyが不正なrequest、begin、Explainはこのcodeのままで、clientは拒否（`PolicySqlRejectedError`）として扱う |
-| `POLICYSQL_INVALID_SQL` | 400 | SQLをparseできない |
+| `POLICYSQL_INVALID_SQL` | 400 | SQLをparseできない。pathは`/statements/<i>`。parserが位置を報告できるとき（字句エラー、予期しないtoken）は`detail.span`にそのtokenの位置（UTF-8のバイト位置、半開区間）を返す。SQLが途中で終わっている、parserの上限に達したなど、位置のないときは`detail`がない。PolicySQLが生成したSQLの位置は返さない |
 | `POLICYSQL_MULTIPLE_STATEMENTS` | 400 | statementが複数含まれる |
-| `POLICYSQL_UNSUPPORTED_SQL` | 400 | 対応範囲外の構文 |
-| `POLICYSQL_SQL_TOO_COMPLEX` | 400 | 入力は上限内だが、policyを合成して生成した文が下流の複雑さの上限（parserの式の高さ・再帰の深さ、結果列2,000、host parameter 32,766、LIKE/GLOBのpattern 50,000 bytes、envelopeのcolumn metadata 1 MiB、またはDBが複雑さを理由に拒否）に達した。pathは`/statements/<i>`で、messageは固定。COMMITより前に検知するため何もcommitされず、clientは拒否（`PolicySqlRejectedError`）として扱う。対話型transactionでは`failed`として閉じ、後続のcommandは409 `POLICYSQL_TRANSACTION_UNAVAILABLE`になる。`Idempotency-Key`付きのAtomic Executeでcompile時（emit時）に検出された場合は500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode。保存済み結果は返さず、何も実行しない）、unkeyedのAtomic Execute・Explain・DB実行時の拒否はこのcodeで、同じrequestを再送しても成功しない |
+| `POLICYSQL_UNSUPPORTED_SQL` | 400 | 対応範囲外の構文。`detail.feature`に、対応していない構文の名前（SQLの構文名。[detailの値](#detailの値)）を返す。識別子やSQLの断片は返さない |
+| `POLICYSQL_SQL_TOO_COMPLEX` | 400 | 入力は上限内だが、policyを合成して生成した文が下流の複雑さの上限（parserの式の高さ・再帰の深さ、結果列2,000、host parameter 32,766、LIKE/GLOBのpattern 50,000 bytes、envelopeのcolumn metadata 1 MiB、またはDBが複雑さを理由に拒否）に達した。pathは`/statements/<i>`で、messageは固定。`detail.complexity`は達した上限の名前（[detailの値](#detailの値)）で、生成した文の長さや位置は返さない。COMMITより前に検知するため何もcommitされず、clientは拒否（`PolicySqlRejectedError`）として扱う。対話型transactionでは`failed`として閉じ、後続のcommandは409 `POLICYSQL_TRANSACTION_UNAVAILABLE`になる。`Idempotency-Key`付きのAtomic Executeでcompile時（emit時）に検出された場合は500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode。保存済み結果は返さず、何も実行しない）、unkeyedのAtomic Execute・Explain・DB実行時の拒否はこのcodeで、同じrequestを再送しても成功しない |
 | `POLICYSQL_DUPLICATE_RESULT_COLUMN` | 400 | alias適用後のresult column名が重複した |
-| `POLICYSQL_INVALID_PARAMETER` | 400 | parameterの不足、型、値が不正 |
+| `POLICYSQL_INVALID_PARAMETER` | 400 | parameterの不足、型、値が不正。`detail.reason`に理由（[detailの値](#detailの値)）を返す。どのparameterかは返さない |
 | `POLICYSQL_AMBIGUOUS_PARAMETER_TYPE` | 400 | Explainでparameter型を一意に証明できない |
 | `POLICYSQL_RESERVED_PARAMETER` | 400 | server用のparameter名を使用した |
 | `POLICYSQL_IDEMPOTENCY_KEY_INVALID` | 400 | `Idempotency-Key`が空または書式不正（16〜128文字のASCII英数字と`. _ : - + / =`以外を含む、長さが範囲外、header重複によるカンマ結合）。keyの省略では発生しない。DB処理の前に拒否するため、再送しても成功しない |
@@ -69,11 +82,11 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_LIMIT_EXCEEDED` | 413 | requestまたはresult limitを超えた。行数、結果bytes、結果のJSON値の数、databaseの生の応答の上限、streaming transportが応答中にdecodeした結果のBLOB値の上限（buffering providerのBLOBはcoreがresult encodingで検出するため413のまま）、`maxStatements`、応答全体の`maxResponseBytes`を含む。commit前に判断し、envelopeはrollbackして冪等性recordも残さない。ただしatomic executeで2文目以降にwriteを含み、databaseの生の応答、またはstreaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合は、後続のwriteが実行された可能性があるため500 `POLICYSQL_INTERNAL`（結果不明）になる。その例外を除き、再送しても成功しない。さらに、`Idempotency-Key`付きのAtomic Executeでcompile時の入力上限（`maxStatements`、`maxParameters`、`maxExpressionDepth`、`maxProjections`、`maxJoins`、client parameterの`maxBytesPerValue`）に達した場合は500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になり、unkeyedのAtomic ExecuteとExplainは413のまま。malformed base64はkeyedのAtomic Executeではcompile errorとして500 `POLICYSQL_OUTCOME_UNKNOWN`（`detail.cause.code`は`POLICYSQL_INVALID_PARAMETER`など）、unkeyedのAtomic ExecuteとExplainでは400 |
 | `POLICYSQL_REQUEST_TOO_LARGE` | 413 | HTTP body（`limits.maxRequestBytes`）、body内のJSON値の数（`limits.maxJsonValues`）、またはSQL text（`limits.maxSqlBytes`、pathは`/statements/<i>/sql`）が受付上限を超えた。HTTP bodyと`maxJsonValues`はcompileより前のbody checkで拒否する。ただし`Idempotency-Key`付きのAtomic Executeでは、deployで上限を引き下げた後にcommit済みwriteの再送が来る可能性があるため、500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode）になる（unkeyed、またはkeyが不正なrequestは413）。`maxSqlBytes`はcompile時に検出するため、`Idempotency-Key`付きのAtomic Executeでは同じく500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明）、unkeyedのAtomic ExecuteとExplainでは413。unkeyedとkey不正の413、および`maxSqlBytes`のunkeyed 413は、再送しても成功しないためclientは拒否（`PolicySqlRejectedError`）として扱う。keyedの500 `POLICYSQL_OUTCOME_UNKNOWN`は結果不明（`PolicySqlOutcomeUnknownError`）で、rollbackとみなさず同じkey・同じbodyで再送する |
 | `POLICYSQL_UNSUPPORTED_MEDIA_TYPE` | 415 | `Content-Type`が`application/json`でない |
-| `POLICYSQL_EXPECTATION_FAILED` | 422 | transaction operationの期待条件を満たさない |
+| `POLICYSQL_EXPECTATION_FAILED` | 422 | transaction operationの期待条件を満たさない。`detail.expectation`は、満たさなかった期待が`affectedRows`と`rowCount`のどちらか。実際の件数は返さない |
 | `POLICYSQL_SCHEMA_MISMATCH` | 422 | database値がcompiled logical contractと一致しない |
 | `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` | 413 | 対話型transactionの恒久的な上限（statement数、累積result bytes）を超えた。commit checkのcallbackの行数・bytes・query数の上限でも発生し、その場合はvalidatorがこのcodeを受け取り、atomic executeや対話型commitは409 `POLICYSQL_COMMIT_CHECK_REJECTED`になる。再送しても成功しない。request rateの制限ではない |
 | `POLICYSQL_INTERNAL` | 500 | 公開できない内部エラー。ラッパーが渡したtrusted sessionや文脈の形が不正な場合、またはatomic executeで2文目以降にwriteを含むenvelopeのdatabaseの生の応答、streaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合（結果不明）もこのcode。`Idempotency-Key`付きのAtomic Executeがcompile（`expected`の照合を含む）・session認可・入力上限のbody checkで通らない場合は、このcodeではなく500 `POLICYSQL_OUTCOME_UNKNOWN`になる |
-| `POLICYSQL_OUTCOME_UNKNOWN` | 500 | `Idempotency-Key`付きのAtomic Executeが、DBを読む前のcompile、session認可、body checkの上限で通らなかった。何も実行せず、keyも消費しないが、同じkeyの以前のrequestがdeploy前のpolicy・schema・上限・sessionでcommit済みだったかもしれないため、結果不明として返す（保存済み結果は返さない）。公式clientは、このcodeを受け取ると同じ`POLICYSQL_OUTCOME_UNKNOWN`のcodeを持つ`PolicySqlOutcomeUnknownError`として扱います（意図して同じ意味に揃えています。`error.cause`がこのserverのerrorで、`status`が500、clientが通信断などで自分で作った場合は`status`がありません）。`detail.cause`はkeyなしなら返っていたcodeとpath（`{ "code": "POLICYSQL_MISSING_POLICY", "path": "/statements/0" }`の形。codeは固定の列挙で、DBの状態に依存するcodeは含まない）。top-levelの`path`は常に`null`。rollbackとみなさず、同じkey・同じbodyで再送する。clientは結果不明（`PolicySqlOutcomeUnknownError`）として扱い、`error.cause.detail.cause`で原因を読める |
+| `POLICYSQL_OUTCOME_UNKNOWN` | 500 | `Idempotency-Key`付きのAtomic Executeが、DBを読む前のcompile、session認可、body checkの上限で通らなかった。何も実行せず、keyも消費しないが、同じkeyの以前のrequestがdeploy前のpolicy・schema・上限・sessionでcommit済みだったかもしれないため、結果不明として返す（保存済み結果は返さない）。公式clientは、このcodeを受け取ると同じ`POLICYSQL_OUTCOME_UNKNOWN`のcodeを持つ`PolicySqlOutcomeUnknownError`として扱います（意図して同じ意味に揃えています。`error.cause`がこのserverのerrorで、`status`が500、clientが通信断などで自分で作った場合は`status`がありません）。`detail.cause`はkeyなしなら返っていたcodeとpathとdetail（`{ "code": "POLICYSQL_MISSING_POLICY", "path": "/statements/0", "detail": null }`の形。`detail`はそのcodeが`detail`を持たないとき`null`で、持つときはそのcodeの`detail`（たとえば`{ "feature": "star" }`）。codeは固定の列挙で、DBの状態に依存するcodeは含まない）。top-levelの`path`は常に`null`。rollbackとみなさず、同じkey・同じbodyで再送する。clientは結果不明（`PolicySqlOutcomeUnknownError`）として扱い、`error.cause.detail.cause`で原因を、`error.cause.detail.cause.detail`でその原因の`detail`を読める |
 | `POLICYSQL_DATABASE_REQUIRED` | 500 | ラッパーが必須のDB引数を渡していない |
 | `POLICYSQL_DATABASE_UNAVAILABLE` | 503 | database adapterまたはtransaction ownerを利用できない |
 | `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` | 503 | commitを送った後に結果を確定できない（transaction ownerの喪失、ownerの記録の保存失敗、COMMIT中の通信エラー）。commit済みの可能性があるため、拒否ではなく結果不明として扱う |
@@ -136,6 +149,82 @@ return createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", 
 
 上限超過時は`Retry-After: 60`（bindingの`period`秒）を付けて429を返します。このとき、認証、WASMの初期化、SQL compile、Durable Object、DB接続は行いません。bindingがない、またはbindingが例外を投げた場合は、ライブラリを呼ばずにHTTP 500 `POLICYSQL_INTERNAL`を返します（fail closed）。
 
+## detailの値
+
+`detail`の値はどれも固定の列挙値か、利用者自身のSQLの中のバイト位置です。識別子、parameter名・値、DBやparserの文言は入りません。内部の理由（どの段で、なぜ拒否したか）は運用者のserver log（`rejection_reason`）にだけ残り、応答には出ません。
+
+### `feature`（`POLICYSQL_UNSUPPORTED_SQL`）
+
+対応していない構文を、SQLの構文名で返します。内部の実装名ではありません。
+
+| 値 | 意味 |
+| --- | --- |
+| `explain` | `EXPLAIN` |
+| `statement` | SELECT・INSERT・UPDATE・DELETE以外の文（`PRAGMA`、DDL、transaction制御など） |
+| `constant_select` | `FROM`のないSELECT（定数だけのSELECT）の対応外の形 |
+| `star` | `*`（`SELECT *`、`RETURNING *`、`t.*`） |
+| `json_collection` | JSONの集合（`json_each`など）の対応外の形 |
+| `delete` | DELETEの対応外の形（`LIMIT`など） |
+| `update` | UPDATEの対応外の形（`OR REPLACE`、`FROM`、`ORDER BY`、`LIMIT`、行値の代入、代入に使えない式） |
+| `insert` | INSERTの対応外の形（`OR REPLACE`、列名の省略、`ON CONFLICT`、空の`VALUES`、値に使えない式） |
+| `insert_select` | `INSERT ... SELECT` |
+| `compound_select` | `UNION`、`INTERSECT`、`EXCEPT` |
+| `values` | 単独の`VALUES`、副問い合わせの`VALUES` |
+| `distinct` | `DISTINCT`、`ALL` |
+| `window_clause` | `WINDOW`句 |
+| `group_by` | 空の`GROUP BY` |
+| `nulls_ordering` | `NULLS FIRST`、`NULLS LAST` |
+| `cte` | `WITH`（CTE）の対応外の形、またはresourceと同じ名前のCTE |
+| `derived_table` | 別名のない、または対応外の形の副問い合わせのtable |
+| `table_source` | `FROM`に書けないtable |
+| `database_qualifier` | `main.t`のようなdatabase名の修飾 |
+| `indexed_by` | `INDEXED BY` |
+| `join` | 対応外のJOIN（`CROSS`、`NATURAL`、カンマ結合、`ON`のないJOINなど） |
+| `self_join` | 同じresourceどうしのJOIN |
+| `window_function` | 窓関数の対応外の形 |
+| `subquery` | 副問い合わせの対応外の形（同じresourceへの相関など） |
+| `expression` | 対応外の式 |
+| `cast` | 対応外の`CAST`の型 |
+| `function` | 対応外の関数 |
+| `literal` | 対応外のliteral（`X'..'`など） |
+| `missing_from` | 基になるresourceがないSELECT |
+| `duplicate_alias` | 別名の重複 |
+| `duplicate_write_column` | INSERT・UPDATEで同じ列を2回書いた |
+| `insert_arity` | INSERTの列数と値の数が合わない |
+| `protected_statement` | policyを合成した文が、生成または検証の段で拒否された |
+
+### `reason`（`POLICYSQL_INVALID_PARAMETER`）
+
+| 値 | 意味 |
+| --- | --- |
+| `positional` | 名前のないparameter（`?`、`?1`） |
+| `prefix` | `:`以外の接頭辞（`$x`、`@x`） |
+| `name` | parameter名が規則に合わない |
+| `type` | 比較・代入・関数引数の型が合わない（literalと列の型の不一致を含む） |
+| `null` | `= NULL`のようなNULLとの比較 |
+| `literal` | literalの字句が読めない |
+| `value` | 送った値が、そのparameterの型や制約に合わない |
+| `names` | 送ったparameter名の集合がSQLのものと違う（不足か余分か） |
+
+### `complexity`（`POLICYSQL_SQL_TOO_COMPLEX`）
+
+`height`（式の高さ）、`recursion`（parserの再帰の深さ）、`columns`（結果列）、`parameters`（host parameter）、`like_pattern`（`LIKE`・`GLOB`のpattern）、`column_metadata`（envelopeのcolumn metadata）、`database_expression_depth`（DBが式を深すぎるとした）、`function_arguments`、`compound_terms`、`join_tables`（DBが複雑さを理由に拒否した）、`database`（DBが原因を示さなかった）。
+
+### `expectation`（`POLICYSQL_EXPECTATION_FAILED`）
+
+`affectedRows`（`expect.affectedRows`）、`rowCount`（`expect.rowCount`）。
+
+### `span`（`POLICYSQL_INVALID_SQL`）
+
+`statements[i].sql`（JSONとして読んだ後の文字列）の**UTF-8のバイト位置**です。`start`はparserが報告したtokenの先頭、`end`はそのtokenの終わりで、半開区間`[start, end)`です。`0 <= start <= end <= sqlのUTF-8での長さ`です。JavaScriptでは次のように切り出します（`String.prototype.slice`はUTF-16の位置なので使えません）。
+
+```js
+const bytes = new TextEncoder().encode(sql);
+const text = new TextDecoder().decode(bytes.subarray(span.start, span.end));
+```
+
+位置を返すのは`POLICYSQL_INVALID_SQL`だけです。`POLICYSQL_FORBIDDEN_COLUMN`などの拒否は、構文木が位置を持たないため位置を返しません。
+
 ## 情報を公開しないエラー
 
 次の情報はclient responseへ含めません。
@@ -147,6 +236,8 @@ return createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", 
 - commit checkのhook認証情報とopaque capability
 - remote databaseのraw error
 - DBの制約名・表名・列名、triggerの文言
+- 利用者のSQLの識別子とparameter名（`detail`は固定の列挙値だけ。位置は`INVALID_SQL`の`span`だけで、利用者自身のSQLの中の位置）
+- PolicySQLが生成したSQLの位置（`span`にならない）と、拒否の内部の理由（server logの`rejection_reason`にだけ残る）
 
 DBの制約違反は、種類（固定の列挙値）だけを返します。
 
