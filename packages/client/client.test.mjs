@@ -540,3 +540,26 @@ test("DATABASE_ERROR (500) is an unknown outcome on every command, like the 503 
     }
   }
 });
+
+test("COMMIT_CHECK_REJECTED is a definite 409 rejection of execute and commit, with detail.reason readable (#145 pull request E)", async () => {
+  const rejection = (detail) => ({ error: { code: "POLICYSQL_COMMIT_CHECK_REJECTED", message: "A commit check rejected the transaction.", path: null, requestId: "req_test", ...(detail === undefined ? {} : { detail }) } });
+  for (const reason of ["denied", "unavailable", "limit", "unconfigured", "callback"]) {
+    const detail = { reason };
+    const h = setup({}, () => async () => ({ status: 409, body: rejection(detail) }));
+    await assert.rejects(h.client.execute(select), error => {
+      assert.ok(error instanceof PolicySqlError);
+      assert.equal(error instanceof PolicySqlOutcomeUnknownError, false, reason);
+      assert.equal(error.code, "POLICYSQL_COMMIT_CHECK_REJECTED");
+      assert.deepEqual(error.detail, detail);
+      return true;
+    });
+    const gateway = mockGateway();
+    const wrap = async (url, init) => (new URL(url).pathname.endsWith("/commit")
+      ? Response.json(rejection(detail), { status: 409 })
+      : gateway.fetchImpl(url, init));
+    const client = new PolicySqlClient({ transport: createHttpTransport({ endpoint: "https://gateway.test", fetchImpl: wrap }) });
+    const tx = await client.beginTransaction();
+    await assert.rejects(tx.commit(), error => error instanceof PolicySqlError && !(error instanceof PolicySqlOutcomeUnknownError) && error.detail.reason === reason, reason);
+    await tx.dispose();
+  }
+});

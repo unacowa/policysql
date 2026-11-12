@@ -5,18 +5,20 @@
 //! and emits `CallValidator`. While a validator is awaited, its callback queries run on the
 //! callback lane against the same open transaction under the callback session. The verdict
 //! revokes the capability; a deny, a malformed decision, or a failed call rejects the commit
-//! with `POLICYSQL_COMMIT_CHECK_REJECTED` before any COMMIT. After the last allow, the binding
+//! with `POLICYSQL_COMMIT_CHECK_REJECTED` and a fixed `detail.reason` (#145 pull request E)
+//! before any COMMIT. After the last allow, the binding
 //! is checked again and the commit continues to `committing`. A callback failure ends the
 //! open transaction; an expiry answers the waiting commit at once. Nothing here can emit
 //! `Commit`: only the commit path after `CommitBinding { passed: true }` does.
 
 use super::super::compiler::{Compiler, Operation, RawResult, TriggeredCheck, Validated};
 use super::super::io::{
-    self, CapabilityGrant, Code, Effect, Event, core_error_reply, error_reply, value_reply,
+    self, CapabilityGrant, CheckReason, Code, Effect, Event, core_error_reply, error_reply,
+    value_reply,
 };
 use super::super::state::{
     CallbackTask, CallbackWork, Capability, CommitChecks, Connection, Durable, Kind, Pending,
-    Phase, Record, Replay, Task, Versions, Volatile, Work, WorkLane,
+    Phase, Record, Replay, Task, Verdict, Versions, Volatile, Work, WorkLane,
 };
 use super::super::{Compiled, MAX_SAFE_INTEGER};
 use super::{
@@ -30,31 +32,40 @@ use serde_json::value::RawValue;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-/// Whether a validator's JSON body is exactly a decision (`commit-checks.ts` `exactDecision`)
-/// that allows the commit: only `version`, `allowed`, and `error`; `version` is `"1"`;
-/// `allowed` is a boolean; `error`, when present, is an object with exactly a string `code`.
-pub(super) fn allowed_decision(decision: &Value) -> bool {
+/// What a validator's JSON body decided (`commit-checks.ts` `exactDecision`): the body must be
+/// exactly a decision, only `version`, `allowed`, and `error`; `version` is `"1"`; `allowed` is a
+/// boolean; `error`, when present, is an object with exactly a string `code`. Allowed only for
+/// exactly the decision that allowed before (unchanged); a well-formed `allowed: false` is
+/// `denied`; anything else is `unavailable`. The validator's `error` is checked for shape only
+/// and never kept.
+pub(super) fn decision_verdict(decision: &Value) -> Verdict {
+    let malformed = Verdict::Rejected(CheckReason::Unavailable);
     let Some(object) = decision.as_object() else {
-        return false;
+        return malformed;
     };
     if !object
         .keys()
         .all(|key| matches!(key.as_str(), "version" | "allowed" | "error"))
     {
-        return false;
+        return malformed;
     }
     if object.get("version").and_then(Value::as_str) != Some("1") {
-        return false;
+        return malformed;
     }
     if let Some(error) = object.get("error") {
         let exact = error.as_object().is_some_and(|error| {
             error.len() == 1 && error.get("code").is_some_and(Value::is_string)
         });
         if !exact {
-            return false;
+            return malformed;
         }
     }
-    object.get("allowed") == Some(&Value::Bool(true))
+    match object.get("allowed") {
+        Some(Value::Bool(true)) => Verdict::Allowed,
+        Some(Value::Bool(false)) => Verdict::Rejected(CheckReason::Denied),
+        // `allowed` is a boolean (`commit-checks.md`): anything else is not a decision.
+        _ => malformed,
+    }
 }
 
 /// base64url without padding (RFC 4648 section 5).
@@ -259,7 +270,11 @@ impl<C: Compiler> Step<'_, C> {
                 "check": missing.id,
             });
             self.log(&unconfigured);
-            return self.close(lane, Phase::Failed, Some(error_reply(Code::CheckRejected)));
+            return self.close(
+                lane,
+                Phase::Failed,
+                Some(error_reply(Code::CheckRejected(CheckReason::Unconfigured))),
+            );
         }
         self.set_phase(Phase::Validating);
         let checks = CommitChecks {
@@ -286,7 +301,11 @@ impl<C: Compiler> Step<'_, C> {
             .and_then(|record| record.expires_at_ms)
             .is_none_or(|at| self.host.now_ms >= at);
         if expired || self.rollback_requested() {
-            return self.close(lane, Phase::Expired, Some(error_reply(Code::CheckRejected)));
+            return self.close(
+                lane,
+                Phase::Expired,
+                Some(error_reply(Code::CheckRejected(CheckReason::Unavailable))),
+            );
         }
         self.issue(lane, request_id, checks)
     }
@@ -347,7 +366,11 @@ impl<C: Compiler> Step<'_, C> {
         let now = self.host.now_ms;
         let expires_at_ms = now.saturating_add(check.timeout_ms).min(deadline);
         if expires_at_ms <= now || self.connection() != Connection::Open {
-            return self.close(lane, Phase::Failed, Some(error_reply(Code::CheckRejected)));
+            return self.close(
+                lane,
+                Phase::Failed,
+                Some(error_reply(Code::CheckRejected(CheckReason::Unavailable))),
+            );
         }
         let auth = canonical::parse(&checks.auth).map_err(|_| Fault("checks_auth"))?;
         let role = match &check.role {
@@ -431,7 +454,7 @@ impl<C: Compiler> Step<'_, C> {
         lane: WorkLane,
         request_id: Option<String>,
         checks: CommitChecks,
-        allowed: bool,
+        verdict: Verdict,
     ) -> Result<()> {
         if let Some(volatile) = &mut self.volatile {
             volatile.capability = None;
@@ -444,11 +467,11 @@ impl<C: Compiler> Step<'_, C> {
             self.volatile_mut().deferred = Some(Work {
                 lane,
                 request_id,
-                task: Task::Verdict { checks, allowed },
+                task: Task::Verdict { checks, verdict },
             });
             return Ok(());
         }
-        self.verdict(lane, request_id, checks, allowed)
+        self.verdict(lane, request_id, checks, verdict)
     }
 
     /// A deny rejects the commit; an allow calls the next validator, or, after the last one,
@@ -458,11 +481,15 @@ impl<C: Compiler> Step<'_, C> {
         lane: WorkLane,
         request_id: Option<String>,
         checks: CommitChecks,
-        allowed: bool,
+        verdict: Verdict,
     ) -> Result<()> {
         self.request.clone_from(&request_id);
-        if !allowed {
-            return self.close(lane, Phase::Failed, Some(error_reply(Code::CheckRejected)));
+        if let Verdict::Rejected(reason) = verdict {
+            return self.close(
+                lane,
+                Phase::Failed,
+                Some(error_reply(Code::CheckRejected(reason))),
+            );
         }
         if checks.index + 1 < checks.checks.len() {
             let next = CommitChecks {
@@ -512,7 +539,7 @@ impl<C: Compiler> Step<'_, C> {
             volatile.deferred.take().ok_or(Fault("expire_validating"))?
         };
         self.request.clone_from(&waiting.request_id);
-        self.respond(error_reply(Code::CheckRejected));
+        self.respond(error_reply(Code::CheckRejected(CheckReason::Unavailable)));
         // In memory at once, so the late verdict is ignored and commands are unavailable.
         self.set_phase(Phase::Expired);
         if self
@@ -599,15 +626,15 @@ impl<C: Compiler> Step<'_, C> {
                 &capability.token_hash,
             );
         if !presented || now >= capability.expires_at_ms {
-            return self.fail_validation(error_reply(Code::Unavailable));
+            return self.fail_validation(error_reply(Code::Unavailable), CheckReason::Callback);
         }
         let Some((members, sequence)) = parse_callback(text) else {
-            return self.fail_validation(error_reply(Code::Unavailable));
+            return self.fail_validation(error_reply(Code::Unavailable), CheckReason::Callback);
         };
         let record = self.record().ok_or(Fault("callback_record"))?;
         let expired = record.expires_at_ms.is_none_or(|at| now >= at);
         if expired || record.snapshot != self.compiler.snapshot() {
-            return self.fail_validation(error_reply(Code::Unavailable));
+            return self.fail_validation(error_reply(Code::Unavailable), CheckReason::Callback);
         }
         let binding = record.binding.clone();
         let deadline = record
@@ -619,7 +646,7 @@ impl<C: Compiler> Step<'_, C> {
             && self.may_repeat_members(&capability.session, &members)
         {
             let Some(digest) = callback_digest(text) else {
-                return self.fail_validation(error_reply(Code::Internal));
+                return self.fail_validation(error_reply(Code::Internal), CheckReason::Callback);
             };
             if same_hash(&digest, &last.digest) {
                 self.respond_callback(value_reply(&last.response));
@@ -628,13 +655,13 @@ impl<C: Compiler> Step<'_, C> {
         }
         if sequence != capability.next_sequence || sequence > self.limits.max_transaction_statements
         {
-            return self.fail_validation(error_reply(Code::Conflict));
+            return self.fail_validation(error_reply(Code::Conflict), CheckReason::Callback);
         }
         let compiled: Compiled = match self.compile_members(&capability.session, &members) {
             Ok(compiled) => compiled,
             Err(error) => {
                 self.log_core_error(&error);
-                return self.fail_validation(core_error_reply(&error));
+                return self.fail_validation(core_error_reply(&error), CheckReason::Callback);
             }
         };
         let handle = compiled.handle;
@@ -642,11 +669,11 @@ impl<C: Compiler> Step<'_, C> {
         self.volatile_mut().handles.push(handle);
         if !compiled.read_only() || compiled.statements.len() != 1 {
             self.release(handle);
-            return self.fail_validation(error_reply(Code::Conflict));
+            return self.fail_validation(error_reply(Code::Conflict), CheckReason::Callback);
         }
         let Some(digest) = callback_digest(text) else {
             self.release(handle);
-            return self.fail_validation(error_reply(Code::Internal));
+            return self.fail_validation(error_reply(Code::Internal), CheckReason::Callback);
         };
         let versions = Versions {
             schema: compiled.schema_version.clone(),
@@ -698,7 +725,10 @@ impl<C: Compiler> Step<'_, C> {
 
     /// A callback failure: answer the query, then end the open transaction and reject the
     /// commit waiting on the validator (`transaction-owner.ts` `callbackQuery`).
-    fn fail_validation(&mut self, reply: Box<RawValue>) -> Result<()> {
+    ///
+    /// `reason` is `limit` for the callback limits of the check and `callback` for every other
+    /// callback failure.
+    fn fail_validation(&mut self, reply: Box<RawValue>, reason: CheckReason) -> Result<()> {
         self.respond_callback(reply);
         let callback = self.volatile_mut().callback.take();
         if let Some(callback) = callback {
@@ -720,7 +750,7 @@ impl<C: Compiler> Step<'_, C> {
         self.close(
             WorkLane::Client,
             Phase::Failed,
-            Some(error_reply(Code::CheckRejected)),
+            Some(error_reply(Code::CheckRejected(reason))),
         )
     }
 
@@ -757,7 +787,8 @@ impl<C: Compiler> Step<'_, C> {
                     || now >= capability.expires_at_ms;
                 if expired || record.snapshot != self.compiler.snapshot() {
                     self.release(handle);
-                    return self.fail_validation(error_reply(Code::Unavailable));
+                    return self
+                        .fail_validation(error_reply(Code::Unavailable), CheckReason::Callback);
                 }
                 let statements = self
                     .compiler
@@ -870,11 +901,11 @@ impl<C: Compiler> Step<'_, C> {
         };
         let [result] = results else {
             self.release(handle);
-            return self.fail_validation(error_reply(Code::Internal));
+            return self.fail_validation(error_reply(Code::Internal), CheckReason::Callback);
         };
         if let Some(code) = codec_failure(result) {
             self.release(handle);
-            return self.fail_validation(error_reply(code));
+            return self.fail_validation(error_reply(code), CheckReason::Callback);
         }
         let raw = RawResult {
             columns: result.columns.clone(),
@@ -888,7 +919,7 @@ impl<C: Compiler> Step<'_, C> {
             Ok(validated) => validated,
             Err(error) => {
                 self.log_core_error(&error);
-                return self.fail_validation(core_error_reply(&error));
+                return self.fail_validation(core_error_reply(&error), CheckReason::Callback);
             }
         };
         let (request, sequence, versions) =
@@ -904,7 +935,7 @@ impl<C: Compiler> Step<'_, C> {
         if rows > self.limits.max_callback_rows
             || result_bytes > self.limits.max_transaction_result_bytes
         {
-            return self.fail_validation(error_reply(Code::TransactionLimit));
+            return self.fail_validation(error_reply(Code::TransactionLimit), CheckReason::Limit);
         }
         if let Some(live) = self
             .volatile
@@ -927,7 +958,7 @@ impl<C: Compiler> Step<'_, C> {
     /// revocation it only answers the query.
     fn callback_failed(&mut self, live: bool, reply: Box<RawValue>) -> Result<()> {
         if live {
-            return self.fail_validation(reply);
+            return self.fail_validation(reply, CheckReason::Callback);
         }
         self.respond_callback(error_reply(Code::Unavailable));
         self.after_callback()
@@ -943,10 +974,10 @@ impl<C: Compiler> Step<'_, C> {
         if let Some(Work {
             lane,
             request_id,
-            task: Task::Verdict { checks, allowed },
+            task: Task::Verdict { checks, verdict },
         }) = deferred
         {
-            return self.verdict(lane, request_id, checks, allowed);
+            return self.verdict(lane, request_id, checks, verdict);
         }
         if deferred.is_some() {
             return Err(Fault("deferred_task"));
@@ -989,7 +1020,7 @@ fn callback_digest(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{allowed_decision, base64url, token_syntax};
+    use super::{CheckReason, Verdict, base64url, decision_verdict, token_syntax};
     use serde_json::json;
 
     #[test]
@@ -1009,12 +1040,27 @@ mod tests {
 
     #[test]
     fn only_an_exact_allowing_decision_allows() {
-        assert!(allowed_decision(&json!({"version": "1", "allowed": true})));
-        assert!(allowed_decision(
-            &json!({"version": "1", "allowed": true, "error": {"code": "x"}})
-        ));
+        let allowed = [
+            json!({"version": "1", "allowed": true}),
+            json!({"version": "1", "allowed": true, "error": {"code": "x"}}),
+        ];
+        for decision in allowed {
+            assert_eq!(decision_verdict(&decision), Verdict::Allowed, "{decision}");
+        }
+        // A well-formed `allowed: false` is the validator's own deny, `error` or not.
         for denied in [
             json!({"version": "1", "allowed": false}),
+            json!({"version": "1", "allowed": false, "error": {"code": "X"}}),
+        ] {
+            assert_eq!(
+                decision_verdict(&denied),
+                Verdict::Rejected(CheckReason::Denied),
+                "{denied}"
+            );
+        }
+        // Anything that is not exactly a decision is no answer. The set of allowed inputs is
+        // the one that allowed before reasons existed.
+        for malformed in [
             json!({"version": 1, "allowed": true}),
             json!({"version": "2", "allowed": true}),
             json!({"version": "1", "allowed": "true"}),
@@ -1025,8 +1071,16 @@ mod tests {
             json!({"version": "1", "allowed": true, "error": {"code": "x", "more": 1}}),
             json!([{"version": "1", "allowed": true}]),
             json!(null),
+            json!({"version": "1"}),
+            json!({"version": "1", "allowed": false, "error": {"code": "x", "more": 1}}),
+            json!({"version": "1", "allowed": false, "reason": "limit"}),
+            json!({"version": "1", "allowed": null}),
         ] {
-            assert!(!allowed_decision(&denied), "{denied}");
+            assert_eq!(
+                decision_verdict(&malformed),
+                Verdict::Rejected(CheckReason::Unavailable),
+                "{malformed}"
+            );
         }
     }
 }

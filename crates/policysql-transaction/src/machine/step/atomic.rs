@@ -41,8 +41,8 @@ use super::super::compiler::{
     Compiler, Operation, RawResult, ResultBudget, StatementLimits, Validated,
 };
 use super::super::io::{
-    self, Class, Code, DriverCall, DriverResult, Effect, ErrorDetail, Event, ObserveContext,
-    ObservedStatement, core_error_reply, error_reply, value_reply,
+    self, CheckReason, Class, Code, DriverCall, DriverResult, Effect, ErrorDetail, Event,
+    ObserveContext, ObservedStatement, core_error_reply, error_reply, value_reply,
 };
 use super::super::state::{
     AtomicIds, AtomicRun, AtomicStatement, AtomicUsage, Binding, CommitChecks, Connection,
@@ -1467,7 +1467,11 @@ impl<C: Compiler> Step<'_, C> {
                 "check": missing.id,
             });
             self.log(&unconfigured);
-            return self.close(lane, Phase::Failed, Some(error_reply(Code::CheckRejected)));
+            return self.close(
+                lane,
+                Phase::Failed,
+                Some(error_reply(Code::CheckRejected(CheckReason::Unconfigured))),
+            );
         }
         let auth = self.atomic_run()?.auth.clone();
         self.issue(

@@ -820,9 +820,18 @@ fn an_envelope_that_could_trigger_a_check_is_forwarded_and_its_reply_relayed() {
     engine.forward_reply = json!({"ok": true, "value": "x"});
     let malformed = engine.run(&execute_request(&audit("a2"), None));
     assert_eq!(code(&malformed), Some("POLICYSQL_INTERNAL"));
-    engine.forward_reply = json!({"ok": false, "error": {"code": "POLICYSQL_COMMIT_CHECK_REJECTED", "message": "m", "path": null}});
+    engine.forward_reply = json!({"ok": false, "error": {"code": "POLICYSQL_COMMIT_CHECK_REJECTED", "message": "m", "path": null, "detail": {"reason": "denied"}}});
     let rejected = engine.run(&execute_request(&audit("a3"), None));
     assert_eq!(code(&rejected), Some("POLICYSQL_COMMIT_CHECK_REJECTED"));
+    // The rejection requires its `detail.reason` (#145 pull request E): one without is forged.
+    engine.forward_reply = json!({"ok": false, "error": {"code": "POLICYSQL_COMMIT_CHECK_REJECTED", "message": "m", "path": null}});
+    let forged = engine.run(&execute_request(&audit("a4"), None));
+    assert_eq!(code(&forged), Some("POLICYSQL_INTERNAL"));
+    let logged = engine
+        .transcript
+        .iter()
+        .any(|line| line.output.contains("owner_reply_rejected"));
+    assert!(logged, "the rejection is logged");
 }
 
 /// ADR 0030: a forwarded owner reply carries `detail` only as the table of its code allows.
@@ -1155,15 +1164,15 @@ fn the_owner_rejects_a_denied_or_unconfigured_check_before_commit() {
     }
     engine.decide(true, &json!({"version": "1", "allowed": false}));
     engine.settle();
-    assert_eq!(
-        code(engine.last_reply().unwrap_or(&Value::Null)),
-        Some("POLICYSQL_COMMIT_CHECK_REJECTED")
-    );
+    let denied = engine.last_reply().cloned().unwrap_or(Value::Null);
+    assert_eq!(code(&denied), Some("POLICYSQL_COMMIT_CHECK_REJECTED"));
+    assert_eq!(denied["error"]["detail"], json!({"reason": "denied"}));
     assert_eq!(engine.observed.commits_emitted, 0);
     assert_eq!(phase_of(engine.store.as_deref()).as_deref(), Some("failed"));
     let mut engine = Engine::atomic(true);
     let reply = engine.run(&atomic_input(&audit("a1"), None));
     assert_eq!(code(&reply), Some("POLICYSQL_COMMIT_CHECK_REJECTED"));
+    assert_eq!(reply["error"]["detail"], json!({"reason": "unconfigured"}));
     assert_eq!(engine.observed.validator_calls, Vec::<Value>::new());
     assert_eq!(engine.observed.commits_emitted, 0);
 }

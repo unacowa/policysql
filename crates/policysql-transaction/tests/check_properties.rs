@@ -9,6 +9,7 @@
 mod common;
 
 use common::{Engine, LIMITS, begin, code, command, phase_of, rejects_commit, sequence_text};
+use policysql_transaction::machine::io::COMMIT_CHECK_REASONS;
 use policysql_transaction::machine::step_json;
 use proptest::prelude::*;
 use serde_json::{Value, json};
@@ -294,6 +295,17 @@ fn check(engine: &Engine, watch: &mut Watch) -> Result<(), TestCaseError> {
     }
     watch.callback_replies_seen = engine.observed.callback_replies.len();
     for (kind, reply) in &engine.observed.replies[watch.replies_seen..] {
+        // Every commit-check rejection carries one of the fixed reasons (#145 pull request E),
+        // and no COMMIT was emitted for it.
+        if code(reply) == Some("POLICYSQL_COMMIT_CHECK_REJECTED") {
+            let reason = reply["error"]["detail"]["reason"].as_str().unwrap_or("");
+            prop_assert!(
+                COMMIT_CHECK_REASONS.contains(&reason),
+                "a rejection without a reason: {}",
+                reply
+            );
+            prop_assert!(!watch.commit_emitted, "a check rejection after COMMIT");
+        }
         if kind == "commit:2" {
             if reply["value"]["status"] == "committed" {
                 prop_assert!(engine.observed.committed_fed, "committed before Committed");

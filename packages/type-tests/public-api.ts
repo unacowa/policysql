@@ -1,5 +1,5 @@
 import { Kysely, CamelCasePlugin, type InsertResult, type UpdateResult, type DeleteResult } from 'kysely'
-import { PolicySqlClient, createHttpTransport, type PolicySqlTransport, type HttpTransportOptions, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlConstraintKind, type PolicySqlUnsupportedFeature, type PolicySqlParameterReason, type PolicySqlComplexity, type PolicySqlExpectation, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
+import { PolicySqlClient, createHttpTransport, type PolicySqlTransport, type HttpTransportOptions, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlConstraintKind, type PolicySqlUnsupportedFeature, type PolicySqlParameterReason, type PolicySqlCommitCheckReason, type PolicySqlComplexity, type PolicySqlExpectation, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
 import { PolicySqlDialect, policyOptions } from '@unacowa/policysql/kysely'
 
 const minimal: PolicySqlClientOptions = { transport: createHttpTransport({ endpoint: 'https://gateway.test' }) }
@@ -77,10 +77,15 @@ void feature
 // @ts-expect-error a feature is one of the fixed values
 new PolicySqlError('Unsupported', 'POLICYSQL_UNSUPPORTED_SQL', 400, { detail: { feature: 'nope' } })
 const invalidParameter = new PolicySqlError('Invalid', 'POLICYSQL_INVALID_PARAMETER', 400, { detail: { reason: 'names' } })
-const reason: PolicySqlParameterReason | undefined = invalidParameter.detail?.reason
+const reason: PolicySqlParameterReason | PolicySqlCommitCheckReason | undefined = invalidParameter.detail?.reason
 void reason
 // @ts-expect-error a parameter reason is one of the fixed values
 new PolicySqlError('Invalid', 'POLICYSQL_INVALID_PARAMETER', 400, { detail: { reason: 'missing' } })
+const rejected = new PolicySqlError('Rejected', 'POLICYSQL_COMMIT_CHECK_REJECTED', 409, { detail: { reason: 'denied' } })
+const checkReason: PolicySqlParameterReason | PolicySqlCommitCheckReason | undefined = rejected.detail?.reason
+void checkReason
+// @ts-expect-error a commit check reason is one of the fixed values
+new PolicySqlError('Rejected', 'POLICYSQL_COMMIT_CHECK_REJECTED', 409, { detail: { reason: 'missing' } })
 const complex = new PolicySqlError('Complex', 'POLICYSQL_SQL_TOO_COMPLEX', 400, { detail: { complexity: 'height' } })
 const complexity: PolicySqlComplexity | undefined = complex.detail?.complexity
 void complexity

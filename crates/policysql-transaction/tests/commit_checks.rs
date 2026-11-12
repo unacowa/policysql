@@ -44,6 +44,11 @@ fn last_reply(engine: &Engine) -> Value {
     engine.last_reply().cloned().unwrap_or_default()
 }
 
+/// The `detail.reason` of a commit-check rejection (#145 pull request E).
+fn reason(reply: &Value) -> Option<&str> {
+    reply["error"]["detail"]["reason"].as_str()
+}
+
 fn logs(engine: &Engine, event: &str) -> usize {
     engine
         .transcript
@@ -119,28 +124,51 @@ fn an_allowed_check_with_callbacks_commits_with_passed() {
 
 #[test]
 fn a_deny_a_malformed_decision_or_a_failed_call_rejects_before_commit() {
-    let outcomes: [(&str, Option<(bool, Value)>); 7] = [
+    // Each way a validator can answer, with the reason the rejection carries (#145 pull request E):
+    // only a well-formed `allowed: false` is `denied`; no usable answer is `unavailable`; an
+    // endpoint the hook adapter refused at the exit (class `rejected`) is `unconfigured`.
+    type Answer = Option<(bool, Value)>;
+    let outcomes: [(&str, Answer, &str); 10] = [
         (
             "deny",
             Some((true, json!({"version": "1", "allowed": false}))),
+            "denied",
         ),
         (
             "non-2xx",
             Some((false, json!({"version": "1", "allowed": true}))),
+            "unavailable",
+        ),
+        (
+            "non-2xx deny",
+            Some((false, json!({"version": "1", "allowed": false}))),
+            "unavailable",
         ),
         (
             "version",
             Some((true, json!({"version": "2", "allowed": true}))),
+            "unavailable",
         ),
         (
             "extra key",
             Some((true, json!({"version": "1", "allowed": true, "x": 1}))),
+            "unavailable",
         ),
-        ("not JSON", Some((true, Value::Null))),
-        ("timeout", None),
-        ("transport", None),
+        (
+            "no allowed",
+            Some((true, json!({"version": "1"}))),
+            "unavailable",
+        ),
+        (
+            "allowed is a string",
+            Some((true, json!({"version": "1", "allowed": "true"}))),
+            "unavailable",
+        ),
+        ("not JSON", Some((true, Value::Null)), "unavailable"),
+        ("timeout", None, "unavailable"),
+        ("transport", None, "unavailable"),
     ];
-    for (label, outcome) in outcomes {
+    for (label, outcome, expected) in outcomes {
         let mut engine = checked();
         validating(&mut engine);
         match outcome {
@@ -165,6 +193,7 @@ fn a_deny_a_malformed_decision_or_a_failed_call_rejects_before_commit() {
             Some("POLICYSQL_COMMIT_CHECK_REJECTED"),
             "{label}: {reply}"
         );
+        assert_eq!(reason(&reply), Some(expected), "{label}: {reply}");
         assert_eq!(engine.observed.commits_emitted, 0, "{label}");
         assert_eq!(
             phase_of(engine.store.as_deref()).as_deref(),
@@ -191,9 +220,24 @@ fn an_unconfigured_check_rejects_before_any_capability() {
     engine.configured.clear();
     let reply = engine.run(&command("commit", &sequence_text(2)));
     assert_eq!(code(&reply), Some("POLICYSQL_COMMIT_CHECK_REJECTED"));
+    assert_eq!(reason(&reply), Some("unconfigured"), "{reply}");
     assert_eq!(engine.observed.validator_calls.len(), 0);
     assert_eq!(logs(&engine, "commit_check_unconfigured"), 1);
     assert_eq!(phase_of(engine.store.as_deref()).as_deref(), Some("failed"));
+}
+
+/// The hook adapter refused the endpoint at the exit (`validatorFailed` of class `rejected`): the
+/// check's endpoint is not usable, which the rejection names as `unconfigured` (#145 pull request E).
+#[test]
+fn a_validator_the_hook_adapter_refused_is_unconfigured() {
+    let mut engine = checked();
+    validating(&mut engine);
+    engine.resolve(false, "rejected");
+    engine.settle();
+    let reply = last_reply(&engine);
+    assert_eq!(code(&reply), Some("POLICYSQL_COMMIT_CHECK_REJECTED"));
+    assert_eq!(reason(&reply), Some("unconfigured"), "{reply}");
+    assert_eq!(engine.observed.commits_emitted, 0);
 }
 
 #[test]
@@ -223,6 +267,7 @@ fn expiry_while_validating_answers_the_commit_now_and_ignores_the_late_verdict()
         code(&last_reply(&engine)),
         Some("POLICYSQL_COMMIT_CHECK_REJECTED")
     );
+    assert_eq!(reason(&last_reply(&engine)), Some("unavailable"));
     assert_eq!(
         engine
             .outstanding
@@ -332,6 +377,7 @@ fn a_tampered_capability_ends_the_transaction() {
             Some("POLICYSQL_COMMIT_CHECK_REJECTED"),
             "{label}"
         );
+        assert_eq!(reason(&last_reply(&engine)), Some("callback"), "{label}");
         assert_eq!(
             phase_of(engine.store.as_deref()).as_deref(),
             Some("failed"),
@@ -380,6 +426,7 @@ fn callback_limits_end_the_transaction() {
         code(&last_reply(&engine)),
         Some("POLICYSQL_COMMIT_CHECK_REJECTED")
     );
+    assert_eq!(reason(&last_reply(&engine)), Some("limit"));
     assert_eq!(engine.observed.commits_emitted, 0);
 
     // Sequences: no more callback queries than statements per transaction.
@@ -396,6 +443,9 @@ fn callback_limits_end_the_transaction() {
         code(&last_reply(&engine)),
         Some("POLICYSQL_COMMIT_CHECK_REJECTED")
     );
+    // The number of callback queries is not one of the check's row and byte limits: `callback`
+    // (the difference from the validator's own `TRANSACTION_CONFLICT` is #158).
+    assert_eq!(reason(&last_reply(&engine)), Some("callback"));
 
     // Bytes: the callback replies count against the transaction result-byte limit.
     let mut engine = checked();
@@ -404,6 +454,8 @@ fn callback_limits_end_the_transaction() {
     let token = engine.token();
     let over = engine.run_callback(&token, &select(1));
     assert_eq!(code(&over), Some("POLICYSQL_TRANSACTION_LIMIT_EXCEEDED"));
+    engine.settle();
+    assert_eq!(reason(&last_reply(&engine)), Some("limit"));
 }
 
 #[test]
@@ -443,6 +495,7 @@ fn a_callback_that_is_not_a_single_read_or_out_of_sequence_ends_the_transaction(
             Some("POLICYSQL_COMMIT_CHECK_REJECTED"),
             "{label}"
         );
+        assert_eq!(reason(&last_reply(&engine)), Some("callback"), "{label}");
         assert_eq!(engine.compiler.live_handles(), 0, "{label}");
     }
 }
@@ -551,6 +604,61 @@ fn a_constraint_class_in_a_callback_query_is_internal() {
             .contains("\"event\":\"database_error_unclassified\"")),
         "the 500 is traceable by its database code"
     );
+}
+
+/// #145 pull request E: a callback query the database refused (class `refused`) answers the
+/// validator 500 `POLICYSQL_DATABASE_ERROR` with no detail, logs its code once, and the waiting
+/// commit is rejected with the reason `callback`.
+#[test]
+fn a_refused_class_in_a_callback_query_is_a_database_error_and_the_reason_is_callback() {
+    let mut engine = checked();
+    validating(&mut engine);
+    let token = engine.token();
+    engine.callback(&token, SELECT);
+    engine.resolve_callback(true, "unknown");
+    let effect = engine.callback_outstanding.take().unwrap_or_default();
+    assert_eq!(effect["type"], "execute");
+    engine.feed(&json!({
+        "type": "executeFailed", "id": effect["id"], "class": "refused",
+        "databaseCode": "SQLITE_UNKNOWN",
+    }));
+    let callback = engine
+        .observed
+        .callback_replies
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        code(&callback),
+        Some("POLICYSQL_DATABASE_ERROR"),
+        "{callback}"
+    );
+    assert!(callback["error"].get("detail").is_none(), "{callback}");
+    assert_eq!(logs(&engine, "database_error_unclassified"), 1);
+    engine.settle();
+    let reply = last_reply(&engine);
+    assert_eq!(code(&reply), Some("POLICYSQL_COMMIT_CHECK_REJECTED"));
+    assert_eq!(reason(&reply), Some("callback"), "{reply}");
+    assert_eq!(engine.observed.commits_emitted, 0);
+}
+
+/// A deny that arrives while a callback query holds the connection waits for it, and keeps its
+/// reason: `denied` (#145 pull request E).
+#[test]
+fn a_deny_waiting_for_the_connection_keeps_its_reason() {
+    let mut engine = checked();
+    validating(&mut engine);
+    let token = engine.token();
+    engine.callback(&token, SELECT);
+    engine.resolve_callback(true, "unknown");
+    engine.decide(true, &json!({"version": "1", "allowed": false}));
+    assert!(engine.outstanding.is_none());
+    engine.resolve_callback(true, "unknown");
+    engine.settle();
+    let reply = last_reply(&engine);
+    assert_eq!(code(&reply), Some("POLICYSQL_COMMIT_CHECK_REJECTED"));
+    assert_eq!(reason(&reply), Some("denied"), "{reply}");
+    assert_eq!(engine.observed.commits_emitted, 0);
 }
 
 #[test]
@@ -669,6 +777,7 @@ fn expiry_before_the_first_validator_rejects_the_commit() {
         code(&last_reply(&engine)),
         Some("POLICYSQL_COMMIT_CHECK_REJECTED")
     );
+    assert_eq!(reason(&last_reply(&engine)), Some("unavailable"));
     assert_eq!(engine.observed.validator_calls.len(), 0);
     assert_eq!(
         phase_of(engine.store.as_deref()).as_deref(),

@@ -7,6 +7,7 @@
 //! ABI as JSON text that the engine keeps verbatim, so a recorded response keeps its exact bytes.
 
 use super::compiler::{Operation, StatementLimits};
+use super::io::CheckReason;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -585,6 +586,14 @@ pub enum WorkLane {
     Background,
 }
 
+/// What a validator's answer decided (#145 pull request E): allowed, or rejected for a reason.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Verdict {
+    Allowed,
+    Rejected(CheckReason),
+}
+
 /// The operation in progress and the step it waits for. Each variant awaits exactly the
 /// effect named in its documentation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -669,7 +678,10 @@ pub enum Task {
     /// A verdict that waits for the connection, which a callback query holds; awaits nothing
     /// (kept as `Volatile::deferred`, resumed when the callback query's `Execute` returns).
     #[serde(rename_all = "camelCase")]
-    Verdict { checks: CommitChecks, allowed: bool },
+    Verdict {
+        checks: CommitChecks,
+        verdict: Verdict,
+    },
     /// `CheckBinding` before a rollback command.
     RollbackBinding { sequence: u64, digest: String },
     /// `Rollback` of a rollback command.

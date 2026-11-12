@@ -31,7 +31,7 @@ import { EngineError } from "../src/errors.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
 import { validateConfig } from "../src/engine-config.ts";
 import { createMemoryTransactionOwners } from "./helpers/memory-owner.mjs";
-import { asRecorded, referenceTranscript } from "./helpers/reference-transcript.mjs";
+import { asRecorded, checkedReason, observedCheckReasons, referenceTranscript } from "./helpers/reference-transcript.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 
@@ -386,9 +386,11 @@ const normalizedCalls = (side, calls, ownerPath) => calls.map((call) => {
 const randomOwner = (value) => (typeof value?.transactionId === "string" && /^atomic_[0-9a-f]{32}$/u.test(value.transactionId)
   ? { ...value, transactionId: "atomic_<owner>" } : value);
 
-const normalizedResult = (result) => result.ok
-  ? { ok: true, value: randomOwner(result.value), requestId: result.requestId }
-  : { ok: false, code: result.error.code, message: result.error.message, path: result.error.path, requestId: result.requestId };
+const normalizedResult = (result) => {
+  if (result.ok) return { ok: true, value: randomOwner(result.value), requestId: result.requestId };
+  checkedReason(result.error);
+  return { ok: false, code: result.error.code, message: result.error.message, path: result.error.path, requestId: result.requestId };
+};
 
 /** One `execute` on one side from `start`; returns what it saw and its clock at the end. */
 const runSide = async (env, side, op, requestId, start) => {
@@ -828,4 +830,10 @@ test("cost_estimate_json evaluates as cost.ts evaluates", async (t) => {
     })));
     assert.deepEqual(actual, expected, `case ${index}`);
   }
+});
+
+// The step side's commit-check rejections all carried one of the fixed reasons (`checkedReason`),
+// which the comparison drops. The set pinned here is what the scenarios above reach.
+test("the commit-check reasons the step side gave are the ones the scenarios reach (#145 pull request E)", () => {
+  assert.deepEqual([...observedCheckReasons].sort(), ["denied", "unavailable", "unconfigured"]);
 });
