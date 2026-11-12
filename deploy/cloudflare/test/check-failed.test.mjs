@@ -79,6 +79,19 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         assert.equal(first.body.error.path, "/statements/0");
         assert.deepEqual(ids(h), before.ids);
 
+        // A write after the failing statement: it neither runs to a commit nor changes the answer.
+        const leading = await h.request("a", EXECUTE, { statements: [insert("bad_3", "another_tenant"), insert("ok_after", "tenant_a")] }, key);
+        assert.equal(leading.status, 403, JSON.stringify(leading.body));
+        assert.equal(leading.body.error.code, "POLICYSQL_CHECK_FAILED");
+        assert.equal(leading.body.error.path, "/statements/0");
+        await h.flush();
+        assert.deepEqual(ids(h), before.ids, "the statement after the failing one committed nothing");
+        assert.equal(commits(h), before.commits);
+        assert.equal(idempotencyRows(h), before.idempotency);
+        assert.equal(h.hooksSeen.length, before.hooks);
+        const resent = await h.request("a", EXECUTE, { statements: [insert("bad_3", "another_tenant"), insert("ok_after", "tenant_a")] }, key);
+        assert.equal(resent.status, 403, "the same key and body is refused the same way, not a conflict");
+
         // Nothing leaks: not the predicate, a session key, the reserved prefix, a table name, or
         // the database's words, in the answer or in anything logged for the request.
         const everything = JSON.stringify(refused.body) + logs.join("\n");
@@ -188,7 +201,9 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
 
 // The answer, apart from its request ID, is the same on both owner adapters, in both
 // placements, with and without a key.
-test("a failed policy check is answered alike on every adapter, placement, and key", () => {
+test("a failed policy check is answered alike on every adapter, placement, and key", (t) => {
+  // The answers are filled by the tests above; a run filtered to this one has none to compare.
+  if (answers.size === 0) { t.skip("run together with the tests that fill the answers"); return; }
   assert.equal(answers.size, OWNER_ADAPTERS.length * PLACEMENTS.length * 2);
   const [first, ...rest] = [...answers.values()];
   for (const other of rest) assert.deepEqual(other, first);

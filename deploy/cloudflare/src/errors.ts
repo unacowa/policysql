@@ -57,11 +57,12 @@ export const internalError = () => new EngineError("POLICYSQL_INTERNAL", "The re
  * `detail.cause` (ADR 0007 #85 and #100, ADR 0030). The message is the same fixed text as core's
  * (`Code::KeyedOutcomeUnknown`).
  */
-export const outcomeUnknownError = (cause: EngineError) => new EngineError(
+export const outcomeUnknownError = (causeCode: string) => new EngineError(
   "POLICYSQL_OUTCOME_UNKNOWN",
   "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.",
   null,
-  { cause: Object.freeze({ code: cause.code, path: cause.path }) },
+  // Both callers refuse before any statement is read, so there is no path to give.
+  { cause: Object.freeze({ code: causeCode, path: null }) },
 );
 
 // A well-formed BLOB over the per-value limit is a permanent limit condition, not a

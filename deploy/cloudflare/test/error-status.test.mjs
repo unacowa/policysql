@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { ERROR_STATUS, LOG_ONLY_CODES, statusFor } from "../src/http/status.ts";
 import { createErrorResponse } from "../src/http/responses.ts";
 import { JwtAuthenticationError } from "../src/adapters/jwt.ts";
-import { OUTCOME_CAUSES } from "../src/error-detail.ts";
+import { OUTCOME_CAUSES, checkedErrorDetail } from "../src/error-detail.ts";
 import { PolicySqlClient, PolicySqlError, PolicySqlOutcomeUnknownError } from "../../../packages/client/index.js";
 
 // The status table is single-sourced (ADR 0019, ADR 0023): website/api/errors.md is the
@@ -241,6 +241,19 @@ test("the Worker's cause list is core's", () => {
   assert.equal(new Set(core).size, core.length, "no duplicates");
   assert.deepEqual([...core].sort(), [...OUTCOME_CAUSES].sort());
   for (const code of ["FORBIDDEN_ACCESS", "REQUEST_TOO_LARGE", "JSON_TOO_DEEP"]) assert.ok(OUTCOME_CAUSES.includes(code), code);
+  // The OpenAPI schema lists the same codes and the same path form as the implementation.
+  const openapi = read("spec/openapi.yaml");
+  const schema = openapi.match(/cause:\n\s+type: object[\s\S]*?code:\n\s+type: string\n\s+enum: \[([^\]]*)\]\n\s+path:\n[^\n]*\n\s+pattern: '([^']*)'/u);
+  assert.ok(schema, "the OpenAPI error detail has the cause schema");
+  const documented = schema[1].split(",").map((code) => code.trim().replace(/^POLICYSQL_/u, ""));
+  assert.deepEqual([...documented].sort(), [...OUTCOME_CAUSES].sort(), "OpenAPI enum is the implementation's list");
+  // The path pattern accepts exactly what the implementation accepts.
+  const pattern = new RegExp(schema[2], "u");
+  for (const path of ["/statements/0", "/statements/12/sql", "/statements/1234567890", "/statements/01", "/statements/-1", "/statements/",
+    "/statements/0/params", "/statements/0/sql/x", "/statements/12345678901", "/x", "", "/statements/0\n"]) {
+    const accepted = checkedErrorDetail("POLICYSQL_OUTCOME_UNKNOWN", { cause: { code: "POLICYSQL_INVALID_SQL", path } }) !== null;
+    assert.equal(pattern.test(path), accepted, `path ${JSON.stringify(path)}`);
+  }
   // No code that depends on the database's state, and no outcome code, is a cause.
   for (const code of ["CONSTRAINT_VIOLATION", "CHECK_FAILED", "SCHEMA_MISMATCH", "DATABASE_TIMEOUT", "TIMEOUT",
     "OUTCOME_UNKNOWN", "COMMIT_OUTCOME_UNKNOWN", "IDEMPOTENCY_CONFLICT", "TRANSACTION_CONFLICT"]) {

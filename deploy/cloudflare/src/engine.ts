@@ -365,7 +365,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         // the denial: it has no replay contract. A malformed role or session is not a denial
         // (it stays a client error or a wrapper fault), and could not have committed.
         if (fields.idempotencyKey !== undefined && error instanceof AccessDeniedError) {
-          throw outcomeUnknownError(error);
+          throw outcomeUnknownError(error.code);
         }
         throw error;
       }
@@ -392,7 +392,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         const rejection = validIdempotencyKey(fields.idempotencyKey) ? deploymentDependentBodyCode(error) : null;
         if (rejection !== null) {
           console.log(JSON.stringify({ event: "keyed_body_limit_unknown", requestId, rejection }));
-          throw outcomeUnknownError(error as EngineError);
+          throw outcomeUnknownError(rejection);
         }
         throw error;
       }

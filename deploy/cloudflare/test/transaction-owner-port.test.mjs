@@ -786,7 +786,7 @@ test("checkedOwnerReply: detail is kept for the code that defines it and rejecte
   const reply = checkedOwnerReply(violation({ constraint: "unique" }));
   assert.equal(Object.isFrozen(reply.error.detail), true);
   // The code's detail is required, and exactly its shape.
-  for (const detail of [undefined, {}, { constraint: "unique", column: "x" }, { constraint: "primary_key" }, { constraint: "UNIQUE" }, { constraint: null },
+  for (const detail of [undefined, {}, { constraint: "unique", column: "x" }, { constraint: "unique", cause: null }, { cause: null }, { constraint: "primary_key" }, { constraint: "UNIQUE" }, { constraint: null },
     { constraint: ["unique"] }, { column: "x" }, [], [{ constraint: "unique" }], "unique", null, 1, true]) {
     assert.equal(checkedOwnerReply(violation(detail)), null, JSON.stringify(detail));
   }

@@ -25,7 +25,7 @@ description: PolicySQLのerror responseと安全な処理方法です。
 | `code` | programから判定する安定したerror code |
 | `message` | codeごとの固定文。DBやparserの文言を含まない |
 | `path` | request body内の問題箇所。特定できない場合は`null` |
-| `detail` | 任意。codeごとに決まった機械可読の値（固定の列挙値と数値だけ。DBやparserの文言・識別子は含まない）。現在は`POLICYSQL_CONSTRAINT_VIOLATION`の`constraint`と、`POLICYSQL_OUTCOME_UNKNOWN`の`cause`（`code`と`path`）だけ。分岐の主キーは`code` |
+| `detail` | 任意。codeごとに決まった機械可読の値（固定の列挙値、数値、requestの文の位置を指す固定形のpath（`/statements/<n>`か`/statements/<n>/sql`）だけ。DBやparserの文言・識別子は含まない）。現在は`POLICYSQL_CONSTRAINT_VIOLATION`の`constraint`と、`POLICYSQL_OUTCOME_UNKNOWN`の`cause`（`code`と`path`）だけ。分岐の主キーは`code` |
 | `requestId` | server logと照合する識別子 |
 
 clientは`message`ではなく`code`を使って分岐してください。
@@ -73,7 +73,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_SCHEMA_MISMATCH` | 422 | database値がcompiled logical contractと一致しない |
 | `POLICYSQL_TRANSACTION_LIMIT_EXCEEDED` | 413 | 対話型transactionの恒久的な上限（statement数、累積result bytes）を超えた。commit checkのcallbackの行数・bytes・query数の上限でも発生し、その場合はvalidatorがこのcodeを受け取り、atomic executeや対話型commitは409 `POLICYSQL_COMMIT_CHECK_REJECTED`になる。再送しても成功しない。request rateの制限ではない |
 | `POLICYSQL_INTERNAL` | 500 | 公開できない内部エラー。ラッパーが渡したtrusted sessionや文脈の形が不正な場合、またはatomic executeで2文目以降にwriteを含むenvelopeのdatabaseの生の応答、streaming transportが応答中にdecodeした結果のBLOB値が上限を超えた場合（結果不明）もこのcode。`Idempotency-Key`付きのAtomic Executeがcompile（`expected`の照合を含む）・session認可・入力上限のbody checkで通らない場合は、このcodeではなく500 `POLICYSQL_OUTCOME_UNKNOWN`になる |
-| `POLICYSQL_OUTCOME_UNKNOWN` | 500 | `Idempotency-Key`付きのAtomic Executeが、DBを読む前のcompile、session認可、body checkの上限で通らなかった。何も実行せず、keyも消費しないが、同じkeyの以前のrequestがdeploy前のpolicy・schema・上限・sessionでcommit済みだったかもしれないため、結果不明として返す（保存済み結果は返さない）。`detail.cause`はkeyなしなら返っていたcodeとpath（`{ "code": "POLICYSQL_MISSING_POLICY", "path": "/statements/0" }`の形。codeは固定の列挙で、DBの状態に依存するcodeは含まない）。top-levelの`path`は常に`null`。rollbackとみなさず、同じkey・同じbodyで再送する。clientは結果不明（`PolicySqlOutcomeUnknownError`）として扱い、`error.cause.detail.cause`で原因を読める |
+| `POLICYSQL_OUTCOME_UNKNOWN` | 500 | `Idempotency-Key`付きのAtomic Executeが、DBを読む前のcompile、session認可、body checkの上限で通らなかった。何も実行せず、keyも消費しないが、同じkeyの以前のrequestがdeploy前のpolicy・schema・上限・sessionでcommit済みだったかもしれないため、結果不明として返す（保存済み結果は返さない）。公式clientは、このcodeを受け取ると同じ`POLICYSQL_OUTCOME_UNKNOWN`のcodeを持つ`PolicySqlOutcomeUnknownError`として扱います（意図して同じ意味に揃えています。`error.cause`がこのserverのerrorで、`status`が500、clientが通信断などで自分で作った場合は`status`がありません）。`detail.cause`はkeyなしなら返っていたcodeとpath（`{ "code": "POLICYSQL_MISSING_POLICY", "path": "/statements/0" }`の形。codeは固定の列挙で、DBの状態に依存するcodeは含まない）。top-levelの`path`は常に`null`。rollbackとみなさず、同じkey・同じbodyで再送する。clientは結果不明（`PolicySqlOutcomeUnknownError`）として扱い、`error.cause.detail.cause`で原因を読める |
 | `POLICYSQL_DATABASE_REQUIRED` | 500 | ラッパーが必須のDB引数を渡していない |
 | `POLICYSQL_DATABASE_UNAVAILABLE` | 503 | database adapterまたはtransaction ownerを利用できない |
 | `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` | 503 | commitを送った後に結果を確定できない（transaction ownerの喪失、ownerの記録の保存失敗、COMMIT中の通信エラー）。commit済みの可能性があるため、拒否ではなく結果不明として扱う |
