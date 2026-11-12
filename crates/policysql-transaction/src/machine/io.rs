@@ -720,9 +720,10 @@ impl ErrorDetail {
     #[must_use]
     pub fn allowed(code: &str, detail: Option<&serde_json::Value>) -> bool {
         match code {
-            // A struct also reads from a JSON array, so the shape is checked first.
+            // A struct also reads from a JSON array, and serde takes a missing or `null`
+            // `Option` field as `None`, so the shape (exactly one key) is checked first.
             "POLICYSQL_CONSTRAINT_VIOLATION" => detail
-                .filter(|value| value.is_object())
+                .filter(|value| value.as_object().is_some_and(|fields| fields.len() == 1))
                 .and_then(|value| Self::deserialize(value).ok())
                 .is_some_and(|detail| detail.constraint.is_some() && detail.cause.is_none()),
             // Read as a `Value`: serde takes a missing `Option` field as `None`.
@@ -953,6 +954,9 @@ mod tests {
             None,
             Some(json!({})),
             Some(json!({"constraint": "unique", "column": "x"})),
+            Some(json!({"constraint": "unique", "cause": null})),
+            Some(json!({"constraint": "unique", "constraint2": null})),
+            Some(json!({"cause": null})),
             Some(json!({"constraint": "primary_key"})),
             Some(json!({"constraint": null})),
             Some(json!({"constraint": 1})),

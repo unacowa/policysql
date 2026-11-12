@@ -753,6 +753,7 @@ fn a_forwarded_reply_keeps_a_valid_detail_and_rejects_a_forged_one() {
         violation(None),
         violation(Some(json!({}))),
         violation(Some(json!({"constraint": "unique", "column": "x"}))),
+        violation(Some(json!({"constraint": "unique", "cause": null}))),
         violation(Some(json!({"constraint": "primary_key"}))),
         violation(Some(json!({"constraint": null}))),
         violation(Some(json!(["unique"]))),

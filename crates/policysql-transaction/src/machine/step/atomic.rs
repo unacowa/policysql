@@ -26,7 +26,8 @@
 //! never read to answer a request, so a keyed retry always starts from the lookup.
 //!
 //! A keyed execute whose compile (or `expected` check) fails after a deployment answers
-//! `POLICYSQL_INTERNAL` (500, the unknown outcome), never the compile error (#85 path 1): the
+//! `POLICYSQL_OUTCOME_UNKNOWN` (500, with `detail.cause` the compile error's code and path),
+//! never the compile error as the answer (#85 path 1, #145): the
 //! compile happens before the idempotency lookup, and the request may be the retry of a write
 //! that committed under the earlier snapshot. The request is not looked up, since an absent
 //! row cannot prove that no commit happened (a concurrent earlier attempt, the #97 autocommit
