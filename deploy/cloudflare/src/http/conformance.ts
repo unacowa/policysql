@@ -224,10 +224,23 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
   {
     name: "an error's detail is served between path and requestId, as the engine returned it",
     async run(createMapping) {
-      // A flat detail (a constraint kind) and a nested one (the cause of an unknown outcome).
+      // A flat detail (a constraint kind, then one of each row of the table) and a nested one
+      // (the cause of an unknown outcome, with the cause's own detail).
       const cases = [
         { code: "POLICYSQL_CONSTRAINT_VIOLATION", status: 409, detail: { constraint: "unique" }, path: "/statements/0" },
-        { code: "POLICYSQL_OUTCOME_UNKNOWN", status: 500, detail: { cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0" } }, path: null },
+        { code: "POLICYSQL_UNSUPPORTED_SQL", status: 400, detail: { feature: "star" }, path: "/statements/0" },
+        { code: "POLICYSQL_INVALID_SQL", status: 400, detail: { span: { start: 7, end: 11 } }, path: "/statements/0" },
+        { code: "POLICYSQL_INVALID_PARAMETER", status: 400, detail: { reason: "names" }, path: "/statements/0" },
+        { code: "POLICYSQL_SQL_TOO_COMPLEX", status: 400, detail: { complexity: "height" }, path: "/statements/0" },
+        { code: "POLICYSQL_EXPECTATION_FAILED", status: 422, detail: { expectation: "affectedRows" }, path: "/statements/0" },
+        {
+          code: "POLICYSQL_OUTCOME_UNKNOWN", status: 500, path: null,
+          detail: { cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0", detail: null } },
+        },
+        {
+          code: "POLICYSQL_OUTCOME_UNKNOWN", status: 500, path: null,
+          detail: { cause: { code: "POLICYSQL_UNSUPPORTED_SQL", path: "/statements/0", detail: { feature: "star" } } },
+        },
       ];
       for (const { code, status, detail, path } of cases) {
         for (const route of ROUTE_CASES) {

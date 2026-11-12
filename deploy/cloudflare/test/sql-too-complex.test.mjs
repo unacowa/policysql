@@ -96,6 +96,11 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(response.body.error.code, "POLICYSQL_SQL_TOO_COMPLEX");
     assert.equal(response.body.error.message, FIXED_MESSAGE);
     assert.equal(response.body.error.path, `/statements/${index}`);
+    // #145 pull request C: the cause that reached the limit is named, and it is the log's cause.
+    const complexity = response.body.error.detail?.complexity;
+    assert.deepEqual(Object.keys(response.body.error.detail ?? {}), ["complexity"]);
+    assert.ok(["height", "recursion", "columns", "parameters", "like_pattern", "column_metadata", "database_expression_depth"].includes(complexity), String(complexity));
+    assert.ok(events(h, "sql_too_complex").some((record) => record.cause === complexity), "the logged cause is the detail");
     // The log lines of this request (a background cost observation of an earlier request can land
     // meanwhile, and it legitimately names the database it observed).
     const own = h.logs.filter((line) => line.includes(response.body.error.requestId));
@@ -162,7 +167,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(keyed.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN");
     assert.equal(keyed.body.error.message, "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.");
     assert.equal(keyed.body.error.path, null);
-    assert.deepEqual(keyed.body.error.detail, { cause: { code: refused.body.error.code, path: refused.body.error.path } },
+    assert.deepEqual(keyed.body.error.detail, { cause: { code: refused.body.error.code, path: refused.body.error.path, detail: refused.body.error.detail ?? null } },
       "the cause is the unkeyed answer");
     assert.equal(keyed.body.results, undefined, "no stored result");
     await h.flush();
@@ -194,7 +199,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(typeof record.requestId, "string");
     assert.equal(typeof record.schemaVersion, "string");
     assert.equal(typeof record.policyVersion, "string");
-    assert.equal(record.abiVersion, 20);
+    assert.equal(record.abiVersion, 21);
     assert.deepEqual(Object.keys(record).sort(), ["abiVersion", "cause", "event", "policyVersion", "requestId", "schemaVersion", "statementIndex"]);
   });
 

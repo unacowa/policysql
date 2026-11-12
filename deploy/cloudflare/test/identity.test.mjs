@@ -128,7 +128,7 @@ const numberArrayBody = (sequence, make) => {
 // Regression fixture (#55 re-review): ~1 MB number arrays in `params`. The owner compiles such
 // a statement before hashing it, so one that cannot compile is never hashed. The responses
 // are main's before ADR 0024 pull request 2, byte for byte, except the exponents (below).
-const INVALID_PARAMETER = { code: "POLICYSQL_INVALID_PARAMETER", message: "A statement parameter is missing or invalid.", path: "/statements/0" };
+const INVALID_PARAMETER = { code: "POLICYSQL_INVALID_PARAMETER", message: "A statement parameter is missing or invalid.", path: "/statements/0", detail: { reason: "value" } };
 // Before ADR 0024 pull request 7 the owner re-serialized the command, and these exponents
 // (`1e300` as `1e+300`) made the envelope exceed core's request limit, so compile rejected the
 // envelope (POLICYSQL_INVALID_REQUEST). The step machine compiles the verified text itself

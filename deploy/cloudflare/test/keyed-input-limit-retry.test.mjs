@@ -63,7 +63,7 @@ const unknown = (response, label, causeCode = "POLICYSQL_REQUEST_TOO_LARGE") => 
   assert.equal(response.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN", label);
   assert.equal(response.body.error.message, "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.", label);
   assert.equal(response.body.error.path, null, label);
-  assert.deepEqual(response.body.error.detail, { cause: { code: causeCode, path: null } }, label);
+  assert.deepEqual(response.body.error.detail, { cause: { code: causeCode, path: null, detail: null } }, label);
   assert.deepEqual(Object.keys(response.body), ["error"], `${label}: no stored result, trace, or internal field`);
   assert.equal(response.body.results, undefined, `${label}: the stored result is not returned`);
   assert.equal(response.body.debug, undefined, `${label}: no trace is returned`);
@@ -118,7 +118,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       assert.ok(events.some((event) => event.event === "keyed_body_limit_unknown"), "the body-limit event");
       const rejected = events.filter((event) => event.event === "request_rejected").at(-1);
       assert.equal(rejected.code, "POLICYSQL_OUTCOME_UNKNOWN");
-      assert.deepEqual(rejected.cause, { code: "POLICYSQL_REQUEST_TOO_LARGE", path: null });
+      assert.deepEqual(rejected.cause, { code: "POLICYSQL_REQUEST_TOO_LARGE", path: null, detail: null });
       unchanged(h, before, "lowered maxRequestBytes");
       assert.equal(rowCount(h, "lowered_bytes"), 1, "never executed twice");
 

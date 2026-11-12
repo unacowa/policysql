@@ -718,6 +718,59 @@ components:
               description: Input-side limit on the joins in one FROM of the client's SQL (default 8, at most 63). Over it is 413 POLICYSQL_LIMIT_EXCEEDED. See maxParameters.
         transactions: { type: object }
         idempotency: { type: object }
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      maxProperties: 1
+      description: >-
+        Machine-readable values fixed per code (ADR 0030). One key, by code: POLICYSQL_CONSTRAINT_VIOLATION
+        constraint; POLICYSQL_OUTCOME_UNKNOWN cause; POLICYSQL_UNSUPPORTED_SQL feature;
+        POLICYSQL_INVALID_SQL span (absent when the parser reports no position); POLICYSQL_INVALID_PARAMETER
+        reason; POLICYSQL_SQL_TOO_COMPLEX complexity; POLICYSQL_EXPECTATION_FAILED expectation. Every other
+        code has no detail. cause.detail never holds a cause.
+      properties:
+        constraint:
+          type: string
+          enum: [unique, not_null, foreign_key, check, other]
+        feature:
+          type: string
+          description: The unsupported SQL construct, by its syntax (docs "detail values").
+          enum: [explain, statement, constant_select, star, json_collection, delete, update, insert, insert_select, compound_select, values, distinct, window_clause, group_by, nulls_ordering, cte, derived_table, table_source, database_qualifier, indexed_by, join, self_join, window_function, subquery, expression, cast, function, literal, missing_from, duplicate_alias, duplicate_write_column, insert_arity, protected_statement]
+        span:
+          type: object
+          additionalProperties: false
+          required: [start, end]
+          description: The offending token of POLICYSQL_INVALID_SQL as UTF-8 byte offsets into the statement's sql, a half-open range with start <= end.
+          properties:
+            start: { type: integer, minimum: 0, maximum: 1048576 }
+            end: { type: integer, minimum: 0, maximum: 1048576 }
+        reason:
+          type: string
+          enum: [positional, prefix, name, type, "null", literal, value, names]
+        complexity:
+          type: string
+          enum: [height, recursion, columns, parameters, like_pattern, column_metadata, database_expression_depth, function_arguments, compound_terms, join_tables, database]
+        expectation:
+          type: string
+          enum: [affectedRows, rowCount]
+        cause:
+          type: object
+          additionalProperties: false
+          required: [code, path, detail]
+          description: The refusal behind POLICYSQL_OUTCOME_UNKNOWN. No code that depends on the database's state is listed.
+          properties:
+            code:
+              type: string
+              enum: [POLICYSQL_FORBIDDEN_ACCESS, POLICYSQL_STALE_OPERATION, POLICYSQL_INVALID_REQUEST, POLICYSQL_REQUEST_TOO_LARGE, POLICYSQL_JSON_TOO_DEEP, POLICYSQL_INVALID_SQL, POLICYSQL_MULTIPLE_STATEMENTS, POLICYSQL_UNSUPPORTED_SQL, POLICYSQL_MISSING_POLICY, POLICYSQL_FORBIDDEN_OPERATION, POLICYSQL_FORBIDDEN_COLUMN, POLICYSQL_FORBIDDEN_COLUMN_CONTEXT, POLICYSQL_DUPLICATE_RESULT_COLUMN, POLICYSQL_INVALID_PARAMETER, POLICYSQL_AMBIGUOUS_PARAMETER_TYPE, POLICYSQL_RESERVED_PARAMETER, POLICYSQL_PRESET_COLUMN, POLICYSQL_LIMIT_EXCEEDED, POLICYSQL_EXPECTATION_FAILED, POLICYSQL_SQL_TOO_COMPLEX, POLICYSQL_INTERNAL, POLICYSQL_DATABASE_UNAVAILABLE]
+            path:
+              type: [string, 'null']
+              pattern: '^/statements/(0|[1-9][0-9]{0,9})(/sql)?$'
+            detail:
+              description: The detail of the answer the request would have had without a key; null when its code has none.
+              oneOf:
+                - { type: 'null' }
+                - { $ref: '#/components/schemas/ErrorDetail' }
     ErrorResponse:
       type: object
       additionalProperties: false
@@ -760,29 +813,20 @@ components:
                 or a request body limit), so nothing ran and the key was not consumed, but the same
                 key may have committed under an earlier deployment: the outcome is unknown, not a
                 rejection. detail.cause is the code and path the request would have been refused with
-                had it carried no key. Retry with the same key and body.
+                had it carried no key. Retry with the same key and body. detail.cause.detail is that
+                answer's own detail, or null when its code has none.
+
+                POLICYSQL_UNSUPPORTED_SQL (400, path /statements/<i>, detail.feature) names the SQL
+                construct that is not supported, by its syntax. POLICYSQL_INVALID_SQL (400, path
+                /statements/<i>, detail.span when the parser reports a position) gives the offending
+                token as UTF-8 byte offsets into the statement's sql, a half-open range. POLICYSQL_INVALID_PARAMETER
+                (400, path /statements/<i>, detail.reason) says why a parameter or value was refused,
+                never which one. POLICYSQL_SQL_TOO_COMPLEX carries detail.complexity, the limit that was reached.
+                POLICYSQL_EXPECTATION_FAILED (422) carries detail.expectation, which declared expectation
+                did not hold, never the actual count. The values of detail are a fixed list, never an
+                identifier, a parameter name or value, or a message of the database or the parser.
             message: { type: string }
             path: { type: [string, 'null'] }
             detail:
-              type: object
-              additionalProperties: false
-              description: >-
-                Machine-readable values fixed per code (ADR 0030). Present only for the codes that
-                define one; today POLICYSQL_CONSTRAINT_VIOLATION and POLICYSQL_OUTCOME_UNKNOWN.
-              properties:
-                constraint:
-                  type: string
-                  enum: [unique, not_null, foreign_key, check, other]
-                cause:
-                  type: object
-                  additionalProperties: false
-                  required: [code, path]
-                  description: The refusal behind POLICYSQL_OUTCOME_UNKNOWN. No code that depends on the database's state is listed.
-                  properties:
-                    code:
-                      type: string
-                      enum: [POLICYSQL_FORBIDDEN_ACCESS, POLICYSQL_STALE_OPERATION, POLICYSQL_INVALID_REQUEST, POLICYSQL_REQUEST_TOO_LARGE, POLICYSQL_JSON_TOO_DEEP, POLICYSQL_INVALID_SQL, POLICYSQL_MULTIPLE_STATEMENTS, POLICYSQL_UNSUPPORTED_SQL, POLICYSQL_MISSING_POLICY, POLICYSQL_FORBIDDEN_OPERATION, POLICYSQL_FORBIDDEN_COLUMN, POLICYSQL_FORBIDDEN_COLUMN_CONTEXT, POLICYSQL_DUPLICATE_RESULT_COLUMN, POLICYSQL_INVALID_PARAMETER, POLICYSQL_AMBIGUOUS_PARAMETER_TYPE, POLICYSQL_RESERVED_PARAMETER, POLICYSQL_PRESET_COLUMN, POLICYSQL_LIMIT_EXCEEDED, POLICYSQL_EXPECTATION_FAILED, POLICYSQL_SQL_TOO_COMPLEX, POLICYSQL_INTERNAL, POLICYSQL_DATABASE_UNAVAILABLE]
-                    path:
-                      type: [string, 'null']
-                      pattern: '^/statements/(0|[1-9][0-9]{0,9})(/sql)?$'
+              $ref: '#/components/schemas/ErrorDetail'
             requestId: { type: string }

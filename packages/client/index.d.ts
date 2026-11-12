@@ -38,11 +38,70 @@ export interface PolicyExecuteResult<Row = Record<string, unknown>> {
   debug?: { executionTrace?: unknown }
 }
 export type PolicySqlConstraintKind = 'unique' | 'not_null' | 'foreign_key' | 'check' | 'other'
-/** Machine-readable values fixed per error code. Branch on `code`, not on the presence of a field. */
+/** The SQL construct `POLICYSQL_UNSUPPORTED_SQL` names, by its syntax (the list is in the error reference). */
+export type PolicySqlUnsupportedFeature =
+  | 'explain'
+  | 'statement'
+  | 'constant_select'
+  | 'star'
+  | 'json_collection'
+  | 'delete'
+  | 'update'
+  | 'insert'
+  | 'insert_select'
+  | 'compound_select'
+  | 'values'
+  | 'distinct'
+  | 'window_clause'
+  | 'group_by'
+  | 'nulls_ordering'
+  | 'cte'
+  | 'derived_table'
+  | 'table_source'
+  | 'database_qualifier'
+  | 'indexed_by'
+  | 'join'
+  | 'self_join'
+  | 'window_function'
+  | 'subquery'
+  | 'expression'
+  | 'cast'
+  | 'function'
+  | 'literal'
+  | 'missing_from'
+  | 'duplicate_alias'
+  | 'duplicate_write_column'
+  | 'insert_arity'
+  | 'protected_statement'
+/** Why `POLICYSQL_INVALID_PARAMETER` refused a parameter or value. It never names the parameter. */
+export type PolicySqlParameterReason = 'positional' | 'prefix' | 'name' | 'type' | 'null' | 'literal' | 'value' | 'names'
+/** The limit `POLICYSQL_SQL_TOO_COMPLEX` reached; `database` when the database named none. */
+export type PolicySqlComplexity =
+  | 'height' | 'recursion' | 'columns' | 'parameters' | 'like_pattern' | 'column_metadata'
+  | 'database_expression_depth' | 'function_arguments' | 'compound_terms' | 'join_tables' | 'database'
+/** Which declared expectation `POLICYSQL_EXPECTATION_FAILED` reports. The actual count is never returned. */
+export type PolicySqlExpectation = 'affectedRows' | 'rowCount'
+/**
+ * Machine-readable values fixed per error code. Branch on `code`, not on the presence of a field.
+ * `span` is half-open UTF-8 byte offsets into the statement's `sql`.
+ */
 export interface PolicySqlErrorDetail {
   readonly constraint?: PolicySqlConstraintKind
-  /** On `POLICYSQL_OUTCOME_UNKNOWN`: the code and path the request would have been refused with, had it carried no key. */
-  readonly cause?: { readonly code: string; readonly path: string | null }
+  /** On `POLICYSQL_UNSUPPORTED_SQL`. */
+  readonly feature?: PolicySqlUnsupportedFeature
+  /** On `POLICYSQL_INVALID_SQL`, when the parser reports where. */
+  readonly span?: { readonly start: number; readonly end: number }
+  /** On `POLICYSQL_INVALID_PARAMETER`. */
+  readonly reason?: PolicySqlParameterReason
+  /** On `POLICYSQL_SQL_TOO_COMPLEX`. */
+  readonly complexity?: PolicySqlComplexity
+  /** On `POLICYSQL_EXPECTATION_FAILED`. */
+  readonly expectation?: PolicySqlExpectation
+  /**
+   * On `POLICYSQL_OUTCOME_UNKNOWN`: the code, path and detail the request would have been
+   * refused with, had it carried no key. `detail` is `null` when that code has none.
+   */
+  readonly cause?: { readonly code: string; readonly path: string | null; readonly detail: PolicySqlErrorDetail | null }
   readonly [field: string]: unknown
 }
 export interface PolicySqlErrorOptions extends ErrorOptions { response?: TransportResponse; detail?: PolicySqlErrorDetail }

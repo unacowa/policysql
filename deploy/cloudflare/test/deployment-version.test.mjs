@@ -117,9 +117,9 @@ test("the wrapper's TransactionOwner answers the probe itself and hands every ot
   // A library message still reaches the library's object: its reply carries the owner wire
   // marker and the request id, which only the library's object sends.
   const begin = await object.fetch(new Request("https://owner/begin", {
-    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_probe", "x-policysql-owner-wire": "3" }, body: "{",
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_probe", "x-policysql-owner-wire": "4" }, body: "{",
   }));
-  assert.equal(begin.headers.get("x-policysql-owner-wire"), "3");
+  assert.equal(begin.headers.get("x-policysql-owner-wire"), "4");
   assert.equal((await begin.json()).error.requestId, "req_probe");
 });
 

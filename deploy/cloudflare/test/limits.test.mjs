@@ -40,6 +40,10 @@ const FIXED_LITERALS = new Map([
     ["VALIDATOR_RESPONSE_BYTES:65536", [1, "the validator reply bound: a fixed protocol constant"]],
     ["now:1000", [1, "milliseconds per second, for the signature timestamp"]],
   ])],
+  // The detail table (#145 pull request C): the ceiling of a statement's byte length.
+  ["error-detail.ts", new Map([
+    ["MAX_SPAN_OFFSET:1048576", [1, "`MAX_SQL_BYTES_CEILING`: the largest offset a `span` may name, a fixed protocol constant of the table, kept equal to core's by test"]],
+  ])],
   ["database.ts", new Map([
     ["BUFFERED_RESULT_BYTES:64000", [1, "the reference wrapper's maxResultBytes: above it a provider that buffers replies is logged once (a notice threshold, not a limit)"]],
     ["now:1000", [1, "the provider timeout, in milliseconds (a time, not a size)"]],
