@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
-use policysql_core::{ConstraintScalar, LogicalType, LogicalValue, ValueDescriptor};
+use policysql_core::{
+    ConstraintScalar, ExpectationKind, LogicalType, LogicalValue, ValueDescriptor,
+};
 use policysql_execution::{DatabaseExecutor, VerifiedExecutionPlan};
 use policysql_sqlite::SqliteProfile;
 use std::fmt;
@@ -160,7 +162,7 @@ fn validate_public_result(
         .expected_result_rows()
         .is_some_and(|expected| u64::try_from(result.rows.len()).ok() != Some(expected))
     {
-        return Err(AdapterError::ExpectationFailed);
+        return Err(AdapterError::ExpectationFailed(ExpectationKind::RowCount));
     }
     Ok(())
 }
@@ -242,7 +244,9 @@ fn validate_mutation_result(
         .expected_affected_rows()
         .is_some_and(|expected| result.affected_rows != expected)
     {
-        return Err(AdapterError::ExpectationFailed);
+        return Err(AdapterError::ExpectationFailed(
+            ExpectationKind::AffectedRows,
+        ));
     }
     if let Some(check_column) = plan.operation_check_column() {
         let mut expected_columns = physical_result_columns(plan);
@@ -535,7 +539,7 @@ pub enum AdapterError {
     NotConfigured,
     Timeout,
     LimitExceeded,
-    ExpectationFailed,
+    ExpectationFailed(ExpectationKind),
     InvalidResult,
     Conflict,
     TransactionRequired,
@@ -552,7 +556,7 @@ impl fmt::Display for AdapterError {
             Self::LimitExceeded => {
                 formatter.write_str("database result exceeded configured limits")
             }
-            Self::ExpectationFailed => {
+            Self::ExpectationFailed(_) => {
                 formatter.write_str("database result did not satisfy the declared expectation")
             }
             Self::InvalidResult => formatter.write_str("database returned an invalid result"),
@@ -588,9 +592,9 @@ mod tests {
     };
     use policysql_catalog::{Catalog, ResourceDescriptor};
     use policysql_core::{
-        ColumnId, ColumnName, ConstraintScalar, LogicalType, LogicalValue, PolicyId, ResourceId,
-        ResourceName, ResultName, SnapshotId, ValueConstraints, ValueDescriptor,
-        ValueRepresentation,
+        ColumnId, ColumnName, ConstraintScalar, ExpectationKind, LogicalType, LogicalValue,
+        PolicyId, ResourceId, ResourceName, ResultName, SnapshotId, ValueConstraints,
+        ValueDescriptor, ValueRepresentation,
     };
     use policysql_execution::{DatabaseExecutor, ExecutionLimits, VerifiedExecutionPlan};
     use policysql_ir::{
@@ -960,7 +964,9 @@ mod tests {
         invalid.affected_rows = 2;
         assert_eq!(
             validate_sealed_result(&mutation_plan(), &mut invalid),
-            Err(AdapterError::ExpectationFailed)
+            Err(AdapterError::ExpectationFailed(
+                ExpectationKind::AffectedRows
+            ))
         );
     }
 

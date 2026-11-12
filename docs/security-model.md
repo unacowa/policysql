@@ -61,10 +61,10 @@ The mandatory invariants above say what the compiler must do. This section state
   4. forbidden columns do not exist.
 
   A resource for which the role has no select policy does not exist in the view.
-- **Observation `Obs`** (観測). What the client receives: result column names, row values, redaction marks, row order when the statement has `ORDER BY`, affected-row counts, `RETURNING` rows, whether operation checks and `expect.affectedRows` succeed, public error codes, for a keyed unknown outcome the `detail.cause` (the code and path a compile, the session gate, or a body limit gave; they do not depend on `D`, see below), and, for a statement the database refused for a constraint, the kind of the constraint (one fixed value per statement: `unique`, `not_null`, `foreign_key`, `check`, `other`; [ADR 0030](adr/0030-error-detail-and-database-constraint-violations.md)). Response time, response size, and resource consumption are not part of `Obs` (see [Residual risks](#residual-risks)).
+- **Observation `Obs`** (観測). What the client receives: result column names, row values, redaction marks, row order when the statement has `ORDER BY`, affected-row counts, `RETURNING` rows, whether operation checks and `expect.affectedRows` succeed, public error codes, for a keyed unknown outcome the `detail.cause` (the code and path a compile, the session gate, or a body limit gave; they do not depend on `D`, see below), for a statement the database refused for a constraint, the kind of the constraint (one fixed value per statement: `unique`, `not_null`, `foreign_key`, `check`, `other`; [ADR 0030](adr/0030-error-detail-and-database-constraint-violations.md)), and the `detail` of a compile or validation refusal (`span`, `feature`, `reason`, `complexity`, `expectation`: a fixed enumeration value, or a byte position in the client's own SQL; a compile-time `complexity` is a function of the client's SQL, the policy, and the deployment; a database-time `complexity` (for example `like_pattern`) and `expectation` also depend on `D`, and the former falls under residual risk 3). Response time, response size, and resource consumption are not part of `Obs` (see [Residual risks](#residual-risks)).
 - **Low-equivalent states** (低等価な DB 対). Two database states `D1` and `D2` with `View(D1, σ) = View(D2, σ)`; they differ only in what the role cannot see.
 
-A statement is *accepted* when it compiles and the verifier seals its plan. Compilation and sealing do not read the database, so whether a statement is rejected before execution, and with which error code, does not depend on `D`.
+A statement is *accepted* when it compiles and the verifier seals its plan. Compilation and sealing do not read the database, so whether a statement is rejected before execution, with which error code, and with which `detail`, does not depend on `D`.
 
 ### P1: read view equivalence
 
@@ -140,6 +140,8 @@ Known gaps:
 - P1, policy `limit`: a negative client `LIMIT` parameter removes the cap (see P1; #136).
 - P3: the #118 scope above is a property of the specification.
 - P5, JSON collection: the output alias is not checked against the `__policysql_` prefix (#137). Whether a client can exploit this is unverified.
+- Existence of a hidden column, and its logical type: the binder and the decoding of parameter values run before the policy against the whole Catalog, so a column the role cannot read is told from one that does not exist by an `INVALID_PARAMETER` on a type mismatch (`WHERE tenant_id = 1`), by `UNSUPPORTED_SQL` where a column is used as an inserted or assigned value, and by a policy refusal of another reason (aggregation or windows off) that precedes the column check; a hidden column that only a derived table or a CTE carries compiles (#141). The `detail` (`reason: type`, `feature: cast`) makes a second type-dependent failure cheaper to read; it adds no fact the code does not already give (#154). The test `a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same` lists each place.
+- Existence of a hidden resource: a resource without a policy for the role is `MISSING_POLICY` and one that does not exist is `FORBIDDEN_OPERATION`, and a CTE named like a Catalog resource is refused by the binder (`feature: cte`) while a CTE of another name is not. The resource unification of #145 (proposal 7) closes both.
 
 ## Residual risks
 

@@ -2,7 +2,7 @@
 // is safe to show an untrusted client, and an RFC 6901 pointer into the request body. It
 // carries no transport status: the HTTP adapter maps the code to a status in its single
 // table (src/http/status.ts), and a non-HTTP caller reads the code.
-import type { ErrorDetail } from "./error-detail.ts";
+import { checkedErrorDetail, type ErrorDetail } from "./error-detail.ts";
 
 /** An operation's failure as data: what every engine operation returns instead of a value. */
 export type OperationError = {
@@ -18,6 +18,11 @@ export class EngineError extends Error {
   readonly code: string;
   readonly path: string | null;
   readonly detail?: ErrorDetail;
+  /**
+   * The `rejection_reason` log record core wrote for the compile this error answers, without a
+   * request id: operator-facing, never part of an `OperationError` or a response (ADR 0030).
+   */
+  compileLog?: Readonly<Record<string, unknown>>;
 
   constructor(code: string, message: string, path: string | null = null, detail?: ErrorDetail) {
     super(message);
@@ -62,7 +67,7 @@ export const outcomeUnknownError = (causeCode: string) => new EngineError(
   "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.",
   null,
   // Both callers refuse before any statement is read, so there is no path to give.
-  { cause: Object.freeze({ code: causeCode, path: null }) },
+  { cause: Object.freeze({ code: causeCode, path: null, detail: null }) },
 );
 
 // A well-formed BLOB over the per-value limit is a permanent limit condition, not a
@@ -77,14 +82,26 @@ export const operationError = (error: unknown): OperationError => error instance
   ? { code: error.code, message: error.message, path: error.path, ...(error.detail === undefined ? {} : { detail: error.detail }) }
   : { code: "POLICYSQL_INTERNAL", message: "The request could not be completed.", path: null };
 
-/** Core's `{ error: { code, message, path } }` result as an EngineError, or null for a success. */
+/**
+ * Core's `{ error: { code, message, path, detail }, log }` result as an EngineError, or null for
+ * a success. A `detail` the code's table does not allow is a fault of core, never shown: the
+ * answer is `POLICYSQL_INTERNAL`.
+ */
 export const wasmError = (body: unknown): EngineError | null => {
-  const envelope = (body as { error?: { code?: unknown; message?: unknown; path?: unknown } } | null)?.error;
+  const envelope = (body as { error?: { code?: unknown; message?: unknown; path?: unknown; detail?: unknown }; log?: unknown } | null)?.error;
   const code = envelope?.code;
   if (typeof code !== "string" || !code) return null;
-  return new EngineError(
+  const detail = checkedErrorDetail(code, envelope?.detail);
+  if (detail === null) return internalError();
+  const error = new EngineError(
     code,
     typeof envelope?.message === "string" ? envelope.message : "The request could not be completed.",
     typeof envelope?.path === "string" ? envelope.path : null,
+    detail,
   );
+  const log = (body as { log?: unknown }).log;
+  if (typeof log === "object" && log !== null && !Array.isArray(log)) {
+    error.compileLog = Object.freeze({ ...(log as Record<string, unknown>) });
+  }
+  return error;
 };

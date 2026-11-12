@@ -176,6 +176,12 @@ const role = (value: unknown): string | undefined => {
 const logRejected = (error: unknown, requestId: string) => {
   const failure = operationError(error);
   const coded = error as { code?: unknown; constructor?: { name?: string } };
+  // An operation that compiles outside the step machine (Explain) writes core's
+  // `rejection_reason` record here, before `request_rejected`, with the request id.
+  const compileLog = (error as { compileLog?: unknown } | null)?.compileLog;
+  if (typeof compileLog === "object" && compileLog !== null) {
+    console.log(JSON.stringify({ ...compileLog, requestId }));
+  }
   console.log(JSON.stringify({
     event: "request_rejected",
     requestId,

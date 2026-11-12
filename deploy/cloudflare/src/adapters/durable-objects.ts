@@ -21,8 +21,9 @@
 //
 // The wire version guards the message shape. Both sides stamp every message and reply with the
 // one constant `OWNER_WIRE_VERSION` (`x-policysql-owner-wire`); a change of any owner wire
-// message must change it. A message whose version differs is answered POLICYSQL_INTERNAL (500)
-// and runs nothing, so a body of another shape never reaches the machine, which would answer
+// message must change it ("4": #145 pull request C, an error's `detail` has more rows and a
+// keyed unknown outcome's `cause` carries one). A message whose version differs is answered
+// POLICYSQL_INTERNAL (500) and runs nothing, so a body of another shape never reaches the machine, which would answer
 // 400 POLICYSQL_INVALID_REQUEST, a definite rejection. A reply whose version differs is not
 // read: a commit becomes POLICYSQL_COMMIT_OUTCOME_UNKNOWN (its COMMIT may have applied, and a
 // retry must never be a rejection, ADR 0007), anything else POLICYSQL_INTERNAL. Neither is a
@@ -61,7 +62,7 @@ const REQUEST_ID_HEADER = "x-policysql-request-id";
 const OWNER_HEADER = "x-policysql-owner";
 const WIRE_HEADER = "x-policysql-owner-wire";
 // Changes whenever any owner wire message changes shape.
-const OWNER_WIRE_VERSION = "3";
+const OWNER_WIRE_VERSION = "4";
 const COMMAND_PATHS: Readonly<Record<OwnerCommandKind, string>> = Object.freeze({
   statement: "/statement", commit: "/commit", rollback: "/rollback",
 });

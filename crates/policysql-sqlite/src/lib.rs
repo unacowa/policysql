@@ -2126,6 +2126,27 @@ pub enum EmitError {
     ReparseFailed,
 }
 
+impl EmitError {
+    /// The variant name, logged in `rejection_reason`; never returned to a client and never
+    /// includes the variant's payload.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::UnsupportedStatement => "UnsupportedStatement",
+            Self::UnknownResource => "UnknownResource",
+            Self::UnknownColumn => "UnknownColumn",
+            Self::MissingServerParameter(_) => "MissingServerParameter",
+            Self::LiteralRequiresParameter => "LiteralRequiresParameter",
+            Self::UnsupportedValue => "UnsupportedValue",
+            Self::TooManyLiterals => "TooManyLiterals",
+            Self::Formatting => "Formatting",
+            Self::InvariantViolation(_) => "InvariantViolation",
+            Self::TooComplex(_) => "TooComplex",
+            Self::ReparseFailed => "ReparseFailed",
+        }
+    }
+}
+
 impl fmt::Display for EmitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

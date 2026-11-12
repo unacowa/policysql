@@ -586,7 +586,7 @@ test("durable-objects: the wire to the object is the internal HTTP form, and rep
     get: (id) => ({
       async fetch(url, init) {
         sent.push({ name: id.name, url, method: init.method, headers: init.headers, body: JSON.parse(init.body) });
-        const marked = { headers: { "x-policysql-owner-wire": "3" } };
+        const marked = { headers: { "x-policysql-owner-wire": "4" } };
         if (new URL(url).pathname === "/rollback") {
           return Response.json({ error: { code: "POLICYSQL_TRANSACTION_CONFLICT", message: "m", path: null, requestId: "req" } }, { status: 409, ...marked });
         }
@@ -646,7 +646,7 @@ test("durable-objects: the object class decodes the internal messages and fails 
   const object = new OwnerObject(state, {});
   const name = `tx_${"a".repeat(32)}`;
   const send = (path, body, headers = {}) => object.fetch(new Request(`https://owner${path}`, {
-    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": "3", ...headers }, body,
+    method: "POST", headers: { "content-type": "application/json", "x-policysql-request-id": "req_obj", "x-policysql-owner": name, "x-policysql-owner-wire": "4", ...headers }, body,
   }));
   for (const [path, body] of [["/begin", "{"], ["/atomic", "null"], ["/statement", "[]"], ["/unknown", "{}"]]) {
     const response = await send(path, body);
@@ -812,7 +812,7 @@ test("durable-objects: an object reply's detail is checked by the Worker, and a 
   const reply = (detail) => ({ error: { code: "POLICYSQL_CONSTRAINT_VIOLATION", message: "m", path: "/statements/0", requestId: "req", ...(detail === undefined ? {} : { detail }) } });
   const answers = [reply({ constraint: "unique" }), reply({ constraint: "unique", column: "x" }), reply({ constraint: "primary_key" }), reply(), reply([]), reply(null), reply("unique")];
   let index = 0;
-  const marked = { "x-policysql-owner-wire": "3" };
+  const marked = { "x-policysql-owner-wire": "4" };
   const namespace = { idFromName: (name) => name, get: () => ({ fetch: async () => Response.json(answers[index++], { status: 409, headers: marked }) }) };
   const app = h.appWith(durableObjectTransactionOwners(namespace));
   const send = async () => {
@@ -837,19 +837,39 @@ test("durable-objects: an object reply's detail is checked by the Worker, and a 
 // of the fixed list and a path of the fixed form; the same matrix as core's `ErrorDetail::allowed`.
 test("checkedOwnerReply: an outcome-unknown reply keeps a fixed cause and rejects every other detail", () => {
   const unknown = (detail) => ({ ok: false, error: { code: "POLICYSQL_OUTCOME_UNKNOWN", message: "m", path: null, ...(detail === undefined ? {} : { detail }) } });
-  const cause = (code, path) => ({ cause: { code, path } });
+  const cause = (code, path, detail = null) => ({ cause: { code, path, detail } });
+  // A cause code whose own row requires a detail cannot carry `null` (#145 pull request C).
+  const REQUIRED = ["UNSUPPORTED_SQL", "INVALID_PARAMETER", "SQL_TOO_COMPLEX", "EXPECTATION_FAILED"];
   for (const code of OUTCOME_CAUSES) {
     for (const path of [null, "/statements/0", "/statements/12/sql", "/statements/9999999999"]) {
       const reply = unknown(cause(`POLICYSQL_${code}`, path));
-      assert.deepEqual(checkedOwnerReply(reply), reply, `${code} ${path}`);
+      if (REQUIRED.includes(code)) assert.equal(checkedOwnerReply(reply), null, `${code} ${path}: a required detail is not null`);
+      else assert.deepEqual(checkedOwnerReply(reply), reply, `${code} ${path}`);
     }
+  }
+  // A cause carries the detail of its own code, checked by that code's row.
+  for (const [code, detail] of [
+    ["UNSUPPORTED_SQL", { feature: "star" }], ["INVALID_SQL", { span: { start: 7, end: 11 } }], ["INVALID_PARAMETER", { reason: "names" }],
+    ["SQL_TOO_COMPLEX", { complexity: "height" }], ["EXPECTATION_FAILED", { expectation: "rowCount" }],
+  ]) {
+    const reply = unknown(cause(`POLICYSQL_${code}`, "/statements/0", detail));
+    assert.deepEqual(checkedOwnerReply(reply), reply, code);
+    assert.equal(Object.isFrozen(checkedOwnerReply(reply).error.detail.cause.detail), true, `${code}: the nested detail is a frozen copy`);
   }
   assert.equal(OUTCOME_CAUSES.length, 22);
   const good = "POLICYSQL_INVALID_SQL";
   const forgedDetails = [
     undefined, {}, { cause: null }, { cause: [] }, { cause: "x" }, { cause: [good, null] }, [cause(good, null)], null, "x", 1,
     { ...cause(good, null), constraint: "unique" }, { constraint: "unique" },
-    { cause: { code: good, path: null, message: "x" } }, { cause: { code: good } }, { cause: { path: null } },
+    { cause: { code: good, path: null, detail: null, message: "x" } }, { cause: { code: good } }, { cause: { path: null } },
+    // The two-key form of the earlier amendment is no longer a cause.
+    { cause: { code: good, path: null } }, { cause: { code: good, detail: null } },
+    // The cause's detail is the cause's code's own: a mismatch, a missing required one, a nested cause.
+    cause(good, null, { feature: "star" }), cause("POLICYSQL_UNSUPPORTED_SQL", null, { span: { start: 0, end: 1 } }),
+    cause("POLICYSQL_UNSUPPORTED_SQL", null, { feature: "nope" }), cause("POLICYSQL_FORBIDDEN_COLUMN", null, {}),
+    cause(good, null, { span: { start: 3, end: 2 } }), cause(good, null, { span: { start: 0, end: 1_048_577 } }),
+    cause(good, null, { cause: { code: good, path: null, detail: null } }), cause(good, null, []), cause(good, null, "x"),
+    { cause: { code: good, path: null, detail: undefined } },
     ...[
       "POLICYSQL_CONSTRAINT_VIOLATION", "POLICYSQL_CHECK_FAILED", "POLICYSQL_SCHEMA_MISMATCH", "POLICYSQL_DATABASE_TIMEOUT",
       "POLICYSQL_OUTCOME_UNKNOWN", "POLICYSQL_COMMIT_OUTCOME_UNKNOWN", "FORBIDDEN_COLUMN", "policysql_invalid_sql", "", 1, null,
@@ -860,6 +880,11 @@ test("checkedOwnerReply: an outcome-unknown reply keeps a fixed cause and reject
   for (const detail of forgedDetails) assert.equal(checkedOwnerReply(unknown(detail)), null, JSON.stringify(detail));
   // The value that comes back is a frozen copy that shares nothing with what was read.
   const original = cause("POLICYSQL_MISSING_POLICY", "/statements/0");
+  const nested = cause("POLICYSQL_UNSUPPORTED_SQL", "/statements/0", { feature: "star" });
+  const checkedNested = checkedOwnerReply(unknown(nested));
+  assert.notEqual(checkedNested.error.detail.cause.detail, nested.cause.detail, "the nested detail shares nothing with the input");
+  nested.cause.detail.feature = "cte";
+  assert.equal(checkedNested.error.detail.cause.detail.feature, "star");
   const reply = checkedOwnerReply(unknown(original));
   assert.equal(Object.isFrozen(reply.error.detail), true);
   assert.equal(Object.isFrozen(reply.error.detail.cause), true);
@@ -872,7 +897,7 @@ test("checkedOwnerReply: an outcome-unknown reply keeps a fixed cause and reject
   assert.equal(checkedOwnerReply(unknown({ cause: Object.create({ code: good, path: null }) })), null, "inherited fields");
   assert.equal(checkedOwnerReply(unknown({ cause: new (class Cause { code = good; path = null; })() })), null, "a class instance");
   assert.deepEqual(
-    checkedOwnerReply(unknown({ cause: Object.assign(Object.create(null), { code: good, path: null }) })),
+    checkedOwnerReply(unknown({ cause: Object.assign(Object.create(null), { code: good, path: null, detail: null }) })),
     unknown(cause(good, null)),
   );
   // No other code takes a cause, and the constraint row takes none beside its kind.
@@ -886,15 +911,18 @@ test("durable-objects: a forged outcome-unknown cause from an object is a safe 5
   const h = await harness(t, { ownerAdapter: "durable-objects", hooks: false });
   const reply = (detail) => ({ error: { code: "POLICYSQL_OUTCOME_UNKNOWN", message: "m", path: null, requestId: "req", ...(detail === undefined ? {} : { detail }) } });
   const answers = [
-    reply({ cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0" } }),
-    reply({ cause: { code: "POLICYSQL_CONSTRAINT_VIOLATION", path: null } }),
-    reply({ cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0/params" } }),
+    reply({ cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0", detail: null } }),
+    reply({ cause: { code: "POLICYSQL_CONSTRAINT_VIOLATION", path: null, detail: null } }),
+    reply({ cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0/params", detail: null } }),
     reply({ cause: { code: "POLICYSQL_MISSING_POLICY" } }),
+    reply({ cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0" } }),
+    reply({ cause: { code: "POLICYSQL_UNSUPPORTED_SQL", path: "/statements/0", detail: null } }),
+    reply({ cause: { code: "POLICYSQL_UNSUPPORTED_SQL", path: "/statements/0", detail: { feature: "nope" } } }),
     reply(),
     reply({}),
   ];
   let index = 0;
-  const marked = { "x-policysql-owner-wire": "3" };
+  const marked = { "x-policysql-owner-wire": "4" };
   const namespace = { idFromName: (name) => name, get: () => ({ fetch: async () => Response.json(answers[index++], { status: 500, headers: marked }) }) };
   const app = h.appWith(durableObjectTransactionOwners(namespace));
   const send = async () => {
@@ -906,7 +934,7 @@ test("durable-objects: a forged outcome-unknown cause from an object is a safe 5
   const first = await send();
   assert.equal(first.status, 500, JSON.stringify(first.body));
   assert.equal(first.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN");
-  assert.deepEqual(first.body.error.detail, { cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0" } });
+  assert.deepEqual(first.body.error.detail, { cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0", detail: null } });
   for (let forged = 1; forged < answers.length; forged += 1) {
     const response = await send();
     assert.equal(response.status, 500, `forged answer ${forged}: ${JSON.stringify(response.body)}`);

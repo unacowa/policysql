@@ -23,15 +23,15 @@ const MESSAGE = "This request was not executed. The outcome of an earlier reques
 // The unknown outcome: a fixed message, no top-level path, and the refusal as the cause. The
 // cause is also what the unkeyed request answers (the differential), and holds nothing else.
 const sameCause = (keyed, unkeyed, label) => {
-  assert.deepEqual(keyed.body.error.detail, { cause: { code: unkeyed.body.error.code, path: unkeyed.body.error.path } }, `${label}: the cause is the unkeyed answer`);
-  assert.equal(unkeyed.body.error.detail, undefined, `${label}: an unkeyed refusal has no detail`);
+  assert.deepEqual(keyed.body.error.detail, { cause: { code: unkeyed.body.error.code, path: unkeyed.body.error.path, detail: unkeyed.body.error.detail ?? null } }, `${label}: the cause is the unkeyed answer`);
+  assert.ok(unkeyed.body.error.detail === undefined || !("cause" in unkeyed.body.error.detail), `${label}: an unkeyed refusal has no cause`);
 };
 const unknown = (response, label, cause, unkeyed) => {
   assert.equal(response.status, 500, `${label}: ${JSON.stringify(response.body)}`);
   assert.equal(response.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN", label);
   assert.equal(response.body.error.message, MESSAGE, label);
   assert.equal(response.body.error.path, null, label);
-  assert.deepEqual(response.body.error.detail, { cause }, label);
+  assert.deepEqual(response.body.error.detail, { cause: { detail: null, ...cause } }, label);
   assert.deepEqual(Object.keys(response.body.error), ["code", "message", "path", "detail", "requestId"], label);
   assert.equal(response.body.results, undefined, `${label}: the stored result is not returned`);
   if (unkeyed !== undefined) sameCause(response, unkeyed, label);
@@ -201,7 +201,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       assert.equal(keyed.status, 500, JSON.stringify(keyed.body));
       const [loggedKeyed] = rejections();
       assert.equal(loggedKeyed.code, "POLICYSQL_OUTCOME_UNKNOWN");
-      assert.deepEqual(loggedKeyed.cause, { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0" });
+      assert.deepEqual(loggedKeyed.cause, { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0", detail: null });
       assert.deepEqual(Object.keys(loggedKeyed).sort(), ["cause", "code", "event", "internalClass", "internalCode", "requestId"]);
 
       const unkeyed = await h.request("a", "/v1/transactions:execute", body, null);
@@ -215,7 +215,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       for (const text of [JSON.stringify(keyed.body), ...logs]) {
         for (const leaked of ["INSERT", secretName, "p_log", "projects", "tenant_id"]) assert.ok(!text.includes(leaked), `${leaked} in ${text.slice(0, 300)}`);
       }
-      assert.deepEqual(Object.keys(keyed.body.error.detail.cause), ["code", "path"]);
+      assert.deepEqual(Object.keys(keyed.body.error.detail.cause), ["code", "path", "detail"]);
     });
   }
 

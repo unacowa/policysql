@@ -134,10 +134,10 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 }
 
 #[test]
-fn abi_20_names_the_step_machine_with_the_check_and_cause_answers() {
+fn abi_21_names_the_step_machine_with_the_detail_and_reason_answers() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 20);
-    assert!(owner.runtime.snapshot().ends_with(":abi-20"));
+    assert_eq!(owner.runtime.abi_version(), 21);
+    assert!(owner.runtime.snapshot().ends_with(":abi-21"));
 }
 
 /// #145 at the ABI boundary: the real `step_json` reads an `executeFailed` of class `constraint`
@@ -270,6 +270,7 @@ fn a_keyed_compile_failure_is_the_unknown_outcome_with_the_real_compiler() {
         json!({"cause": {
             "code": unkeyed["reply"]["error"]["code"],
             "path": unkeyed["reply"]["error"]["path"],
+            "detail": null,
         }}),
         "the cause is the unkeyed answer's code and path"
     );

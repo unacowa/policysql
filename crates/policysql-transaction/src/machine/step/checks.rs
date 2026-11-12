@@ -794,7 +794,7 @@ impl<C: Compiler> Step<'_, C> {
             }
             (CallbackTask::Binding { handle, .. }, Event::BindingCheckFailed { class, .. }) => {
                 self.release(handle);
-                self.callback_failed(live.is_some(), error_reply(Code::for_class(*class)))
+                self.callback_failed(live.is_some(), io::class_reply(*class))
             }
             (
                 CallbackTask::Execute {

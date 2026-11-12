@@ -2,6 +2,7 @@
 //! effects (ADR 0024 "Effect execution contract") and records a transcript.
 #![allow(dead_code, clippy::missing_panics_doc, clippy::too_many_lines)]
 
+use policysql_transaction::machine::io::ErrorDetail;
 use policysql_transaction::machine::{
     Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, ResultBudget,
     StatementLimits, StatementSummary, TriggeredCheck, Validated, step_json,
@@ -173,6 +174,7 @@ impl Compiler for FakeCompiler {
                     code: "POLICYSQL_INVALID_SQL".to_owned(),
                     message: "The SQL statement cannot be parsed.".to_owned(),
                     path: Some(format!("/statements/{index}")),
+                    detail: None,
                     log: None,
                 });
             };
@@ -266,6 +268,7 @@ impl Compiler for FakeCompiler {
             code: "POLICYSQL_SCHEMA_MISMATCH".to_owned(),
             message: "The database result does not match the compiled logical contract.".to_owned(),
             path: Some(format!("/statements/{index}")),
+            detail: None,
             log: None,
         };
         let expect = {
@@ -283,6 +286,7 @@ impl Compiler for FakeCompiler {
                 code: "POLICYSQL_EXPECTATION_FAILED".to_owned(),
                 message: "The statement did not meet its expectation.".to_owned(),
                 path: Some(format!("/statements/{index}/expect")),
+                detail: Some(Box::new(ErrorDetail::expectation("affectedRows"))),
                 log: None,
             });
         }

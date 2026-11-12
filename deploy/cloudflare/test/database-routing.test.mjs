@@ -55,7 +55,7 @@ test("wrapper-rejected JWTs and missing endpoint access never connect or check a
     h.session("a", { access: ["catalog"] }));
   assert.equal(keyed.status, 500, JSON.stringify(keyed.body));
   assert.equal(keyed.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN");
-  assert.deepEqual(keyed.body.error.detail, { cause: { code: "POLICYSQL_FORBIDDEN_ACCESS", path: null } });
+  assert.deepEqual(keyed.body.error.detail, { cause: { code: "POLICYSQL_FORBIDDEN_ACCESS", path: null, detail: null } });
   assert.equal(h.counts().checks, 0);
   assert.equal(h.counts().connects, 0);
   assert.equal(h.events.length, 0);

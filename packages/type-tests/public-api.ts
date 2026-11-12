@@ -1,5 +1,5 @@
 import { Kysely, CamelCasePlugin, type InsertResult, type UpdateResult, type DeleteResult } from 'kysely'
-import { PolicySqlClient, createHttpTransport, type PolicySqlTransport, type HttpTransportOptions, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlConstraintKind, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
+import { PolicySqlClient, createHttpTransport, type PolicySqlTransport, type HttpTransportOptions, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlConstraintKind, type PolicySqlUnsupportedFeature, type PolicySqlParameterReason, type PolicySqlComplexity, type PolicySqlExpectation, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
 import { PolicySqlDialect, policyOptions } from '@unacowa/policysql/kysely'
 
 const minimal: PolicySqlClientOptions = { transport: createHttpTransport({ endpoint: 'https://gateway.test' }) }
@@ -63,10 +63,39 @@ void constraint
 // @ts-expect-error a constraint kind is one of the fixed values
 new PolicySqlError('Failed', 'POLICYSQL_CONSTRAINT_VIOLATION', 409, { detail: { constraint: 'primary_key' } })
 const unknown = new PolicySqlError('Unknown', 'POLICYSQL_OUTCOME_UNKNOWN', 500, {
-  detail: { cause: { code: 'POLICYSQL_INVALID_SQL', path: '/statements/0' } },
+  detail: { cause: { code: 'POLICYSQL_INVALID_SQL', path: '/statements/0', detail: { span: { start: 7, end: 11 } } } },
 })
 const causePath: string | null | undefined = unknown.detail?.cause?.path
 void causePath
+const causeSpanStart: number | undefined = unknown.detail?.cause?.detail?.span?.start
+void causeSpanStart
+// @ts-expect-error the cause of an unknown outcome always has a detail field (null when there is none)
+new PolicySqlError('Unknown', 'POLICYSQL_OUTCOME_UNKNOWN', 500, { detail: { cause: { code: 'POLICYSQL_INVALID_SQL', path: null } } })
+const unsupported = new PolicySqlError('Unsupported', 'POLICYSQL_UNSUPPORTED_SQL', 400, { detail: { feature: 'star' } })
+const feature: PolicySqlUnsupportedFeature | undefined = unsupported.detail?.feature
+void feature
+// @ts-expect-error a feature is one of the fixed values
+new PolicySqlError('Unsupported', 'POLICYSQL_UNSUPPORTED_SQL', 400, { detail: { feature: 'nope' } })
+const invalidParameter = new PolicySqlError('Invalid', 'POLICYSQL_INVALID_PARAMETER', 400, { detail: { reason: 'names' } })
+const reason: PolicySqlParameterReason | undefined = invalidParameter.detail?.reason
+void reason
+// @ts-expect-error a parameter reason is one of the fixed values
+new PolicySqlError('Invalid', 'POLICYSQL_INVALID_PARAMETER', 400, { detail: { reason: 'missing' } })
+const complex = new PolicySqlError('Complex', 'POLICYSQL_SQL_TOO_COMPLEX', 400, { detail: { complexity: 'height' } })
+const complexity: PolicySqlComplexity | undefined = complex.detail?.complexity
+void complexity
+// @ts-expect-error a complexity is one of the fixed values
+new PolicySqlError('Complex', 'POLICYSQL_SQL_TOO_COMPLEX', 400, { detail: { complexity: 'big' } })
+const expectationFailed = new PolicySqlError('Expectation', 'POLICYSQL_EXPECTATION_FAILED', 422, { detail: { expectation: 'rowCount' } })
+const expectation: PolicySqlExpectation | undefined = expectationFailed.detail?.expectation
+void expectation
+// @ts-expect-error an expectation is one of the fixed values
+new PolicySqlError('Expectation', 'POLICYSQL_EXPECTATION_FAILED', 422, { detail: { expectation: 'rows' } })
+const parseError = new PolicySqlError('Parse', 'POLICYSQL_INVALID_SQL', 400, { detail: { span: { start: 0, end: 1 } } })
+const spanEnd: number | undefined = parseError.detail?.span?.end
+void spanEnd
+// @ts-expect-error a span has both offsets
+new PolicySqlError('Parse', 'POLICYSQL_INVALID_SQL', 400, { detail: { span: { start: 0 } } })
 new PolicySqlOutcomeUnknownError({ phase: 'commit', transactionId: 'tx_123', sequence: 1 })
 // @ts-expect-error error codes are required strings
 new PolicySqlError('Failed', { cause: new Error() })

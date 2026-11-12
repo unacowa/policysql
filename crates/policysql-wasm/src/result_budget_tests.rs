@@ -369,7 +369,11 @@ proptest! {
             // The generator keeps the values within the limit and the result well formed, so the
             // only refusal is the result-byte limit: nothing else may reject a generated result.
             Err(error) => prop_assert!(
-                matches!(error, super::RuntimeError::Rejected(super::RejectionKind::LimitExceeded)),
+                matches!(
+                    error,
+                    super::RuntimeError::Rejected(rejection)
+                        if rejection.kind == super::RejectionKind::LimitExceeded
+                ),
                 "{error:?}"
             ),
         }
@@ -402,9 +406,8 @@ fn raw_values_are_counted_at_the_limit_and_one_over() {
     assert!(
         matches!(
             over,
-            Err(super::RuntimeError::Rejected(
-                super::RejectionKind::LimitExceeded
-            ))
+            Err(super::RuntimeError::Rejected(rejection))
+                if rejection.kind == super::RejectionKind::LimitExceeded
         ),
         "{over:?}"
     );
@@ -489,9 +492,8 @@ fn the_raw_text_is_bounded_by_the_remaining_raw_budget() {
     let output = runtime.validate_result_within(handle, 0, &junk, budget(length));
     assert!(matches!(
         output,
-        Err(super::RuntimeError::Rejected(
-            super::RejectionKind::LimitExceeded
-        ))
+        Err(super::RuntimeError::Rejected(rejection))
+            if rejection.kind == super::RejectionKind::LimitExceeded
     ));
 }
 

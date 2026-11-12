@@ -2357,6 +2357,37 @@ pub enum PolicyError {
     InvariantViolation(String),
 }
 
+impl PolicyError {
+    /// The variant name, logged in `rejection_reason`; never returned to a client and never
+    /// includes the variant's payload.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::InvalidBundle => "InvalidBundle",
+            Self::InvalidRole => "InvalidRole",
+            Self::UnknownResource => "UnknownResource",
+            Self::UnknownColumn => "UnknownColumn",
+            Self::UnknownOperator => "UnknownOperator",
+            Self::InvalidPredicate => "InvalidPredicate",
+            Self::IncompatibleOperand => "IncompatibleOperand",
+            Self::BytesPresetTooLarge => "BytesPresetTooLarge",
+            Self::NullComparison => "NullComparison",
+            Self::UnsupportedCapability => "UnsupportedCapability",
+            Self::UnsupportedRedaction => "UnsupportedRedaction",
+            Self::DuplicateColumnPermission => "DuplicateColumnPermission",
+            Self::PresetColumnOverlap => "PresetColumnOverlap",
+            Self::DuplicatePolicy => "DuplicatePolicy",
+            Self::TooManyPolicies => "TooManyPolicies",
+            Self::MissingPolicy => "MissingPolicy",
+            Self::ForbiddenColumn => "ForbiddenColumn",
+            Self::ForbiddenColumnContext => "ForbiddenColumnContext",
+            Self::MissingSessionValue => "MissingSessionValue",
+            Self::InvalidSessionKey => "InvalidSessionKey",
+            Self::InvariantViolation(_) => "InvariantViolation",
+        }
+    }
+}
+
 impl fmt::Display for PolicyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

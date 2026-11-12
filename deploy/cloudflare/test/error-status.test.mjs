@@ -214,7 +214,7 @@ test("CHECK_FAILED is a 403 rejection and neither unknown outcome is a rejection
   for (const [status, codes] of REJECTIONS) {
     for (const code of ["OUTCOME_UNKNOWN", "COMMIT_OUTCOME_UNKNOWN"]) assert.equal(codes.includes(code), false, `${code} under ${status}`);
   }
-  const detail = { cause: { code: "POLICYSQL_INVALID_SQL", path: "/statements/0" } };
+  const detail = { cause: { code: "POLICYSQL_INVALID_SQL", path: "/statements/0", detail: null } };
   for (const status of [400, 403, 409, 413, 422, 500, 502, 503, 504]) {
     const body = { error: { code: "POLICYSQL_OUTCOME_UNKNOWN", message: "m", path: null, detail, requestId: "req_1" } };
     const client = new PolicySqlClient({ transport: async () => ({ status, body }) });
@@ -251,7 +251,7 @@ test("the Worker's cause list is core's", () => {
   const pattern = new RegExp(schema[2], "u");
   for (const path of ["/statements/0", "/statements/12/sql", "/statements/1234567890", "/statements/01", "/statements/-1", "/statements/",
     "/statements/0/params", "/statements/0/sql/x", "/statements/12345678901", "/x", "", "/statements/0\n"]) {
-    const accepted = checkedErrorDetail("POLICYSQL_OUTCOME_UNKNOWN", { cause: { code: "POLICYSQL_INVALID_SQL", path } }) !== null;
+    const accepted = checkedErrorDetail("POLICYSQL_OUTCOME_UNKNOWN", { cause: { code: "POLICYSQL_INVALID_SQL", path, detail: null } }) !== null;
     assert.equal(pattern.test(path), accepted, `path ${JSON.stringify(path)}`);
   }
   // No code that depends on the database's state, and no outcome code, is a cause.

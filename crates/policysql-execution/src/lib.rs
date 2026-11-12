@@ -39,6 +39,17 @@ pub enum ComplexityCause {
 }
 
 impl ComplexityCause {
+    /// Every cause, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::Height,
+        Self::Recursion,
+        Self::Columns,
+        Self::Parameters,
+        Self::LikePattern,
+        Self::ColumnMetadata,
+        Self::DatabaseExpressionDepth,
+    ];
+
     /// The fixed cause name logged as `cause`.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -332,6 +343,19 @@ pub enum VerificationError {
     EmptyProtectedSql,
     ProfileMismatch,
     InvariantViolation(String),
+}
+
+impl VerificationError {
+    /// The variant name, logged in `rejection_reason`; never returned to a client and never
+    /// includes the variant's payload.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::EmptyProtectedSql => "EmptyProtectedSql",
+            Self::ProfileMismatch => "ProfileMismatch",
+            Self::InvariantViolation(_) => "InvariantViolation",
+        }
+    }
 }
 
 impl fmt::Display for VerificationError {

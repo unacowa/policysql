@@ -402,7 +402,7 @@ test("CONSTRAINT_VIOLATION is a definite 409 rejection of a statement, with its 
 });
 
 test("the server's OUTCOME_UNKNOWN and the client's own unknown outcome share a code and differ by cause and status (#145)", async () => {
-  const detail = { cause: { code: "POLICYSQL_INVALID_SQL", path: "/statements/0" } };
+  const detail = { cause: { code: "POLICYSQL_INVALID_SQL", path: "/statements/0", detail: null } };
   const body = { error: { code: "POLICYSQL_OUTCOME_UNKNOWN", message: "m", path: null, detail, requestId: "req_test" } };
   const fromServer = setup({}, () => async () => ({ status: 500, body }));
   await assert.rejects(fromServer.client.execute(select), (error) => {

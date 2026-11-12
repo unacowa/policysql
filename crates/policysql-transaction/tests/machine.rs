@@ -157,6 +157,10 @@ fn a_database_complexity_refusal_closes_the_transaction_with_the_fixed_code() {
         "The statement is too complex to run under the active policy."
     );
     assert_eq!(reply["error"]["path"], "/statements/0");
+    assert_eq!(
+        reply["error"]["detail"],
+        json!({"complexity": "like_pattern"})
+    );
     assert_eq!(phase_of(engine.store.as_deref()).as_deref(), Some("failed"));
     assert!(log.contains("\"event\":\"sql_too_complex\""), "{log}");
     assert!(log.contains("\"cause\":\"like_pattern\""), "{log}");

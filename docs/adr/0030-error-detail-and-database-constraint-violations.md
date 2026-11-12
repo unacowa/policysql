@@ -220,3 +220,134 @@ The ABI is 20 (the snapshot is `…:abi-20`) and the owner wire version is `"3"`
 are those of section Consequences: an active interactive transaction is closed with 409
 `POLICYSQL_TRANSACTION_UNAVAILABLE` on its next command, and a keyed atomic retry replays. The
 `"2"` and ABI 19 above are the record of pull request A.
+
+## Amendment (#145 pull request C)
+
+### Table rows
+
+Five codes of a compile (and of the database's complexity refusal) gain a row, and a keyed
+`POLICYSQL_OUTCOME_UNKNOWN`'s `cause` gains `detail`:
+
+| Code | `detail` | Required |
+| --- | --- | --- |
+| `POLICYSQL_CONSTRAINT_VIOLATION` | `{ "constraint": <kind> }` (unchanged) | yes |
+| `POLICYSQL_OUTCOME_UNKNOWN` | `{ "cause": { "code": <code>, "path": <path or null>, "detail": <object or null> } }`, all three keys always present | yes |
+| `POLICYSQL_INVALID_SQL` | `{ "span": { "start": <int>, "end": <int> } }` | **no**: absent when the parser reports no position |
+| `POLICYSQL_UNSUPPORTED_SQL` | `{ "feature": <feature> }` | yes |
+| `POLICYSQL_INVALID_PARAMETER` | `{ "reason": <reason> }` | yes |
+| `POLICYSQL_SQL_TOO_COMPLEX` | `{ "complexity": <complexity> }` | yes |
+| `POLICYSQL_EXPECTATION_FAILED` | `{ "expectation": "affectedRows" \| "rowCount" }` | yes |
+| every other code | none | a `detail` is invalid |
+
+`INVALID_SQL` is the one exception to "a code in the table requires its detail" of section 1:
+turso_parser reports a position for its lexical errors and for an unexpected token, and none for an
+unexpected end of input, a limit, or a custom error, and a position that is not there is not
+invented. `cause.detail` is checked with the row of `cause.code` (`null` where that code has no
+detail or an optional one); `cause.code` is never `POLICYSQL_OUTCOME_UNKNOWN`, so the check does not
+recurse. The enumerations are `UNSUPPORTED_FEATURES` (33), `PARAMETER_REASONS` (8),
+`COMPLEXITY_DETAILS` (11), and `EXPECTATIONS` (2) in core, kept equal by test in the Worker, OpenAPI,
+the parser and gateway, and the client's types. `tests/fixtures/error-detail-cases.json` is read by
+both core's and the Worker's tests and decides the same way in both.
+
+### What a value is
+
+- `feature` names a construct by its SQL syntax (`star`, `cte`, `insert_select`, `window_function`,
+  `protected_statement`: a statement the policy composed was refused at emit or verification). The
+  binder's internal shape names (`JSON document provenance`, `same-resource correlation`) are logged
+  only; several of them map to one feature.
+- `reason` is why a parameter was refused: `positional`, `prefix`, `name`, `type`, `null`,
+  `literal`, `value`, `names`. It never names the parameter. `names` is "the supplied names differ
+  from the SQL's"; missing and unexpected are not told apart, which would take a set difference.
+- `complexity` is the key's name, not `cause`: `OUTCOME_UNKNOWN`'s `detail.cause` is an object, and
+  one key name with two types would make the client's type a union. It is the value of the log's
+  `sql_too_complex.cause` (the 7 compile causes, the database's 4, and `database`).
+- `expectation` is which of `expect.affectedRows` and `expect.rowCount` did not hold. The count is
+  not returned.
+- `span` is the UTF-8 byte range `[start, end)` of the token in `statements[i].sql`, as decoded from
+  the JSON (neither the engine nor core rewrites it). `path` stays `/statements/<i>`. The AST of
+  turso_parser carries no positions, so only `INVALID_SQL` has one; `FORBIDDEN_COLUMN` and the like
+  do not. The SQL PolicySQL emits is never a source of a span: it is re-parsed without a position.
+  A span past 1,048,576 (`MAX_SQL_BYTES_CEILING`) is invalid in the table and is left out by the
+  producer.
+
+### The `detail` and what it lets a client infer
+
+The detail is a fixed enumeration or a position in the client's own bytes, never an identifier,
+a parameter name or value, or a parser or database message. The judgement of what it adds, per
+detail (the full argument is in the issue):
+
+- A column that does not exist and one the role cannot see are answered alike. The binder walks a
+  statement in a fixed order and stops at the first failure; up to the point where a column is
+  resolved both walk the same way, and `FORBIDDEN_COLUMN` has no `detail`. A test
+  (`detail_tests.rs`, "a missing name and a hidden one") compiles 47 column templates (20 of them
+  also for a hidden column of integer, json, boolean and bytes type: CTEs, derived tables,
+  `HAVING`, JSON collections included) and 12 resource templates against both and requires the same
+  answer wherever the code is the same.
+- That test also lists where the *code* already differs, which `detail` does not change:
+  a resource without a policy for the role is `MISSING_POLICY` and one that does not exist is
+  `FORBIDDEN_OPERATION` (the resource unification of #145 proposal 7 closes this); a hidden column
+  that reaches a policy refusal of its own (aggregation or windows off) before the column check is
+  answered with that refusal (#154); a column used as an inserted or assigned value is `UNSUPPORTED_SQL`
+  when it exists and `FORBIDDEN_COLUMN` when it does not; a literal or value of another type than
+  the hidden column's is `INVALID_PARAMETER` (the type of a hidden column shows in the code, #154).
+  One more difference is a refusal against an acceptance: a column that only a derived table or a CTE
+  carries, and the outer statement does not use, is not checked, so a hidden one compiles and a missing
+  one is refused (#141).
+- One case differs in `detail` with the same code: a CTE named like a Catalog resource is refused
+  by the binder before the role is looked at (`feature: cte`), and a CTE of any other name goes on
+  to its next refusal. That told a client whether a resource exists before `feature` was added
+  (a successful compile against a refusal), so the set of facts is the same and `feature` only makes
+  it cheaper to combine with another refusal. It is listed in the test as the only known split of
+  this kind, and the unification change closes it.
+- The binder and the decoding of parameter values run before the policy, against the whole Catalog:
+  a forbidden column's existence and logical type are visible from the code (`WHERE tenant_id = 1` is
+  `INVALID_PARAMETER`, `WHERE nope = 1` is `FORBIDDEN_COLUMN`). `reason: type` and `feature: cast`
+  make a second type-dependent failure cheaper to read; they do not add a fact the first request
+  already gives. The root fix (type checks only on columns the role sees, or the policy first) is
+  #154.
+- `complexity` depends on the policy (the emitted statement holds its predicate, companions and
+  server parameters), and on rows for a database `like_pattern`. The code `SQL_TOO_COMPLEX`
+  already said "too complex under the active policy"; `Obs` now says that the value is a function
+  of the client's SQL, the policy, and the deployment.
+- `expectation` follows the visible count, as the code does; with both expectations on a
+  mutation, `affectedRows` passing and `rowCount` failing already told the count from the path
+  of a two-statement envelope.
+
+### Log: `rejection_reason`
+
+A refusal's internal reason is logged, never returned. The event `rejection_reason` is written where
+the compile or the result validation happened (the Worker's core, an owner's core, and for Explain
+the engine), with `requestId`, `statementIndex` or `null`, `code`, `reason`, `shape`,
+`schemaVersion`, `policyVersion`, `abiVersion`:
+
+- `reason` is `<stage>.<variant name>`: `bind.UnknownColumn` (does not exist), `policy.ForbiddenColumn`
+  (forbidden), `policy.MissingPolicy`, `policy.InvalidPredicate`, `policy.MissingSessionValue`,
+  `compile.ClientParameterMismatch`, `emit.*`, `verify.*`, `gateway.*`, `request.*`, `parameter.*`,
+  `result.*`, `auth.*`, `runtime.*`. Only variant names; the strings carried by
+  `InvariantViolation`, `MissingServerParameter` and the like are not logged.
+- `shape` is the binder's internal shape for `bind.Unsupported` (`CTE shadows protected resource`),
+  a fixed string embedded in the binary, else `null`.
+- `request_rejected` is written by the engine from the answer to the client and cannot carry the
+  reason: it is not in the answer, and an owner compile does not pass through the owner wire back
+  to the Worker. The two are joined by `requestId`. `sql_too_complex` and
+  `emitted_sql_reparse_failed` keep their own events and get no `rejection_reason`; Explain's
+  `compile_json` carries those two records in `log` as well, so they are logged there too.
+- A keyed unknown outcome writes the original reason too: the log happens where the compile failed,
+  before the answer is rewritten.
+- Explain's `compile_json` returns the record as a sibling `log` of `error`, a private field of the
+  ABI; the engine moves it to a non-public field of `EngineError` and writes it before
+  `request_rejected`. It is never part of an `OperationError` or a response.
+
+### Versions
+
+The ABI is 21 (the snapshot is `…:abi-21`) and the owner wire version is `"4"`. The consequences
+are those of section Consequences: an active interactive transaction is closed with 409
+`POLICYSQL_TRANSACTION_UNAVAILABLE` on its next command, and a keyed atomic retry replays.
+
+### Left to pull request D and later
+
+`limit` of `LIMIT_EXCEEDED`, `REQUEST_TOO_LARGE` and `TRANSACTION_LIMIT_EXCEEDED`, a finer `path` of
+`INVALID_REQUEST`, merging the resource distinction (proposal 7), `DATABASE_ERROR` (proposal 6),
+and the `reason` of a commit check (proposal 8). Positions of `FORBIDDEN_COLUMN` and the like need a
+lexical rescan and are not planned.
+

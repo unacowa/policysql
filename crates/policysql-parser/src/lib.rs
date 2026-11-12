@@ -39,6 +39,127 @@ pub struct SqliteFrontend {
     limits: BindingLimits,
 }
 
+/// A SQL construct the binder or the compiler rejects, named by its syntax.
+///
+/// These names are public: they appear in `error.detail.feature`. Internal shape names stay in
+/// [`BindError::Unsupported`] for the operator log and are never returned to a client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnsupportedFeature {
+    Explain,
+    Statement,
+    ConstantSelect,
+    Star,
+    JsonCollection,
+    Delete,
+    Update,
+    Insert,
+    InsertSelect,
+    CompoundSelect,
+    Values,
+    Distinct,
+    WindowClause,
+    GroupBy,
+    NullsOrdering,
+    Cte,
+    DerivedTable,
+    TableSource,
+    DatabaseQualifier,
+    IndexedBy,
+    Join,
+    SelfJoin,
+    WindowFunction,
+    Subquery,
+    Expression,
+    Cast,
+    Function,
+    Literal,
+    MissingFrom,
+    DuplicateAlias,
+    DuplicateWriteColumn,
+    InsertArity,
+    ProtectedStatement,
+}
+
+impl UnsupportedFeature {
+    /// Every feature, in declaration order.
+    pub const ALL: [Self; 33] = [
+        Self::Explain,
+        Self::Statement,
+        Self::ConstantSelect,
+        Self::Star,
+        Self::JsonCollection,
+        Self::Delete,
+        Self::Update,
+        Self::Insert,
+        Self::InsertSelect,
+        Self::CompoundSelect,
+        Self::Values,
+        Self::Distinct,
+        Self::WindowClause,
+        Self::GroupBy,
+        Self::NullsOrdering,
+        Self::Cte,
+        Self::DerivedTable,
+        Self::TableSource,
+        Self::DatabaseQualifier,
+        Self::IndexedBy,
+        Self::Join,
+        Self::SelfJoin,
+        Self::WindowFunction,
+        Self::Subquery,
+        Self::Expression,
+        Self::Cast,
+        Self::Function,
+        Self::Literal,
+        Self::MissingFrom,
+        Self::DuplicateAlias,
+        Self::DuplicateWriteColumn,
+        Self::InsertArity,
+        Self::ProtectedStatement,
+    ];
+
+    /// The public `error.detail.feature` value.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Explain => "explain",
+            Self::Statement => "statement",
+            Self::ConstantSelect => "constant_select",
+            Self::Star => "star",
+            Self::JsonCollection => "json_collection",
+            Self::Delete => "delete",
+            Self::Update => "update",
+            Self::Insert => "insert",
+            Self::InsertSelect => "insert_select",
+            Self::CompoundSelect => "compound_select",
+            Self::Values => "values",
+            Self::Distinct => "distinct",
+            Self::WindowClause => "window_clause",
+            Self::GroupBy => "group_by",
+            Self::NullsOrdering => "nulls_ordering",
+            Self::Cte => "cte",
+            Self::DerivedTable => "derived_table",
+            Self::TableSource => "table_source",
+            Self::DatabaseQualifier => "database_qualifier",
+            Self::IndexedBy => "indexed_by",
+            Self::Join => "join",
+            Self::SelfJoin => "self_join",
+            Self::WindowFunction => "window_function",
+            Self::Subquery => "subquery",
+            Self::Expression => "expression",
+            Self::Cast => "cast",
+            Self::Function => "function",
+            Self::Literal => "literal",
+            Self::MissingFrom => "missing_from",
+            Self::DuplicateAlias => "duplicate_alias",
+            Self::DuplicateWriteColumn => "duplicate_write_column",
+            Self::InsertArity => "insert_arity",
+            Self::ProtectedStatement => "protected_statement",
+        }
+    }
+}
+
+/// A half-open range of UTF-8 byte offsets into the statement text, `[start, end)`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceSpan {
     pub start: usize,
@@ -88,12 +209,15 @@ impl SqliteFrontend {
         }
         let parsed = Parser::new(sql.as_bytes())
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| BindError::InvalidSql)?;
+            .map_err(|error| BindError::InvalidSql(parse_error_span(&error, sql.len())))?;
         if parsed.len() != 1 {
             return Err(BindError::MultipleStatements);
         }
         let Cmd::Stmt(statement) = &parsed[0] else {
-            return Err(BindError::Unsupported("EXPLAIN"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Explain,
+                "EXPLAIN",
+            ));
         };
         let (statement, trace) = match statement {
             Stmt::Select(select) => {
@@ -143,7 +267,12 @@ impl SqliteFrontend {
                 catalog,
             )?,
             Stmt::Update(update) => self.bind_update(update, catalog)?,
-            _ => return Err(BindError::Unsupported("statement")),
+            _ => {
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::Statement,
+                    "statement",
+                ));
+            }
         };
         let start = sql
             .find(|character: char| !character.is_whitespace())
@@ -163,7 +292,10 @@ impl SqliteFrontend {
             || !select.order_by.is_empty()
             || select.limit.is_some()
         {
-            return Err(BindError::Unsupported("constant SELECT option"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::ConstantSelect,
+                "constant SELECT option",
+            ));
         }
         let OneSelect::Select {
             distinctness,
@@ -174,7 +306,10 @@ impl SqliteFrontend {
             window_clause,
         } = &select.body.select
         else {
-            return Err(BindError::Unsupported("constant SELECT"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::ConstantSelect,
+                "constant SELECT",
+            ));
         };
         if distinctness.is_some()
             || where_clause.is_some()
@@ -183,16 +318,25 @@ impl SqliteFrontend {
             || columns.is_empty()
             || columns.len() > self.limits.max_projections
         {
-            return Err(BindError::Unsupported("constant SELECT option"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::ConstantSelect,
+                "constant SELECT option",
+            ));
         }
         let projections = columns
             .iter()
             .map(|column| {
                 let ResultColumn::Expr(expression, alias) = column else {
-                    return Err(BindError::Unsupported("constant star"));
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::Star,
+                        "constant star",
+                    ));
                 };
                 let Expr::Literal(Literal::Numeric(raw)) = expression.as_ref() else {
-                    return Err(BindError::Unsupported("constant expression"));
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::ConstantSelect,
+                        "constant expression",
+                    ));
                 };
                 let (expression, _) = bind_literal(&Literal::Numeric(raw.clone()), None)?;
                 let output_name = explicit_alias(alias.as_ref()).unwrap_or(raw);
@@ -218,7 +362,10 @@ impl SqliteFrontend {
             || !select.order_by.is_empty()
             || select.limit.is_some()
         {
-            return Err(BindError::Unsupported("JSON collection option"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON collection option",
+            ));
         }
         let OneSelect::Select {
             distinctness,
@@ -229,7 +376,10 @@ impl SqliteFrontend {
             window_clause,
         } = &select.body.select
         else {
-            return Err(BindError::Unsupported("JSON collection"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON collection",
+            ));
         };
         if distinctness.is_some()
             || group_by.is_some()
@@ -237,7 +387,10 @@ impl SqliteFrontend {
             || columns.len() != 1
             || from.joins.len() != 1
         {
-            return Err(BindError::Unsupported("JSON collection shape"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON collection shape",
+            ));
         }
         let root = bind_source(&from.select, catalog)?;
         let resource = root.resource.id;
@@ -248,21 +401,37 @@ impl SqliteFrontend {
             JoinOperator::Comma | JoinOperator::TypedJoin(None)
         ) || join.constraint.is_some()
         {
-            return Err(BindError::Unsupported("JSON table join"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON table join",
+            ));
         }
         let SelectTable::TableCall(name, arguments, table_alias) = join.table.as_ref() else {
-            return Err(BindError::Unsupported("JSON table source"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON table source",
+            ));
         };
         if name.db_name.is_some() || arguments.len() != 2 {
-            return Err(BindError::Unsupported("JSON table arguments"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON table arguments",
+            ));
         }
         let recursive = match canonical(name.name.as_str()).as_str() {
             "json_each" => false,
             "json_tree" => true,
-            _ => return Err(BindError::Unsupported("table function")),
+            _ => {
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::JsonCollection,
+                    "table function",
+                ));
+            }
         };
-        let table_alias = explicit_alias(table_alias.as_ref())
-            .ok_or(BindError::Unsupported("JSON table alias"))?;
+        let table_alias = explicit_alias(table_alias.as_ref()).ok_or(BindError::Unsupported(
+            UnsupportedFeature::JsonCollection,
+            "JSON table alias",
+        ))?;
         let mut state = BindState {
             scopes: vec![root],
             trace: BindTrace::default(),
@@ -276,7 +445,10 @@ impl SqliteFrontend {
             0,
         )?;
         let BoundExpr::Column(document) = document else {
-            return Err(BindError::Unsupported("JSON document provenance"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON document provenance",
+            ));
         };
         if document_type != LogicalType::Json {
             return Err(BindError::IncompatibleTypes);
@@ -291,7 +463,10 @@ impl SqliteFrontend {
             return Err(BindError::IncompatibleTypes);
         }
         let ResultColumn::Expr(expression, output_alias) = &columns[0] else {
-            return Err(BindError::Unsupported("JSON collection projection"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON collection projection",
+            ));
         };
         let Expr::FunctionCall {
             name,
@@ -302,7 +477,10 @@ impl SqliteFrontend {
             filter_over,
         } = expression.as_ref()
         else {
-            return Err(BindError::Unsupported("JSON collection aggregate"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON collection aggregate",
+            ));
         };
         if !name.as_str().eq_ignore_ascii_case("json_group_array")
             || args.len() != 1
@@ -317,7 +495,10 @@ impl SqliteFrontend {
                         && column.as_str().eq_ignore_ascii_case("value")
             )
         {
-            return Err(BindError::Unsupported("JSON collection aggregate"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON collection aggregate",
+            ));
         }
         let output_name = explicit_alias(output_alias.as_ref())
             .ok_or(BindError::InvalidResultName)
@@ -358,7 +539,10 @@ impl SqliteFrontend {
             || !order_by.is_empty()
             || limit.is_some()
         {
-            return Err(BindError::Unsupported("DELETE option"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Delete,
+                "DELETE option",
+            ));
         }
         let resource = catalog
             .resource(table.name.as_str())
@@ -398,7 +582,10 @@ impl SqliteFrontend {
             || update.limit.is_some()
             || update.sets.is_empty()
         {
-            return Err(BindError::Unsupported("UPDATE option"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Update,
+                "UPDATE option",
+            ));
         }
         let resource = catalog
             .resource(update.tbl_name.name.as_str())
@@ -417,7 +604,10 @@ impl SqliteFrontend {
         let mut assignments = Vec::with_capacity(update.sets.len());
         for set in &update.sets {
             if set.col_names.len() != 1 {
-                return Err(BindError::Unsupported("row-value UPDATE"));
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::Update,
+                    "row-value UPDATE",
+                ));
             }
             let column = resource
                 .column(set.col_names[0].as_str())
@@ -438,7 +628,10 @@ impl SqliteFrontend {
                 &value,
                 BoundExpr::ClientParameter { .. } | BoundExpr::Literal(_)
             ) {
-                return Err(BindError::Unsupported("UPDATE assignment expression"));
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::Update,
+                    "UPDATE assignment expression",
+                ));
             }
             assignments.push(BoundAssignment {
                 column: bound_column(column, ColumnUsage::Write),
@@ -463,6 +656,7 @@ impl SqliteFrontend {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)]
     fn bind_insert(
         &self,
         with: Option<&turso_parser::ast::With>,
@@ -474,10 +668,16 @@ impl SqliteFrontend {
         catalog: &Catalog,
     ) -> Result<(BoundStatement, BindTrace), BindError> {
         if with.is_some() || or_conflict.is_some() || table.db_name.is_some() {
-            return Err(BindError::Unsupported("INSERT option"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Insert,
+                "INSERT option",
+            ));
         }
         if columns.is_empty() {
-            return Err(BindError::Unsupported("INSERT columns"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Insert,
+                "INSERT columns",
+            ));
         }
         let resource = catalog
             .resource(table.name.as_str())
@@ -494,20 +694,32 @@ impl SqliteFrontend {
             descriptors.push(column.clone());
         }
         let InsertBody::Select(select, None) = body else {
-            return Err(BindError::Unsupported("INSERT body"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Insert,
+                "INSERT body",
+            ));
         };
         if select.with.is_some()
             || !select.body.compounds.is_empty()
             || !select.order_by.is_empty()
             || select.limit.is_some()
         {
-            return Err(BindError::Unsupported("INSERT SELECT"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::InsertSelect,
+                "INSERT SELECT",
+            ));
         }
         let OneSelect::Values(values) = &select.body.select else {
-            return Err(BindError::Unsupported("INSERT SELECT"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::InsertSelect,
+                "INSERT SELECT",
+            ));
         };
         if values.is_empty() {
-            return Err(BindError::Unsupported("empty VALUES"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Insert,
+                "empty VALUES",
+            ));
         }
         let root = bind_source(&SelectTable::Table(table.clone(), None, None), catalog)?;
         let mut state = BindState {
@@ -536,7 +748,10 @@ impl SqliteFrontend {
                     &value,
                     BoundExpr::ClientParameter { .. } | BoundExpr::Literal(_)
                 ) {
-                    return Err(BindError::Unsupported("INSERT value expression"));
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::Insert,
+                        "INSERT value expression",
+                    ));
                 }
                 row.push(BoundAssignment {
                     column: bound_column(column, ColumnUsage::Write),
@@ -563,7 +778,10 @@ impl SqliteFrontend {
         catalog: &Catalog,
     ) -> Result<(BoundSelect, BindTrace), BindError> {
         if !select.body.compounds.is_empty() {
-            return Err(BindError::Unsupported("compound SELECT"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::CompoundSelect,
+                "compound SELECT",
+            ));
         }
         let OneSelect::Select {
             distinctness,
@@ -574,13 +792,19 @@ impl SqliteFrontend {
             window_clause,
         } = &select.body.select
         else {
-            return Err(BindError::Unsupported("VALUES"));
+            return Err(BindError::Unsupported(UnsupportedFeature::Values, "VALUES"));
         };
         if distinctness.is_some() {
-            return Err(BindError::Unsupported("DISTINCT or ALL"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Distinct,
+                "DISTINCT or ALL",
+            ));
         }
         if !window_clause.is_empty() {
-            return Err(BindError::Unsupported("WINDOW"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::WindowClause,
+                "WINDOW",
+            ));
         }
         let from = from.as_ref().ok_or(BindError::MissingFrom)?;
         if from.joins.len() > self.limits.max_joins {
@@ -620,7 +844,10 @@ impl SqliteFrontend {
         };
         let (group_by, having) = if let Some(group) = group_by {
             if group.exprs.is_empty() {
-                return Err(BindError::Unsupported("empty GROUP BY"));
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::GroupBy,
+                    "empty GROUP BY",
+                ));
             }
             let columns = group
                 .exprs
@@ -645,7 +872,10 @@ impl SqliteFrontend {
             .iter()
             .map(|order| {
                 if order.nulls.is_some() {
-                    return Err(BindError::Unsupported("NULLS ordering"));
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::NullsOrdering,
+                        "NULLS ordering",
+                    ));
                 }
                 let expression = match state.resolve_direct_column(&order.expr) {
                     Ok(column) => BoundExpr::Column(bound_column(&column, ColumnUsage::Order)),
@@ -721,18 +951,30 @@ impl SqliteFrontend {
                 }) =>
             {
                 if name.db_name.is_some() || indexed.is_some() {
-                    return Err(BindError::Unsupported("CTE qualifier"));
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::Cte,
+                        "CTE qualifier",
+                    ));
                 }
-                let with = select.with.as_ref().ok_or(BindError::Unsupported("CTE"))?;
+                let with = select
+                    .with
+                    .as_ref()
+                    .ok_or(BindError::Unsupported(UnsupportedFeature::Cte, "CTE"))?;
                 let cte = &with.ctes[0];
                 if catalog.resource(cte.tbl_name.as_str()).is_some() {
-                    return Err(BindError::Unsupported("CTE shadows protected resource"));
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::Cte,
+                        "CTE shadows protected resource",
+                    ));
                 }
                 if with.recursive
                     || !cte.columns.is_empty()
                     || !matches!(cte.materialized, turso_parser::ast::Materialized::Any)
                 {
-                    return Err(BindError::Unsupported("CTE options"));
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::Cte,
+                        "CTE options",
+                    ));
                 }
                 let qualifier = explicit_alias(alias.as_ref()).unwrap_or(cte.tbl_name.as_str());
                 self.bind_derived_source(&cte.select, qualifier, catalog)
@@ -743,11 +985,16 @@ impl SqliteFrontend {
                 BindTrace::default(),
             )),
             SelectTable::Select(inner, alias) if select.with.is_none() => {
-                let alias = explicit_alias(alias.as_ref())
-                    .ok_or(BindError::Unsupported("derived table without alias"))?;
+                let alias = explicit_alias(alias.as_ref()).ok_or(BindError::Unsupported(
+                    UnsupportedFeature::DerivedTable,
+                    "derived table without alias",
+                ))?;
                 self.bind_derived_source(inner, alias, catalog)
             }
-            _ => Err(BindError::Unsupported("table source")),
+            _ => Err(BindError::Unsupported(
+                UnsupportedFeature::TableSource,
+                "table source",
+            )),
         }
     }
 
@@ -765,7 +1012,10 @@ impl SqliteFrontend {
             || !inner.group_by.is_empty()
             || inner.having.is_some()
         {
-            return Err(BindError::Unsupported("non-transparent derived table"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::DerivedTable,
+                "non-transparent derived table",
+            ));
         }
         let resource = catalog
             .resource_by_id(inner.resource)
@@ -773,7 +1023,10 @@ impl SqliteFrontend {
         let mut columns = BTreeMap::new();
         for projection in inner.projections {
             let BoundExpr::Column(column) = projection.expression else {
-                return Err(BindError::Unsupported("derived expression"));
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::DerivedTable,
+                    "derived expression",
+                ));
             };
             let descriptor = resource
                 .column_by_id(column.id)
@@ -804,13 +1057,22 @@ fn bind_source<'a>(
     catalog: &'a Catalog,
 ) -> Result<SourceScope<'a>, BindError> {
     let SelectTable::Table(name, alias, indexed) = table else {
-        return Err(BindError::Unsupported("table source"));
+        return Err(BindError::Unsupported(
+            UnsupportedFeature::TableSource,
+            "table source",
+        ));
     };
     if name.db_name.is_some() {
-        return Err(BindError::Unsupported("database qualifier"));
+        return Err(BindError::Unsupported(
+            UnsupportedFeature::DatabaseQualifier,
+            "database qualifier",
+        ));
     }
     if indexed.is_some() {
-        return Err(BindError::Unsupported("INDEXED BY"));
+        return Err(BindError::Unsupported(
+            UnsupportedFeature::IndexedBy,
+            "INDEXED BY",
+        ));
     }
     let resource = catalog
         .resource(name.name.as_str())
@@ -857,7 +1119,12 @@ fn bind_joins<'a>(
             {
                 JoinKind::Left
             }
-            _ => return Err(BindError::Unsupported("JOIN type")),
+            _ => {
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::Join,
+                    "JOIN type",
+                ));
+            }
         };
         let joined = bind_source(&join.table, catalog)?;
         if state
@@ -865,7 +1132,10 @@ fn bind_joins<'a>(
             .iter()
             .any(|scope| scope.resource.id == joined.resource.id)
         {
-            return Err(BindError::Unsupported("self JOIN"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::SelfJoin,
+                "self JOIN",
+            ));
         }
         if state
             .scopes
@@ -877,12 +1147,15 @@ fn bind_joins<'a>(
         let joined_resource = joined.resource.id;
         let joined_alias = joined.alias.clone();
         state.scopes.push(joined);
-        let JoinConstraint::On(on) = join
-            .constraint
-            .as_ref()
-            .ok_or(BindError::Unsupported("JOIN without ON"))?
+        let JoinConstraint::On(on) = join.constraint.as_ref().ok_or(BindError::Unsupported(
+            UnsupportedFeature::Join,
+            "JOIN without ON",
+        ))?
         else {
-            return Err(BindError::Unsupported("JOIN constraint"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Join,
+                "JOIN constraint",
+            ));
         };
         output.push(BoundJoin {
             resource: joined_resource,
@@ -909,7 +1182,10 @@ impl BindState<'_> {
         let mut output = Vec::with_capacity(returning.len());
         for result in returning {
             let ResultColumn::Expr(expression, alias) = result else {
-                return Err(BindError::Unsupported("RETURNING star"));
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::Star,
+                    "RETURNING star",
+                ));
             };
             let column = self.resolve_direct_column(expression)?;
             let output_name = explicit_alias(alias.as_ref())
@@ -926,7 +1202,10 @@ impl BindState<'_> {
 
     fn bind_projection(&mut self, result: &ResultColumn) -> Result<BoundProjection, BindError> {
         let ResultColumn::Expr(expression, alias) = result else {
-            return Err(BindError::Unsupported("star projection"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Star,
+                "star projection",
+            ));
         };
         let (expression, default_name) = match expression.as_ref() {
             Expr::FunctionCallStar { name, filter_over }
@@ -1006,13 +1285,22 @@ impl BindState<'_> {
             || !within_group.is_empty()
             || tail.filter_clause.is_some()
         {
-            return Err(BindError::Unsupported("ROW_NUMBER option"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::WindowFunction,
+                "ROW_NUMBER option",
+            ));
         }
         let Some(Over::Window(window)) = &tail.over_clause else {
-            return Err(BindError::Unsupported("ROW_NUMBER without inline window"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::WindowFunction,
+                "ROW_NUMBER without inline window",
+            ));
         };
         if window.base.is_some() || window.frame_clause.is_some() || window.order_by.is_empty() {
-            return Err(BindError::Unsupported("window shape"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::WindowFunction,
+                "window shape",
+            ));
         }
         let partition_by = window
             .partition_by
@@ -1027,7 +1315,10 @@ impl BindState<'_> {
             .iter()
             .map(|order| {
                 if order.nulls.is_some() {
-                    return Err(BindError::Unsupported("window NULLS ordering"));
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::NullsOrdering,
+                        "window NULLS ordering",
+                    ));
                 }
                 let column = self.resolve_direct_column(&order.expr)?;
                 Ok(BoundOrder {
@@ -1041,10 +1332,16 @@ impl BindState<'_> {
             .collect::<Result<Vec<_>, BindError>>()?;
         let resource = order_by
             .first()
-            .ok_or(BindError::Unsupported("window without order"))?
+            .ok_or(BindError::Unsupported(
+                UnsupportedFeature::WindowFunction,
+                "window without order",
+            ))?
             .expression
             .direct_column()
-            .ok_or(BindError::Unsupported("window order expression"))?
+            .ok_or(BindError::Unsupported(
+                UnsupportedFeature::WindowFunction,
+                "window order expression",
+            ))?
             .id
             .resource();
         if partition_by
@@ -1057,7 +1354,10 @@ impl BindState<'_> {
                     .is_none_or(|column| column.id.resource() != resource)
             })
         {
-            return Err(BindError::Unsupported("multi-resource window"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::WindowFunction,
+                "multi-resource window",
+            ));
         }
         Ok(BoundExpr::RowNumber {
             resource,
@@ -1157,7 +1457,10 @@ impl BindState<'_> {
                 self.bind_boolean(&items[0], usage, depth + 1)
             }
             Expr::Exists(select) => self.bind_exists(select, depth + 1),
-            _ => Err(BindError::Unsupported("boolean expression")),
+            _ => Err(BindError::Unsupported(
+                UnsupportedFeature::Expression,
+                "boolean expression",
+            )),
         }
     }
 
@@ -1193,6 +1496,7 @@ impl BindState<'_> {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn bind_exists(&mut self, select: &Select, depth: usize) -> Result<BoundExpr, BindError> {
         self.check_depth(depth)?;
         if select.with.is_some()
@@ -1200,7 +1504,10 @@ impl BindState<'_> {
             || !select.order_by.is_empty()
             || select.limit.is_some()
         {
-            return Err(BindError::Unsupported("subquery option"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Subquery,
+                "subquery option",
+            ));
         }
         let OneSelect::Select {
             distinctness,
@@ -1211,14 +1518,23 @@ impl BindState<'_> {
             window_clause,
         } = &select.body.select
         else {
-            return Err(BindError::Unsupported("subquery VALUES"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Values,
+                "subquery VALUES",
+            ));
         };
         if distinctness.is_some() || group_by.is_some() || !window_clause.is_empty() {
-            return Err(BindError::Unsupported("subquery shape"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Subquery,
+                "subquery shape",
+            ));
         }
         let from = from.as_ref().ok_or(BindError::MissingFrom)?;
         if !from.joins.is_empty() {
-            return Err(BindError::Unsupported("subquery JOIN"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Subquery,
+                "subquery JOIN",
+            ));
         }
         let source = bind_source(&from.select, self.catalog)?;
         if self
@@ -1226,7 +1542,10 @@ impl BindState<'_> {
             .iter()
             .any(|scope| scope.resource.id == source.resource.id)
         {
-            return Err(BindError::Unsupported("same-resource correlation"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Subquery,
+                "same-resource correlation",
+            ));
         }
         let resource = source.resource.id;
         let alias = source.alias.clone();
@@ -1241,7 +1560,10 @@ impl BindState<'_> {
         for column in columns {
             let constant_exists_projection = if columns.len() == 1 {
                 let ResultColumn::Expr(expression, alias) = column else {
-                    return Err(BindError::Unsupported("subquery projection"));
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::Subquery,
+                        "subquery projection",
+                    ));
                 };
                 match expression.as_ref() {
                     Expr::Literal(Literal::Numeric(raw))
@@ -1269,7 +1591,10 @@ impl BindState<'_> {
             if projection.expression.direct_column().is_none()
                 && projection.expression != BoundExpr::Literal(LogicalValue::Int64(1))
             {
-                return Err(BindError::Unsupported("subquery projection"));
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::Subquery,
+                    "subquery projection",
+                ));
             }
             projections.push(projection);
         }
@@ -1316,6 +1641,7 @@ impl BindState<'_> {
         Ok((left, right))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn bind_scalar(
         &mut self,
         expression: &Expr,
@@ -1420,7 +1746,10 @@ impl BindState<'_> {
                 expected,
                 depth,
             ),
-            _ => Err(BindError::Unsupported("scalar expression")),
+            _ => Err(BindError::Unsupported(
+                UnsupportedFeature::Expression,
+                "scalar expression",
+            )),
         }
     }
 
@@ -1452,14 +1781,20 @@ impl BindState<'_> {
         depth: usize,
     ) -> Result<(BoundExpr, LogicalType), BindError> {
         let Some(type_name) = type_name else {
-            return Err(BindError::Unsupported("CAST type"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Cast,
+                "CAST type",
+            ));
         };
         if type_name.array_dimensions != 0
             || type_name.size.is_some()
             || !type_name.name.eq_ignore_ascii_case("text")
             || expected.is_some_and(|expected| expected != LogicalType::String)
         {
-            return Err(BindError::Unsupported("CAST type"));
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Cast,
+                "CAST type",
+            ));
         }
         let (inner, _) = self.bind_scalar(expression, usage, None, depth + 1)?;
         Ok((BoundExpr::CastText(Box::new(inner)), LogicalType::String))
@@ -1522,7 +1857,12 @@ impl BindState<'_> {
                 vec![LogicalType::Json, LogicalType::String],
                 LogicalType::Json,
             ),
-            _ => return Err(BindError::Unsupported("scalar function")),
+            _ => {
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::Function,
+                    "scalar function",
+                ));
+            }
         };
         if arguments.len() != signature.len()
             || expected.is_some_and(|expected| expected != return_type)
@@ -1567,7 +1907,12 @@ impl BindState<'_> {
         let (qualifier, name) = match expression {
             Expr::Id(name) | Expr::Name(name) => (None, name.as_str()),
             Expr::Qualified(source, name) => (Some(source.as_str()), name.as_str()),
-            _ => return Err(BindError::Unsupported("derived projection")),
+            _ => {
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::Expression,
+                    "derived projection",
+                ));
+            }
         };
         if matches!(canonical(name).as_str(), "rowid" | "_rowid_" | "oid") {
             return Err(BindError::ImplicitRowId);
@@ -1651,7 +1996,12 @@ fn bind_literal(
         Literal::True => (LogicalValue::Boolean(true), LogicalType::Boolean),
         Literal::False => (LogicalValue::Boolean(false), LogicalType::Boolean),
         Literal::Null => return Err(BindError::NullComparison),
-        _ => return Err(BindError::Unsupported("literal")),
+        _ => {
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::Literal,
+                "literal",
+            ));
+        }
     };
     if expected.is_some_and(|expected| expected != logical_type) {
         return Err(BindError::IncompatibleTypes);
@@ -1706,9 +2056,11 @@ fn has_json_table_call(select: &Select) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BindError {
     Empty,
-    InvalidSql,
+    /// The statement does not parse; the span is the offending token when the parser reports one.
+    InvalidSql(Option<SourceSpan>),
     MultipleStatements,
-    Unsupported(&'static str),
+    /// The first field is the public feature; the second is the internal shape, logged only.
+    Unsupported(UnsupportedFeature, &'static str),
     MissingFrom,
     UnknownResource,
     UnknownColumn,
@@ -1734,15 +2086,73 @@ pub enum BindError {
     InsertArity,
 }
 
+impl BindError {
+    /// The variant name, logged as `bind.<name>`; never returned to a client.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Empty => "Empty",
+            Self::InvalidSql(_) => "InvalidSql",
+            Self::MultipleStatements => "MultipleStatements",
+            Self::Unsupported(..) => "Unsupported",
+            Self::MissingFrom => "MissingFrom",
+            Self::UnknownResource => "UnknownResource",
+            Self::UnknownColumn => "UnknownColumn",
+            Self::AmbiguousColumn => "AmbiguousColumn",
+            Self::DuplicateAlias => "DuplicateAlias",
+            Self::ImplicitRowId => "ImplicitRowId",
+            Self::ProjectionLimit => "ProjectionLimit",
+            Self::JoinLimit => "JoinLimit",
+            Self::ParameterLimit => "ParameterLimit",
+            Self::ExpressionDepth => "ExpressionDepth",
+            Self::PositionalParameter => "PositionalParameter",
+            Self::UnsupportedParameterPrefix => "UnsupportedParameterPrefix",
+            Self::InvalidParameterName => "InvalidParameterName",
+            Self::ReservedParameterNamespace => "ReservedParameterNamespace",
+            Self::UnprovableParameterType => "UnprovableParameterType",
+            Self::IncompatibleTypes => "IncompatibleTypes",
+            Self::InvalidLiteral => "InvalidLiteral",
+            Self::NullComparison => "NullComparison",
+            Self::InvalidLimit => "InvalidLimit",
+            Self::InvalidResultName => "InvalidResultName",
+            Self::DuplicateResultName => "DuplicateResultName",
+            Self::DuplicateWriteColumn => "DuplicateWriteColumn",
+            Self::InsertArity => "InsertArity",
+        }
+    }
+}
+
+fn parse_error_span(error: &turso_parser::error::Error, length: usize) -> Option<SourceSpan> {
+    use turso_parser::error::Error;
+    let (start, token_length) = match error {
+        Error::UnrecognizedToken { span, .. }
+        | Error::UnterminatedLiteral { span, .. }
+        | Error::UnterminatedBracket { span, .. }
+        | Error::UnterminatedBlockComment { span, .. }
+        | Error::BadVariableName { span, .. }
+        | Error::BadNumber { span, .. }
+        | Error::BadFractionalPart { span, .. }
+        | Error::BadExponentPart { span, .. }
+        | Error::ExpectedEqualsSign { span, .. }
+        | Error::MalformedHexInteger { span, .. } => (span.offset(), span.len()),
+        Error::ParseUnexpectedToken { parsed_offset, .. } => {
+            (parsed_offset.offset(), parsed_offset.len())
+        }
+        _ => return None,
+    };
+    let end = start.checked_add(token_length)?;
+    (end <= length).then_some(SourceSpan { start, end })
+}
+
 impl fmt::Display for BindError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => formatter.write_str("SQL statement is empty"),
-            Self::InvalidSql => formatter.write_str("SQL statement is invalid"),
+            Self::InvalidSql(_) => formatter.write_str("SQL statement is invalid"),
             Self::MultipleStatements => {
                 formatter.write_str("exactly one SQL statement is required")
             }
-            Self::Unsupported(shape) => write!(formatter, "unsupported SQL shape: {shape}"),
+            Self::Unsupported(_, shape) => write!(formatter, "unsupported SQL shape: {shape}"),
             Self::MissingFrom => formatter.write_str("SELECT requires one base resource"),
             Self::UnknownResource => {
                 formatter.write_str("statement references an unavailable resource")
@@ -1786,7 +2196,7 @@ impl std::error::Error for BindError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{BindError, SqliteFrontend};
+    use super::{BindError, SourceSpan, SqliteFrontend, UnsupportedFeature};
     use policysql_catalog::{Catalog, ResourceDescriptor};
     use policysql_core::{
         ColumnName, LogicalType, ResourceId, ResourceName, SnapshotId, ValueDescriptor,
@@ -1958,12 +2368,12 @@ mod tests {
         for (sql, expected) in [
             (
                 "SELECT * FROM projects",
-                BindError::Unsupported("star projection"),
+                BindError::Unsupported(UnsupportedFeature::Star, "star projection"),
             ),
             ("SELECT rowid FROM projects", BindError::ImplicitRowId),
             (
                 "SELECT id FROM projects JOIN projects p ON p.id = projects.id",
-                BindError::Unsupported("self JOIN"),
+                BindError::Unsupported(UnsupportedFeature::SelfJoin, "self JOIN"),
             ),
         ] {
             assert_eq!(
@@ -2490,15 +2900,15 @@ mod tests {
             ),
             (
                 "SELECT id FROM projects WHERE id = 'seed",
-                BindError::InvalidSql,
+                BindError::InvalidSql(Some(SourceSpan { start: 35, end: 40 })),
             ),
             (
                 "SELECT id FROM projects WHERE id = 'seed''",
-                BindError::InvalidSql,
+                BindError::InvalidSql(Some(SourceSpan { start: 35, end: 42 })),
             ),
             (
                 "SELECT id FROM projects WHERE id = X'00'",
-                BindError::Unsupported("literal"),
+                BindError::Unsupported(UnsupportedFeature::Literal, "literal"),
             ),
             (
                 "UPDATE projects SET name = \"renamed\" WHERE id = :id",
@@ -2506,10 +2916,64 @@ mod tests {
             ),
             (
                 "INSERT INTO projects (id) VALUES (X'00')",
-                BindError::Unsupported("literal"),
+                BindError::Unsupported(UnsupportedFeature::Literal, "literal"),
             ),
         ] {
             assert_eq!(frontend.bind(sql, &catalog()), Err(expected), "{sql}");
         }
+    }
+
+    #[test]
+    fn parse_failures_carry_a_utf8_byte_span_only_when_the_parser_has_one() {
+        let frontend = SqliteFrontend::default();
+        let span = |sql: &str| match frontend.bind(sql, &catalog()) {
+            Err(BindError::InvalidSql(span)) => span,
+            other => unreachable!("expected an invalid SQL error for {sql:?}: {other:?}"),
+        };
+        let at = |start, end| Some(SourceSpan { start, end });
+        assert_eq!(span("SELECT"), None);
+        assert_eq!(span("SELECT id FROM t WHERE x = 'abc"), at(27, 31));
+        assert_eq!(span("SELECT 1; SELEC 2"), at(10, 15));
+        // Two three-byte characters before the bad token: the offset counts bytes, not UTF-16 units.
+        assert_eq!(
+            span("SELECT \u{3042} \u{3044} FROM t WHERE @@ = 1"),
+            at(28, 29)
+        );
+        assert_eq!(span("SELECT x\0y"), at(8, 10));
+        assert_eq!(span("SELECT /* x"), None);
+        assert_eq!(span("SELECT [abc"), None);
+        for sql in [
+            "SELECT id FROM t WHERE x = 'abc",
+            "SELECT 1; SELEC 2",
+            "SELECT \u{3042} \u{3044} FROM t WHERE @@ = 1",
+        ] {
+            let Some(found) = span(sql) else {
+                unreachable!("{sql}")
+            };
+            assert!(found.start <= found.end && found.end <= sql.len(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn unsupported_feature_names_are_unique_snake_case() {
+        let names = UnsupportedFeature::ALL.map(UnsupportedFeature::name);
+        let unique: std::collections::BTreeSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), 33);
+        assert!(names.iter().all(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        }));
+    }
+
+    #[test]
+    fn bind_error_names_are_variant_names() {
+        assert_eq!(BindError::InvalidSql(None).name(), "InvalidSql");
+        assert_eq!(
+            BindError::Unsupported(UnsupportedFeature::Star, "star projection").name(),
+            "Unsupported"
+        );
+        assert_eq!(BindError::UnknownColumn.name(), "UnknownColumn");
     }
 }
