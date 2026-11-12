@@ -1,5 +1,5 @@
 import { Kysely, CamelCasePlugin, type InsertResult, type UpdateResult, type DeleteResult } from 'kysely'
-import { PolicySqlClient, createHttpTransport, type PolicySqlTransport, type HttpTransportOptions, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlConstraintKind, type PolicySqlUnsupportedFeature, type PolicySqlParameterReason, type PolicySqlCommitCheckReason, type PolicySqlComplexity, type PolicySqlExpectation, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
+import { PolicySqlClient, createHttpTransport, type PolicySqlTransport, type HttpTransportOptions, PolicySqlError, PolicySqlOutcomeUnknownError, type PolicySqlConstraintKind, type PolicySqlUnsupportedFeature, type PolicySqlParameterReason, type PolicySqlCommitCheckReason, type PolicySqlComplexity, type PolicySqlExpectation, type PolicySqlLimit, type PolicySqlClientOptions, type PolicyExecuteResult } from '@unacowa/policysql/client'
 import { PolicySqlDialect, policyOptions } from '@unacowa/policysql/kysely'
 
 const minimal: PolicySqlClientOptions = { transport: createHttpTransport({ endpoint: 'https://gateway.test' }) }
@@ -84,6 +84,11 @@ new PolicySqlError('Invalid', 'POLICYSQL_INVALID_PARAMETER', 400, { detail: { re
 const rejected = new PolicySqlError('Rejected', 'POLICYSQL_COMMIT_CHECK_REJECTED', 409, { detail: { reason: 'denied' } })
 const checkReason: PolicySqlParameterReason | PolicySqlCommitCheckReason | undefined = rejected.detail?.reason
 void checkReason
+const tooMany = new PolicySqlError('Too many', 'POLICYSQL_LIMIT_EXCEEDED', 413, { detail: { limit: 'maxRows' } })
+const limit: PolicySqlLimit | undefined = tooMany.detail?.limit
+void limit
+// @ts-expect-error a limit is the name of a Capabilities key
+new PolicySqlError('Too many', 'POLICYSQL_LIMIT_EXCEEDED', 413, { detail: { limit: 'timeoutMs' } })
 // @ts-expect-error a commit check reason is one of the fixed values
 new PolicySqlError('Rejected', 'POLICYSQL_COMMIT_CHECK_REJECTED', 409, { detail: { reason: 'missing' } })
 const complex = new PolicySqlError('Complex', 'POLICYSQL_SQL_TOO_COMPLEX', 400, { detail: { complexity: 'height' } })

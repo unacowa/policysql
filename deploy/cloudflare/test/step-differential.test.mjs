@@ -25,7 +25,7 @@ import { initSync, PolicySqlRuntime } from "../pkg/policysql_wasm.js";
 import { TransactionOwnerCore } from "../src/transaction-owner.ts";
 import { callCommitCheckHook } from "../src/adapters/commit-check-hook.ts";
 import { runtimeLimitsJson } from "../src/limits.ts";
-import { asRecorded, checkedReason, observedCheckReasons, referenceTranscript } from "./helpers/reference-transcript.mjs";
+import { asRecorded, checkedDetail, observedDetails, referenceTranscript } from "./helpers/reference-transcript.mjs";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 
@@ -334,7 +334,7 @@ const normalizedRecord = (side, value) => {
 };
 const normalizedReply = (reply) => {
   if (reply.ok) return { ok: true, value: reply.value };
-  checkedReason(reply.error);
+  checkedDetail(reply.error);
   return { ok: false, code: reply.error.code, message: reply.error.message, path: reply.error.path };
 };
 
@@ -1300,8 +1300,18 @@ test("generated commit-check sequences agree", async (t) => {
   assert.ok(stats.validatorCalls >= 25 && stats.callbacks >= 25 && stats.committed >= 10 && stats.rejected >= 10, JSON.stringify(stats));
 });
 
-// The step side's commit-check rejections all carried one of the fixed reasons (`checkedReason`),
-// which the comparison drops. The set pinned here is what the scenarios above reach.
-test("the commit-check reasons the step side gave are the ones the scenarios reach (#145 pull request E)", () => {
-  assert.deepEqual([...observedCheckReasons].sort(), ["callback", "denied", "limit", "unavailable", "unconfigured"]);
+// The step side's commit-check rejections and limit refusals all carried one of the fixed values
+// of their code (`checkedDetail`), which the comparison drops. The set pinned here is what the
+// scenarios above reach.
+test("the details the step side gave are the ones the scenarios reach (#145 pull requests E and F)", () => {
+  assert.deepEqual([...observedDetails].sort(), [
+    "POLICYSQL_COMMIT_CHECK_REJECTED callback",
+    "POLICYSQL_COMMIT_CHECK_REJECTED denied",
+    "POLICYSQL_COMMIT_CHECK_REJECTED limit",
+    "POLICYSQL_COMMIT_CHECK_REJECTED unavailable",
+    "POLICYSQL_COMMIT_CHECK_REJECTED unconfigured",
+    "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED maxCallbackBytesPerCheck",
+    "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED maxCallbackRowsPerCheck",
+    "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED maxStatements",
+  ]);
 });

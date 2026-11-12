@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  COMMIT_CHECK_REASONS, COMPLEXITY_DETAILS, EXPECTATIONS, MAX_SPAN_OFFSET, PARAMETER_REASONS, UNSUPPORTED_FEATURES, checkedErrorDetail,
+  COMMIT_CHECK_REASONS, COMPLEXITY_DETAILS, EXCEEDED_LIMITS, EXPECTATIONS, MAX_SPAN_OFFSET, PARAMETER_REASONS, REQUEST_LIMITS,
+  TRANSACTION_LIMITS, UNSUPPORTED_FEATURES, checkedErrorDetail,
 } from "../src/error-detail.ts";
 
 // `error.detail` of #145 pull request C: the table that core (`ErrorDetail::allowed`) and the
@@ -87,6 +88,19 @@ test("the enumerations are the same in core, the Worker, OpenAPI, and the client
   const reasons = openapiEnum("reason");
   assert.equal(reasons.length, PARAMETER_REASONS.length + COMMIT_CHECK_REASONS.length, "OpenAPI reason is exactly the two lists");
   assert.equal(new Set(reasons).size, reasons.length, "the two reason lists share no value");
+  // `limit` is one OpenAPI property and one client type for three codes, each with a list of its
+  // own: the public form is the union of the three, in the order of their first appearance
+  // (`EXCEEDED_LIMITS`, then what `REQUEST_LIMITS` adds, then `TRANSACTION_LIMITS`).
+  const limitLists = [["EXCEEDED_LIMITS", EXCEEDED_LIMITS], ["REQUEST_LIMITS", REQUEST_LIMITS], ["TRANSACTION_LIMITS", TRANSACTION_LIMITS]];
+  for (const [constant, worker] of limitLists) {
+    const core = constantList(io, constant);
+    assert.equal(new Set(core).size, core.length, `${constant}: no duplicates`);
+    assert.deepEqual(core, [...worker], `${constant}: core and the Worker`);
+  }
+  const limits = [...new Set(limitLists.flatMap(([, worker]) => worker))];
+  assert.equal(limits.length, 14, "the three lists name 14 limits");
+  assert.deepEqual(openapiEnum("limit"), limits, "OpenAPI limit is the union of the three lists");
+  assert.deepEqual(typeUnion("PolicySqlLimit"), limits, "the client's PolicySqlLimit is the union of the three lists");
   const maxSpan = io.match(/pub const MAX_SPAN_OFFSET: u64 = ([0-9_]+);/u);
   assert.ok(maxSpan, "core declares MAX_SPAN_OFFSET");
   assert.equal(Number(maxSpan[1].replaceAll("_", "")), MAX_SPAN_OFFSET);
@@ -95,6 +109,26 @@ test("the enumerations are the same in core, the Worker, OpenAPI, and the client
   // The Rust types' own names (`UnsupportedFeature::ALL`, `ParameterReason::ALL`, `ComplexityCause::ALL`,
   // `ExpectationKind::ALL`) are compared with core's constants variant for variant by
   // `the_detail_enumerations_are_the_rust_types_and_core_keeps_them` in crates/policysql-wasm.
+});
+
+test("the limit codes take their own list, or no detail", () => {
+  for (const [code, list] of [
+    ["POLICYSQL_LIMIT_EXCEEDED", EXCEEDED_LIMITS], ["POLICYSQL_REQUEST_TOO_LARGE", REQUEST_LIMITS],
+    ["POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", TRANSACTION_LIMITS],
+  ]) {
+    assert.equal(checkedErrorDetail(code, undefined), undefined, `${code}: a bound without a name has no detail`);
+    for (const limit of [...EXCEEDED_LIMITS, ...REQUEST_LIMITS, ...TRANSACTION_LIMITS]) {
+      const checked = checkedErrorDetail(code, { limit });
+      if (list.includes(limit)) assert.deepEqual(checked, { limit }, `${code} ${limit}`);
+      else assert.equal(checked, null, `${code} ${limit}: another code's value`);
+    }
+    for (const detail of [null, {}, { limit: "timeoutMs" }, { limit: "limits.maxRows" }, { limit: "MAXROWS" }, { limit: 100 },
+      { limit: ["maxRows"] }, { limit: list[0], value: 1 }, { reason: "denied" }]) {
+      assert.equal(checkedErrorDetail(code, detail), null, `${code} ${JSON.stringify(detail)}`);
+    }
+  }
+  assert.equal(checkedErrorDetail("POLICYSQL_INVALID_PARAMETER", { limit: "maxRows" }), null);
+  assert.equal(checkedErrorDetail("POLICYSQL_COMMIT_CHECK_REJECTED", { limit: "maxRows" }), null);
 });
 
 test("an optional detail may be absent, a required one may not, and a code without a row has none", () => {

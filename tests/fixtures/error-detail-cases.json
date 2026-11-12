@@ -1947,5 +1947,848 @@
    "constraint": "other"
   },
   "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxRows"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxResultBytes"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxResponseBytes"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxStatements"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxJsonValues"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxBytesPerValue"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxParameters"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxExpressionDepth"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxProjections"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxJoins"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxRequestBytes"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxSqlBytes"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxCallbackRowsPerCheck"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxCallbackBytesPerCheck"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "timeoutMs"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxCommitChecks"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxCallbackQueriesPerCheck"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "limits.maxRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "transactions.maxStatements"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "MAXROWS"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxRows "
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": ""
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": 100
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": [
+    "maxRows"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxRows",
+   "value": 100
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "reason": "names"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": {
+   "constraint": "unique"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": [
+   "maxRows"
+  ],
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": "maxRows",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_LIMIT_EXCEEDED",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxRequestBytes"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxJsonValues"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxSqlBytes"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxResultBytes"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxResponseBytes"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxStatements"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxBytesPerValue"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxParameters"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxExpressionDepth"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxProjections"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxJoins"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxCallbackRowsPerCheck"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxCallbackBytesPerCheck"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "timeoutMs"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxCommitChecks"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxCallbackQueriesPerCheck"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "limits.maxRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "transactions.maxStatements"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "MAXROWS"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxRows "
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": ""
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": 100
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": [
+    "maxRequestBytes"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "limit": "maxRequestBytes",
+   "value": 100
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "reason": "names"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": {
+   "constraint": "unique"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": [
+   "maxRequestBytes"
+  ],
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": "maxRequestBytes",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_REQUEST_TOO_LARGE",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxStatements"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxResultBytes"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxCallbackRowsPerCheck"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxCallbackBytesPerCheck"
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxResponseBytes"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxJsonValues"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxBytesPerValue"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxParameters"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxExpressionDepth"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxProjections"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxJoins"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxRequestBytes"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxSqlBytes"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "timeoutMs"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxCommitChecks"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxCallbackQueriesPerCheck"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "limits.maxRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "transactions.maxStatements"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "MAXROWS"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxRows "
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": ""
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": 100
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": null
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": [
+    "maxStatements"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "limit": "maxStatements",
+   "value": 100
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "reason": "names"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": {
+   "constraint": "unique"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": [
+   "maxStatements"
+  ],
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": "maxStatements",
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED",
+  "detail": null,
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INVALID_PARAMETER",
+  "detail": {
+   "limit": "maxRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_COMMIT_CHECK_REJECTED",
+  "detail": {
+   "limit": "maxRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_DATABASE_ERROR",
+  "detail": {
+   "limit": "maxRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_INTERNAL",
+  "detail": {
+   "limit": "maxRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_FORBIDDEN_COLUMN",
+  "detail": {
+   "limit": "maxRows"
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_REQUEST_TOO_LARGE",
+    "path": null,
+    "detail": {
+     "limit": "maxRequestBytes"
+    }
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_REQUEST_TOO_LARGE",
+    "path": null,
+    "detail": {
+     "limit": "maxJsonValues"
+    }
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_REQUEST_TOO_LARGE",
+    "path": "/statements/0/sql",
+    "detail": {
+     "limit": "maxSqlBytes"
+    }
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_REQUEST_TOO_LARGE",
+    "path": null,
+    "detail": null
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_LIMIT_EXCEEDED",
+    "path": "/statements/0",
+    "detail": null
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_LIMIT_EXCEEDED",
+    "path": null,
+    "detail": {
+     "limit": "maxStatements"
+    }
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_LIMIT_EXCEEDED",
+    "path": "/statements/0",
+    "detail": {
+     "limit": "maxJoins"
+    }
+   }
+  },
+  "valid": true
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_REQUEST_TOO_LARGE",
+    "path": null,
+    "detail": {
+     "limit": "maxRows"
+    }
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_LIMIT_EXCEEDED",
+    "path": null,
+    "detail": {
+     "limit": "maxSqlBytes"
+    }
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_LIMIT_EXCEEDED",
+    "path": null,
+    "detail": {
+     "limit": "maxCallbackRowsPerCheck"
+    }
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_LIMIT_EXCEEDED",
+    "path": null,
+    "detail": {}
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_REQUEST_TOO_LARGE",
+    "path": null,
+    "detail": {
+     "limit": "limits.maxRequestBytes"
+    }
+   }
+  },
+  "valid": false
+ },
+ {
+  "code": "POLICYSQL_OUTCOME_UNKNOWN",
+  "detail": {
+   "cause": {
+    "code": "POLICYSQL_LIMIT_EXCEEDED",
+    "path": null
+   }
+  },
+  "valid": false
  }
 ]

@@ -209,6 +209,7 @@ test("malformed bytes, namespace spoofing, forbidden columns and mixed parameter
   const oversized = await execute(h, [insert("too-large", Buffer.alloc(MAX_BYTES_PER_VALUE + 1).toString("base64"))]);
   assert.equal(oversized.status, 413);
   assert.equal(oversized.body.error.code, "POLICYSQL_LIMIT_EXCEEDED");
+  assert.deepEqual(oversized.body.error.detail, { limit: "maxBytesPerValue" });
   assert.equal(h.counts().connects, 0);
 });
 
@@ -366,6 +367,7 @@ test("large malformed base64 remains invalid input, before decoded size classifi
     const result = await execute(h, [insert("invalid", value)]);
     assert.equal(result.status, tooLarge ? 413 : 400, name);
     assert.equal(result.body.error.code, tooLarge ? "POLICYSQL_LIMIT_EXCEEDED" : "POLICYSQL_INVALID_PARAMETER", name);
+    assert.deepEqual(result.body.error.detail, tooLarge ? { limit: "maxBytesPerValue" } : { reason: "value" }, name);
     assert.equal(h.counts().connects, 0);
   }
 });
@@ -380,6 +382,9 @@ for (const hooks of [false, true]) test(`oversized physical BLOB returns 413 and
   }]);
   assert.equal(result.status, 413, JSON.stringify(result.body));
   assert.equal(result.body.error.code, "POLICYSQL_LIMIT_EXCEEDED");
+  // The HTTP transport reports the class `limit`, which does not say which bound it was: no
+  // `detail.limit` (#145 pull request F). The driver transport marks the value and names it.
+  assert.equal(result.body.error.detail, undefined);
   assert.equal(result.body.results, undefined);
   assert.equal(physical(h, "undo-oversize"), undefined);
   assert.ok(h.events.some(event => event.sql === "ROLLBACK"));
@@ -396,6 +401,7 @@ test("oversized physical BLOB in an interactive statement's result is 413 and en
   const result = await h.request("a", `${path}/statements`, { sequence: 2, sql: "SELECT state FROM projects WHERE id=:id", params: { id: "seed" } }, null);
   assert.equal(result.status, 413, JSON.stringify(result.body));
   assert.equal(result.body.error.code, "POLICYSQL_LIMIT_EXCEEDED");
+  assert.equal(result.body.error.detail, undefined, "the class `limit` names no bound");
   const commit = await h.request("a", `${path}/commit`, { sequence: 3 }, null);
   assert.equal(commit.body.error.code, "POLICYSQL_TRANSACTION_UNAVAILABLE");
   assert.equal(physical(h, "undo-interactive"), undefined);

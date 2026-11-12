@@ -563,3 +563,26 @@ test("COMMIT_CHECK_REJECTED is a definite 409 rejection of execute and commit, w
     await tx.dispose();
   }
 });
+
+test("a 413 limit refusal keeps its classification and detail.limit is readable, or absent (#145 pull request F)", async () => {
+  const refusal = (code, detail) => ({ error: { code, message: "The request or result exceeded a configured limit.", path: null, requestId: "req_test", ...(detail === undefined ? {} : { detail }) } });
+  for (const [code, limit] of [
+    ["POLICYSQL_LIMIT_EXCEEDED", "maxRows"], ["POLICYSQL_REQUEST_TOO_LARGE", "maxSqlBytes"],
+    ["POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", "maxCallbackBytesPerCheck"], ["POLICYSQL_LIMIT_EXCEEDED", undefined],
+  ]) {
+    const detail = limit === undefined ? undefined : { limit };
+    const h = setup({}, () => async () => ({ status: 413, body: refusal(code, detail) }));
+    await assert.rejects(h.client.execute(select), error => {
+      assert.ok(error instanceof PolicySqlError);
+      // The detail does not change what a refusal means: the transaction limit is a rejection of a
+      // transaction statement only (`protocol.js`), so on `execute` it stays an unknown outcome.
+      const unknown = error instanceof PolicySqlOutcomeUnknownError;
+      assert.equal(unknown, code === "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED", code);
+      const refused = unknown ? error.cause : error;
+      assert.equal(refused.code, code);
+      assert.equal(refused.status, 413);
+      assert.deepEqual(refused.detail, detail);
+      return true;
+    }, `${code} ${limit}`);
+  }
+});

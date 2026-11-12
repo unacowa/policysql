@@ -727,8 +727,9 @@ components:
         Machine-readable values fixed per code (ADR 0030). One key, by code: POLICYSQL_CONSTRAINT_VIOLATION
         constraint; POLICYSQL_OUTCOME_UNKNOWN cause; POLICYSQL_UNSUPPORTED_SQL feature;
         POLICYSQL_INVALID_SQL span (absent when the parser reports no position); POLICYSQL_INVALID_PARAMETER
-        reason; POLICYSQL_COMMIT_CHECK_REJECTED reason (its own values); POLICYSQL_SQL_TOO_COMPLEX complexity; POLICYSQL_EXPECTATION_FAILED expectation. Every other
-        code has no detail. cause.detail never holds a cause.
+        reason; POLICYSQL_COMMIT_CHECK_REJECTED reason (its own values); POLICYSQL_SQL_TOO_COMPLEX complexity; POLICYSQL_EXPECTATION_FAILED expectation;
+        POLICYSQL_LIMIT_EXCEEDED, POLICYSQL_REQUEST_TOO_LARGE and POLICYSQL_TRANSACTION_LIMIT_EXCEEDED limit (absent for a bound
+        without a Capabilities key). Every other code has no detail. cause.detail never holds a cause.
       properties:
         constraint:
           type: string
@@ -757,6 +758,10 @@ components:
         expectation:
           type: string
           enum: [affectedRows, rowCount]
+        limit:
+          type: string
+          description: The Capabilities key of the limit, limits.<limit> for POLICYSQL_LIMIT_EXCEEDED and POLICYSQL_REQUEST_TOO_LARGE, transactions.<limit> for POLICYSQL_TRANSACTION_LIMIT_EXCEEDED. Each code takes only its own values (docs "detail values"). The configured number is not returned; read it from Capabilities.
+          enum: [maxRows, maxResultBytes, maxResponseBytes, maxStatements, maxJsonValues, maxBytesPerValue, maxParameters, maxExpressionDepth, maxProjections, maxJoins, maxRequestBytes, maxSqlBytes, maxCallbackRowsPerCheck, maxCallbackBytesPerCheck]
         cause:
           type: object
           additionalProperties: false
@@ -845,6 +850,10 @@ components:
                 POLICYSQL_EXPECTATION_FAILED (422) carries detail.expectation, which declared expectation
                 did not hold, never the actual count. The values of detail are a fixed list, never an
                 identifier, a parameter name or value, or a message of the database or the parser.
+
+                POLICYSQL_LIMIT_EXCEEDED, POLICYSQL_REQUEST_TOO_LARGE and POLICYSQL_TRANSACTION_LIMIT_EXCEEDED
+                (413) may carry detail.limit, the Capabilities key of the limit that was crossed; it is
+                absent for a derived or fixed internal bound. The configured number is never returned.
             message: { type: string }
             path: { type: [string, 'null'] }
             detail:

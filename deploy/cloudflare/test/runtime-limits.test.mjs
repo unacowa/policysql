@@ -14,6 +14,7 @@ import { testConfig, testOwners, testProvider } from "./helpers/database.mjs";
 import { harness, OWNER_ADAPTERS } from "./helpers/routing.mjs";
 import { PolicySqlClient, PolicySqlError, PolicySqlOutcomeUnknownError, createHttpTransport } from "../../../packages/client/index.js";
 import { RUNTIME_DEFAULT_LIMITS, limitsJson } from "./helpers/limits.mjs";
+import { EXCEEDED_LIMITS, REQUEST_LIMITS, TRANSACTION_LIMITS } from "../src/error-detail.ts";
 
 initSync({ module: readFileSync(new URL("../pkg/policysql_wasm_bg.wasm", import.meta.url)) });
 const example = (name) => readFileSync(new URL(`../../../examples/database-routing/${name}`, import.meta.url), "utf8");
@@ -72,6 +73,13 @@ const assertAdvertisesExactly = (advertised, runtime) => {
     assert.equal(at(advertised, path), enforced[key], path);
   }
 };
+
+// #145 pull request F: `detail.limit` is a key of Capabilities (`limits.<name>`, or
+// `transactions.<name>` for the transaction code), so every name a list holds must be advertised.
+test("every name of detail.limit is a key Capabilities advertises, under its code's group", () => {
+  for (const name of [...EXCEEDED_LIMITS, ...REQUEST_LIMITS]) assert.ok(`limits.${name}` in ADVERTISED_SOURCES, `limits.${name}`);
+  for (const name of TRANSACTION_LIMITS) assert.ok(`transactions.${name}` in ADVERTISED_SOURCES, `transactions.${name}`);
+});
 
 test("Capabilities advertises exactly the runtime's limits, each from its own source", () => {
   // Distinct values, so an advertised number taken from the wrong source cannot match.
@@ -273,6 +281,9 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     const third = await h.request("a", path, { sequence: 3, ...read }, null);
     assert.equal(third.status, 413, JSON.stringify(third.body));
     assert.equal(third.body.error.code, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
+    // The name is the Capabilities key of `transactions`, which holds the configured number.
+    assert.deepEqual(third.body.error.detail, { limit: "maxStatements" });
+    assert.equal((await h.request("a", "/v1/capabilities")).body.transactions.maxStatements, 2);
     assert.equal((await h.ownerRecord(id)).status, "failed");
   });
 
@@ -296,6 +307,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       assert.equal(error.code, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
       assert.equal(error.status, 413);
       assert.equal(error.response.body.error.code, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
+      assert.deepEqual(error.detail, { limit: "maxStatements" });
       return true;
     });
     const statements = sent.filter((request) => request.path.endsWith("/statements"));
@@ -313,6 +325,10 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       const h = await setup(t, { maxTransactionResultBytes: limit }, { hooks: false });
       const response = await h.request("a", `/v1/transactions/${await start(h, "read")}/statements`, { sequence: 1, ...read }, null);
       assert.equal(response.status, status, `limit=${limit}: ${JSON.stringify(response.body)}`);
+      if (status === 413) {
+        assert.deepEqual(response.body.error.detail, { limit: "maxResultBytes" });
+        assert.equal((await h.request("a", "/v1/capabilities")).body.transactions.maxResultBytes, limit);
+      }
     }
   });
 
@@ -325,7 +341,12 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       const committed = await h.request("a", `/v1/transactions/${id}/commit`, { sequence: 2 }, null);
       assert.equal(h.hooksSeen[0].status, callbackStatus, `limit=${limit}: ${JSON.stringify(h.hooksSeen[0].result)}`);
       assert.equal(committed.status, commitStatus, `limit=${limit}`);
-      if (callbackStatus !== 200) assert.equal(h.hooksSeen[0].result.error.code, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
+      if (callbackStatus !== 200) {
+        assert.equal(h.hooksSeen[0].result.error.code, "POLICYSQL_TRANSACTION_LIMIT_EXCEEDED");
+        // The validator is told which limit; the client's commit is the check's `limit` reason.
+        assert.deepEqual(h.hooksSeen[0].result.error.detail, { limit: "maxCallbackRowsPerCheck" });
+        assert.deepEqual(committed.body.error.detail, { reason: "limit" });
+      }
     }
   });
 
