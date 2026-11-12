@@ -102,6 +102,11 @@ pub enum Class {
     /// #144). Only `executeFailed` carries it, with the index of the failed statement and a
     /// `constraint` name.
     Constraint,
+    /// The database answered a statement request with an error that is neither a complexity
+    /// refusal nor a constraint violation (#145 pull request E): `POLICYSQL_DATABASE_ERROR`
+    /// (500). Unlike `constraint` it carries no obligation: it is never a definite refusal, so
+    /// an adapter that reports it on any event changes nothing a client decides.
+    Refused,
 }
 
 /// The kind of a constraint violation (ADR 0030): one fixed value per refused statement.
@@ -522,6 +527,8 @@ pub enum Code {
     BindingRejected,
     DatabaseTimeout,
     DatabaseUnavailable,
+    /// The database refused a statement (class `refused`, #145 pull request E).
+    DatabaseError,
     SchemaMismatch,
     LimitExceeded,
     IdempotencyConflict,
@@ -585,6 +592,10 @@ impl Code {
                 "POLICYSQL_DATABASE_UNAVAILABLE",
                 "The database is temporarily unavailable.",
             ),
+            Self::DatabaseError => (
+                "POLICYSQL_DATABASE_ERROR",
+                "The database refused the statement.",
+            ),
             Self::SchemaMismatch => (
                 "POLICYSQL_SCHEMA_MISMATCH",
                 "The database result does not match the compiled logical contract.",
@@ -622,7 +633,9 @@ impl Code {
     }
 
     /// The code an adapter class maps to for a database or provider failure (as today:
-    /// `turso.ts` `remoteFailure` and `database.ts`).
+    /// `turso.ts` `remoteFailure` and `database.ts`). `refused` maps to
+    /// `POLICYSQL_DATABASE_ERROR` on every event: it is never a definite refusal, so an adapter
+    /// that reports it elsewhere changes nothing a client decides.
     #[must_use]
     pub const fn for_class(class: Class) -> Self {
         match class {
@@ -634,6 +647,7 @@ impl Code {
             Class::NotCommitted | Class::Unknown | Class::Constraint => Self::Internal,
             Class::Limit => Self::LimitExceeded,
             Class::Complex => Self::SqlTooComplex,
+            Class::Refused => Self::DatabaseError,
         }
     }
 
@@ -1143,6 +1157,9 @@ mod tests {
             Code::ConstraintViolation
         );
         assert_eq!(Code::for_class(Class::Constraint), Code::Internal);
+        // A database refusal is `DATABASE_ERROR` on every event (#145 pull request E).
+        assert_eq!(Code::for_class(Class::Refused), Code::DatabaseError);
+        assert_eq!(Code::for_execute(Class::Refused), Code::DatabaseError);
         for class in [
             Class::Timeout,
             Class::Unavailable,
@@ -1151,6 +1168,7 @@ mod tests {
             Class::Unknown,
             Class::Limit,
             Class::Complex,
+            Class::Refused,
         ] {
             assert_eq!(Code::for_execute(class), Code::for_class(class));
         }

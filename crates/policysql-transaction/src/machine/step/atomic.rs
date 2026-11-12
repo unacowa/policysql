@@ -339,12 +339,16 @@ const fn commit_failure(class: Class) -> Code {
         Class::Timeout => Code::DatabaseTimeout,
         Class::Unavailable => Code::DatabaseUnavailable,
         Class::NotCommitted => Code::Unavailable,
-        // A complexity refusal or a constraint violation is a statement-request outcome: a
-        // COMMIT is never classified this way (ADR 0027, ADR 0030), so it is as unexpected here
-        // as `limit`. A deferred foreign key that fails at COMMIT stays an unknown outcome.
-        Class::Rejected | Class::Unknown | Class::Limit | Class::Complex | Class::Constraint => {
-            Code::Internal
-        }
+        // A complexity refusal, a constraint violation or a database refusal is a
+        // statement-request outcome: a COMMIT is never classified this way (ADR 0027, ADR 0030,
+        // #145 pull request E), so it is as unexpected here as `limit`. A deferred foreign key
+        // that fails at COMMIT stays an unknown outcome.
+        Class::Rejected
+        | Class::Unknown
+        | Class::Limit
+        | Class::Complex
+        | Class::Constraint
+        | Class::Refused => Code::Internal,
     }
 }
 
@@ -364,7 +368,8 @@ const fn commit_failure(class: Class) -> Code {
 /// A constraint violation is a definite refusal whatever follows the failed statement: the
 /// adapter reports the class only after the conditional batch and the baton showed that nothing
 /// after it ran and the transaction is still open (ADR 0030). On the idempotency lookup or
-/// insert it is `POLICYSQL_INTERNAL`, like `limit`.
+/// insert it is `POLICYSQL_INTERNAL`, like `limit`. A database refusal (`refused`) on the
+/// lookup or insert is `POLICYSQL_DATABASE_ERROR` (500, unknown outcome), as everywhere else.
 fn execute_failure(task: &Task, class: Class, later_write: bool) -> Code {
     match (task, class) {
         // A stored response over the lookup bound (a row written before the bounds existed, or

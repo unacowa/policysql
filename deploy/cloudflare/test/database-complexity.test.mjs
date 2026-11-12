@@ -4,13 +4,13 @@
 // never kept, logged, or returned.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { COMPLEXITY_ALLOWLIST, COMPLEXITY_CODES, DatabaseStatementError, SqlComplexityError, complexityCause, statementFailure } from "../src/database-complexity.ts";
+import { COMPLEXITY_ALLOWLIST, COMPLEXITY_CODES, DatabaseRequestError, DatabaseStatementError, SqlComplexityError, complexityCause, requestFailure, statementFailure } from "../src/database-complexity.ts";
 import { CONSTRAINT_KINDS, CONSTRAINT_PREFIXES, SqlConstraintError, constraintKind } from "../src/database-constraint.ts";
 import { TursoHttpTransport } from "../src/turso-http.ts";
 import { COMPLEXITY_PROBES, sqlComplexitySmoke } from "../scripts/smoke-complexity.mjs";
 import { CommitNotSentError, EngineError } from "../src/errors.ts";
 import { requestSqls, runBatch } from "./helpers/hrana.mjs";
-import { directCommitFailureClass, directFailureClass, executeFailedEvent, failureClass } from "../src/step-effects.ts";
+import { commitFailureClass, directCommitFailureClass, directFailureClass, executeFailedEvent, failureClass } from "../src/step-effects.ts";
 
 // The read cap core passes with each execute (ADR 0027); these tests choose their own.
 const READ_CAP = 2_097_152;
@@ -81,18 +81,40 @@ test("a match needs code SQLITE_ERROR and a message prefix: other codes, near mi
   for (const error of [null, undefined, "error", 1, [], {}]) assert.equal(complexityCause(error), null);
 });
 
-test("an unmatched statement error is a 503 carrying only a safe database code", () => {
+test("an unmatched statement error is a 500 database error carrying only a safe database code", () => {
   for (const [code, expected] of [["SQLITE_CONSTRAINT_UNIQUE", "SQLITE_CONSTRAINT_UNIQUE"], ["SQLITE_BUSY", "SQLITE_BUSY"], ["has space", "UNKNOWN"],
     ["lower", "UNKNOWN"], ["X".repeat(65), "UNKNOWN"], [undefined, "UNKNOWN"], [7, "UNKNOWN"], ["SQLITE_ERROR\n", "UNKNOWN"]]) {
     const failure = statementFailure({ code, message: "UNIQUE constraint failed: projects.id" }, 0);
     assert.ok(failure instanceof DatabaseStatementError);
-    assert.equal(failure.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+    assert.equal(failure.code, "POLICYSQL_DATABASE_ERROR");
+    assert.equal(failure.message, "The database refused the statement.");
     assert.equal(failure.databaseCode, expected);
     assert.equal(JSON.stringify(failure).includes("projects"), false);
     assert.equal(failure.message.includes("projects"), false);
   }
   // SQLITE_ERROR with a message off the allowlist is unclassified, not complexity.
   assert.ok(statementFailure({ code: "SQLITE_ERROR", message: 'no such table: "secret_table"' }, 0) instanceof DatabaseStatementError);
+  // What a real Turso says for a table or a statement it cannot run is a database refusal too (#145 pull request E).
+  for (const code of ["SQLITE_UNKNOWN", "SQL_PARSE_ERROR", "SQL_MANY_STATEMENTS", "SQLITE_BUSY", "SQLITE_CONSTRAINT_UNIQUE"]) {
+    const failure = statementFailure({ code, message: "SQLite error: no such table: t" }, 1);
+    assert.ok(failure instanceof DatabaseStatementError, code);
+    assert.equal(failure.code, "POLICYSQL_DATABASE_ERROR");
+    assert.equal(failure.databaseCode, code);
+  }
+});
+
+test("a pipeline request that failed as a whole stays a 503 and keeps only a safe database code", () => {
+  const failure = requestFailure({ code: "SQLITE_BUSY", message: "secret_table" });
+  assert.ok(failure instanceof DatabaseRequestError && !(failure instanceof DatabaseStatementError));
+  assert.equal(failure.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+  assert.equal(failure.databaseCode, "SQLITE_BUSY");
+  assert.equal(JSON.stringify(failure).includes("secret_table"), false);
+  assert.equal(failure.message.includes("secret_table"), false);
+  assert.equal(requestFailure({ code: "lower" }).databaseCode, "UNKNOWN");
+  assert.equal(requestFailure(null).databaseCode, "UNKNOWN");
+  // Its class is `unavailable`, and its event carries the code for the log.
+  assert.equal(failureClass(failure), "unavailable");
+  assert.deepEqual(executeFailedEvent(3, failure, failureClass), { type: "executeFailed", id: 3, class: "unavailable", databaseCode: "SQLITE_BUSY" });
 });
 
 test("the executeFailed event: complex carries the index and cause, an unclassified failure only the code, and a commit is never complex", () => {
@@ -101,7 +123,14 @@ test("the executeFailed event: complex carries the index and cause, an unclassif
     assert.deepEqual(executeFailedEvent(7, complex, classify), { type: "executeFailed", id: 7, class: "complex", statement: 2, cause: "columns" });
   }
   const unclassified = new DatabaseStatementError("SQLITE_CONSTRAINT");
-  assert.deepEqual(executeFailedEvent(8, unclassified, failureClass), { type: "executeFailed", id: 8, class: "unavailable", databaseCode: "SQLITE_CONSTRAINT" });
+  for (const classify of [failureClass, directFailureClass]) {
+    assert.deepEqual(executeFailedEvent(8, unclassified, classify), { type: "executeFailed", id: 8, class: "refused", databaseCode: "SQLITE_CONSTRAINT" });
+  }
+  // The class is found by the code, so a user's transport throwing the engine error gets it too.
+  assert.equal(failureClass(new EngineError("POLICYSQL_DATABASE_ERROR", "m")), "refused");
+  // A COMMIT is never a database refusal (ADR 0007): the direct placement reports it as unavailable.
+  assert.equal(directCommitFailureClass(unclassified), "unavailable");
+  assert.equal(commitFailureClass(unclassified), "unknown");
   // A constraint violation carries the index, the fixed kind, and the code, never text (ADR 0030).
   const constraint = new SqlConstraintError(1, "unique");
   for (const classify of [failureClass, directFailureClass]) {

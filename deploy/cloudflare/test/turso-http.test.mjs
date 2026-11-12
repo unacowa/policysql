@@ -6,7 +6,7 @@ import { CommitNotSentError } from "../src/errors.ts";
 import { MAX_BYTES_PER_VALUE } from "./helpers/routing.mjs";
 import { redirectResponses } from "./helpers/redirects.mjs";
 import { batchReply, okResults, requestSqls, runBatch } from "./helpers/hrana.mjs";
-import { DatabaseStatementError, SqlComplexityError } from "../src/database-complexity.ts";
+import { DatabaseRequestError, DatabaseStatementError, SqlComplexityError } from "../src/database-complexity.ts";
 import { SqlConstraintError } from "../src/database-constraint.ts";
 
 // The read cap core passes with each execute (ADR 0027); these tests choose their own.
@@ -618,13 +618,14 @@ test("S2: a batch that fails as a whole keeps its code, is never a complexity re
     return transaction.execute(threeStatements, { maxResponseBytes: READ_CAP }).then(() => null, (failure) => failure);
   };
   const complexity = await run(COMPLEXITY);
-  assert.ok(complexity instanceof DatabaseStatementError && !(complexity instanceof SqlComplexityError));
+  // A top-level error is the request failing, not a statement refused: 503, never a database refusal.
+  assert.ok(complexity instanceof DatabaseRequestError && !(complexity instanceof SqlComplexityError) && !(complexity instanceof DatabaseStatementError));
   assert.equal(complexity.databaseCode, "SQLITE_UNKNOWN");
   assert.equal(complexity.code, "POLICYSQL_DATABASE_UNAVAILABLE");
   const busy = await run({ code: "SQLITE_BUSY", message: "database is locked" });
   assert.equal(busy.databaseCode, "SQLITE_BUSY");
   const unsafe = await run({ code: "sqlite busy: secret", message: "x" });
-  assert.ok(unsafe instanceof DatabaseStatementError);
+  assert.ok(unsafe instanceof DatabaseRequestError);
   assert.equal(unsafe.databaseCode, "UNKNOWN");
   const none = await run({ message: "no code" });
   assert.equal(none.databaseCode, "UNKNOWN");
@@ -654,7 +655,10 @@ test("E1: a batch reply that ends the stream keeps its code, is never classified
   const events = (name) => lines.flatMap((line) => { try { const record = JSON.parse(line); return record.event === name ? [record] : []; } catch { return []; } });
 
   const refused = await run(stepsReply([okStep(), null, null], [null, CONSTRAINT, null]));
+  // A database refusal (500), never a constraint violation: a stream that ended proves nothing about the steps before it.
   assert.ok(refused.failure instanceof DatabaseStatementError && refused.failure.databaseCode === "SQLITE_CONSTRAINT");
+  assert.ok(!(refused.failure instanceof SqlConstraintError));
+  assert.equal(refused.failure.code, "POLICYSQL_DATABASE_ERROR");
   // The stream ended: COMMIT is refused before it is sent, ROLLBACK sends nothing and logs no recovery.
   await assert.rejects(refused.transaction.commit(), CommitNotSentError);
   await refused.transaction.rollback();
@@ -663,11 +667,11 @@ test("E1: a batch reply that ends the stream keeps its code, is never classified
   assert.equal(sent.length, 2, "only BEGIN and the batch were sent");
   assert.deepEqual(events("database_stream_recovery"), []);
 
-  // A complexity message is not a definite refusal here: only its code is kept (a 503).
+  // A complexity message is not a definite refusal here: only its code is kept (a database refusal, 500).
   const complex = await run(stepsReply([okStep(), null, null], [null, COMPLEXITY, null]));
   assert.ok(complex.failure instanceof DatabaseStatementError && !(complex.failure instanceof SqlComplexityError));
   assert.equal(complex.failure.databaseCode, "SQLITE_UNKNOWN");
-  assert.equal(complex.failure.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+  assert.equal(complex.failure.code, "POLICYSQL_DATABASE_ERROR");
 
   // Success without a baton, or a reply that breaks the contract: a plain 503; a success is logged.
   const success = await run(batchReply([result(["n"], [["1"]]), result(["n"], [["1"]]), result(["n"], [["1"]])]));

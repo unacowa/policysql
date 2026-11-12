@@ -518,3 +518,25 @@ test("#85: an owner's version-skew answer (500 POLICYSQL_INTERNAL) is an unknown
   await assert.rejects(h.client.execute("UPDATE posts SET title = 'x'", {}, { idempotencyKey: "request-key-0001" }),
     error => error instanceof PolicySqlOutcomeUnknownError);
 });
+
+test("DATABASE_ERROR (500) is an unknown outcome on every command, like the 503 it replaces (#145 pull request E)", async () => {
+  for (const [status, code] of [[500, "POLICYSQL_DATABASE_ERROR"], [503, "POLICYSQL_DATABASE_UNAVAILABLE"]]) {
+    const body = errorBody(code, "The database refused the statement.");
+    const failing = setup({}, () => async () => ({ status, body }));
+    await assert.rejects(failing.client.execute(select), error =>
+      error instanceof PolicySqlOutcomeUnknownError && error.cause instanceof PolicySqlError && error.cause.status === status && error.cause.code === code, code);
+    await assert.rejects(failing.client.beginTransaction(), error => error instanceof PolicySqlOutcomeUnknownError, code);
+    const gateway = mockGateway();
+    const wrap = (kind) => async (url, init) => (new URL(url).pathname.endsWith(`/${kind}`)
+      ? Response.json(body, { status })
+      : gateway.fetchImpl(url, init));
+    for (const kind of ["statements", "commit", "rollback"]) {
+      const client = new PolicySqlClient({ transport: createHttpTransport({ endpoint: "https://gateway.test", fetchImpl: wrap(kind) }) });
+      const tx = await client.beginTransaction();
+      const failure = await (kind === "statements" ? tx.execute(select) : tx[kind]()).then(() => null, (error) => error);
+      assert.ok(failure instanceof PolicySqlOutcomeUnknownError, `${code} ${kind}`);
+      assert.equal(failure.cause.status, status, `${code} ${kind}`);
+      await tx.dispose();
+    }
+  }
+});

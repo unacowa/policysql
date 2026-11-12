@@ -451,6 +451,7 @@ const smoke = async (baseUrl, token, tracker, database, sessionTokens, schedules
     databaseCode: (error) => (error instanceof DatabaseStatementError || error instanceof SqlConstraintError ? error.databaseCode : null),
     complexityCause: (error) => (error instanceof SqlComplexityError ? error.complexityCause : null),
     constraint: (error) => (error instanceof SqlConstraintError ? error.constraint : null),
+    refused: (error) => (error instanceof DatabaseStatementError ? error.code : null),
   });
   // Constraint violations (#145, ADR 0030): each kind real Turso can produce is classified by the
   // transport (the reply kept its baton), the transaction rolls back, and a deferred foreign key

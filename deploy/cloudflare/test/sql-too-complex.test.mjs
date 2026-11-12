@@ -390,7 +390,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(h.events.slice(before).some((event) => event.sql.startsWith("INSERT INTO")), false, "the INSERT after the refusal never reached the database");
   });
 
-  test(`${ownerAdapter}: a database error the allowlist does not name stays 503 and is logged with its code only`, async (t) => {
+  test(`${ownerAdapter}: a database error the allowlist does not name is a 500 database error and is logged with its code only`, async (t) => {
     const h = await setup(t);
     const insert = (id) => ({ sql: "INSERT INTO projects(id,name,note) VALUES(:id,:name,:note)", params: { id, name: "n", note: "n" } });
     h.logs.length = 0;
@@ -403,8 +403,10 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       }
     });
     const busy = await post(h, { statements: [insert("seed")] }, EXECUTE, "unclassified-key-000001");
-    assert.equal(busy.status, 503, JSON.stringify(busy.body));
-    assert.equal(busy.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+    assert.equal(busy.status, 500, JSON.stringify(busy.body));
+    assert.equal(busy.body.error.code, "POLICYSQL_DATABASE_ERROR");
+    assert.equal(busy.body.error.message, "The database refused the statement.");
+    assert.equal(busy.body.error.detail, undefined);
     const [record] = events(h, "database_error_unclassified");
     assert.deepEqual(Object.keys(record).sort(), ["code", "event", "requestId"]);
     assert.equal(record.code, "SQLITE_BUSY");

@@ -252,6 +252,7 @@ fn a_commit_failure_is_never_a_rejection_and_rolls_back() {
         ("unavailable", "POLICYSQL_DATABASE_UNAVAILABLE"),
         ("unknown", "POLICYSQL_INTERNAL"),
         ("rejected", "POLICYSQL_INTERNAL"),
+        ("refused", "POLICYSQL_INTERNAL"),
     ] {
         let mut engine = Engine::atomic(false);
         engine.feed(&execute_request(&insert("p1"), Some(KEY)));
@@ -623,6 +624,60 @@ fn a_constraint_violation_is_a_conflict_on_the_envelope_and_never_on_commit_or_t
         let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
         assert_eq!(code(&reply), Some("POLICYSQL_INTERNAL"), "{reply}");
         assert_eq!(engine.observed.commits_emitted, 0);
+    }
+}
+
+/// #145 pull request E: a statement the database refused for neither complexity nor a constraint
+/// (`refused`) is 500 `POLICYSQL_DATABASE_ERROR` on the envelope, and on the idempotency lookup
+/// and insert too (where a constraint is `POLICYSQL_INTERNAL`); rolled back before COMMIT, with no
+/// path and no detail, and logged once with the database's code only. A COMMIT is never one.
+#[test]
+fn a_database_refusal_is_a_database_error_on_every_statement_request_and_never_on_commit() {
+    // Effects of a keyed write: checkBinding, open, lookup, envelope, insert, commit.
+    for (successes, key) in [(2, Some(KEY)), (3, Some(KEY)), (4, Some(KEY)), (2, None)] {
+        let mut engine = Engine::atomic(false);
+        engine.feed(&execute_request(&insert("p1"), key));
+        for _ in 0..successes {
+            engine.resolve(true, "unknown");
+        }
+        let effect = engine.outstanding.take().unwrap_or(Value::Null);
+        assert_eq!(effect["type"], "execute", "after {successes} effects");
+        engine.feed(&json!({
+            "type": "executeFailed", "id": effect["id"], "class": "refused",
+            "databaseCode": "SQLITE_UNKNOWN",
+        }));
+        engine.settle();
+        let reply = engine.last_reply().cloned().unwrap_or(Value::Null);
+        assert_eq!(
+            code(&reply),
+            Some("POLICYSQL_DATABASE_ERROR"),
+            "after {successes} effects: {reply}"
+        );
+        assert_eq!(
+            reply["error"]["message"],
+            "The database refused the statement."
+        );
+        assert_eq!(reply["error"]["path"], Value::Null);
+        assert!(reply["error"].get("detail").is_none(), "{reply}");
+        let logs: Vec<&str> = engine
+            .transcript
+            .iter()
+            .filter(|line| {
+                line.output
+                    .contains("\"event\":\"database_error_unclassified\"")
+            })
+            .map(|line| line.output.as_str())
+            .collect();
+        assert_eq!(logs.len(), 1, "after {successes} effects");
+        assert!(
+            logs[0].contains("\"code\":\"SQLITE_UNKNOWN\""),
+            "{}",
+            logs[0]
+        );
+        assert_eq!(engine.observed.commits_emitted, 0);
+        assert_eq!(engine.observed.rollbacks_emitted, 1);
+        assert_eq!(engine.idempotency_rows, Vec::<[String; 3]>::new());
+        assert_eq!(engine.compiler.live_handles(), 0);
     }
 }
 

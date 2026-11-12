@@ -23,7 +23,8 @@
 //
 // A constraint violation is classified in database-constraint.ts. `statementFailure` is called
 // only for a reply that kept its baton (turso-http.ts), so the transaction is still open and
-// nothing after the failed step ran (ADR 0030).
+// nothing after the failed step ran (ADR 0030). Anything else a statement step reports is
+// DatabaseStatementError, 500 POLICYSQL_DATABASE_ERROR (#145 pull request E).
 import { EngineError } from "./errors.ts";
 import { SqlConstraintError, constraintKind } from "./database-constraint.ts";
 
@@ -80,11 +81,25 @@ export class SqlComplexityError extends Error {
 
 /**
  * A statement the database refused for neither complexity nor a constraint, and any refusal in
- * a reply that ended the stream: a 503 as before. `databaseCode` is
- * the Hrana `code` only (never the message), restricted to `[A-Z0-9_]{1,64}`, for the
- * `database_error_unclassified` log.
+ * a reply that ended the stream (#144): 500 POLICYSQL_DATABASE_ERROR (#145 pull request E). Not a
+ * definite refusal. `databaseCode` is the Hrana `code` only (never the message), restricted to
+ * `[A-Z0-9_]{1,64}`, for the `database_error_unclassified` log.
  */
 export class DatabaseStatementError extends EngineError {
+  readonly databaseCode: string;
+
+  constructor(databaseCode: string) {
+    super("POLICYSQL_DATABASE_ERROR", "The database refused the statement.");
+    this.databaseCode = databaseCode;
+  }
+}
+
+/**
+ * A pipeline request that failed as a whole (a Hrana `type: "error"` result, not a statement's
+ * step error): no statement was refused, so it stays 503 POLICYSQL_DATABASE_UNAVAILABLE.
+ * `databaseCode` as for DatabaseStatementError.
+ */
+export class DatabaseRequestError extends EngineError {
   readonly databaseCode: string;
 
   constructor(databaseCode: string) {
@@ -105,14 +120,21 @@ export const complexityCause = (error: unknown): string | null => {
   return COMPLEXITY_ALLOWLIST.find((entry) => text.startsWith(entry.prefix))?.cause ?? null;
 };
 
+const safeDatabaseCode = (error: unknown): string => {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  return typeof code === "string" && SAFE_CODE.test(code) ? code : "UNKNOWN";
+};
+
 /**
  * A database failure that is never a complexity refusal: only the Hrana error object's `code` is
  * read, and only when it has the safe shape; its message is never read.
  */
-export const unclassifiedFailure = (error: unknown): DatabaseStatementError => {
-  const code = (error as { code?: unknown } | null | undefined)?.code;
-  return new DatabaseStatementError(typeof code === "string" && SAFE_CODE.test(code) ? code : "UNKNOWN");
-};
+export const unclassifiedFailure = (error: unknown): DatabaseStatementError =>
+  new DatabaseStatementError(safeDatabaseCode(error));
+
+/** The failure of a pipeline request as a whole: the code is kept for the log, the message is never read. */
+export const requestFailure = (error: unknown): DatabaseRequestError =>
+  new DatabaseRequestError(safeDatabaseCode(error));
 
 /** The failure of step `index` of a statement batch, from its Hrana error object. */
 export const statementFailure = (error: unknown, index: number): Error => {

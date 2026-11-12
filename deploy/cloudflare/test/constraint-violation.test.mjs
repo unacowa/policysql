@@ -336,7 +336,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       const text = `${JSON.stringify(response.body)}\n${h.logs.join("\n")}`;
       assert.equal(text.includes(fragment), false, `"${fragment.slice(0, 40)}" must not appear`);
     }
-    // The code must match exactly: an extended code with a UNIQUE message stays a 503.
+    // The code must match exactly: an extended code with a UNIQUE message is no constraint violation, only a database refusal (500).
     h.replaceDatabaseResponse(({ results }) => {
       for (const entry of results) {
         const errors = entry.response?.result?.step_errors;
@@ -345,8 +345,8 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     });
     h.logs.length = 0;
     const extended = await execute(h, [parent("p1", "seed-code")]);
-    assert.equal(extended.status, 503);
-    assert.equal(extended.body.error.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+    assert.equal(extended.status, 500);
+    assert.equal(extended.body.error.code, "POLICYSQL_DATABASE_ERROR");
     assert.deepEqual(events(h.logs, "database_error_unclassified").map((record) => record.code), ["SQLITE_CONSTRAINT_UNIQUE"]);
     assert.equal(events(h.logs, "database_constraint_violation").length, 0);
   });
