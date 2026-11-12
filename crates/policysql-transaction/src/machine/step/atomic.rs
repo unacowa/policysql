@@ -481,11 +481,12 @@ impl<C: Compiler> Step<'_, C> {
                 // deployment changed the policy, the schema, or the snapshot: the compile
                 // error is one the client takes as a definite rejection, which ADR 0007
                 // forbids when COMMIT may have been sent (#85 path 1). Nothing is looked up
-                // or run; the answer is the unknown outcome, and a later retry under a
-                // snapshot that compiles it again replays its row. An unkeyed request has no
+                // or run; the answer is the unknown outcome (500 `POLICYSQL_OUTCOME_UNKNOWN`)
+                // with this compile's code and path as `detail.cause`, and a later retry under
+                // a snapshot that compiles it again replays its row. An unkeyed request has no
                 // replay contract, so its compile error stays definite.
                 let reply = if request.key.is_some() {
-                    error_reply(Code::Internal)
+                    io::outcome_unknown_reply(&error)
                 } else {
                     core_error_reply(&error)
                 };
@@ -715,9 +716,10 @@ impl<C: Compiler> Step<'_, C> {
                 // write that committed under an earlier deployment, so an owner compile
                 // failure (the Worker and this owner disagree on the policy though their
                 // snapshot strings match, or the input is retried after a policy change) is
-                // the unknown outcome, never a definite compile rejection (#85 path 1).
+                // the unknown outcome (500 `POLICYSQL_OUTCOME_UNKNOWN`, this compile's code and
+                // path as `detail.cause`), never a definite compile rejection (#85 path 1).
                 let reply = if parsed.idempotency.is_some() {
-                    error_reply(Code::Internal)
+                    io::outcome_unknown_reply(&error)
                 } else {
                     core_error_reply(&error)
                 };

@@ -134,10 +134,10 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 }
 
 #[test]
-fn abi_19_names_the_step_machine_with_the_constraint_outcome() {
+fn abi_20_names_the_step_machine_with_the_check_and_cause_answers() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 19);
-    assert!(owner.runtime.snapshot().ends_with(":abi-19"));
+    assert_eq!(owner.runtime.abi_version(), 20);
+    assert!(owner.runtime.snapshot().ends_with(":abi-20"));
 }
 
 /// #145 at the ABI boundary: the real `step_json` reads an `executeFailed` of class `constraint`
@@ -194,8 +194,9 @@ fn a_constraint_class_is_a_conflict_with_detail_and_a_logged_record() {
 }
 
 /// #85 path 1 with the real compiler: a keyed execute whose compile fails (here an operation
-/// the policy does not grant) is answered 500 `POLICYSQL_INTERNAL`, the unknown outcome, and an
-/// unkeyed one keeps the definite compile error. The engine's `request` event reaches the
+/// the policy does not grant) is answered 500 `POLICYSQL_OUTCOME_UNKNOWN`, the unknown outcome, with
+/// the unkeyed answer's code and path as `detail.cause`, and an unkeyed one keeps the definite
+/// compile error. The engine's `request` event reaches the
 /// compile after its binding check; nothing is looked up or executed, and no state remains.
 #[test]
 fn a_keyed_compile_failure_is_the_unknown_outcome_with_the_real_compiler() {
@@ -246,18 +247,34 @@ fn a_keyed_compile_failure_is_the_unknown_outcome_with_the_real_compiler() {
     };
     let (keyed, volatile, output) = answer(Some("keyed-compile-failure-0001"));
     assert_eq!(
-        keyed["reply"]["error"]["code"], "POLICYSQL_INTERNAL",
+        keyed["reply"]["error"]["code"], "POLICYSQL_OUTCOME_UNKNOWN",
         "{}",
         output["raw"]
     );
     assert_eq!(
         keyed["reply"]["error"]["message"],
-        "The request could not be completed."
+        "This request was not executed. The outcome of an earlier request with the same \
+         Idempotency-Key is unknown."
     );
+    assert_eq!(keyed["reply"]["error"]["path"], Value::Null);
     assert!(volatile.is_none(), "the failed request leaves no state");
     let (unkeyed, _, output) = answer(None);
     assert_eq!(
         unkeyed["reply"]["error"]["code"], "POLICYSQL_MISSING_POLICY",
+        "{}",
+        output["raw"]
+    );
+    assert!(unkeyed["reply"]["error"].get("detail").is_none());
+    assert_eq!(
+        keyed["reply"]["error"]["detail"],
+        json!({"cause": {
+            "code": unkeyed["reply"]["error"]["code"],
+            "path": unkeyed["reply"]["error"]["path"],
+        }}),
+        "the cause is the unkeyed answer's code and path"
+    );
+    assert_eq!(
+        keyed["reply"]["error"]["detail"]["cause"]["path"], "/statements/0",
         "{}",
         output["raw"]
     );
@@ -620,4 +637,77 @@ fn cost_estimate_json_is_exported() {
         "results": [{"columns": ["detail"], "rows": [["SCAN counters"]]}],
     }).to_string())).unwrap_or_default();
     assert_eq!(output["estimates"][0]["upperRowsRead"], 20);
+}
+
+/// Drives a direct atomic `execute` of `body` (no key) through `step_json`, answering the
+/// envelope's `execute` with `columns` and `rows`; returns the type of every effect emitted and
+/// the reply.
+fn direct_atomic_with_result(body: &str, columns: &Value, rows: &Value) -> (Vec<String>, Value) {
+    let runtime = runtime(
+        r#"{"max_rows":100,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":8}"#,
+    )
+    .unwrap_or_else(|| unreachable!("valid runtime"));
+    let snapshot = runtime.snapshot();
+    let auth: Value = serde_json::from_str(AUTH).unwrap_or_default();
+    let request = json!({"type": "request", "operation": {
+        "kind": "execute", "auth": auth, "databaseBinding": binding(&snapshot),
+        "snapshot": snapshot, "bodyText": body,
+    }});
+    let mut volatile = None;
+    let mut output = engine_step(&runtime, &mut volatile, &request, 1);
+    let mut kinds = Vec::new();
+    for request in 2..20 {
+        let effects = output["effects"].as_array().cloned().unwrap_or_default();
+        kinds.extend(
+            effects
+                .iter()
+                .filter_map(|effect| effect["type"].as_str().map(str::to_owned)),
+        );
+        if let Some(respond) = effects.iter().find(|effect| effect["type"] == "respond") {
+            return (kinds, respond["reply"].clone());
+        }
+        let Some(effect) = effects.last() else { break };
+        let id = effect["id"].clone();
+        let event = match effect["type"].as_str() {
+            Some("checkBinding") => json!({"type": "bindingChecked", "id": id, "allowed": true}),
+            Some("open") => json!({"type": "opened", "id": id}),
+            Some("rollback") => json!({"type": "rolledBack", "id": id}),
+            Some("execute") => json!({"type": "executed", "id": id, "results": [{
+                "columns": columns, "rows": rows, "rowsAffected": rows.as_array().map_or(0, Vec::len),
+                "usage": {"rowsRead": 0, "rowsWritten": 1, "queryDurationMs": 1},
+            }]}),
+            _ => break,
+        };
+        output = engine_step(&runtime, &mut volatile, &event, request);
+    }
+    (kinds, output)
+}
+
+/// #145 pull request B with the real compiler: a changed row whose check column is FALSE is
+/// answered 403 `POLICYSQL_CHECK_FAILED` at the statement, after a ROLLBACK and never a COMMIT.
+#[test]
+fn a_false_check_column_rolls_back_and_answers_check_failed() {
+    let body =
+        r#"{"statements":[{"sql":"INSERT INTO counters (id) VALUES (:id)","params":{"id":"x"}}]}"#;
+    let (kinds, reply) =
+        direct_atomic_with_result(body, &json!(["__policysql_check"]), &json!([[false]]));
+    assert!(
+        kinds.iter().any(|kind| kind == "rollback"),
+        "{kinds:?} {reply}"
+    );
+    assert!(!kinds.iter().any(|kind| kind == "commit"), "{kinds:?}");
+    assert_eq!(reply["error"]["code"], "POLICYSQL_CHECK_FAILED", "{reply}");
+    assert_eq!(reply["error"]["path"], "/statements/0");
+    assert!(reply["error"].get("detail").is_none(), "{reply}");
+    assert_eq!(
+        reply["error"]["message"],
+        "A changed row does not satisfy the policy check."
+    );
+    // Control: the same statement with a TRUE check column commits.
+    let (kinds, reply) =
+        direct_atomic_with_result(body, &json!(["__policysql_check"]), &json!([[true]]));
+    assert!(
+        kinds.iter().any(|kind| kind == "commit"),
+        "{kinds:?} {reply}"
+    );
 }

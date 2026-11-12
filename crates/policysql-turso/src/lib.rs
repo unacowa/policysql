@@ -254,9 +254,7 @@ fn validate_mutation_result(
         }
         for row in &mut result.rows {
             if row.pop() != Some(LogicalValue::Boolean(true)) {
-                return Err(AdapterError::Rejected(
-                    "mutation post-state check failed".to_owned(),
-                ));
+                return Err(AdapterError::CheckFailed);
             }
         }
         result.columns.pop();
@@ -541,7 +539,8 @@ pub enum AdapterError {
     InvalidResult,
     Conflict,
     TransactionRequired,
-    Rejected(String),
+    /// A changed row's policy `check` column was not SQL TRUE (FALSE or UNKNOWN).
+    CheckFailed,
     Remote,
 }
 
@@ -561,9 +560,7 @@ impl fmt::Display for AdapterError {
             Self::TransactionRequired => {
                 formatter.write_str("mutation requires an owned transaction")
             }
-            Self::Rejected(message) => {
-                write!(formatter, "database operation was rejected: {message}")
-            }
+            Self::CheckFailed => formatter.write_str("mutation post-state check failed"),
             Self::Remote => formatter.write_str("remote database operation failed"),
         }
     }
@@ -949,10 +946,12 @@ mod tests {
         assert_eq!(accepted.affected_rows, 1);
 
         let mut rejected = mutation_result(LogicalValue::Boolean(false));
-        assert!(matches!(
-            validate_sealed_result(&mutation_plan(), &mut rejected),
-            Err(AdapterError::Rejected(_))
-        ));
+        let error = validate_sealed_result(&mutation_plan(), &mut rejected);
+        assert_eq!(error, Err(AdapterError::CheckFailed));
+        assert_eq!(
+            AdapterError::CheckFailed.to_string(),
+            "mutation post-state check failed"
+        );
     }
 
     #[test]
