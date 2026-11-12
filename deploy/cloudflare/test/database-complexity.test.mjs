@@ -328,12 +328,14 @@ test("a statement reply that cannot be read: the rollback continues from the rep
     "wrong result count with the baton after results": { reply: () => Response.json({ results: [], baton: "b9" }), next: "b9" },
     "stalled after the baton": { reply: () => stalled('{"baton":"b6","base_url":null,'), next: "b6", timeoutMs: 50 },
     "read error after the baton": { reply: () => failing('{"baton":"b7","base_url":null,'), next: "b7" },
-    "no baton": { reply: () => Response.json({ baton: null, results: [ok()] }), next: null },
+    // A reply that was read and has a null baton: the server ended the stream (#144), so there is
+    // nothing to roll back and no request or recovery log.
+    "no baton": { reply: () => Response.json({ baton: null, results: [ok()] }), next: null, ended: true },
     "HTTP failure": { reply: () => new Response("no", { status: 502 }), next: null },
   };
   const logged = [];
   t.mock.method(console, "log", (line) => { try { logged.push(JSON.parse(line)); } catch { /* not a record */ } });
-  for (const [kind, { reply, next, timeoutMs = 1_000 }] of Object.entries(kinds)) {
+  for (const [kind, { reply, next, timeoutMs = 1_000, ended = false }] of Object.entries(kinds)) {
     logged.length = 0;
     const sent = [];
     const instance = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "unreadable", async (_url, init) => {
@@ -348,7 +350,12 @@ test("a statement reply that cannot be read: the rollback continues from the rep
     await assert.rejects(transaction.execute([{ sql: "SELECT big" }], { maxResponseBytes: READ_CAP }), (error) => error instanceof EngineError, kind);
     const before = sent.length;
     await transaction.rollback();
-    if (next === null) {
+    if (ended) {
+      assert.equal(sent.length, before, `${kind}: nothing is sent on a stream the server ended`);
+      assert.deepEqual(logged, [], `${kind}: no recovery outcome is logged`);
+      await assert.rejects(transaction.commit().then(() => { throw new Error("committed"); }), () => true, kind);
+      assert.equal(sent.length, before, `${kind}: COMMIT is not sent either`);
+    } else if (next === null) {
       // The baton never arrived: one best-effort attempt with the last one; this fixture accepts
       // it, so the recovery is recorded (a real server refuses a consumed baton, see below).
       assert.deepEqual(sent.at(-1), { baton: "b1", sql: "ROLLBACK" }, `${kind}: the last baton is tried`);
