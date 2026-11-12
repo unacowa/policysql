@@ -160,4 +160,22 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       }
     });
   }
+
+  // Explain compiles outside the step machine; a complexity refusal there is logged with its own
+  // event and the request id, as it is on Execute.
+  test(`${ownerAdapter}: a too-complex Explain logs sql_too_complex with its cause and the request id`, async (t) => {
+    const h = await setup(t, false);
+    const statement = { sql: "SELECT id FROM projects WHERE name LIKE :q", params: { q: "a".repeat(50_001) } };
+    for (const path of [EXPLAIN, EXECUTE]) {
+      h.logs.length = 0;
+      const response = await h.request("a", path, one(statement), null);
+      assert.equal(response.status, 400, JSON.stringify(response.body));
+      assert.deepEqual(response.body.error.detail, { complexity: "like_pattern" });
+      const logged = records(h, "sql_too_complex").filter((record) => record.requestId === response.body.error.requestId);
+      assert.equal(logged.length, 1, `${path}: one record`);
+      assert.equal(logged[0].cause, "like_pattern");
+      assert.equal(logged[0].statementIndex, 0);
+      assert.equal(reasonsOf(h, response).length, 0, "a complexity refusal has no rejection_reason");
+    }
+  });
 }

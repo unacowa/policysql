@@ -183,9 +183,9 @@ return createErrorResponse(429, "POLICYSQL_RATE_LIMITED", "Too many requests.", 
 | `self_join` | 同じresourceどうしのJOIN |
 | `window_function` | 窓関数の対応外の形 |
 | `subquery` | 副問い合わせの対応外の形（同じresourceへの相関など） |
-| `expression` | 対応外の式 |
+| `expression` | 対応外の式。射影の中の対応外の関数、窓関数、副問い合わせ（`id IN (SELECT ...)`、`id = (SELECT ...)`）もここに出る |
 | `cast` | 対応外の`CAST`の型 |
-| `function` | 対応外の関数 |
+| `function` | `WHERE`などの条件の中の対応外の関数 |
 | `literal` | 対応外のliteral（`X'..'`など） |
 | `missing_from` | 基になるresourceがないSELECT |
 | `duplicate_alias` | 別名の重複 |

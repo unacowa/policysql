@@ -53,7 +53,7 @@ const constantList = (source, name) => {
   return values;
 };
 
-test("the enumerations are the same in core, the Worker, OpenAPI, the parser, and the client's types", () => {
+test("the enumerations are the same in core, the Worker, OpenAPI, and the client's types", () => {
   const io = read("crates/policysql-transaction/src/machine/io.rs");
   const openapi = read("spec/openapi.yaml");
   const types = read("packages/client/index.d.ts");
@@ -85,24 +85,9 @@ test("the enumerations are the same in core, the Worker, OpenAPI, the parser, an
   assert.equal(Number(maxSpan[1].replaceAll("_", "")), MAX_SPAN_OFFSET);
   assert.match(component, new RegExp(`start: \\{ type: integer, minimum: 0, maximum: ${MAX_SPAN_OFFSET} \\}`, "u"));
   assert.match(component, new RegExp(`end: \\{ type: integer, minimum: 0, maximum: ${MAX_SPAN_OFFSET} \\}`, "u"));
-  // The parser's and the gateway's names are the ones core accepts, in the same order.
-  const parser = read("crates/policysql-parser/src/lib.rs");
-  const names = parser.slice(parser.indexOf("impl UnsupportedFeature {"));
-  const features = [...names.slice(0, names.indexOf("\n}\n")).matchAll(/Self::[A-Za-z]+ => "([a-z_]+)",/gu)].map((match) => match[1]);
-  assert.deepEqual(features, constantList(io, "UNSUPPORTED_FEATURES"), "UnsupportedFeature::name");
-  const gateway = read("crates/policysql-gateway/src/lib.rs");
-  const reasons = gateway.slice(gateway.indexOf("impl ParameterReason {"));
-  const reasonNames = [...reasons.slice(0, reasons.indexOf("\n}\n")).matchAll(/Self::[A-Za-z]+ => "([a-z]+)",/gu)].map((match) => match[1]);
-  assert.deepEqual(reasonNames, constantList(io, "PARAMETER_REASONS"), "ParameterReason::name");
-  const execution = read("crates/policysql-execution/src/lib.rs");
-  const complexityCauses = [...execution.slice(execution.indexOf("impl ComplexityCause {")).matchAll(/Self::[A-Za-z]+ => "([a-z_]+)",/gu)]
-    .map((match) => match[1]).slice(0, 7);
-  const database = constantList(io, "COMPLEXITY_CAUSES");
-  assert.deepEqual([...new Set([...complexityCauses, ...database, "database"])].sort(), [...constantList(io, "COMPLEXITY_DETAILS")].sort(),
-    "the complexity values are the compile causes, the database's, and `database`");
-  const core = read("crates/policysql-core/src/lib.rs");
-  assert.deepEqual([...core.slice(core.indexOf("impl ExpectationKind {")).matchAll(/Self::[A-Za-z]+ => "([A-Za-z]+)",/gu)].map((match) => match[1]).slice(0, 2),
-    constantList(io, "EXPECTATIONS"), "ExpectationKind::name");
+  // The Rust types' own names (`UnsupportedFeature::ALL`, `ParameterReason::ALL`, `ComplexityCause::ALL`,
+  // `ExpectationKind::ALL`) are compared with core's constants variant for variant by
+  // `the_detail_enumerations_are_the_rust_types_and_core_keeps_them` in crates/policysql-wasm.
 });
 
 test("an optional detail may be absent, a required one may not, and a code without a row has none", () => {

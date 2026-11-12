@@ -279,14 +279,20 @@ detail (the full argument is in the issue):
 - A column that does not exist and one the role cannot see are answered alike. The binder walks a
   statement in a fixed order and stops at the first failure; up to the point where a column is
   resolved both walk the same way, and `FORBIDDEN_COLUMN` has no `detail`. A test
-  (`detail_tests.rs`, "a missing name and a hidden one") compiles 34 column and 12 resource
-  templates against both and requires the same answer wherever the code is the same.
+  (`detail_tests.rs`, "a missing name and a hidden one") compiles 47 column templates (22 of them
+  also for a hidden column of integer, json, boolean and bytes type: CTEs, derived tables,
+  `HAVING`, JSON collections included) and 12 resource templates against both and requires the same
+  answer wherever the code is the same.
 - That test also lists where the *code* already differs, which `detail` does not change:
   a resource without a policy for the role is `MISSING_POLICY` and one that does not exist is
   `FORBIDDEN_OPERATION` (the resource unification of #145 proposal 7 closes this); a hidden column
   that reaches a policy refusal of its own (aggregation or windows off) before the column check is
   answered with that refusal (#154); a column used as an inserted or assigned value is `UNSUPPORTED_SQL`
-  when it exists and `FORBIDDEN_COLUMN` when it does not.
+  when it exists and `FORBIDDEN_COLUMN` when it does not; a literal or value of another type than
+  the hidden column's is `INVALID_PARAMETER` (the type of a hidden column shows in the code, #154).
+  One more difference is a refusal against an acceptance: a column that only a derived table or a CTE
+  carries, and the outer statement does not use, is not checked, so a hidden one compiles and a missing
+  one is refused (#141).
 - One case differs in `detail` with the same code: a CTE named like a Catalog resource is refused
   by the binder before the role is looked at (`feature: cte`), and a CTE of any other name goes on
   to its next refusal. That told a client whether a resource exists before `feature` was added
@@ -324,7 +330,8 @@ the engine), with `requestId`, `statementIndex` or `null`, `code`, `reason`, `sh
 - `request_rejected` is written by the engine from the answer to the client and cannot carry the
   reason: it is not in the answer, and an owner compile does not pass through the owner wire back
   to the Worker. The two are joined by `requestId`. `sql_too_complex` and
-  `emitted_sql_reparse_failed` keep their own events and get no `rejection_reason`.
+  `emitted_sql_reparse_failed` keep their own events and get no `rejection_reason`; Explain's
+  `compile_json` carries those two records in `log` as well, so they are logged there too.
 - A keyed unknown outcome writes the original reason too: the log happens where the compile failed,
   before the answer is rewritten.
 - Explain's `compile_json` returns the record as a sibling `log` of `error`, a private field of the
