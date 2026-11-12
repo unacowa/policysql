@@ -17,7 +17,7 @@ const commits = (h) => h.events.filter(({ sql }) => sql === "COMMIT").length;
 const count = (h, id) => h.rows("a").filter((row) => row.id === id).length;
 const idempotencyRows = (h) => h.databases.get("a").database.prepare("SELECT count(*) AS n FROM policysql_idempotency").get().n;
 // The example policy's only INSERT permission: removing it makes an INSERT a compile error
-// ("No policy permits this operation."), as a policy change does.
+// ("No policy permits this operation, or the resource does not exist."), as a policy change does.
 const denyInsert = (policy) => policy.replace(/^        insert:\n(?:^          .*\n)+/gmu, "");
 const MESSAGE = "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.";
 // The unknown outcome: a fixed message, no top-level path, and the refusal as the cause. The

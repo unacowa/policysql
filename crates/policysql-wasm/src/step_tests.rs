@@ -134,10 +134,10 @@ fn begun_with(runtime: super::PolicySqlRuntime) -> Owner {
 }
 
 #[test]
-fn abi_21_names_the_step_machine_with_the_detail_and_reason_answers() {
+fn abi_22_names_the_step_machine_with_the_detail_and_reason_answers() {
     let owner = begun();
-    assert_eq!(owner.runtime.abi_version(), 21);
-    assert!(owner.runtime.snapshot().ends_with(":abi-21"));
+    assert_eq!(owner.runtime.abi_version(), 22);
+    assert!(owner.runtime.snapshot().ends_with(":abi-22"));
 }
 
 /// #145 at the ABI boundary: the real `step_json` reads an `executeFailed` of class `constraint`
@@ -206,79 +206,83 @@ fn a_keyed_compile_failure_is_the_unknown_outcome_with_the_real_compiler() {
     .unwrap_or_else(|| unreachable!("valid runtime"));
     let snapshot = runtime.snapshot();
     let auth: Value = serde_json::from_str(AUTH).unwrap_or_default();
-    let body = json!({"statements": [{"sql": "DELETE FROM counters", "params": {}}]}).to_string();
-    let answer = |key: Option<&str>| {
-        let mut volatile = None;
-        let mut operation = json!({
-            "kind": "execute", "auth": auth.clone(), "databaseBinding": binding(&snapshot),
-            "snapshot": snapshot.clone(), "bodyText": body.clone(),
-        });
-        if let Some(key) = key {
-            operation["idempotencyKey"] = json!(key);
-        }
-        let output = engine_step(
-            &runtime,
-            &mut volatile,
-            &json!({"type": "request", "operation": operation}),
-            1,
-        );
+    // An operation the policy does not grant, and a resource that does not exist: one answer
+    // (#145 pull request D).
+    for sql in ["DELETE FROM counters", "SELECT id FROM no_such_table"] {
+        let body = json!({"statements": [{"sql": sql, "params": {}}]}).to_string();
+        let answer = |key: Option<&str>| {
+            let mut volatile = None;
+            let mut operation = json!({
+                "kind": "execute", "auth": auth.clone(), "databaseBinding": binding(&snapshot),
+                "snapshot": snapshot.clone(), "bodyText": body.clone(),
+            });
+            if let Some(key) = key {
+                operation["idempotencyKey"] = json!(key);
+            }
+            let output = engine_step(
+                &runtime,
+                &mut volatile,
+                &json!({"type": "request", "operation": operation}),
+                1,
+            );
+            assert_eq!(
+                output["effects"][0]["type"], "checkBinding",
+                "{}",
+                output["raw"]
+            );
+            let id = output["effects"][0]["id"].clone();
+            let checked = engine_step(
+                &runtime,
+                &mut volatile,
+                &json!({"type": "bindingChecked", "id": id, "allowed": true}),
+                1,
+            );
+            let reply = checked["effects"]
+                .as_array()
+                .and_then(|effects| {
+                    effects
+                        .iter()
+                        .find(|effect| effect["type"] == "respond")
+                        .cloned()
+                })
+                .unwrap_or_default();
+            (reply, volatile, checked)
+        };
+        let (keyed, volatile, output) = answer(Some("keyed-compile-failure-0001"));
         assert_eq!(
-            output["effects"][0]["type"], "checkBinding",
+            keyed["reply"]["error"]["code"], "POLICYSQL_OUTCOME_UNKNOWN",
             "{}",
             output["raw"]
         );
-        let id = output["effects"][0]["id"].clone();
-        let checked = engine_step(
-            &runtime,
-            &mut volatile,
-            &json!({"type": "bindingChecked", "id": id, "allowed": true}),
-            1,
+        assert_eq!(
+            keyed["reply"]["error"]["message"],
+            "This request was not executed. The outcome of an earlier request with the same \
+             Idempotency-Key is unknown."
         );
-        let reply = checked["effects"]
-            .as_array()
-            .and_then(|effects| {
-                effects
-                    .iter()
-                    .find(|effect| effect["type"] == "respond")
-                    .cloned()
-            })
-            .unwrap_or_default();
-        (reply, volatile, checked)
-    };
-    let (keyed, volatile, output) = answer(Some("keyed-compile-failure-0001"));
-    assert_eq!(
-        keyed["reply"]["error"]["code"], "POLICYSQL_OUTCOME_UNKNOWN",
-        "{}",
-        output["raw"]
-    );
-    assert_eq!(
-        keyed["reply"]["error"]["message"],
-        "This request was not executed. The outcome of an earlier request with the same \
-         Idempotency-Key is unknown."
-    );
-    assert_eq!(keyed["reply"]["error"]["path"], Value::Null);
-    assert!(volatile.is_none(), "the failed request leaves no state");
-    let (unkeyed, _, output) = answer(None);
-    assert_eq!(
-        unkeyed["reply"]["error"]["code"], "POLICYSQL_MISSING_POLICY",
-        "{}",
-        output["raw"]
-    );
-    assert!(unkeyed["reply"]["error"].get("detail").is_none());
-    assert_eq!(
-        keyed["reply"]["error"]["detail"],
-        json!({"cause": {
-            "code": unkeyed["reply"]["error"]["code"],
-            "path": unkeyed["reply"]["error"]["path"],
-            "detail": null,
-        }}),
-        "the cause is the unkeyed answer's code and path"
-    );
-    assert_eq!(
-        keyed["reply"]["error"]["detail"]["cause"]["path"], "/statements/0",
-        "{}",
-        output["raw"]
-    );
+        assert_eq!(keyed["reply"]["error"]["path"], Value::Null);
+        assert!(volatile.is_none(), "the failed request leaves no state");
+        let (unkeyed, _, output) = answer(None);
+        assert_eq!(
+            unkeyed["reply"]["error"]["code"], "POLICYSQL_MISSING_POLICY",
+            "{}",
+            output["raw"]
+        );
+        assert!(unkeyed["reply"]["error"].get("detail").is_none());
+        assert_eq!(
+            keyed["reply"]["error"]["detail"],
+            json!({"cause": {
+                "code": unkeyed["reply"]["error"]["code"],
+                "path": unkeyed["reply"]["error"]["path"],
+                "detail": null,
+            }}),
+            "the cause is the unkeyed answer's code and path"
+        );
+        assert_eq!(
+            keyed["reply"]["error"]["detail"]["cause"]["path"], "/statements/0",
+            "{}",
+            output["raw"]
+        );
+    }
 }
 
 /// ADR 0024 pull request 5 with the real compiler: the policy's check triggers on the

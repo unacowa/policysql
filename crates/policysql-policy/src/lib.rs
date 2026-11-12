@@ -239,6 +239,28 @@ enum RawColumn {
 }
 
 impl PolicyBundle {
+    /// Every role that has a policy, with the resources it has a policy of any operation on
+    /// (#145 pull request D: the resources the role's SQL may name).
+    #[must_use]
+    pub fn resources_by_role(&self) -> BTreeMap<RoleName, BTreeSet<policysql_core::ResourceId>> {
+        fn add<P>(
+            into: &mut BTreeMap<RoleName, BTreeSet<policysql_core::ResourceId>>,
+            policies: &BTreeMap<policysql_core::ResourceId, BTreeMap<RoleName, P>>,
+        ) {
+            for (resource, roles) in policies {
+                for role in roles.keys() {
+                    into.entry(role.clone()).or_default().insert(*resource);
+                }
+            }
+        }
+        let mut by_role = BTreeMap::new();
+        add(&mut by_role, &self.select);
+        add(&mut by_role, &self.insert);
+        add(&mut by_role, &self.update);
+        add(&mut by_role, &self.delete);
+        by_role
+    }
+
     /// Returns only the already-activated SELECT surface visible to one role.
     #[must_use]
     pub fn select_access(
@@ -2451,7 +2473,7 @@ mod tests {
     use policysql_testkit::{
         OracleRow, OracleSession, OracleValue, TruthValue, evaluate_select_filter,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn descriptor() -> ValueDescriptor {
         ValueDescriptor {
@@ -2512,6 +2534,43 @@ mod tests {
                 .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
         )
         .unwrap_or_else(|error| unreachable!("valid policy: {error}"))
+    }
+
+    #[test]
+    fn lists_the_resources_each_role_has_a_policy_on() {
+        let bundle = activate(
+            "version: 1
+resources:
+  projects:
+    roles:
+      reader:
+        select:
+          columns: [id]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+      writer:
+        insert:
+          columns: [id, name]
+          presets:
+            tenant_id: { session: tenant_id }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id] }
+",
+        );
+        let by_role = bundle.resources_by_role();
+        let projects = ResourceId::new(1).unwrap_or_else(|error| unreachable!("valid ID: {error}"));
+        let role = |name: &str| {
+            RoleName::new(name).unwrap_or_else(|error| unreachable!("valid role: {error}"))
+        };
+        assert_eq!(by_role.len(), 2);
+        assert_eq!(
+            by_role.get(&role("reader")),
+            Some(&BTreeSet::from([projects]))
+        );
+        assert_eq!(
+            by_role.get(&role("writer")),
+            Some(&BTreeSet::from([projects]))
+        );
+        assert_eq!(by_role.get(&role("stranger")), None);
     }
 
     #[test]
