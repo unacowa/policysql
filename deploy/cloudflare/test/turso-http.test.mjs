@@ -623,3 +623,37 @@ test("S2: a batch that fails as a whole keeps its code, is never a complexity re
   const none = await run({ message: "no code" });
   assert.equal(none.databaseCode, "UNKNOWN");
 });
+
+// Real Turso ends the stream (`baton: null`) when SQLite closed the transaction itself on the
+// error; the reply is still the batch reply (observed by the release smoke, #144).
+test("E1: a refused batch whose reply ends the stream keeps its code, and nothing more is sent on that stream", async (t) => {
+  t.mock.method(console, "log", () => {});
+  const sent = [];
+  const reply = (entry) => async (_url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(body);
+    const [sql] = [requestSqls(body.requests)[0] ?? ""];
+    if (sql.startsWith("BEGIN")) return Response.json({ baton: "b0", results: [result([], [])] });
+    if (sql === "ROLLBACK") return Response.json({ error: "Baton not found" }, { status: 404 });
+    return Response.json({ baton: null, results: [entry] });
+  };
+  const run = async (entry) => {
+    const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "ended", reply(entry));
+    const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
+    const failure = await transaction.execute(threeStatements, { maxResponseBytes: READ_CAP }).then(() => null, (error) => error);
+    return { transaction, failure };
+  };
+  const refused = await run(stepsReply([okStep(), null, null], [null, CONSTRAINT, null]));
+  assert.ok(refused.failure instanceof DatabaseStatementError && refused.failure.databaseCode === "SQLITE_CONSTRAINT");
+  const complex = await run(stepsReply([okStep(), null, null], [null, COMPLEXITY, null]));
+  assert.ok(complex.failure instanceof SqlComplexityError && complex.failure.statement === 1);
+  // The stream is gone: the rollback is the best-effort one and never throws; a COMMIT is never sent.
+  await refused.transaction.rollback();
+  assert.equal(refused.transaction.open, false);
+  // A success without a baton, or a reply that breaks the contract, is a plain 503.
+  for (const entry of [batchReply([okStep(), okStep(), okStep()].map((x) => result(["n"], [["1"]]))), stepsReply([okStep(), okStep(), null], [null, COMPLEXITY, null])]) {
+    const { failure } = await run(entry);
+    assert.equal(failure.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+    assert.ok(!(failure instanceof DatabaseStatementError) && !(failure instanceof SqlComplexityError));
+  }
+});

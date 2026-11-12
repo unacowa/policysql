@@ -437,7 +437,16 @@ class TursoHttpTransaction {
       if (validBaton(next)) this.baton = next; else this.unusable = true;
       throw error;
     }
-    if (!body.baton) { this.unusable = true; throw databaseFailure(); }
+    if (!body.baton) {
+      this.unusable = true;
+      // Real Turso ends the stream (`baton: null`) when SQLite itself closed the transaction on the
+      // error (`ON CONFLICT ROLLBACK`, `RAISE(ROLLBACK)`), and the reply is still the batch reply.
+      // Read it so the refusal keeps its code; the stream stays unusable, so nothing more is sent
+      // on it (a success without a baton, or a reply that breaks the contract, is a plain 503).
+      const ended = readBatch(body.results[0], statements.length, this.transport.requestId);
+      if (ended.refused !== null) throw statementFailure(ended.error, ended.refused);
+      throw databaseFailure();
+    }
     // The stream's next baton comes first, even when a statement was refused: the rollback that
     // follows a refusal must continue this stream with the baton of this reply, or the server
     // keeps the transaction (and its write lock) open until the stream expires.

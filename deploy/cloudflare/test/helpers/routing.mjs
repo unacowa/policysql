@@ -199,8 +199,13 @@ export const harness = async (t, { hooks = true, idempotencyTable = true, custom
       results.push(await runStatement(request.stmt));
     }
     // Every reply carries a new baton, as a real server's does; a replacement reply may name it.
+    // As real Turso (observed by the release smoke, #144), a stream whose transaction SQLite closed
+    // by itself (`ON CONFLICT ROLLBACK`, `RAISE(ROLLBACK)`) ends with the reply: `baton: null`.
     let next = null;
-    if (!closed) {
+    if (!closed && !connection.database.isTransaction) {
+      connection.database.close();
+      connections.delete(baton);
+    } else if (!closed) {
       next = crypto.randomUUID();
       connections.delete(baton);
       connections.set(next, connection);

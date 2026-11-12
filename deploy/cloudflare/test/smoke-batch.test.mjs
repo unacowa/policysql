@@ -14,29 +14,20 @@ const classify = {
 };
 
 /**
- * A transport that sends each statement as its own request and carries on after an error, as the
- * pipeline did before #144; it fails with the first error once every statement ran.
+ * A transport whose batches lose their conditions on the way to the server, so the server runs every
+ * step as an unconditional pipeline did before #144 (the statements after the first error run).
  */
-const carriesOn = (transport) => ({
-  async begin(...args) {
-    const transaction = await transport.begin(...args);
-    return {
-      ...transaction,
-      get open() { return transaction.open; },
-      async execute(statements, options) {
-        const results = [];
-        let first;
-        for (const statement of statements) {
-          try { results.push(...await transaction.execute([statement], options)); } catch (error) { first ??= error; }
-        }
-        if (first) throw first;
-        return results;
-      },
-      commit: () => transaction.commit(),
-      rollback: () => transaction.rollback(),
-    };
-  },
-});
+const withoutConditions = (transport) => {
+  const forward = transport.fetchImpl;
+  transport.fetchImpl = (url, init) => {
+    const body = JSON.parse(init.body);
+    for (const request of body.requests) {
+      if (request.type === "batch") for (const step of request.batch.steps) delete step.condition;
+    }
+    return forward(url, { ...init, body: JSON.stringify(body) });
+  };
+  return transport;
+};
 
 for (const ownerAdapter of OWNER_ADAPTERS) {
   test(`${ownerAdapter}: the section passes with the library's transport and reports each table`, async (t) => {
@@ -59,15 +50,15 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     t.mock.method(console, "log", () => {});
     const h = await harness(t, { ownerAdapter });
     h.databases.get("a").database.exec(STATEMENT_BATCH_TABLES.join(";"));
-    const transport = carriesOn(h.database.connect(h.binding("a"), "smoke"));
+    const transport = withoutConditions(h.database.connect(h.binding("a"), "smoke"));
     const { failures } = await statementBatchSmoke({ transport, ...classify });
     // Where SQLite closed the transaction itself, the later statements stayed committed. After an
     // ordinary ABORT the transaction is still open and the rollback takes them back, so that table
-    // cannot tell the two transports apart.
+    // is only named for the reply that broke the contract.
     for (const table of ["smoke_conflict_rollback", "smoke_raise_rollback"]) {
       assert.ok(failures.includes(`${table}: no statement of the failed envelope left a row`), `${table}: ${JSON.stringify(failures)}`);
     }
-    assert.equal(failures.some((failure) => failure.startsWith("smoke_conflict_abort")), false);
+    assert.equal(failures.includes("smoke_conflict_abort: no statement of the failed envelope left a row"), false);
     for (const failure of failures) assert.equal(/INSERT|SELECT|UNIQUE/u.test(failure), false, failure);
   });
 }
