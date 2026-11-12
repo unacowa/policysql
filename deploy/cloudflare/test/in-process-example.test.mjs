@@ -72,11 +72,12 @@ test("in-process: failures are codes, never statuses, and body checks run withou
   const p = createInProcessPolicySql(getRuntime);
   t.after(() => p.close());
   const context = { database: p.binding, session: session("tenant_a") };
-  const failure = async (promise, code) => {
+  const failure = async (promise, code, detail) => {
     const result = await promise;
     assert.equal(result.ok, false, JSON.stringify(result));
     assert.equal(result.error.code, code);
-    assert.deepEqual(Object.keys(result.error).sort(), ["code", "message", "path"]);
+    assert.deepEqual(Object.keys(result.error).sort(), detail === undefined ? ["code", "message", "path"] : ["code", "detail", "message", "path"]);
+    assert.deepEqual(result.error.detail, detail);
     assert.equal(JSON.stringify(result).includes("status\":4"), false);
   };
   await failure(p.engine.execute({ bodyText: statements({ sql: "SELECT tenant_id FROM projects", params: {} }) }, context),
@@ -91,7 +92,7 @@ test("in-process: failures are codes, never statuses, and body checks run withou
   // the definite REQUEST_TOO_LARGE (#100).
   await failure(p.engine.execute({
     bodyText: `"${"x".repeat(1_048_576)}"`, idempotencyKey: "in-process-over-limit-key-1",
-  }, context), "POLICYSQL_INTERNAL");
+  }, context), "POLICYSQL_OUTCOME_UNKNOWN", { cause: { code: "POLICYSQL_REQUEST_TOO_LARGE", path: null } });
   await failure(p.engine.execute({ bodyText: statements({ sql: "SELECT id FROM projects", params: {} }), role: "admin" }, context),
     "POLICYSQL_FORBIDDEN_ACCESS");
   await failure(p.engine.catalog({}, { database: p.binding, session: session("tenant_a", ["execute"]) }), "POLICYSQL_FORBIDDEN_ACCESS");

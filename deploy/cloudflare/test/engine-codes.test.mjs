@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 // not "these twelve, and no others". The list is the decision.
 const ENGINE_CODES = new Map([
   ["POLICYSQL_INTERNAL", "a fault of the engine or of its inputs"],
+  ["POLICYSQL_OUTCOME_UNKNOWN", "a keyed execute refused by the session gate or a body limit before core, whose retry may be of a write committed under an earlier deployment (ADR 0007 #85, #100); the refusal goes in detail.cause"],
   ["POLICYSQL_INVALID_REQUEST", "request framing checked before core (ADR 0023 order), and the begin body checks that stay in the engine while interactive commands have no `request` kind (ADR 0024 pull request 7)"],
   ["POLICYSQL_REQUEST_TOO_LARGE", "the request byte and value limits, checked before the body reaches core; a keyed execute answers the unknown outcome when the retry may predate a deployment that lowered them (ADR 0007, #100)"],
   ["POLICYSQL_JSON_TOO_DEEP", "the body depth limit, checked before core; the limit tightened from 65 to 64 nested containers, so a keyed execute answers the unknown outcome (ADR 0007, #100)"],

@@ -112,7 +112,8 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         "/v1/transactions:execute", { statements: [insert("commit_gate_atomic")] }, reduced, "commit-gate-atomic-0001",
       );
       assert.equal(atomic.status, 500, JSON.stringify(atomic.body));
-      assert.equal(atomic.body.error.code, "POLICYSQL_INTERNAL");
+      assert.equal(atomic.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN");
+      assert.deepEqual(atomic.body.error.detail, { cause: { code: "POLICYSQL_FORBIDDEN_ACCESS", path: null } });
       await unknown(atomic, "execute");
       assert.equal(count(h, "commit_gate_atomic"), 0, "the atomic write never ran");
 

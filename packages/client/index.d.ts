@@ -41,6 +41,8 @@ export type PolicySqlConstraintKind = 'unique' | 'not_null' | 'foreign_key' | 'c
 /** Machine-readable values fixed per error code. Branch on `code`, not on the presence of a field. */
 export interface PolicySqlErrorDetail {
   readonly constraint?: PolicySqlConstraintKind
+  /** On `POLICYSQL_OUTCOME_UNKNOWN`: the code and path the request would have been refused with, had it carried no key. */
+  readonly cause?: { readonly code: string; readonly path: string | null }
   readonly [field: string]: unknown
 }
 export interface PolicySqlErrorOptions extends ErrorOptions { response?: TransportResponse; detail?: PolicySqlErrorDetail }

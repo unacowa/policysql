@@ -106,11 +106,13 @@ export const readResponse = (response) => {
 // Only documented code/status pairs establish rejection. Status alone, unknown
 // errors and exceptions thrown by a Transport cannot establish execution outcome.
 // Every pair is the one in the public status table (website/api/errors.md); a server test
-// checks that.
+// checks that. `POLICYSQL_OUTCOME_UNKNOWN` (500) and `POLICYSQL_COMMIT_OUTCOME_UNKNOWN` (503) are
+// never a rejection: by default they are an unknown outcome, and `error.cause.detail.cause`
+// carries the refusal a keyed execute hid (#145).
 export const REJECTIONS = new Map([
   [401, ["UNAUTHENTICATED", "AUTHENTICATION_FAILED"]],
   [403, ["FORBIDDEN_ACCESS", "MISSING_POLICY", "FORBIDDEN_OPERATION", "FORBIDDEN_COLUMN",
-    "FORBIDDEN_COLUMN_CONTEXT", "PRESET_COLUMN", "TRANSACTION_MODE_VIOLATION"]],
+    "FORBIDDEN_COLUMN_CONTEXT", "PRESET_COLUMN", "TRANSACTION_MODE_VIOLATION", "CHECK_FAILED"]],
   [400, ["INVALID_REQUEST", "JSON_TOO_DEEP", "INVALID_SQL", "MULTIPLE_STATEMENTS", "UNSUPPORTED_SQL", "DUPLICATE_RESULT_COLUMN",
     "INVALID_PARAMETER", "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER", "IDEMPOTENCY_KEY_INVALID", "SQL_TOO_COMPLEX"]],
   [409, ["STALE_OPERATION", "IDEMPOTENCY_CONFLICT", "TRANSACTION_CONFLICT", "TRANSACTION_UNAVAILABLE", "COMMIT_CHECK_REJECTED",
@@ -123,7 +125,7 @@ const sqlRejections = new Set([
   "MISSING_POLICY", "FORBIDDEN_OPERATION", "FORBIDDEN_COLUMN", "FORBIDDEN_COLUMN_CONTEXT",
   "INVALID_SQL", "MULTIPLE_STATEMENTS", "UNSUPPORTED_SQL", "DUPLICATE_RESULT_COLUMN", "INVALID_PARAMETER",
   "AMBIGUOUS_PARAMETER_TYPE", "RESERVED_PARAMETER", "PRESET_COLUMN", "EXPECTATION_FAILED", "SCHEMA_MISMATCH",
-  "SQL_TOO_COMPLEX", "CONSTRAINT_VIOLATION",
+  "SQL_TOO_COMPLEX", "CONSTRAINT_VIOLATION", "CHECK_FAILED",
 ]);
 const rejectsCommand = ({ error, status }, kind) => {
   const code = error.code.slice("POLICYSQL_".length);

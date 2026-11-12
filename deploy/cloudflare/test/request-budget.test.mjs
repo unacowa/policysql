@@ -325,11 +325,13 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
         // is the unknown outcome (#85 path 1: the retry of a committed write from before a
         // deployment changed the policy or the role), never a definite rejection.
         assert.equal(executed.status, 500, JSON.stringify(executed.body).slice(0, 300));
-        assert.equal(executed.body.error.code, "POLICYSQL_INTERNAL");
+        assert.equal(executed.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN");
         // Without a key there is no replay contract, so the same compile failure is definite.
         const unkeyed = await call(EXECUTE, { method: "POST", headers: {}, body: JSON.stringify({ statements: [insert("long_role_unkeyed")] }) });
         assert.equal(unkeyed.status, 403, JSON.stringify(unkeyed.body).slice(0, 300));
         assert.equal(unkeyed.body.error.code, "POLICYSQL_MISSING_POLICY");
+        // The cause is what the unkeyed request answers.
+        assert.deepEqual(executed.body.error.detail, { cause: { code: unkeyed.body.error.code, path: unkeyed.body.error.path } });
         const explained = await call("/v1/transactions:explain", { method: "POST", headers: {}, body: JSON.stringify({ statements: [insert("long_role")] }) });
         assert.equal(explained.status, 403, JSON.stringify(explained.body).slice(0, 300));
         const catalog = await call("/v1/catalog", { method: "GET", headers: {} });

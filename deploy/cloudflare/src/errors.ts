@@ -51,6 +51,19 @@ export class CommitNotSentError extends Error {
 
 export const internalError = () => new EngineError("POLICYSQL_INTERNAL", "The request could not be completed.");
 
+/**
+ * A keyed execute refused before core (the session gate or a body limit) whose retry may be of
+ * a write that committed under an earlier deployment: the unknown outcome, with the refusal as
+ * `detail.cause` (ADR 0007 #85 and #100, ADR 0030). The message is the same fixed text as core's
+ * (`Code::KeyedOutcomeUnknown`).
+ */
+export const outcomeUnknownError = (cause: EngineError) => new EngineError(
+  "POLICYSQL_OUTCOME_UNKNOWN",
+  "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.",
+  null,
+  { cause: Object.freeze({ code: cause.code, path: cause.path }) },
+);
+
 // A well-formed BLOB over the per-value limit is a permanent limit condition, not a
 // transient database failure; both database transports use this same category. The
 // HTTP transport also uses it for statement responses over its response-size bound.

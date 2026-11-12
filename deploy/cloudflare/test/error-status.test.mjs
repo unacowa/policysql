@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { ERROR_STATUS, LOG_ONLY_CODES, statusFor } from "../src/http/status.ts";
 import { createErrorResponse } from "../src/http/responses.ts";
 import { JwtAuthenticationError } from "../src/adapters/jwt.ts";
+import { OUTCOME_CAUSES } from "../src/error-detail.ts";
+import { PolicySqlClient, PolicySqlError, PolicySqlOutcomeUnknownError } from "../../../packages/client/index.js";
 
 // The status table is single-sourced (ADR 0019, ADR 0023): website/api/errors.md is the
 // specification, src/http/status.ts is the only implementation, and every code the library
@@ -194,5 +196,54 @@ test("the log-only codes have no status and createErrorResponse refuses them", (
     for (const status of [400, 403, 429, 500, 503]) {
       assert.throws(() => createErrorResponse(status, code, "m"), TypeError, `${code} at ${status}`);
     }
+  }
+});
+
+// #145: a policy `check` that fails is a definite 403 of a statement; the unknown outcomes
+// (500 `POLICYSQL_OUTCOME_UNKNOWN` of a keyed execute, 503 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`) are
+// never a rejection of any command, at any status.
+test("CHECK_FAILED is a 403 rejection and neither unknown outcome is a rejection at any status", async () => {
+  const { REJECTIONS } = await import("../../../packages/client/protocol.js");
+  const all = { ...specTable("library"), ...specTable("wrapper") };
+  assert.equal(all.POLICYSQL_CHECK_FAILED, 403);
+  assert.equal(statusFor("POLICYSQL_CHECK_FAILED"), 403);
+  assert.ok(REJECTIONS.get(403).includes("CHECK_FAILED"));
+  assert.equal(all.POLICYSQL_OUTCOME_UNKNOWN, 500);
+  assert.equal(statusFor("POLICYSQL_OUTCOME_UNKNOWN"), 500);
+  assert.equal(all.POLICYSQL_COMMIT_OUTCOME_UNKNOWN, 503);
+  for (const [status, codes] of REJECTIONS) {
+    for (const code of ["OUTCOME_UNKNOWN", "COMMIT_OUTCOME_UNKNOWN"]) assert.equal(codes.includes(code), false, `${code} under ${status}`);
+  }
+  const detail = { cause: { code: "POLICYSQL_INVALID_SQL", path: "/statements/0" } };
+  for (const status of [400, 403, 409, 413, 422, 500, 502, 503, 504]) {
+    const body = { error: { code: "POLICYSQL_OUTCOME_UNKNOWN", message: "m", path: null, detail, requestId: "req_1" } };
+    const client = new PolicySqlClient({ transport: async () => ({ status, body }) });
+    await assert.rejects(client.execute("SELECT 1"), (error) => {
+      assert.ok(error instanceof PolicySqlOutcomeUnknownError, `status ${status}`);
+      assert.ok(error.cause instanceof PolicySqlError);
+      assert.equal(error.cause.code, "POLICYSQL_OUTCOME_UNKNOWN");
+      assert.equal(error.cause.status, status);
+      assert.deepEqual(error.cause.detail, detail, "the refusal reaches the application as error.cause.detail.cause");
+      return true;
+    });
+  }
+});
+
+// #145: the list of codes a keyed outcome's cause may take is kept twice, in core (which checks an
+// owner's reply) and in the Worker (which checks the reply it relays). They are one set, and
+// contain the codes the engine itself puts there.
+test("the Worker's cause list is core's", () => {
+  const rust = read("crates/policysql-transaction/src/machine/io.rs");
+  const block = rust.match(/OUTCOME_CAUSE_CODES: \[&str; (\d+)\] = \[([^\]]*)\];/u);
+  assert.ok(block, "core declares OUTCOME_CAUSE_CODES");
+  const core = [...block[2].matchAll(/"POLICYSQL_([A-Z0-9_]+)"/gu)].map((match) => match[1]);
+  assert.equal(core.length, Number(block[1]));
+  assert.equal(new Set(core).size, core.length, "no duplicates");
+  assert.deepEqual([...core].sort(), [...OUTCOME_CAUSES].sort());
+  for (const code of ["FORBIDDEN_ACCESS", "REQUEST_TOO_LARGE", "JSON_TOO_DEEP"]) assert.ok(OUTCOME_CAUSES.includes(code), code);
+  // No code that depends on the database's state, and no outcome code, is a cause.
+  for (const code of ["CONSTRAINT_VIOLATION", "CHECK_FAILED", "SCHEMA_MISMATCH", "DATABASE_TIMEOUT", "TIMEOUT",
+    "OUTCOME_UNKNOWN", "COMMIT_OUTCOME_UNKNOWN", "IDEMPOTENCY_CONFLICT", "TRANSACTION_CONFLICT"]) {
+    assert.equal(OUTCOME_CAUSES.includes(code), false, code);
   }
 });

@@ -3,7 +3,8 @@
 // COMMIT was sent, so it must never be an answer the client takes as a definite rejection
 // (ADR 0007): `maxRequestBytes` and `maxJsonValues` can be lowered, and the body depth limit
 // tightened from accepting 65 nested containers to 64 (ADR 0027 pull request 7). The answer is
-// 500 POLICYSQL_INTERNAL (the unknown outcome) on both placements, the body read stays bounded
+// 500 POLICYSQL_OUTCOME_UNKNOWN (the unknown outcome, the refusal as `detail.cause`, #145) on
+// both placements, the body read stays bounded
 // by the current limit, nothing is looked up, replayed, executed, committed, or consumed, and a
 // later deployment whose limits accept the request replays the stored result. A rejection that
 // was invalid under every deployment (malformed JSON, a duplicate key, a lone surrogate, a
@@ -57,10 +58,12 @@ const unchanged = (h, before, label) => {
   assert.deepEqual(h.ownerNames(), before.owners, `${label}: no owner was created`);
   for (const name of before.owners) assert.equal(h.ownerInputs(name).length, before.inputs[name], `${label}: nothing was forwarded to ${name}`);
 };
-const unknown = (response, label) => {
+const unknown = (response, label, causeCode = "POLICYSQL_REQUEST_TOO_LARGE") => {
   assert.equal(response.status, 500, `${label}: ${JSON.stringify(response.body).slice(0, 300)}`);
-  assert.equal(response.body.error.code, "POLICYSQL_INTERNAL", label);
-  assert.equal(response.body.error.message, "The request could not be completed.", label);
+  assert.equal(response.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN", label);
+  assert.equal(response.body.error.message, "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.", label);
+  assert.equal(response.body.error.path, null, label);
+  assert.deepEqual(response.body.error.detail, { cause: { code: causeCode, path: null } }, label);
   assert.deepEqual(Object.keys(response.body), ["error"], `${label}: no stored result, trace, or internal field`);
   assert.equal(response.body.results, undefined, `${label}: the stored result is not returned`);
   assert.equal(response.body.debug, undefined, `${label}: no trace is returned`);
@@ -68,6 +71,7 @@ const unknown = (response, label) => {
 const definite = (response, status, code, label) => {
   assert.equal(response.status, status, `${label}: ${JSON.stringify(response.body).slice(0, 300)}`);
   assert.equal(response.body.error.code, code, label);
+  assert.equal(response.body.error.detail, undefined, `${label}: no detail`);
   assert.equal(response.body.results, undefined, `${label}: no result`);
 };
 
@@ -86,7 +90,8 @@ const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 for (const ownerAdapter of OWNER_ADAPTERS) {
   for (const [placement, hooks] of [["direct", false], ["owner", true]]) {
     test(`${ownerAdapter}/${placement}: #100 a keyed write retried after maxRequestBytes is lowered is unknown, then replays`, async (t) => {
-      t.mock.method(console, "log", () => {});
+      const logs = [];
+      t.mock.method(console, "log", (line) => { logs.push(String(line)); });
       const limits = { ...REQUIRED, maxRequestBytes: MIB };
       const h = await harness(t, { ownerAdapter, hooks, fixture, runtimeLimits: limits });
       const key = `lowered-bytes-${placement}-0001`;
@@ -107,6 +112,13 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
       assert.equal(h.runtime.snapshot, snapshot, "a limit change does not change the snapshot");
       const retry = await h.request("a", EXECUTE, body, key);
       unknown(retry, "lowered maxRequestBytes");
+      // The log keeps both facts: the body limit (`keyed_body_limit_unknown`) and the refusal the
+      // keyed answer hid (`request_rejected.cause`).
+      const events = logs.map((line) => { try { return JSON.parse(line); } catch { return {}; } });
+      assert.ok(events.some((event) => event.event === "keyed_body_limit_unknown"), "the body-limit event");
+      const rejected = events.filter((event) => event.event === "request_rejected").at(-1);
+      assert.equal(rejected.code, "POLICYSQL_OUTCOME_UNKNOWN");
+      assert.deepEqual(rejected.cause, { code: "POLICYSQL_REQUEST_TOO_LARGE", path: null });
       unchanged(h, before, "lowered maxRequestBytes");
       assert.equal(rowCount(h, "lowered_bytes"), 1, "never executed twice");
 
@@ -249,7 +261,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
 
       // The retry is unknown: the matching row is not looked up, replayed, or consumed.
       const retry = await h.request("a", EXECUTE, new RawJson(deep.text), key);
-      unknown(retry, "depth 65");
+      unknown(retry, "depth 65", "POLICYSQL_JSON_TOO_DEEP");
       unchanged(h, before, "depth 65");
       assert.equal(rowCount(h, "depth_65"), 0, "the write is not executed under the new limit");
       assert.equal(database.prepare("SELECT fingerprint FROM policysql_idempotency WHERE key_hash = ?").get(keyHash).fingerprint,

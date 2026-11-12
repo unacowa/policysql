@@ -62,6 +62,11 @@ const constraint: PolicySqlConstraintKind | undefined = failed.detail?.constrain
 void constraint
 // @ts-expect-error a constraint kind is one of the fixed values
 new PolicySqlError('Failed', 'POLICYSQL_CONSTRAINT_VIOLATION', 409, { detail: { constraint: 'primary_key' } })
+const unknown = new PolicySqlError('Unknown', 'POLICYSQL_OUTCOME_UNKNOWN', 500, {
+  detail: { cause: { code: 'POLICYSQL_INVALID_SQL', path: '/statements/0' } },
+})
+const causePath: string | null | undefined = unknown.detail?.cause?.path
+void causePath
 new PolicySqlOutcomeUnknownError({ phase: 'commit', transactionId: 'tx_123', sequence: 1 })
 // @ts-expect-error error codes are required strings
 new PolicySqlError('Failed', { cause: new Error() })
