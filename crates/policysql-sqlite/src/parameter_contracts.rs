@@ -177,7 +177,7 @@ pub(crate) fn logical_value_matches(
     }
 }
 
-fn column_descriptor<'a>(
+pub(crate) fn column_descriptor<'a>(
     catalog: &'a Catalog,
     column: &BoundColumn,
 ) -> Option<&'a ValueDescriptor> {

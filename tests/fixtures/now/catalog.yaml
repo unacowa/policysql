@@ -1,0 +1,11 @@
+version: 1
+resources:
+  projects:
+    source: { table: projects }
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      name: { type: string }
+      updated_at: { type: instant, representation: string, format: rfc3339 }
+      touched_on: { type: datetime, representation: string, format: sqlite-datetime }
+      updated_ms: { type: int64 }

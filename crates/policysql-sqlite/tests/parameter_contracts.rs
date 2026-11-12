@@ -56,6 +56,11 @@ resources:
           limit: 100
 ";
 
+fn context() -> policysql_core::CompileContext {
+    policysql_core::CompileContext::new(1_793_366_096_789)
+        .unwrap_or_else(|| unreachable!("the test time is in range"))
+}
+
 fn snapshot() -> SnapshotId {
     SnapshotId::new("parameter_contracts").unwrap_or_else(|_| unreachable!())
 }
@@ -438,8 +443,8 @@ fn compile(
     .unwrap_or_else(|_| unreachable!());
     let statement = bind(sql, &catalog);
     let output = match &statement {
-        BoundStatement::Insert(_) => policy.compile_insert(&statement, &session),
-        BoundStatement::Update(_) => policy.compile_update(&statement, &session),
+        BoundStatement::Insert(_) => policy.compile_insert(&statement, &session, &context()),
+        BoundStatement::Update(_) => policy.compile_update(&statement, &session, &context()),
         BoundStatement::Delete(_) => policy.compile_delete(&statement, &session),
         _ => policy.compile_select(&statement, &session),
     }

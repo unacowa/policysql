@@ -280,7 +280,7 @@ pub fn run(
     };
     let compiled = match generated.meta.kind {
         StatementKind::Select => bundle.compile_select(&bound, &world.session),
-        StatementKind::Update => bundle.compile_update(&bound, &world.session),
+        StatementKind::Update => bundle.compile_update(&bound, &world.session, &context()),
         StatementKind::Delete => bundle.compile_delete(&bound, &world.session),
     };
     let mut compiled = match compiled {
@@ -345,6 +345,11 @@ pub fn run(
         unexpected_errors,
     };
     (Some(bound), outcome)
+}
+
+fn context() -> policysql_core::CompileContext {
+    policysql_core::CompileContext::new(1_793_366_096_789)
+        .unwrap_or_else(|| unreachable!("the test time is in range"))
 }
 
 fn observe_select(

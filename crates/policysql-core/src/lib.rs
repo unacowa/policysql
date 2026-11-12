@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bytes;
+pub mod time;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -557,6 +558,36 @@ fn basic_datetime(value: &str, require_offset: bool) -> bool {
 #[allow(clippy::cast_precision_loss)]
 fn i64_as_f64(value: i64) -> f64 {
     value as f64
+}
+
+/// The latest time a compile accepts: 9999-12-31T23:59:59.999Z, the last instant the
+/// formatters in [`time`] spell with a four-digit year.
+pub const MAX_COMPILE_TIME_MS: u64 = 253_402_300_799_999;
+
+/// Per-request facts the host supplies to one compile (ADR 0031): the time of the request
+/// (`Date.now()` of the engine or the owner that compiles). Never part of the trusted session,
+/// the request body, or any identity. One value serves every statement and row of the compile.
+/// Not `Copy` on purpose: #163 adds 32 bytes of entropy, and callers pass it by reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompileContext {
+    now_ms: u64,
+}
+
+impl CompileContext {
+    /// `None` when `now_ms` is after [`MAX_COMPILE_TIME_MS`].
+    #[must_use]
+    pub const fn new(now_ms: u64) -> Option<Self> {
+        if now_ms > MAX_COMPILE_TIME_MS {
+            None
+        } else {
+            Some(Self { now_ms })
+        }
+    }
+
+    #[must_use]
+    pub const fn now_ms(&self) -> u64 {
+        self.now_ms
+    }
 }
 
 /// Immutable values derived from verified authentication claims.

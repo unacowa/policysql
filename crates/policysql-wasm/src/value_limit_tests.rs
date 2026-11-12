@@ -33,6 +33,7 @@ fn compile(runtime: &PolicySqlRuntime, sql: &str, params: &Value) -> Value {
         AUTH,
         &json!({"statements":[{"sql":sql,"params":params}]}).to_string(),
         "execute",
+        crate::TEST_CONTEXT,
     ))
     .unwrap_or_else(|_| unreachable!())
 }
@@ -139,8 +140,9 @@ fn the_request_limit_governs_when_it_is_smaller() {
     let body = json!({"statements":[{"sql":INSERT_STATE,"params":{"v": encode(&vec![9; HARD_MAX_BYTES_PER_VALUE])}}]})
         .to_string();
     assert!(body.len() > 1_048_576);
-    let output: Value = serde_json::from_str(&runtime.compile_json(AUTH, &body, "execute"))
-        .unwrap_or_else(|_| unreachable!());
+    let output: Value =
+        serde_json::from_str(&runtime.compile_json(AUTH, &body, "execute", crate::TEST_CONTEXT))
+            .unwrap_or_else(|_| unreachable!());
     // Core's derived compile bound is `maxRequestBytes` plus the auth and framing; the body is
     // 1,398,104 + envelope bytes, past it.
     assert_eq!(

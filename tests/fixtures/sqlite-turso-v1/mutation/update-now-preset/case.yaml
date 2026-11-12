@@ -1,0 +1,6 @@
+id: sqlite.mutation.update-now-preset
+profile: sqlite-turso-v1
+description: UPDATEのpresetへcompileの時刻（now）を形ごとのserver parameterとして入れる
+covers: [statement.update.direct, policy.mutation.preset, policy.mutation.preset-now, policy.mutation.returning, threat.row-policy-replacement]
+tests: [positive, negative, bypass, differential]
+expected: allow

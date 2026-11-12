@@ -8,8 +8,8 @@
 
 use super::{PolicySqlRuntime, RuntimeError, compiled_statement, error_body, refusal_log};
 use policysql_transaction::machine::{
-    Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult, ResultBudget,
-    StatementLimits, StatementSummary, TriggeredCheck, Validated,
+    CompileFacts, Compiled, Compiler, CoreError, DriverStatement, Limits, Operation, RawResult,
+    ResultBudget, StatementLimits, StatementSummary, TriggeredCheck, Validated,
 };
 use serde::Serialize;
 
@@ -89,10 +89,17 @@ impl Compiler for RuntimeCompiler<'_> {
         self.0.snapshot.as_str()
     }
 
-    fn compile(&self, auth_json: &str, envelope_json: &str) -> Result<Compiled, CoreError> {
+    fn compile(
+        &self,
+        auth_json: &str,
+        envelope_json: &str,
+        facts: &CompileFacts,
+    ) -> Result<Compiled, CoreError> {
+        let context = policysql_core::CompileContext::new(facts.now_ms)
+            .ok_or_else(|| core_error(self.0, RuntimeError::Internal))?;
         let (response, compiled) = self
             .0
-            .compile(auth_json, envelope_json, "execute")
+            .compile(auth_json, envelope_json, "execute", &context)
             .map_err(|error| core_error(self.0, error))?;
         let compiled = compiled.ok_or_else(|| core_error(self.0, RuntimeError::Internal))?;
         let handle = self

@@ -1,0 +1,11 @@
+version: 1
+resources:
+  projects:
+    source: { table: projects }
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      name: { type: string }
+      updated_at: { type: instant }
+      updated_by: { type: string }
+      updated_ms: { type: int64 }

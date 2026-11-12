@@ -218,6 +218,12 @@ leaves:
     status: advertised
     contexts: [write]
     required_tests: [positive, negative, bypass, differential]
+  - id: policy.mutation.preset-now
+    profile: sqlite-turso-v1
+    kind: policy
+    status: advertised
+    contexts: [write]
+    required_tests: [positive, negative, bypass, differential]
   - id: policy.mutation.operation-check
     profile: sqlite-turso-v1
     kind: policy

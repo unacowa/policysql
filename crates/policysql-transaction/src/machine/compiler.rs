@@ -151,6 +151,22 @@ pub struct Validated {
     pub operation_check: bool,
 }
 
+/// What one compile takes from the host facts of the step that compiles (ADR 0031): the
+/// step's `now_ms`. Not `Copy` (see `policysql_core::CompileContext`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompileFacts {
+    pub now_ms: u64,
+}
+
+impl CompileFacts {
+    #[must_use]
+    pub const fn of(host: &super::io::HostFacts) -> Self {
+        Self {
+            now_ms: host.now_ms,
+        }
+    }
+}
+
 /// The policy compiler. Every method is deterministic given the runtime's configuration and
 /// the handles it holds.
 pub trait Compiler {
@@ -163,7 +179,15 @@ pub trait Compiler {
     /// # Errors
     ///
     /// The compile's client-facing error, as `compile_json` reports it.
-    fn compile(&self, auth_json: &str, envelope_json: &str) -> Result<Compiled, CoreError>;
+    ///
+    /// `facts` is made from the host facts of the step that compiles; one value serves every
+    /// statement and row of the envelope.
+    fn compile(
+        &self,
+        auth_json: &str,
+        envelope_json: &str,
+        facts: &CompileFacts,
+    ) -> Result<Compiled, CoreError>;
 
     /// The driver statements of a live handle.
     ///

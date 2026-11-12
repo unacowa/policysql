@@ -87,7 +87,7 @@ fn runtime() -> super::PolicySqlRuntime {
 
 fn compile_with(auth: &str, statement: &Value, endpoint: &str) -> Value {
     let request = json!({"statements": [statement]}).to_string();
-    serde_json::from_str(&runtime().compile_json(auth, &request, endpoint))
+    serde_json::from_str(&runtime().compile_json(auth, &request, endpoint, crate::TEST_CONTEXT))
         .unwrap_or_else(|_| unreachable!("runtime output is JSON"))
 }
 
@@ -442,7 +442,7 @@ fn the_rejection_reason_names_the_stage_and_the_variant_and_no_identifier() {
         assert_eq!(record["statementIndex"], 0, "{sql}");
         assert_eq!(record["schemaVersion"], "schema_detail", "{sql}");
         assert_eq!(record["policyVersion"], "policy_detail", "{sql}");
-        assert_eq!(record["abiVersion"], 24, "{sql}");
+        assert_eq!(record["abiVersion"], 25, "{sql}");
         assert!(
             record["reason"]
                 .as_str()
@@ -471,8 +471,13 @@ fn the_rejection_reason_names_the_stage_and_the_variant_and_no_identifier() {
         {"sql": "SELECT nope FROM projects", "params": {}},
     ]})
     .to_string();
-    let output: Value = serde_json::from_str(&runtime().compile_json(AUTH, &request, "execute"))
-        .unwrap_or_default();
+    let output: Value = serde_json::from_str(&runtime().compile_json(
+        AUTH,
+        &request,
+        "execute",
+        crate::TEST_CONTEXT,
+    ))
+    .unwrap_or_default();
     assert_eq!(log(&output)["statementIndex"], 1);
     assert_eq!(output["error"]["path"], "/statements/1");
 }
@@ -901,7 +906,7 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
 /// A request over several statements, for one endpoint.
 fn compile_statements(statements: &Value, endpoint: &str) -> Value {
     let request = json!({"statements": statements}).to_string();
-    serde_json::from_str(&runtime().compile_json(AUTH, &request, endpoint))
+    serde_json::from_str(&runtime().compile_json(AUTH, &request, endpoint, crate::TEST_CONTEXT))
         .unwrap_or_else(|_| unreachable!("runtime output is JSON"))
 }
 
@@ -1278,7 +1283,7 @@ fn runtime_with(limits: &str) -> super::PolicySqlRuntime {
 
 fn compile_on(runtime: &super::PolicySqlRuntime, statements: &Value, endpoint: &str) -> Value {
     let request = json!({"statements": statements}).to_string();
-    serde_json::from_str(&runtime.compile_json(AUTH, &request, endpoint))
+    serde_json::from_str(&runtime.compile_json(AUTH, &request, endpoint, crate::TEST_CONTEXT))
         .unwrap_or_else(|_| unreachable!("runtime output is JSON"))
 }
 
@@ -1455,7 +1460,8 @@ fn a_bound_without_a_capabilities_key_carries_no_limit() {
         "x".repeat(200_000)
     );
     let output: Value =
-        serde_json::from_str(&small.compile_json(AUTH, &request, "execute")).unwrap_or_default();
+        serde_json::from_str(&small.compile_json(AUTH, &request, "execute", crate::TEST_CONTEXT))
+            .unwrap_or_default();
     assert_eq!(code(&output), "POLICYSQL_REQUEST_TOO_LARGE", "{output}");
     assert_eq!(output["error"]["path"], Value::Null);
     assert_eq!(detail(&output), None);

@@ -2,8 +2,8 @@
 
 use policysql_catalog::Catalog;
 use policysql_core::{
-    ClientParameterName, ExpectationKind, LimitName, LogicalValue, RoleName, SnapshotId,
-    TrustedSession,
+    ClientParameterName, CompileContext, ExpectationKind, LimitName, LogicalValue, RoleName,
+    SnapshotId, TrustedSession,
 };
 use policysql_execution::{
     ComplexityCause, DatabaseExecutor, ExecutionLimits, VerificationError, VerifiedExecutionPlan,
@@ -173,6 +173,7 @@ impl Gateway {
         permission: EndpointPermission,
         precondition: Option<&SnapshotId>,
         requests: &[StatementRequest],
+        context: &CompileContext,
     ) -> Result<CompiledEnvelope, GatewayError> {
         if !auth.permissions.contains(&permission) {
             return Err(GatewayError::AccessDenied);
@@ -204,10 +205,12 @@ impl Gateway {
                     self.policies.compile_select(&statement, &auth.session)
                 }
                 BoundStatement::Insert(_) => {
-                    self.policies.compile_insert(&statement, &auth.session)
+                    self.policies
+                        .compile_insert(&statement, &auth.session, context)
                 }
                 BoundStatement::Update(_) => {
-                    self.policies.compile_update(&statement, &auth.session)
+                    self.policies
+                        .compile_update(&statement, &auth.session, context)
                 }
                 BoundStatement::Delete(_) => {
                     self.policies.compile_delete(&statement, &auth.session)
@@ -335,9 +338,15 @@ impl Gateway {
         precondition: Option<&SnapshotId>,
         requests: &[StatementRequest],
         executor: &E,
+        context: &CompileContext,
     ) -> Result<Vec<E::Output>, GatewayError> {
-        let compiled =
-            self.compile_envelope(auth, EndpointPermission::Execute, precondition, requests)?;
+        let compiled = self.compile_envelope(
+            auth,
+            EndpointPermission::Execute,
+            precondition,
+            requests,
+            context,
+        )?;
         if compiled
             .statements
             .iter()
@@ -772,8 +781,8 @@ mod tests {
     };
     use policysql_catalog::{Catalog, ResourceDescriptor};
     use policysql_core::{
-        ColumnName, LimitName, LogicalType, ResourceId, ResourceName, RoleName, SnapshotId,
-        TrustedSession, ValueDescriptor, ValueRepresentation,
+        ColumnName, CompileContext, LimitName, LogicalType, ResourceId, ResourceName, RoleName,
+        SnapshotId, TrustedSession, ValueDescriptor, ValueRepresentation,
     };
     use policysql_execution::{DatabaseExecutor, ExecutionLimits, VerifiedExecutionPlan};
     use policysql_parser::{BindError, SourceSpan, UnsupportedFeature};
@@ -856,6 +865,11 @@ resources:
             ),
             AuthContext::new(session, [EndpointPermission::Execute]),
         )
+    }
+
+    fn context() -> CompileContext {
+        CompileContext::new(1_793_366_096_789)
+            .unwrap_or_else(|| unreachable!("the test time is in range"))
     }
 
     #[test]
@@ -1010,7 +1024,7 @@ resources:
             },
         ];
         assert_eq!(
-            gateway.execute_atomic(&auth, Some(&snapshot()), &requests, &executor),
+            gateway.execute_atomic(&auth, Some(&snapshot()), &requests, &executor, &context()),
             Err(GatewayError::Rejected {
                 rejection: Rejection {
                     kind: RejectionKind::ForbiddenColumn,
@@ -1039,7 +1053,13 @@ resources:
         }];
         assert_eq!(
             gateway
-                .compile_envelope(&auth, EndpointPermission::Explain, None, &request)
+                .compile_envelope(
+                    &auth,
+                    EndpointPermission::Explain,
+                    None,
+                    &request,
+                    &context()
+                )
                 .map(|_| ()),
             Err(GatewayError::AccessDenied)
         );
@@ -1047,7 +1067,13 @@ resources:
             .unwrap_or_else(|error| unreachable!("valid snapshot: {error}"));
         assert_eq!(
             gateway
-                .compile_envelope(&auth, EndpointPermission::Execute, Some(&stale), &request)
+                .compile_envelope(
+                    &auth,
+                    EndpointPermission::Execute,
+                    Some(&stale),
+                    &request,
+                    &context()
+                )
                 .map(|_| ()),
             Err(GatewayError::SnapshotMismatch)
         );
@@ -1068,7 +1094,13 @@ resources:
             expected_row_count: Some(1),
         }];
         let compiled = gateway
-            .compile_envelope(&auth, EndpointPermission::Execute, None, &request)
+            .compile_envelope(
+                &auth,
+                EndpointPermission::Execute,
+                None,
+                &request,
+                &context(),
+            )
             .unwrap_or_else(|error| unreachable!("mutation compiles: {error}"));
         assert_eq!(
             compiled.statements[0].plan.operation(),
@@ -1076,7 +1108,7 @@ resources:
         );
         assert_eq!(compiled.statements[0].plan.expected_result_rows(), Some(1));
         assert_eq!(
-            gateway.execute_atomic(&auth, None, &request, &executor),
+            gateway.execute_atomic(&auth, None, &request, &executor, &context()),
             Err(GatewayError::TransactionRequired)
         );
         assert_eq!(
@@ -1186,5 +1218,161 @@ resources:
         let names = ParameterReason::ALL.map(ParameterReason::name);
         let unique: std::collections::BTreeSet<_> = names.iter().collect();
         assert_eq!(unique.len(), 8);
+    }
+
+    fn now_gateway() -> (Gateway, AuthContext) {
+        let typed = |logical_type, format: Option<&str>| ValueDescriptor {
+            logical_type,
+            representation: ValueRepresentation::String,
+            nullable: false,
+            format: format.map(str::to_owned),
+            storage: None,
+            constraints: None,
+            json_schema: None,
+        };
+        let resource = ResourceDescriptor::new(
+            ResourceId::new(1).unwrap_or_else(|error| unreachable!("valid ID: {error}")),
+            ResourceName::new("projects")
+                .unwrap_or_else(|error| unreachable!("valid resource: {error}")),
+            [
+                ("id", typed(LogicalType::String, None)),
+                ("tenant_id", typed(LogicalType::String, None)),
+                ("name", typed(LogicalType::String, None)),
+                ("updated_at", typed(LogicalType::Instant, Some("rfc3339"))),
+            ]
+            .map(|(name, descriptor)| {
+                (
+                    ColumnName::new(name)
+                        .unwrap_or_else(|error| unreachable!("valid column: {error}")),
+                    descriptor,
+                )
+            }),
+        )
+        .unwrap_or_else(|error| unreachable!("valid resource: {error}"));
+        let catalog = Catalog::new(snapshot(), [resource])
+            .unwrap_or_else(|error| unreachable!("valid Catalog: {error}"));
+        let policy = PolicyBundle::activate(
+            r"
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, name, updated_at]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          limit: 10
+        insert:
+          columns: [id, name]
+          presets:
+            tenant_id: { session: tenant_id }
+            updated_at: { now: {} }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, updated_at] }
+        update:
+          columns: [name]
+          presets:
+            updated_at: { now: {} }
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          check: { tenant_id: { eq: { session: tenant_id } } }
+          returning: { columns: [id, updated_at] }
+",
+            &catalog,
+            snapshot(),
+        )
+        .unwrap_or_else(|error| unreachable!("valid policy: {error}"));
+        let session = TrustedSession::new(
+            RoleName::new("member").unwrap_or_else(|error| unreachable!("valid role: {error}")),
+            "user_1",
+            BTreeMap::from([("tenant_id".to_owned(), "tenant_1".to_owned())]),
+        )
+        .unwrap_or_else(|error| unreachable!("valid session: {error}"));
+        (
+            Gateway::new(
+                catalog,
+                policy,
+                snapshot(),
+                ExecutionLimits {
+                    max_rows: 10,
+                    max_result_bytes: 10_000,
+                    timeout_ms: 1_000,
+                    max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
+                },
+                4,
+            ),
+            AuthContext::new(
+                session,
+                [EndpointPermission::Execute, EndpointPermission::Explain],
+            ),
+        )
+    }
+
+    fn now_request(sql: &str, parameters: &[(&str, &str)]) -> StatementRequest {
+        StatementRequest {
+            sql: sql.to_owned(),
+            parameters: parameters
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        policysql_core::ClientParameterName::new(*name)
+                            .unwrap_or_else(|error| unreachable!("valid parameter: {error}")),
+                        policysql_core::LogicalValue::String((*value).to_owned()),
+                    )
+                })
+                .collect(),
+            expected_affected_rows: None,
+            expected_row_count: None,
+        }
+    }
+
+    /// ADR 0031: one compile, one time. Every statement of an envelope gets the same value, and
+    /// the Explain endpoint compiles with a context as well.
+    #[test]
+    fn every_statement_of_an_envelope_shares_the_one_compile_time() {
+        let (gateway, auth) = now_gateway();
+        let requests = [
+            now_request(
+                "INSERT INTO projects (id, name) VALUES (:id, :name) RETURNING id, updated_at",
+                &[("id", "p9"), ("name", "n")],
+            ),
+            now_request(
+                "UPDATE projects SET name = :name WHERE id = :id RETURNING id, updated_at",
+                &[("id", "p1"), ("name", "n")],
+            ),
+        ];
+        let name = policysql_core::ServerParameterName::from_trusted_suffix("now_rfc3339")
+            .unwrap_or_else(|error| unreachable!("valid name: {error}"));
+        let at = |now_ms: u64, permission| {
+            let context = CompileContext::new(now_ms)
+                .unwrap_or_else(|| unreachable!("the test time is in range"));
+            gateway
+                .compile_envelope(&auth, permission, None, &requests, &context)
+                .unwrap_or_else(|error| unreachable!("the envelope compiles: {error}"))
+        };
+        let values = |envelope: &super::CompiledEnvelope| {
+            envelope
+                .statements
+                .iter()
+                .map(|statement| statement.plan.server_parameters().get(&name).cloned())
+                .collect::<Vec<_>>()
+        };
+        let expected = Some(policysql_core::LogicalValue::String(
+            "2026-10-30T13:14:56.789Z".to_owned(),
+        ));
+        assert_eq!(
+            values(&at(1_793_366_096_789, EndpointPermission::Execute)),
+            [expected.clone(), expected.clone()]
+        );
+        assert_eq!(
+            values(&at(1_793_366_096_789, EndpointPermission::Explain)),
+            [expected.clone(), expected]
+        );
+        let epoch = Some(policysql_core::LogicalValue::String(
+            "1970-01-01T00:00:00.000Z".to_owned(),
+        ));
+        assert_eq!(
+            values(&at(0, EndpointPermission::Execute)),
+            [epoch.clone(), epoch]
+        );
     }
 }
