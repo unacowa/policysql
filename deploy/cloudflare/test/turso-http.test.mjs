@@ -625,35 +625,51 @@ test("S2: a batch that fails as a whole keeps its code, is never a complexity re
 });
 
 // Real Turso ends the stream (`baton: null`) when SQLite closed the transaction itself on the
-// error; the reply is still the batch reply (observed by the release smoke, #144).
-test("E1: a refused batch whose reply ends the stream keeps its code, and nothing more is sent on that stream", async (t) => {
-  t.mock.method(console, "log", () => {});
+// error; the reply is still the batch reply (observed by the release smoke, #144). Its refusal keeps
+// its code but is never a definite (complexity) refusal, and no request is sent on the ended stream.
+test("E1: a batch reply that ends the stream keeps its code, is never classified as complexity, and sends nothing more", async (t) => {
+  const lines = [];
+  t.mock.method(console, "log", (...args) => lines.push(args.map(String).join(" ")));
   const sent = [];
-  const reply = (entry) => async (_url, init) => {
-    const body = JSON.parse(init.body);
-    sent.push(body);
-    const [sql] = [requestSqls(body.requests)[0] ?? ""];
-    if (sql.startsWith("BEGIN")) return Response.json({ baton: "b0", results: [result([], [])] });
-    if (sql === "ROLLBACK") return Response.json({ error: "Baton not found" }, { status: 404 });
-    return Response.json({ baton: null, results: [entry] });
-  };
   const run = async (entry) => {
-    const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "ended", reply(entry));
+    sent.length = 0;
+    lines.length = 0;
+    const transport = new TursoHttpTransport({ url: "https://db.test", authToken: "fixture" }, "ended", async (_url, init) => {
+      const body = JSON.parse(init.body);
+      sent.push(body);
+      const sql = requestSqls(body.requests)[0] ?? "";
+      if (sql.startsWith("BEGIN")) return Response.json({ baton: "b0", results: [result([], [])] });
+      return Response.json({ baton: null, results: [entry] });
+    });
     const transaction = await transport.begin("write", 1000, undefined, runtimeLimit);
     const failure = await transaction.execute(threeStatements, { maxResponseBytes: READ_CAP }).then(() => null, (error) => error);
     return { transaction, failure };
   };
+  const events = (name) => lines.flatMap((line) => { try { const record = JSON.parse(line); return record.event === name ? [record] : []; } catch { return []; } });
+
   const refused = await run(stepsReply([okStep(), null, null], [null, CONSTRAINT, null]));
   assert.ok(refused.failure instanceof DatabaseStatementError && refused.failure.databaseCode === "SQLITE_CONSTRAINT");
-  const complex = await run(stepsReply([okStep(), null, null], [null, COMPLEXITY, null]));
-  assert.ok(complex.failure instanceof SqlComplexityError && complex.failure.statement === 1);
-  // The stream is gone: the rollback is the best-effort one and never throws; a COMMIT is never sent.
+  // The stream ended: COMMIT is refused before it is sent, ROLLBACK sends nothing and logs no recovery.
+  await assert.rejects(refused.transaction.commit(), CommitNotSentError);
   await refused.transaction.rollback();
   assert.equal(refused.transaction.open, false);
-  // A success without a baton, or a reply that breaks the contract, is a plain 503.
-  for (const entry of [batchReply([okStep(), okStep(), okStep()].map((x) => result(["n"], [["1"]]))), stepsReply([okStep(), okStep(), null], [null, COMPLEXITY, null])]) {
-    const { failure } = await run(entry);
-    assert.equal(failure.code, "POLICYSQL_DATABASE_UNAVAILABLE");
-    assert.ok(!(failure instanceof DatabaseStatementError) && !(failure instanceof SqlComplexityError));
-  }
+  assert.deepEqual(requestSqls(sent.flatMap((body) => body.requests)).filter((sql) => /^(COMMIT|ROLLBACK|close)$/u.test(sql)), []);
+  assert.equal(sent.length, 2, "only BEGIN and the batch were sent");
+  assert.deepEqual(events("database_stream_recovery"), []);
+
+  // A complexity message is not a definite refusal here: only its code is kept (a 503).
+  const complex = await run(stepsReply([okStep(), null, null], [null, COMPLEXITY, null]));
+  assert.ok(complex.failure instanceof DatabaseStatementError && !(complex.failure instanceof SqlComplexityError));
+  assert.equal(complex.failure.databaseCode, "SQLITE_UNKNOWN");
+  assert.equal(complex.failure.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+
+  // Success without a baton, or a reply that breaks the contract: a plain 503; a success is logged.
+  const success = await run(batchReply([result(["n"], [["1"]]), result(["n"], [["1"]]), result(["n"], [["1"]])]));
+  assert.equal(success.failure.code, "POLICYSQL_DATABASE_UNAVAILABLE");
+  assert.ok(!(success.failure instanceof DatabaseStatementError) && !(success.failure instanceof SqlComplexityError));
+  assert.deepEqual(events("database_protocol_violation"), [{ event: "database_protocol_violation", requestId: "ended", reason: "stream_ended_without_error" }]);
+  assert.equal(lines.join("\n").includes("too many columns"), false);
+  const broken = await run(stepsReply([okStep(), okStep(), null], [null, COMPLEXITY, null]));
+  assert.ok(!(broken.failure instanceof DatabaseStatementError) && !(broken.failure instanceof SqlComplexityError));
+  assert.deepEqual(events("database_protocol_violation").map((record) => record.reason), ["error_step_has_result"]);
 });

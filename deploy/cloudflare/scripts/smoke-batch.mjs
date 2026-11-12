@@ -25,9 +25,9 @@ export const STATEMENT_BATCH_TABLES = Object.freeze([
 // The three ways a statement fails inside a write transaction. `seeded`: a row committed first
 // that the second statement then duplicates; otherwise the second statement trips the trigger.
 const FAILURES = Object.freeze([
-  { table: "smoke_conflict_rollback", seeded: true, closesTransaction: true },
-  { table: "smoke_conflict_abort", seeded: true, closesTransaction: false },
-  { table: "smoke_raise_rollback", seeded: false, closesTransaction: true },
+  { table: "smoke_conflict_rollback", seeded: true },
+  { table: "smoke_conflict_abort", seeded: true },
+  { table: "smoke_raise_rollback", seeded: false },
 ]);
 
 /**
@@ -76,7 +76,7 @@ export const statementBatchSmoke = async ({ transport, databaseCode, complexityC
     return read.error ? null : read.value;
   };
 
-  for (const { table, seeded, closesTransaction } of FAILURES) {
+  for (const { table, seeded } of FAILURES) {
     const base = unique(table);
     const [first, second, third] = [`${base}_a`, `${base}_dup`, `${base}_b`];
     const entry = { code: null, rowsAfter: null, rollback: null };
@@ -90,8 +90,9 @@ export const statementBatchSmoke = async ({ transport, databaseCode, complexityC
     entry.rollback = run.rollback ?? null;
     entry.code = run.error ? databaseCode(run.error) : null;
     expect(run.error !== undefined && entry.code === "SQLITE_CONSTRAINT", `${table}: the envelope is refused as a constraint failure`);
-    // The ROLLBACK that follows may fail where SQLite closed the transaction itself; that is expected.
-    if (!closesTransaction) expect(entry.rollback === "ok", `${table}: the rollback succeeded`);
+    // Where SQLite closed the transaction itself, Turso ended the stream and the library sends no
+    // rollback for it; everywhere the rollback must still resolve.
+    expect(entry.rollback === "ok", `${table}: the rollback resolved`);
     entry.rowsAfter = await countRows(table, [first, third]);
     expect(entry.rowsAfter === 0, `${table}: no statement of the failed envelope left a row`);
   }

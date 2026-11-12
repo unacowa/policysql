@@ -388,6 +388,8 @@ class TursoHttpTransaction {
   open: boolean;
   /** The reply to the last request on the stream was not read, so its baton is unknown (#96). */
   unusable = false;
+  /** The reply was read and its baton was null: the server ended the stream, so nothing is left to roll back (#144). */
+  streamEnded = false;
   readonly usage: DatabaseUsage[];
 
   constructor(
@@ -439,12 +441,17 @@ class TursoHttpTransaction {
     }
     if (!body.baton) {
       this.unusable = true;
+      this.streamEnded = true;
       // Real Turso ends the stream (`baton: null`) when SQLite itself closed the transaction on the
       // error (`ON CONFLICT ROLLBACK`, `RAISE(ROLLBACK)`), and the reply is still the batch reply.
-      // Read it so the refusal keeps its code; the stream stays unusable, so nothing more is sent
-      // on it (a success without a baton, or a reply that breaks the contract, is a plain 503).
+      // It is read so the refusal keeps its code, but never classified as a complexity refusal: a
+      // stream that ended gives no evidence that the steps before the error ran inside a
+      // transaction, so the refusal is not definite. Nothing more is sent on the ended stream, and
+      // a success without a baton is a plain 503 that is logged (a statement may have run outside
+      // a transaction).
       const ended = readBatch(body.results[0], statements.length, this.transport.requestId);
-      if (ended.refused !== null) throw statementFailure(ended.error, ended.refused);
+      if (ended.refused !== null) throw unclassifiedFailure(ended.error);
+      logProtocolViolation(this.transport.requestId, "stream_ended_without_error");
       throw databaseFailure();
     }
     // The stream's next baton comes first, even when a statement was refused: the rollback that
@@ -469,6 +476,13 @@ class TursoHttpTransaction {
     // the transaction and its write lock now; when it did, the server refuses it and the stream
     // stays until the server expires it (ADR 0027, "Baton recovery"). COMMIT is never skipped
     // or attempted this way: an unusable stream is committed only if that same reply was read.
+    // A stream the server ended (a read reply with a null baton) has nothing left to roll back and
+    // no baton to continue: no request is sent and no recovery outcome is logged, so the runbook's
+    // `refused` signal (a write lock waiting for expiry) is not raised for it (#144).
+    if (this.streamEnded && sql === "ROLLBACK") {
+      this.open = false;
+      return;
+    }
     if (this.unusable && sql === "ROLLBACK") {
       this.open = false;
       await this.recover();

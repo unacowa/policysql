@@ -459,6 +459,11 @@ best-effort ROLLBACK+close through it before rethrowing the original failure and
 so without this attempt the server transaction, and an IMMEDIATE write lock, would wait for
 stream expiry.
 
+A stream the server ended (#144) is not part of this residual. When a reply is read and its baton
+is null (real Turso does this when SQLite closed the transaction itself, `ON CONFLICT ROLLBACK`,
+`RAISE(ROLLBACK)`), no write lock remains: the transport marks the stream ended, `finish("ROLLBACK")`
+sends nothing and logs no `database_stream_recovery`, and a COMMIT is `CommitNotSentError`.
+
 The remaining case is a reply whose headers never arrive: a connect timeout, a transport failure
 before a response, or a non-2xx reply. No baton is readable there. The stream is marked unusable,
 and `finish("ROLLBACK")` makes exactly one bounded best-effort attempt with the last known baton:
@@ -561,14 +566,17 @@ causes added to the fixed cause names are `function_arguments`, `compound_terms`
 conditional Hrana batch: each step runs only when the step before it succeeded. A reply that does
 not show that nothing ran after the first error is a protocol violation and 503. The first
 refusal is therefore classified (the earlier rule, "the one error of its reply and its statement
-the last", is removed). Real Turso ends the stream (`baton: null`) when SQLite closed the
-transaction itself; the batch reply is read all the same, so that refusal keeps its code. A reply
-that breaks the contract is logged once as `database_protocol_violation` with a fixed reason
-(never the baton, a message, or SQL), and a batch that fails as a whole keeps only its code. The reason: when SQLite closes the transaction on an error (`ON CONFLICT
+the last", is removed). The reason: when SQLite closes the transaction on an error (`ON CONFLICT
 ROLLBACK`, `RAISE(ROLLBACK)`), a later write committed in autocommit (reproduced on real Turso).
-Core keeps the rule for an **unreadable reply** (#97) because it does not know whether a custom
-transport stops at the first error: an atomic
-execute whose envelope contains a later write and that fails with the limit class is 500
+Real Turso ends the stream (`baton: null`) when SQLite closed the transaction itself; the batch
+reply is read all the same, so that refusal keeps its code, but it is never classified as a
+complexity refusal (a stream that ended is no evidence that the earlier steps ran inside a
+transaction, so the refusal is not definite), and a success without a baton is a plain 503 logged
+as `database_protocol_violation` (`stream_ended_without_error`). A reply that breaks the contract
+is logged once as `database_protocol_violation` with a fixed reason (never the baton, a message,
+or SQL), and a batch that fails as a whole keeps only its code. Core keeps the rule for an
+**unreadable reply** (#97) because it does not know whether a custom transport stops at the first
+error: an atomic execute whose envelope contains a later write and that fails with the limit class is 500
 `POLICYSQL_INTERNAL` (outcome unknown), not 413, because the write after an earlier error could
 have run in autocommit and committed. A read-only envelope, or one whose only write is its
 first statement, keeps 413. The transport recovers the reply's baton and rolls back; how,
