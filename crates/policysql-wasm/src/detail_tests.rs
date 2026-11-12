@@ -683,6 +683,33 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "WITH c AS (SELECT id, {C} FROM projects) SELECT id FROM c",
         "SELECT d.id FROM (SELECT id, {C} FROM projects) AS d",
     ];
+    // A hidden column of another type is run with the templates that do not themselves ask for a
+    // type (a value or a function argument), so that what differs is the name and not a
+    // parameter value of the wrong type; the literal comparisons are the type probes.
+    const TYPED_TEMPLATES: [&str; 22] = [
+        "SELECT {C} FROM projects",
+        "SELECT projects.{C} FROM projects",
+        "SELECT id FROM projects WHERE {C} IS NULL",
+        "SELECT id FROM projects ORDER BY {C}",
+        "UPDATE projects SET name = :v WHERE {C} IS NULL",
+        "DELETE FROM projects WHERE {C} IS NULL",
+        "INSERT INTO projects (id, name) VALUES (:id, :n) RETURNING {C}",
+        "SELECT id FROM projects WHERE {C} = 'a'",
+        "SELECT id FROM projects WHERE {C} = 1",
+        "SELECT id FROM projects WHERE {C} = TRUE",
+        "WITH c AS (SELECT id, {C} FROM projects) SELECT id FROM c",
+        "WITH c AS (SELECT id, {C} FROM projects) SELECT {C} FROM c",
+        "WITH c AS (SELECT id, {C} FROM projects) SELECT c.{C} FROM c",
+        "SELECT d.id FROM (SELECT id, {C} FROM projects) AS d",
+        "SELECT d.{C} FROM (SELECT id, {C} FROM projects) AS d",
+        "SELECT id FROM projects GROUP BY id HAVING {C} IS NULL",
+        "SELECT id, count(*) FROM projects GROUP BY id HAVING count({C}) > 1",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.{C}, '$') AS j",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.id, :path) AS j WHERE p.{C} IS NULL",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.id, '$') AS j WHERE j.{C} IS NULL",
+        "SELECT id, count(*) FROM projects GROUP BY {C}",
+        "SELECT row_number() OVER (ORDER BY {C}) FROM projects",
+    ];
     let column_templates = [
         "SELECT {C} FROM projects",
         "SELECT {C} AS x FROM projects",
@@ -759,33 +786,6 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
     let mut seen: std::collections::BTreeMap<Pair, BTreeSet<&str>> =
         std::collections::BTreeMap::new();
     let mut checked = 0;
-    // A hidden column of another type is run with the templates that do not themselves ask for a
-    // type (a value or a function argument), so that what differs is the name and not a
-    // parameter value of the wrong type; the literal comparisons are the type probes.
-    const TYPED_TEMPLATES: [&str; 22] = [
-        "SELECT {C} FROM projects",
-        "SELECT projects.{C} FROM projects",
-        "SELECT id FROM projects WHERE {C} IS NULL",
-        "SELECT id FROM projects ORDER BY {C}",
-        "UPDATE projects SET name = :v WHERE {C} IS NULL",
-        "DELETE FROM projects WHERE {C} IS NULL",
-        "INSERT INTO projects (id, name) VALUES (:id, :n) RETURNING {C}",
-        "SELECT id FROM projects WHERE {C} = 'a'",
-        "SELECT id FROM projects WHERE {C} = 1",
-        "SELECT id FROM projects WHERE {C} = TRUE",
-        "WITH c AS (SELECT id, {C} FROM projects) SELECT id FROM c",
-        "WITH c AS (SELECT id, {C} FROM projects) SELECT {C} FROM c",
-        "WITH c AS (SELECT id, {C} FROM projects) SELECT c.{C} FROM c",
-        "SELECT d.id FROM (SELECT id, {C} FROM projects) AS d",
-        "SELECT d.{C} FROM (SELECT id, {C} FROM projects) AS d",
-        "SELECT id FROM projects GROUP BY id HAVING {C} IS NULL",
-        "SELECT id, count(*) FROM projects GROUP BY id HAVING count({C}) > 1",
-        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.{C}, '$') AS j",
-        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.id, :path) AS j WHERE p.{C} IS NULL",
-        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.id, '$') AS j WHERE j.{C} IS NULL",
-        "SELECT id, count(*) FROM projects GROUP BY {C}",
-        "SELECT row_number() OVER (ORDER BY {C}) FROM projects",
-    ];
     let mut cases: Vec<(&str, &str, &str)> = Vec::new();
     for template in &column_templates {
         cases.push((template, "{C}", "private_note"));
@@ -862,6 +862,7 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
 /// code requires. The match functions fail to compile when a variant is added, so a new one has to
 /// be placed here.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn every_production_refusal_carries_the_detail_its_code_requires() {
     use policysql_execution::{ComplexityCause, VerificationError};
     use policysql_gateway::{classify_bind_error, compile_failure, policy_rejection};
@@ -977,11 +978,7 @@ fn every_production_refusal_carries_the_detail_its_code_requires() {
         BindError::DuplicateWriteColumn,
         BindError::InsertArity,
     ];
-    binds.extend(
-        UnsupportedFeature::ALL
-            .map(|feature| BindError::Unsupported(feature, "shape"))
-            .into_iter(),
-    );
+    binds.extend(UnsupportedFeature::ALL.map(|feature| BindError::Unsupported(feature, "shape")));
     let policies = [
         PolicyError::InvalidBundle,
         PolicyError::InvalidRole,
