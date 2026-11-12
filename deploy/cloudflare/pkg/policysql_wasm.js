@@ -136,11 +136,12 @@ export class PolicySqlRuntime {
      * @param {string} verified_auth_json
      * @param {string} request_json
      * @param {string} permission
+     * @param {string} context_json
      * @returns {string}
      */
-    compile_json(verified_auth_json, request_json, permission) {
-        let deferred4_0;
-        let deferred4_1;
+    compile_json(verified_auth_json, request_json, permission, context_json) {
+        let deferred5_0;
+        let deferred5_1;
         try {
             const ptr0 = passStringToWasm0(verified_auth_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len0 = WASM_VECTOR_LEN;
@@ -148,12 +149,14 @@ export class PolicySqlRuntime {
             const len1 = WASM_VECTOR_LEN;
             const ptr2 = passStringToWasm0(permission, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len2 = WASM_VECTOR_LEN;
-            const ret = wasm.policysqlruntime_compile_json(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
-            deferred4_0 = ret[0];
-            deferred4_1 = ret[1];
+            const ptr3 = passStringToWasm0(context_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len3 = WASM_VECTOR_LEN;
+            const ret = wasm.policysqlruntime_compile_json(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+            deferred5_0 = ret[0];
+            deferred5_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
         } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+            wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
         }
     }
     /**

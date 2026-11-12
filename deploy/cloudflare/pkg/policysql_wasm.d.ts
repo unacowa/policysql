@@ -41,7 +41,7 @@ export class PolicySqlRuntime {
     /**
      * Compiles an authenticated atomic request into profile-verified statements.
      */
-    compile_json(verified_auth_json: string, request_json: string, permission: string): string;
+    compile_json(verified_auth_json: string, request_json: string, permission: string, context_json: string): string;
     /**
      * Evaluates the cost of one envelope from the `EXPLAIN QUERY PLAN` results an `Observe`
      * effect's statements returned and the wrapper's cost catalog (ADR 0024 "Cost"). The
@@ -153,7 +153,7 @@ export interface InitOutput {
     readonly policysqlruntime_catalog_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_check_body_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_commit_checks_enabled: (a: number) => number;
-    readonly policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+    readonly policysqlruntime_compile_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
     readonly policysqlruntime_cost_estimate_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_identity_json: (a: number, b: number, c: number) => [number, number];
     readonly policysqlruntime_limits_json: (a: number) => [number, number];

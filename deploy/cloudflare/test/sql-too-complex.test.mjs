@@ -199,7 +199,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(typeof record.requestId, "string");
     assert.equal(typeof record.schemaVersion, "string");
     assert.equal(typeof record.policyVersion, "string");
-    assert.equal(record.abiVersion, 24);
+    assert.equal(record.abiVersion, 25);
     assert.deepEqual(Object.keys(record).sort(), ["abiVersion", "cause", "event", "policyVersion", "requestId", "schemaVersion", "statementIndex"]);
   });
 

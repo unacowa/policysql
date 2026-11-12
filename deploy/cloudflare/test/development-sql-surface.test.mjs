@@ -163,7 +163,7 @@ const accepted = [
 
 test("development smoke resources reject NULL outside a nullable assignment and non-canonical bytes", () => {
   const code = (sql, params) => JSON.parse(runtime.compile_json(
-    auth, JSON.stringify({ statements: [{ sql, params }] }), "execute",
+    auth, JSON.stringify({ statements: [{ sql, params }] }), "execute", JSON.stringify({ nowMs: Date.now() }),
   )).error?.code;
   assert.equal(code("UPDATE smoke_values SET label = :label WHERE id = :id RETURNING id", { id: "sv_1", label: null }), "POLICYSQL_INVALID_PARAMETER");
   assert.equal(code("SELECT id FROM smoke_values WHERE note = :note", { note: null }), "POLICYSQL_INVALID_PARAMETER");
@@ -177,7 +177,7 @@ test("development smoke resources reject NULL outside a nullable assignment and 
 // the committed module had missed #113 and #116; #115 since).
 test("the shipped WASM rejects unprotected EXISTS, unobservable mutation filter columns, and ungated aggregates", () => {
   const code = (sql) => JSON.parse(runtime.compile_json(
-    auth, JSON.stringify({ statements: [{ sql, params: {} }] }), "execute",
+    auth, JSON.stringify({ statements: [{ sql, params: {} }] }), "execute", JSON.stringify({ nowMs: Date.now() }),
   )).error?.code;
   // #114: a client EXISTS outside a SELECT's WHERE reached the database without its policy.
   assert.equal(
@@ -215,6 +215,7 @@ test("development Catalog and policy compile every advertised SQL family", () =>
       auth,
       JSON.stringify({ statements: [{ sql: fixture.sql, params: fixture.params }] }),
       "execute",
+      JSON.stringify({ nowMs: Date.now() }),
     ));
     assert.equal(compiled.error, undefined, `${fixture.name}: ${JSON.stringify(compiled)}`);
     assert.equal(compiled.statements.length, 1, fixture.name);
@@ -240,6 +241,7 @@ test("development Catalog and policy still reject documented bypass shapes", () 
       auth,
       JSON.stringify({ statements: [{ sql, params: {} }] }),
       "execute",
+      JSON.stringify({ nowMs: Date.now() }),
     ));
     assert.equal(typeof compiled.error?.code, "string", sql);
   }

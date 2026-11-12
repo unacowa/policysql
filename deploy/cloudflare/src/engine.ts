@@ -353,7 +353,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       await checkDatabaseBinding(dependencies.database, checked.databaseBinding, runtime.snapshot);
       const body = await readBody(fields.bodyText);
       checkBody(runtime, body);
-      const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body, "explain")) as unknown as CompiledResponse;
+      const compiled = parsedRuntimeCall(runtime.compile_json(JSON.stringify(auth), body, "explain", JSON.stringify({ nowMs: Date.now() }))) as unknown as CompiledResponse;
       return { ok: true as const, value: explainResponse(compiled, auth, checked.requestId) };
     }),
 
