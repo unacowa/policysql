@@ -253,8 +253,8 @@ table with the `created_at` column shown in ADR 0028, or the cleanup skips it.
 
 A deployment that lowers an input limit (`maxRequestBytes`, the body-side `maxJsonValues`, or
 the depth limit tightened in ABI 16) can refuse the body of a keyed retry that committed under
-the earlier limits. A keyed atomic execute answers that as 500 `POLICYSQL_INTERNAL` (the unknown
-outcome), never a definite 413/400; it does not look up, replay, execute, or consume the key, and
+the earlier limits. A keyed atomic execute answers that as 500 `POLICYSQL_OUTCOME_UNKNOWN` (the unknown
+outcome, the limit's code in `detail.cause`), never a definite 413/400; it does not look up, replay, execute, or consume the key, and
 a later deployment that restores the limit replays the stored response (ADR 0007, #100). If such
 retries must replay rather than stay unknown, do not lower the limit below a body accepted in the
 idempotency retention window W (ADR 0028; 30 days in the reference wrapper); the depth

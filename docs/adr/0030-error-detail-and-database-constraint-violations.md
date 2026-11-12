@@ -140,7 +140,7 @@ extended code, the refusal returns to 503 (the exact match of the code), and the
   it would reject can still reach the database's constraint first: with an insert policy of
   `columns: [id, tenant_id, code]`, `check: tenant_id = session` (no preset) and
   `UNIQUE (tenant_id, code)`, a client of tenant `a` that inserts `tenant_id = 'another_tenant'`
-  gets 409 `unique` when another tenant has that `code` and 422 `POLICYSQL_SCHEMA_MISMATCH` when it
+  gets 409 `unique` when another tenant has that `code` and 403 `POLICYSQL_CHECK_FAILED` when it
   does not.
 - The ABI is 19, so the snapshot (`…:abi-19`) changes with this deployment. An interactive
   transaction that is still active under the earlier snapshot is closed with 409
@@ -165,3 +165,58 @@ extended code, the refusal returns to 503 (the exact match of the code), and the
 
 One pull request: ABI 19, owner wire `"2"`, the log event `database_constraint_violation`, the
 release smoke `smoke-constraint.mjs`, and the table of the error codes in the public documentation.
+
+## Amendment (#145 pull request B)
+
+### Table rows
+
+The `detail` table of section 1 has a second row, and the rule that a value is an enumeration
+or a number gains one form, a pointer of a fixed shape into the request:
+
+| Code | `detail` |
+| --- | --- |
+| `POLICYSQL_CONSTRAINT_VIOLATION` | `{ "constraint": <kind> }` (unchanged; no other key) |
+| `POLICYSQL_OUTCOME_UNKNOWN` | `{ "cause": { "code": <code>, "path": <path or null> } }`, both keys always present |
+
+`cause.code` is one of 22 codes, in `OUTCOME_CAUSE_CODES` (core) and `OUTCOME_CAUSES` (Worker):
+every code a compile returns, plus the session gate's and the body limits' (`POLICYSQL_JSON_TOO_DEEP`).
+A code that depends on the database's state (`CONSTRAINT_VIOLATION`, `CHECK_FAILED`,
+`SCHEMA_MISMATCH`, `DATABASE_TIMEOUT`, `COMMIT_*`, `TRANSACTION_*`, `IDEMPOTENCY_CONFLICT`) is not
+in the list. `cause.path` is `null`, `/statements/<n>`, or `/statements/<n>/sql`, with `<n>` a
+canonical decimal of at most 10 digits. A test over every `RuntimeError` variant in core checks
+that a compile can only produce a listed code and path. Core's `owner_replied` and the Worker's
+`checkedOwnerReply` check a forwarded reply against the row, and a `cause` on any other code is
+invalid; the official client still only checks that `detail` is a plain object.
+
+### `POLICYSQL_CHECK_FAILED` (403)
+
+A changed row whose post-state `check` is FALSE or UNKNOWN is 403 `POLICYSQL_CHECK_FAILED` at
+`/statements/<i>`, with no `detail` and a fixed message; it was 422 `POLICYSQL_SCHEMA_MISMATCH`,
+which now means only a value the catalog's type cannot hold. The value conversion still runs
+first, so a row with both is `SCHEMA_MISMATCH`. The refusal is definite on every path: it is
+decided after the statements ran inside the open transaction and before COMMIT, the idempotency
+row, and any validator call. The step machine closes as failed and rolls back (an interactive
+transaction's COMMIT is only the client's command). With a key it means that this attempt
+committed nothing and recorded nothing under the key; a retry after the key's record passed its
+retention, under a deployment whose check changed, can be this refusal too, as for
+`POLICYSQL_EXPECTATION_FAILED`. The official client lists it as a rejection of `execute` and
+`statement` only. The example of Consequences above is now this code.
+
+### `POLICYSQL_OUTCOME_UNKNOWN` (500)
+
+The four places that answered a keyed refusal with `POLICYSQL_INTERNAL` (the session gate, the
+body limits, and the two compiles of core, direct and owner) answer 500
+`POLICYSQL_OUTCOME_UNKNOWN`, with the fixed message "This request was not executed. The outcome of
+an earlier request with the same Idempotency-Key is unknown.", a top-level `path` of `null`, and the
+code and path the unkeyed answer has as `cause`. All four run before the database is read, so the
+cause cannot depend on it. The status is 500, not 503: the official client reads both as unknown,
+500 is the status those answers already had, 503 reads as temporary and a deployment change is
+not, and the instruction to retry a keyed 500 with the same key and body still holds. The log
+event `request_rejected` carries `cause` (`{code, path}` or `null`).
+
+### Versions
+
+The ABI is 20 (the snapshot is `…:abi-20`) and the owner wire version is `"3"`. The consequences
+are those of section Consequences: an active interactive transaction is closed with 409
+`POLICYSQL_TRANSACTION_UNAVAILABLE` on its next command, and a keyed atomic retry replays. The
+`"2"` and ABI 19 above are the record of pull request A.

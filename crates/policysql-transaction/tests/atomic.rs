@@ -7,6 +7,7 @@ mod common;
 use common::{
     Engine, OWNER, STATEMENT_LIMITS, T0, atomic_input, code, envelope, execute_request, phase_of,
 };
+use policysql_transaction::machine::io::ErrorDetail;
 use policysql_transaction::machine::{CoreError, StatementLimits};
 use serde_json::{Value, json};
 
@@ -752,6 +753,7 @@ fn a_forwarded_reply_keeps_a_valid_detail_and_rejects_a_forged_one() {
         violation(None),
         violation(Some(json!({}))),
         violation(Some(json!({"constraint": "unique", "column": "x"}))),
+        violation(Some(json!({"constraint": "unique", "cause": null}))),
         violation(Some(json!({"constraint": "primary_key"}))),
         violation(Some(json!({"constraint": null}))),
         violation(Some(json!(["unique"]))),
@@ -790,6 +792,95 @@ fn a_forwarded_reply_keeps_a_valid_detail_and_rejects_a_forged_one() {
     engine.forward_reply = json!({"ok": false, "error": {"code": "POLICYSQL_FORBIDDEN_COLUMN", "message": "m", "path": null}});
     let plain = engine.run(&execute_request(&audit("a3"), None));
     assert_eq!(code(&plain), Some("POLICYSQL_FORBIDDEN_COLUMN"));
+}
+
+/// ADR 0030 amendment: a forwarded `POLICYSQL_OUTCOME_UNKNOWN` is relayed only with its `cause`
+/// in the fixed form; anything else an owner could say is a forgery.
+#[test]
+fn a_forwarded_outcome_unknown_keeps_a_valid_cause_and_rejects_a_forged_one() {
+    let unknown = |detail: Option<Value>| {
+        let mut error = json!({
+            "code": "POLICYSQL_OUTCOME_UNKNOWN", "message": "m", "path": null,
+        });
+        if let Some(detail) = detail {
+            error["detail"] = detail;
+        }
+        json!({"ok": false, "error": error})
+    };
+    let cause = |code: Value, path: Value| json!({"cause": {"code": code, "path": path}});
+    for valid in [
+        unknown(Some(cause(
+            json!("POLICYSQL_MISSING_POLICY"),
+            json!("/statements/0"),
+        ))),
+        unknown(Some(cause(
+            json!("POLICYSQL_FORBIDDEN_ACCESS"),
+            Value::Null,
+        ))),
+        unknown(Some(cause(
+            json!("POLICYSQL_REQUEST_TOO_LARGE"),
+            json!("/statements/12/sql"),
+        ))),
+    ] {
+        let mut engine = Engine::atomic(false);
+        engine.forward_reply = valid.clone();
+        let reply = engine.run(&execute_request(&audit("a1"), None));
+        assert_eq!(reply, valid, "a valid cause is relayed as it is");
+    }
+    for forged in [
+        unknown(None),
+        unknown(Some(json!({}))),
+        unknown(Some(json!({"cause": null}))),
+        unknown(Some(json!({"cause": []}))),
+        unknown(Some(json!({"cause": "x"}))),
+        unknown(Some(json!({"constraint": "unique"}))),
+        unknown(Some(json!({
+            "cause": {"code": "POLICYSQL_INVALID_SQL", "path": null}, "constraint": "unique",
+        }))),
+        unknown(Some(json!({"cause": {"code": "POLICYSQL_INVALID_SQL"}}))),
+        unknown(Some(json!({"cause": {"path": null}}))),
+        unknown(Some(json!({
+            "cause": {"code": "POLICYSQL_INVALID_SQL", "path": null, "message": "x"},
+        }))),
+        unknown(Some(cause(
+            json!("POLICYSQL_CONSTRAINT_VIOLATION"),
+            Value::Null,
+        ))),
+        unknown(Some(cause(json!("POLICYSQL_SCHEMA_MISMATCH"), Value::Null))),
+        unknown(Some(cause(json!("FORBIDDEN_COLUMN"), Value::Null))),
+        unknown(Some(cause(json!(7), Value::Null))),
+        unknown(Some(cause(
+            json!("POLICYSQL_INVALID_SQL"),
+            json!("/statements/01"),
+        ))),
+        unknown(Some(cause(
+            json!("POLICYSQL_INVALID_SQL"),
+            json!("/statements/0/params"),
+        ))),
+        unknown(Some(cause(json!("POLICYSQL_INVALID_SQL"), json!(0)))),
+        json!({"ok": false, "error": {
+            "code": "POLICYSQL_CONSTRAINT_VIOLATION", "message": "m", "path": "/statements/0",
+            "detail": {"constraint": "unique", "cause": {"code": "POLICYSQL_INVALID_SQL", "path": null}},
+        }}),
+        json!({"ok": false, "error": {
+            "code": "POLICYSQL_INVALID_SQL", "message": "m", "path": null,
+            "detail": {"cause": {"code": "POLICYSQL_INVALID_SQL", "path": null}},
+        }}),
+    ] {
+        let mut engine = Engine::atomic(false);
+        engine.forward_reply = forged.clone();
+        let reply = engine.run(&execute_request(&audit("a2"), None));
+        assert_eq!(
+            code(&reply),
+            Some("POLICYSQL_INTERNAL"),
+            "{forged} -> {reply}"
+        );
+        let logged = engine
+            .transcript
+            .iter()
+            .any(|line| line.output.contains("owner_reply_rejected"));
+        assert!(logged, "{forged}: the rejection is logged");
+    }
 }
 
 /// A forward that fails with the class `constraint` is an adapter fault, not a 409.
@@ -1469,10 +1560,10 @@ fn a_keyed_compile_failure_after_a_commit_is_the_unknown_outcome_on_both_placeme
     for (owner, error_code) in [
         (false, "POLICYSQL_FORBIDDEN_OPERATION"),
         (false, "POLICYSQL_STALE_OPERATION"),
-        (false, "POLICYSQL_SCHEMA_MISMATCH"),
+        (false, "POLICYSQL_INVALID_SQL"),
         (true, "POLICYSQL_FORBIDDEN_OPERATION"),
         (true, "POLICYSQL_STALE_OPERATION"),
-        (true, "POLICYSQL_SCHEMA_MISMATCH"),
+        (true, "POLICYSQL_INVALID_SQL"),
     ] {
         let mut engine = placed(owner);
         let first = engine.run(&keyed(owner, &insert("p1")));
@@ -1481,21 +1572,34 @@ fn a_keyed_compile_failure_after_a_commit_is_the_unknown_outcome_on_both_placeme
         assert_eq!(engine.idempotency_rows.len(), 1, "owner={owner}");
         let awaited = engine.observed.awaited.len();
 
-        engine.compiler.reject = Some(CoreError::new(
-            error_code,
-            "The operation is no longer permitted.",
-        ));
+        let mut refusal = CoreError::new(error_code, "The operation is no longer permitted.");
+        refusal.path = Some("/statements/0".to_owned());
+        engine.compiler.reject = Some(refusal);
         let retry = engine.run(&keyed(owner, &insert("p1")));
         assert_eq!(
             code(&retry),
-            Some("POLICYSQL_INTERNAL"),
+            Some("POLICYSQL_OUTCOME_UNKNOWN"),
             "owner={owner}, {error_code}: {retry}"
         );
         assert_eq!(
-            retry["error"]["message"], "The request could not be completed.",
+            retry["error"]["message"],
+            "This request was not executed. The outcome of an earlier request with the same \
+             Idempotency-Key is unknown.",
             "owner={owner}, {error_code}"
         );
         assert_eq!(retry["error"]["path"], Value::Null);
+        assert_eq!(
+            retry["error"]["detail"],
+            json!({"cause": {"code": error_code, "path": "/statements/0"}}),
+            "owner={owner}, {error_code}: the compile's code and path"
+        );
+        assert!(
+            ErrorDetail::allowed(
+                retry["error"]["code"].as_str().unwrap_or_default(),
+                retry["error"].get("detail")
+            ),
+            "owner={owner}, {error_code}: a reader accepts the reply"
+        );
         assert_eq!(
             engine.observed.awaited[awaited..].to_vec(),
             ["checkBinding"],
@@ -1563,8 +1667,13 @@ fn a_keyed_compile_failure_without_a_prior_commit_is_also_the_unknown_outcome() 
             let reply = engine.run(&event);
             assert_eq!(
                 code(&reply),
-                Some("POLICYSQL_INTERNAL"),
+                Some("POLICYSQL_OUTCOME_UNKNOWN"),
                 "owner={owner}, {label}: {reply}"
+            );
+            assert_eq!(
+                reply["error"]["detail"],
+                json!({"cause": {"code": "POLICYSQL_INVALID_SQL", "path": null}}),
+                "owner={owner}, {label}"
             );
             assert_eq!(engine.observed.envelope_executes, 0);
             assert_eq!(engine.observed.commits_emitted, 0);
@@ -1594,6 +1703,10 @@ fn an_unkeyed_compile_failure_keeps_its_definite_error_on_both_placements() {
             code(&reply),
             Some("POLICYSQL_INVALID_SQL"),
             "owner={owner}: {reply}"
+        );
+        assert!(
+            reply["error"].get("detail").is_none(),
+            "owner={owner}: an unkeyed refusal carries no detail: {reply}"
         );
         assert_eq!(engine.observed.envelope_executes, 0, "owner={owner}");
         assert_eq!(engine.observed.commits_emitted, 0, "owner={owner}");

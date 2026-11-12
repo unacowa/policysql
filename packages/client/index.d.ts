@@ -41,6 +41,8 @@ export type PolicySqlConstraintKind = 'unique' | 'not_null' | 'foreign_key' | 'c
 /** Machine-readable values fixed per error code. Branch on `code`, not on the presence of a field. */
 export interface PolicySqlErrorDetail {
   readonly constraint?: PolicySqlConstraintKind
+  /** On `POLICYSQL_OUTCOME_UNKNOWN`: the code and path the request would have been refused with, had it carried no key. */
+  readonly cause?: { readonly code: string; readonly path: string | null }
   readonly [field: string]: unknown
 }
 export interface PolicySqlErrorOptions extends ErrorOptions { response?: TransportResponse; detail?: PolicySqlErrorDetail }
@@ -53,6 +55,13 @@ export class PolicySqlError extends Error {
   /** Machine-readable values fixed per code. The branch key is `code`. */
   readonly detail?: PolicySqlErrorDetail
 }
+/**
+ * The outcome of a request is unknown. Its `code` is `POLICYSQL_OUTCOME_UNKNOWN`, the same code
+ * as the server's 500 answer to a keyed execute it refused before reading the database (then
+ * `cause` is that `PolicySqlError`, with `detail.cause` for the refusal). The two mean the same
+ * thing: do not assume a rollback, resend with the same key and body. Tell them apart by
+ * `cause`, and by `status` (set on the server's, absent on this one).
+ */
 export class PolicySqlOutcomeUnknownError extends PolicySqlError {
   constructor(context: {
     transactionId?: string

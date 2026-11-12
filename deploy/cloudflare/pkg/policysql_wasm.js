@@ -364,7 +364,11 @@ export class PolicySqlRuntime {
      * `POLICYSQL_INTERNAL`) and for an interactive commit (was a 200 with status `failed`), and
      * bumped `ABI_VERSION` to 12; no identity value changed. #145 added the outcome class
      * `constraint` and `error.detail` (409 `POLICYSQL_CONSTRAINT_VIOLATION`) and bumped
-     * `ABI_VERSION` to 19; no identity value changed.
+     * `ABI_VERSION` to 19; no identity value changed. #145 pull request B changed the answer
+     * to a failed policy `check` (403 `POLICYSQL_CHECK_FAILED`, was 422
+     * `POLICYSQL_SCHEMA_MISMATCH`) and to a keyed compile failure (500
+     * `POLICYSQL_OUTCOME_UNKNOWN` with `error.detail.cause`, was `POLICYSQL_INTERNAL`), and
+     * bumped `ABI_VERSION` to 20; no identity value changed.
      * @param {string | null | undefined} durable_json
      * @param {string | null | undefined} volatile_json
      * @param {string} event_json

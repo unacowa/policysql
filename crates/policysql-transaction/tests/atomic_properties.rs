@@ -32,7 +32,7 @@ const CLASSES: [&str; 7] = [
 
 /// The codes the client takes as a definite rejection of `execute` (`REJECTIONS` in
 /// `packages/client/protocol.js`).
-const REJECTIONS: [&str; 27] = [
+const REJECTIONS: [&str; 28] = [
     "POLICYSQL_UNAUTHENTICATED",
     "POLICYSQL_AUTHENTICATION_FAILED",
     "POLICYSQL_FORBIDDEN_ACCESS",
@@ -55,6 +55,7 @@ const REJECTIONS: [&str; 27] = [
     "POLICYSQL_TRANSACTION_UNAVAILABLE",
     "POLICYSQL_COMMIT_CHECK_REJECTED",
     "POLICYSQL_CONSTRAINT_VIOLATION",
+    "POLICYSQL_CHECK_FAILED",
     "POLICYSQL_LIMIT_EXCEEDED",
     "POLICYSQL_EXPECTATION_FAILED",
     "POLICYSQL_SCHEMA_MISMATCH",

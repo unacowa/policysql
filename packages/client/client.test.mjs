@@ -401,6 +401,60 @@ test("CONSTRAINT_VIOLATION is a definite 409 rejection of a statement, with its 
   await assert.rejects(other.client.execute(select), error => error instanceof PolicySqlOutcomeUnknownError);
 });
 
+test("the server's OUTCOME_UNKNOWN and the client's own unknown outcome share a code and differ by cause and status (#145)", async () => {
+  const detail = { cause: { code: "POLICYSQL_INVALID_SQL", path: "/statements/0" } };
+  const body = { error: { code: "POLICYSQL_OUTCOME_UNKNOWN", message: "m", path: null, detail, requestId: "req_test" } };
+  const fromServer = setup({}, () => async () => ({ status: 500, body }));
+  await assert.rejects(fromServer.client.execute(select), (error) => {
+    assert.ok(error instanceof PolicySqlOutcomeUnknownError);
+    assert.equal(error.code, "POLICYSQL_OUTCOME_UNKNOWN");
+    assert.equal(error.status, undefined, "the outer error has no status");
+    assert.ok(error.cause instanceof PolicySqlError);
+    assert.equal(error.cause instanceof PolicySqlOutcomeUnknownError, false);
+    assert.equal(error.cause.code, "POLICYSQL_OUTCOME_UNKNOWN");
+    assert.equal(error.cause.status, 500);
+    assert.deepEqual(error.cause.detail, detail);
+    return true;
+  });
+  const lost = setup({}, () => async () => { throw new Error("connection reset"); });
+  await assert.rejects(lost.client.execute(select), (error) => {
+    assert.ok(error instanceof PolicySqlOutcomeUnknownError);
+    assert.equal(error.code, "POLICYSQL_OUTCOME_UNKNOWN");
+    assert.equal(error.status, undefined);
+    assert.equal(error.cause instanceof PolicySqlError, false, "a transport failure has no server error");
+    return true;
+  });
+});
+
+test("CHECK_FAILED is a definite 403 rejection of a statement, without a detail; elsewhere it is unknown (#145)", async () => {
+  const refusal = { error: { code: "POLICYSQL_CHECK_FAILED", message: "A changed row does not satisfy the policy check.", path: "/statements/0", requestId: "req_test" } };
+  const h = setup({}, () => async () => ({ status: 403, body: refusal }));
+  await assert.rejects(h.client.execute(select), error => {
+    assert.ok(error instanceof PolicySqlError);
+    assert.equal(error instanceof PolicySqlOutcomeUnknownError, false);
+    assert.equal(error.code, "POLICYSQL_CHECK_FAILED");
+    assert.equal(error.status, 403);
+    assert.equal(error.detail, undefined);
+    return true;
+  });
+  // As the answer to begin, commit, or rollback it cannot establish an outcome.
+  const started = setup({}, () => async () => ({ status: 403, body: refusal }));
+  await assert.rejects(started.client.beginTransaction(), error => error instanceof PolicySqlOutcomeUnknownError);
+  const gateway = mockGateway();
+  const wrap = (kind) => async (url, init) => (new URL(url).pathname.endsWith(`/${kind}`)
+    ? Response.json(refusal, { status: 403 })
+    : gateway.fetchImpl(url, init));
+  for (const kind of ["commit", "rollback"]) {
+    const client = new PolicySqlClient({ transport: createHttpTransport({ endpoint: "https://gateway.test", fetchImpl: wrap(kind) }) });
+    const tx = await client.beginTransaction();
+    await assert.rejects(tx[kind](), error => error instanceof PolicySqlOutcomeUnknownError, kind);
+    await tx.dispose();
+  }
+  // Another status for the same code is not a rejection.
+  const other = setup({}, () => async () => ({ status: 422, body: refusal }));
+  await assert.rejects(other.client.execute(select), error => error instanceof PolicySqlOutcomeUnknownError);
+});
+
 test("a key the server rejects as malformed (400 IDEMPOTENCY_KEY_INVALID) is a definite rejection, not an unknown outcome", async () => {
   const body = errorBody("POLICYSQL_IDEMPOTENCY_KEY_INVALID");
   const h = setup({}, () => async () => ({ status: 400, body }));

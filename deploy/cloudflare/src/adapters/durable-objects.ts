@@ -61,7 +61,7 @@ const REQUEST_ID_HEADER = "x-policysql-request-id";
 const OWNER_HEADER = "x-policysql-owner";
 const WIRE_HEADER = "x-policysql-owner-wire";
 // Changes whenever any owner wire message changes shape.
-const OWNER_WIRE_VERSION = "2";
+const OWNER_WIRE_VERSION = "3";
 const COMMAND_PATHS: Readonly<Record<OwnerCommandKind, string>> = Object.freeze({
   statement: "/statement", commit: "/commit", rollback: "/rollback",
 });

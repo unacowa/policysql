@@ -87,7 +87,11 @@ use wasm_bindgen::prelude::*;
 /// event other than `executeFailed`, the class is 500 `POLICYSQL_INTERNAL`. An error reply may
 /// carry `detail`; a forwarded owner reply is read with it and checked against the code. The
 /// machine writes the log event `database_constraint_violation`. No identity value changed.
-const ABI_VERSION: u32 = 19;
+/// 20: issue #145 pull request B: a policy `check` that is not SQL TRUE for a changed row
+/// answers 403 `POLICYSQL_CHECK_FAILED` at `/statements/<i>` (was 422 `POLICYSQL_SCHEMA_MISMATCH`),
+/// and a keyed atomic execute that does not compile answers 500 `POLICYSQL_OUTCOME_UNKNOWN` with
+/// `detail.cause` (`code`, `path`) (was `POLICYSQL_INTERNAL`). No identity value changed.
+const ABI_VERSION: u32 = 20;
 /// The fixed JSON levels the machine adds when it wraps an interactive command in the
 /// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
 /// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must
@@ -904,7 +908,11 @@ impl PolicySqlRuntime {
     /// `POLICYSQL_INTERNAL`) and for an interactive commit (was a 200 with status `failed`), and
     /// bumped `ABI_VERSION` to 12; no identity value changed. #145 added the outcome class
     /// `constraint` and `error.detail` (409 `POLICYSQL_CONSTRAINT_VIOLATION`) and bumped
-    /// `ABI_VERSION` to 19; no identity value changed.
+    /// `ABI_VERSION` to 19; no identity value changed. #145 pull request B changed the answer
+    /// to a failed policy `check` (403 `POLICYSQL_CHECK_FAILED`, was 422
+    /// `POLICYSQL_SCHEMA_MISMATCH`) and to a keyed compile failure (500
+    /// `POLICYSQL_OUTCOME_UNKNOWN` with `error.detail.cause`, was `POLICYSQL_INTERNAL`), and
+    /// bumped `ABI_VERSION` to 20; no identity value changed.
     #[must_use]
     #[allow(clippy::needless_pass_by_value)]
     pub fn step_json(
@@ -1241,6 +1249,7 @@ impl PolicySqlRuntime {
             policysql_turso::AdapterError::LimitExceeded => {
                 RuntimeError::Rejected(RejectionKind::LimitExceeded)
             }
+            policysql_turso::AdapterError::CheckFailed => RuntimeError::CheckFailedAt(index),
             _ => RuntimeError::RemoteResult,
         })?;
         Ok(ValidatedExecuteResult {
@@ -1764,6 +1773,8 @@ enum RuntimeError {
     Busy,
     RemoteResult,
     RemoteResultAt(usize),
+    /// Statement `n`'s post-state `check` is not SQL TRUE for some changed row (403).
+    CheckFailedAt(usize),
 }
 
 impl RuntimeError {
@@ -2914,6 +2925,11 @@ fn error_body(runtime_error: RuntimeError) -> ErrorBody {
             "The database result does not match the compiled logical contract.",
             Some(index),
         ),
+        RuntimeError::CheckFailedAt(index) => error(
+            "POLICYSQL_CHECK_FAILED",
+            "A changed row does not satisfy the policy check.",
+            Some(index),
+        ),
     }
 }
 
@@ -3821,6 +3837,181 @@ resources:
         let validated = runtime.validate_result_json(handle, 0, &raw.to_string());
         assert!(!validated.contains("error"));
         assert!(runtime.release_execution(handle));
+    }
+
+    /// Compiles an envelope of two policy-checked inserts and returns its handle.
+    fn two_insert_handle(runtime: &PolicySqlRuntime) -> u64 {
+        let output = runtime.compile_json(
+            r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute"],"session":{"tenant_id":"tenant_1"}}"#,
+            r#"{"statements":[{"sql":"INSERT INTO projects (id, name, status) VALUES (:id, :name, :status) RETURNING id, name, status","params":{"id":"new_1","name":"New","status":"active"}},{"sql":"INSERT INTO projects (id, name, status) VALUES (:id, :name, :status) RETURNING id, name, status","params":{"id":"new_2","name":"New","status":"active"}}]}"#,
+            "execute",
+        );
+        let compiled: serde_json::Value = serde_json::from_str(&output)
+            .unwrap_or_else(|error| unreachable!("valid response JSON: {error}"));
+        compiled["executionHandle"]
+            .as_u64()
+            .unwrap_or_else(|| unreachable!("mutation handle: {output}"))
+    }
+
+    /// #145 pull request B: a check column that is not SQL TRUE (FALSE, UNKNOWN, or any other
+    /// value) is 403 `POLICYSQL_CHECK_FAILED` at the statement's index, with no `detail`; a
+    /// value that does not match the logical type stays 422 `POLICYSQL_SCHEMA_MISMATCH`, also
+    /// when a false check is in the same row (the conversion runs first).
+    #[test]
+    fn a_false_check_is_check_failed_and_a_type_mismatch_stays_schema_mismatch() {
+        let runtime = runtime();
+        let handle = two_insert_handle(&runtime);
+        let validate = |index: usize, row: serde_json::Value| -> serde_json::Value {
+            let raw = serde_json::json!({
+                "columns": ["id", "name", "status", "__policysql_check"],
+                "rows": [row],
+                "affectedRows": 1
+            });
+            parse_json(&runtime.validate_result_json(handle, index, &raw.to_string()))
+        };
+        let good = serde_json::json!(["new_1", "New", "active", 1]);
+        assert!(validate(0, good.clone()).get("error").is_none());
+        for check in [serde_json::json!(0), serde_json::Value::Null] {
+            for index in [0, 1] {
+                let row = serde_json::json!(["new_1", "New", "active", check]);
+                let answer = validate(index, row);
+                assert_eq!(
+                    answer["error"]["code"], "POLICYSQL_CHECK_FAILED",
+                    "{answer}"
+                );
+                assert_eq!(
+                    answer["error"]["path"],
+                    format!("/statements/{index}"),
+                    "{answer}"
+                );
+                assert!(answer["error"].get("detail").is_none(), "{answer}");
+                assert_eq!(
+                    answer["error"]["message"],
+                    "A changed row does not satisfy the policy check."
+                );
+            }
+        }
+        // The value of the wrong type wins over the false check beside it.
+        let mismatch = validate(1, serde_json::json!([{"x": 1}, "New", "active", 0]));
+        assert_eq!(
+            mismatch["error"]["code"], "POLICYSQL_SCHEMA_MISMATCH",
+            "{mismatch}"
+        );
+        assert_eq!(mismatch["error"]["path"], "/statements/1");
+        // A column list of another shape is a mismatch, not a check failure.
+        let raw = serde_json::json!({"columns": ["id"], "rows": [["new_1"]], "affectedRows": 1});
+        let answer = parse_json(&runtime.validate_result_json(handle, 0, &raw.to_string()));
+        assert_eq!(
+            answer["error"]["code"], "POLICYSQL_SCHEMA_MISMATCH",
+            "{answer}"
+        );
+        assert!(runtime.release_execution(handle));
+    }
+
+    /// #145 pull request B: every code a keyed compile can answer is in the fixed cause list
+    /// (`OUTCOME_CAUSE_CODES`) with a path of the fixed form; only the result validation's
+    /// codes are outside it. A new `RuntimeError` or `RejectionKind` must be placed here.
+    #[test]
+    fn every_compile_error_is_a_valid_outcome_cause_and_a_result_error_is_not() {
+        use super::{ComplexityCause, RejectionKind, RuntimeError, error_body};
+        use policysql_transaction::machine::io::{OUTCOME_CAUSE_CODES, is_cause_path};
+
+        let kinds = [
+            RejectionKind::InvalidRequest,
+            RejectionKind::InvalidSql,
+            RejectionKind::MultipleStatements,
+            RejectionKind::UnsupportedSql,
+            RejectionKind::MissingPolicy,
+            RejectionKind::ForbiddenOperation,
+            RejectionKind::ForbiddenColumn,
+            RejectionKind::ForbiddenColumnContext,
+            RejectionKind::DuplicateResultColumn,
+            RejectionKind::InvalidParameter,
+            RejectionKind::AmbiguousParameterType,
+            RejectionKind::ReservedParameter,
+            RejectionKind::PresetColumn,
+            RejectionKind::LimitExceeded,
+            RejectionKind::ExpectationFailed,
+        ];
+        // Not a check of `kinds`' contents: the match fails to compile when a kind is added.
+        for kind in kinds {
+            match kind {
+                RejectionKind::InvalidRequest
+                | RejectionKind::InvalidSql
+                | RejectionKind::MultipleStatements
+                | RejectionKind::UnsupportedSql
+                | RejectionKind::MissingPolicy
+                | RejectionKind::ForbiddenOperation
+                | RejectionKind::ForbiddenColumn
+                | RejectionKind::ForbiddenColumnContext
+                | RejectionKind::DuplicateResultColumn
+                | RejectionKind::InvalidParameter
+                | RejectionKind::AmbiguousParameterType
+                | RejectionKind::ReservedParameter
+                | RejectionKind::PresetColumn
+                | RejectionKind::LimitExceeded
+                | RejectionKind::ExpectationFailed => {}
+            }
+        }
+        let mut errors = vec![
+            RuntimeError::Session,
+            RuntimeError::Access,
+            RuntimeError::Snapshot,
+            RuntimeError::Envelope,
+            RuntimeError::RequestTooLarge,
+            RuntimeError::Internal,
+            RuntimeError::Busy,
+            RuntimeError::RemoteResult,
+        ];
+        for index in [0, 7] {
+            errors.extend([
+                RuntimeError::EnvelopeAt(index),
+                RuntimeError::SqlTooLargeAt(index),
+                RuntimeError::TooComplexAt(ComplexityCause::Height, index),
+                RuntimeError::EmittedSqlInvalidAt(index),
+                RuntimeError::RemoteResultAt(index),
+                RuntimeError::CheckFailedAt(index),
+            ]);
+            for kind in kinds {
+                errors.push(RuntimeError::RejectedAt(kind, index));
+            }
+        }
+        errors.extend(kinds.map(RuntimeError::Rejected));
+        for error in errors {
+            // Exhaustive: a new variant fails to compile until it is placed.
+            let in_cause_list = match error {
+                RuntimeError::Session
+                | RuntimeError::Access
+                | RuntimeError::Snapshot
+                | RuntimeError::Envelope
+                | RuntimeError::EnvelopeAt(_)
+                | RuntimeError::RequestTooLarge
+                | RuntimeError::SqlTooLargeAt(_)
+                | RuntimeError::Rejected(_)
+                | RuntimeError::RejectedAt(..)
+                | RuntimeError::TooComplexAt(..)
+                | RuntimeError::EmittedSqlInvalidAt(_)
+                | RuntimeError::Internal
+                | RuntimeError::Busy => true,
+                RuntimeError::RemoteResult
+                | RuntimeError::RemoteResultAt(_)
+                | RuntimeError::CheckFailedAt(_) => false,
+            };
+            let body = error_body(error);
+            assert_eq!(
+                OUTCOME_CAUSE_CODES.contains(&body.code),
+                in_cause_list,
+                "{error:?} -> {}",
+                body.code
+            );
+            if in_cause_list {
+                assert!(
+                    body.path.as_deref().is_none_or(is_cause_path),
+                    "{error:?} -> {:?}",
+                    body.path
+                );
+            }
+        }
     }
 
     // ADR 0027 pull request 3: the request-side limits, derived bounds, and their codes.

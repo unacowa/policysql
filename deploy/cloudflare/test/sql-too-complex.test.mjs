@@ -159,8 +159,11 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     const beforeRows = idempotency();
     const keyed = await post(h, { statements: [bulk(342, "d")] }, EXECUTE, "bulk-insert-key-000003");
     assert.equal(keyed.status, 500, JSON.stringify(keyed.body).slice(0, 300));
-    assert.equal(keyed.body.error.code, "POLICYSQL_INTERNAL");
-    assert.equal(keyed.body.error.message, "The request could not be completed.");
+    assert.equal(keyed.body.error.code, "POLICYSQL_OUTCOME_UNKNOWN");
+    assert.equal(keyed.body.error.message, "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.");
+    assert.equal(keyed.body.error.path, null);
+    assert.deepEqual(keyed.body.error.detail, { cause: { code: refused.body.error.code, path: refused.body.error.path } },
+      "the cause is the unkeyed answer");
     assert.equal(keyed.body.results, undefined, "no stored result");
     await h.flush();
     assert.equal(h.rows("a").filter((row) => row.id.startsWith("d")).length, 0, "the refused envelope ran nothing");
@@ -191,7 +194,7 @@ for (const ownerAdapter of OWNER_ADAPTERS) {
     assert.equal(typeof record.requestId, "string");
     assert.equal(typeof record.schemaVersion, "string");
     assert.equal(typeof record.policyVersion, "string");
-    assert.equal(record.abiVersion, 19);
+    assert.equal(record.abiVersion, 20);
     assert.deepEqual(Object.keys(record).sort(), ["abiVersion", "cause", "event", "policyVersion", "requestId", "schemaVersion", "statementIndex"]);
   });
 

@@ -7,7 +7,7 @@
 // The operations match the client `PolicySqlTransport` kinds (ADR 0015): execute, explain,
 // begin, statement, commit, rollback, catalog, capabilities; plus callbackQuery for a
 // commit-check validator and health.
-import { AccessDeniedError, internalError, operationError, EngineError } from "./errors.ts";
+import { AccessDeniedError, internalError, outcomeUnknownError, operationError, EngineError } from "./errors.ts";
 import type { OperationError } from "./errors.ts";
 import { readBodyText } from "./request-body.ts";
 import type { BodyText } from "./request-body.ts";
@@ -108,7 +108,8 @@ const invalidRequest = () => new EngineError("POLICYSQL_INVALID_REQUEST", "The r
 // `maxRequestBytes` and `maxJsonValues` can be lowered by a deploy, and the depth limit tightened
 // from accepting 65 nested containers to 64 in ADR 0027 pull request 7. A keyed execute may be
 // the retry of a write that committed under the earlier limits, so the engine answers the
-// unknown outcome instead of a definite 413/400 (ADR 0007, #100). Every other body rejection
+// unknown outcome (500 `POLICYSQL_OUTCOME_UNKNOWN`, the refusal as `detail.cause`) instead of a
+// definite 413/400 (ADR 0007, #100, ADR 0030). Every other body rejection
 // (syntax, a duplicate key, a lone surrogate, a missing body, a wrong content type) was invalid
 // under every deployment and stays definite.
 const deploymentDependentBodyCode = (error: unknown): string | null => {
@@ -181,6 +182,8 @@ const logRejected = (error: unknown, requestId: string) => {
     code: failure.code,
     internalClass: coded?.constructor?.name ?? "UnknownError",
     internalCode: typeof coded?.code === "string" ? coded.code : null,
+    // The refusal behind a keyed unknown outcome; null for every other rejection.
+    cause: failure.detail?.cause ?? null,
   }));
 };
 
@@ -357,11 +360,12 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
         // A keyed execute may be the retry of a write that committed before a deployment
         // changed the wrapper's session policy (the principal lost `execute` or its role).
         // A denial is a definite rejection (ADR 0007); nothing has run for this request and
-        // the body is not read, so the answer is the unknown outcome. A keyless request keeps
+        // the body is not read, so the answer is the unknown outcome (500
+        // `POLICYSQL_OUTCOME_UNKNOWN`, the denial as `detail.cause`). A keyless request keeps
         // the denial: it has no replay contract. A malformed role or session is not a denial
         // (it stays a client error or a wrapper fault), and could not have committed.
         if (fields.idempotencyKey !== undefined && error instanceof AccessDeniedError) {
-          throw internalError();
+          throw outcomeUnknownError(error.code);
         }
         throw error;
       }
@@ -381,13 +385,14 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       } catch (error) {
         // The body was rejected before the step machine, so nothing ran and the key is not
         // consumed. A well-formed key can be the retry of a write that committed under an
-        // earlier deployment: answer the unknown outcome (ADR 0007, #100). A malformed key
+        // earlier deployment: answer the unknown outcome with the limit as `detail.cause`
+        // (ADR 0007, #100, ADR 0030). A malformed key
         // could never have committed, and an unkeyed request has no replay contract, so both
         // keep the definite answer. The body read stays bounded by the same limit as before.
         const rejection = validIdempotencyKey(fields.idempotencyKey) ? deploymentDependentBodyCode(error) : null;
         if (rejection !== null) {
           console.log(JSON.stringify({ event: "keyed_body_limit_unknown", requestId, rejection }));
-          throw internalError();
+          throw outcomeUnknownError(rejection);
         }
         throw error;
       }
@@ -412,7 +417,7 @@ export const createEngine = (input: AppDependencies): PolicySqlEngine => {
       const result = fromOwner(reply, requestId);
       if (!result.ok) {
         const { error } = result as OperationFailure;
-        logRejected(new EngineError(error.code, error.message, error.path), requestId);
+        logRejected(new EngineError(error.code, error.message, error.path, error.detail), requestId);
       }
       return result;
     }),

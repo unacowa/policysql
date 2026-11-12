@@ -512,6 +512,8 @@ pub enum Code {
     Conflict,
     Unavailable,
     Internal,
+    /// The commit outcome is unknown (503 `POLICYSQL_COMMIT_OUTCOME_UNKNOWN`). Not
+    /// [`Code::KeyedOutcomeUnknown`].
     OutcomeUnknown,
     TransactionLimit,
     ModeViolation,
@@ -528,6 +530,11 @@ pub enum Code {
     SqlTooComplex,
     /// The database refused a statement as a constraint violation (ADR 0030, #145).
     ConstraintViolation,
+    /// A keyed atomic execute was refused before the database was read (a compile, the session
+    /// gate, or a body limit), so the outcome of an earlier request with the same key is unknown
+    /// (500 `POLICYSQL_OUTCOME_UNKNOWN`, ADR 0007 #85 and ADR 0030). The refusal is
+    /// `detail.cause`. Not [`Code::OutcomeUnknown`], the commit outcome.
+    KeyedOutcomeUnknown,
     /// Request JSON nests deeper than the documented depth (ADR 0027 pull request 7, #66).
     JsonTooDeep,
 }
@@ -603,6 +610,10 @@ impl Code {
                 "POLICYSQL_CONSTRAINT_VIOLATION",
                 "The statement violates a database constraint.",
             ),
+            Self::KeyedOutcomeUnknown => (
+                "POLICYSQL_OUTCOME_UNKNOWN",
+                "This request was not executed. The outcome of an earlier request with the same Idempotency-Key is unknown.",
+            ),
             Self::JsonTooDeep => (
                 "POLICYSQL_JSON_TOO_DEEP",
                 "The request JSON nests too deeply.",
@@ -637,13 +648,70 @@ impl Code {
     }
 }
 
-/// `error.detail`: values fixed per code, enumerations and numbers only (ADR 0030). A later
-/// change adds a field and a row to [`ErrorDetail::allowed`].
+/// The codes a keyed atomic execute refused before the database was read can carry as
+/// `detail.cause.code` (ADR 0030 amendment): every code a compile returns, the session gate's
+/// and the body limits'. A code that depends on the database's state is never in this list.
+pub const OUTCOME_CAUSE_CODES: [&str; 22] = [
+    "POLICYSQL_FORBIDDEN_ACCESS",
+    "POLICYSQL_STALE_OPERATION",
+    "POLICYSQL_INVALID_REQUEST",
+    "POLICYSQL_REQUEST_TOO_LARGE",
+    "POLICYSQL_JSON_TOO_DEEP",
+    "POLICYSQL_INVALID_SQL",
+    "POLICYSQL_MULTIPLE_STATEMENTS",
+    "POLICYSQL_UNSUPPORTED_SQL",
+    "POLICYSQL_MISSING_POLICY",
+    "POLICYSQL_FORBIDDEN_OPERATION",
+    "POLICYSQL_FORBIDDEN_COLUMN",
+    "POLICYSQL_FORBIDDEN_COLUMN_CONTEXT",
+    "POLICYSQL_DUPLICATE_RESULT_COLUMN",
+    "POLICYSQL_INVALID_PARAMETER",
+    "POLICYSQL_AMBIGUOUS_PARAMETER_TYPE",
+    "POLICYSQL_RESERVED_PARAMETER",
+    "POLICYSQL_PRESET_COLUMN",
+    "POLICYSQL_LIMIT_EXCEEDED",
+    "POLICYSQL_EXPECTATION_FAILED",
+    "POLICYSQL_SQL_TOO_COMPLEX",
+    "POLICYSQL_INTERNAL",
+    "POLICYSQL_DATABASE_UNAVAILABLE",
+];
+
+/// Whether `path` is one a `detail.cause.path` may take: `/statements/<n>` or
+/// `/statements/<n>/sql`, with `<n>` a canonical decimal of 1 to 10 digits.
+#[must_use]
+pub fn is_cause_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/statements/") else {
+        return false;
+    };
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let (number, tail) = rest.split_at(digits);
+    let canonical = match number.as_bytes() {
+        [b'0'] => true,
+        [b'1'..=b'9', ..] => number.len() <= 10,
+        _ => false,
+    };
+    canonical && (tail.is_empty() || tail == "/sql")
+}
+
+/// `error.detail`: values fixed per code, enumerations, numbers, and fixed-form pointers only
+/// (ADR 0030). A later change adds a field and a row to [`ErrorDetail::allowed`].
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ErrorDetail {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constraint: Option<ConstraintKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<OutcomeCause>,
+}
+
+/// The refusal behind a keyed `POLICYSQL_OUTCOME_UNKNOWN`: the code and path the same request
+/// would have been answered with had it carried no key.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomeCause {
+    pub code: String,
+    /// Always serialized; `null` when the cause has no path.
+    pub path: Option<String>,
 }
 
 impl ErrorDetail {
@@ -652,13 +720,39 @@ impl ErrorDetail {
     #[must_use]
     pub fn allowed(code: &str, detail: Option<&serde_json::Value>) -> bool {
         match code {
-            // A struct also reads from a JSON array, so the shape is checked first.
+            // A struct also reads from a JSON array, and serde takes a missing or `null`
+            // `Option` field as `None`, so the shape (exactly one key) is checked first.
             "POLICYSQL_CONSTRAINT_VIOLATION" => detail
-                .filter(|value| value.is_object())
+                .filter(|value| value.as_object().is_some_and(|fields| fields.len() == 1))
                 .and_then(|value| Self::deserialize(value).ok())
-                .is_some_and(|detail| detail.constraint.is_some()),
+                .is_some_and(|detail| detail.constraint.is_some() && detail.cause.is_none()),
+            // Read as a `Value`: serde takes a missing `Option` field as `None`.
+            "POLICYSQL_OUTCOME_UNKNOWN" => detail.is_some_and(Self::outcome_cause_allowed),
             _ => detail.is_none(),
         }
+    }
+
+    fn outcome_cause_allowed(detail: &serde_json::Value) -> bool {
+        let Some(detail) = detail.as_object() else {
+            return false;
+        };
+        let Some(cause) = detail
+            .get("cause")
+            .and_then(serde_json::Value::as_object)
+            .filter(|_| detail.len() == 1)
+        else {
+            return false;
+        };
+        let code_allowed = cause
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|code| OUTCOME_CAUSE_CODES.contains(&code));
+        let path_allowed = match cause.get("path") {
+            Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::String(path)) => is_cause_path(path),
+            _ => false,
+        };
+        cause.len() == 2 && code_allowed && path_allowed
     }
 }
 
@@ -742,6 +836,31 @@ pub fn constraint_reply(kind: ConstraintKind, index: u64) -> Box<RawValue> {
             path: Some(&path),
             detail: Some(&ErrorDetail {
                 constraint: Some(kind),
+                cause: None,
+            }),
+        },
+    })
+}
+
+/// 500 `POLICYSQL_OUTCOME_UNKNOWN` for a keyed atomic execute refused by a compile: the fixed
+/// message, no top-level path, and the compile's code and path as `detail.cause`. The cause is
+/// not checked here: a reader (the engine's `checkedOwnerReply`, a machine's `owner_replied`)
+/// rejects a code outside [`OUTCOME_CAUSE_CODES`].
+#[must_use]
+pub fn outcome_unknown_reply(cause: &super::compiler::CoreError) -> Box<RawValue> {
+    let (code, message) = Code::KeyedOutcomeUnknown.parts();
+    to_raw(&ErrorReply {
+        ok: false,
+        error: ErrorBody {
+            code,
+            message,
+            path: None,
+            detail: Some(&ErrorDetail {
+                constraint: None,
+                cause: Some(OutcomeCause {
+                    code: cause.code.clone(),
+                    path: cause.path.clone(),
+                }),
             }),
         },
     })
@@ -769,7 +888,11 @@ pub fn value_reply(value: &RawValue) -> Box<RawValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Class, Code, ConstraintKind, ErrorDetail, constraint_reply};
+    use super::{
+        Class, Code, ConstraintKind, ErrorDetail, OUTCOME_CAUSE_CODES, constraint_reply,
+        is_cause_path, outcome_unknown_reply,
+    };
+    use crate::machine::compiler::CoreError;
     use serde_json::{Value, json};
 
     #[test]
@@ -817,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn the_detail_table_has_one_row_and_every_other_code_has_no_detail() {
+    fn the_detail_table_has_two_rows_and_every_other_code_has_no_detail() {
         let allowed =
             |code: &str, detail: Option<Value>| ErrorDetail::allowed(code, detail.as_ref());
         let violation = "POLICYSQL_CONSTRAINT_VIOLATION";
@@ -831,6 +954,9 @@ mod tests {
             None,
             Some(json!({})),
             Some(json!({"constraint": "unique", "column": "x"})),
+            Some(json!({"constraint": "unique", "cause": null})),
+            Some(json!({"constraint": "unique", "constraint2": null})),
+            Some(json!({"cause": null})),
             Some(json!({"constraint": "primary_key"})),
             Some(json!({"constraint": null})),
             Some(json!({"constraint": 1})),
@@ -867,5 +993,154 @@ mod tests {
                 "detail": {"constraint": "check"},
             }})
         );
+    }
+
+    #[test]
+    fn the_keyed_outcome_unknown_code_is_not_the_commit_outcome() {
+        assert_eq!(
+            Code::KeyedOutcomeUnknown.parts(),
+            (
+                "POLICYSQL_OUTCOME_UNKNOWN",
+                "This request was not executed. The outcome of an earlier request with the same \
+                 Idempotency-Key is unknown."
+            )
+        );
+        assert_eq!(
+            Code::OutcomeUnknown.parts().0,
+            "POLICYSQL_COMMIT_OUTCOME_UNKNOWN"
+        );
+    }
+
+    #[test]
+    fn the_outcome_unknown_reply_has_the_fixed_shape_and_always_writes_the_path() {
+        let mut cause = CoreError::new("POLICYSQL_MISSING_POLICY", "ignored message");
+        cause.path = Some("/statements/2".to_owned());
+        let reply = outcome_unknown_reply(&cause);
+        assert!(
+            reply.get().starts_with(
+                "{\"ok\":false,\"error\":{\"code\":\"POLICYSQL_OUTCOME_UNKNOWN\",\"message\":"
+            ),
+            "{}",
+            reply.get()
+        );
+        let parsed: Value = serde_json::from_str(reply.get())
+            .unwrap_or_else(|error| unreachable!("a reply is JSON: {error}"));
+        assert_eq!(
+            parsed,
+            json!({"ok": false, "error": {
+                "code": "POLICYSQL_OUTCOME_UNKNOWN",
+                "message": Code::KeyedOutcomeUnknown.parts().1,
+                "path": null,
+                "detail": {"cause": {"code": "POLICYSQL_MISSING_POLICY", "path": "/statements/2"}},
+            }})
+        );
+        let pathless = CoreError::new("POLICYSQL_FORBIDDEN_ACCESS", "ignored message");
+        let reply = outcome_unknown_reply(&pathless);
+        let parsed: Value = serde_json::from_str(reply.get())
+            .unwrap_or_else(|error| unreachable!("a reply is JSON: {error}"));
+        assert_eq!(
+            parsed["error"]["detail"],
+            json!({"cause": {"code": "POLICYSQL_FORBIDDEN_ACCESS", "path": null}}),
+            "a null path is written, not omitted"
+        );
+        assert!(ErrorDetail::allowed(
+            "POLICYSQL_OUTCOME_UNKNOWN",
+            parsed["error"].get("detail")
+        ));
+    }
+
+    #[test]
+    fn the_outcome_unknown_detail_table_accepts_only_a_fixed_cause() {
+        let allowed =
+            |detail: Value| ErrorDetail::allowed("POLICYSQL_OUTCOME_UNKNOWN", Some(&detail));
+        for code in OUTCOME_CAUSE_CODES {
+            for path in [
+                Value::Null,
+                json!("/statements/0"),
+                json!("/statements/12/sql"),
+                json!("/statements/9999999999"),
+            ] {
+                assert!(
+                    allowed(json!({"cause": {"code": code, "path": path}})),
+                    "{code} {path}"
+                );
+            }
+        }
+        assert_eq!(OUTCOME_CAUSE_CODES.len(), 22);
+        let good = "POLICYSQL_INVALID_SQL";
+        assert!(!ErrorDetail::allowed("POLICYSQL_OUTCOME_UNKNOWN", None));
+        let mut forged = vec![
+            json!({}),
+            json!({"cause": null}),
+            json!({"cause": []}),
+            json!({"cause": "x"}),
+            json!([{"code": good, "path": null}]),
+            json!({"cause": {"code": good, "path": null}, "constraint": "unique"}),
+            json!({"cause": {"code": good, "path": null, "message": "x"}}),
+            json!({"cause": {"code": good}}),
+            json!({"cause": {"path": null}}),
+            json!({"cause": [good, null]}),
+            Value::Null,
+        ];
+        for code in [
+            json!("POLICYSQL_CONSTRAINT_VIOLATION"),
+            json!("POLICYSQL_CHECK_FAILED"),
+            json!("POLICYSQL_SCHEMA_MISMATCH"),
+            json!("POLICYSQL_DATABASE_TIMEOUT"),
+            json!("POLICYSQL_OUTCOME_UNKNOWN"),
+            json!("POLICYSQL_COMMIT_OUTCOME_UNKNOWN"),
+            json!("FORBIDDEN_COLUMN"),
+            json!("policysql_invalid_sql"),
+            json!(1),
+            Value::Null,
+        ] {
+            forged.push(json!({"cause": {"code": code, "path": null}}));
+        }
+        for path in [
+            json!("/statements/01"),
+            json!("/statements/-1"),
+            json!("/statements/"),
+            json!("/statements/0/params"),
+            json!("/statements/0/sql/x"),
+            json!("/x"),
+            json!(""),
+            json!("/statements/12345678901"),
+            json!(0),
+        ] {
+            forged.push(json!({"cause": {"code": good, "path": path}}));
+        }
+        for detail in forged {
+            assert!(!allowed(detail.clone()), "{detail}");
+        }
+        // A cause is not a constraint's, and no other code takes one.
+        let cause = json!({"cause": {"code": good, "path": null}});
+        assert!(!ErrorDetail::allowed("POLICYSQL_INVALID_SQL", Some(&cause)));
+        assert!(!ErrorDetail::allowed(
+            "POLICYSQL_CONSTRAINT_VIOLATION",
+            Some(&json!({"constraint": "unique", "cause": {"code": good, "path": null}}))
+        ));
+    }
+
+    #[test]
+    fn a_cause_path_is_a_statement_pointer_with_a_canonical_index() {
+        for path in [
+            "/statements/0",
+            "/statements/10/sql",
+            "/statements/1234567890",
+        ] {
+            assert!(is_cause_path(path), "{path}");
+        }
+        for path in [
+            "",
+            "/statements/",
+            "/statements/00",
+            "/statements/+1",
+            "/statements/1/sql/",
+            "/statements/1/SQL",
+            "statements/1",
+            "/statements/12345678901",
+        ] {
+            assert!(!is_cause_path(path), "{path}");
+        }
     }
 }

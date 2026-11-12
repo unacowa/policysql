@@ -224,17 +224,23 @@ export const httpConformanceCases: readonly ConformanceCase[] = Object.freeze(([
   {
     name: "an error's detail is served between path and requestId, as the engine returned it",
     async run(createMapping) {
-      const detail = { constraint: "unique" };
-      for (const route of ROUTE_CASES) {
-        const { engine } = recordingEngine(() => ({
-          ok: false, error: { code: "POLICYSQL_CONSTRAINT_VIOLATION", message: "safe message", path: "/statements/0", detail }, requestId: "req_detail",
-        }));
-        const response = await createMapping(engine).fetch(route.request(), context());
-        same(response.status, 409, `${route.label}: detail status`);
-        expectFixedHeaders(response, `${route.label} detail`);
-        const text = await response.text();
-        same(Object.keys((JSON.parse(text) as { error: object }).error), ["code", "message", "path", "detail", "requestId"], `${route.label}: detail field order`);
-        same((JSON.parse(text) as { error: { detail: unknown } }).error.detail, detail, `${route.label}: detail`);
+      // A flat detail (a constraint kind) and a nested one (the cause of an unknown outcome).
+      const cases = [
+        { code: "POLICYSQL_CONSTRAINT_VIOLATION", status: 409, detail: { constraint: "unique" }, path: "/statements/0" },
+        { code: "POLICYSQL_OUTCOME_UNKNOWN", status: 500, detail: { cause: { code: "POLICYSQL_MISSING_POLICY", path: "/statements/0" } }, path: null },
+      ];
+      for (const { code, status, detail, path } of cases) {
+        for (const route of ROUTE_CASES) {
+          const { engine } = recordingEngine(() => ({
+            ok: false, error: { code, message: "safe message", path, detail }, requestId: "req_detail",
+          }));
+          const response = await createMapping(engine).fetch(route.request(), context());
+          same(response.status, status, `${route.label} ${code}: detail status`);
+          expectFixedHeaders(response, `${route.label} ${code} detail`);
+          const text = await response.text();
+          same(Object.keys((JSON.parse(text) as { error: object }).error), ["code", "message", "path", "detail", "requestId"], `${route.label} ${code}: detail field order`);
+          same((JSON.parse(text) as { error: { detail: unknown } }).error.detail, detail, `${route.label} ${code}: detail`);
+        }
       }
     },
   },

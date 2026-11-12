@@ -691,6 +691,15 @@ today.
   that a commit retry is never a definite rejection (ADR 0007, amendment #104), not a machine
   decision: a denied caller must not learn from the owner's record whether the transaction
   exists or whether COMMIT may have been sent. No state, event, or ABI changes.
+- **Policy check failure and keyed compile cause (#145 pull request B, ABI 20).** A mutation
+  result whose check column is not SQL TRUE is answered 403 `POLICYSQL_CHECK_FAILED` at the
+  statement (was 422 `POLICYSQL_SCHEMA_MISMATCH`), through the same `close(Phase::Failed)` and
+  rollback; no COMMIT, idempotency row, or validator call precedes it. The keyed compile failure
+  of #85 path 1 is answered 500 `POLICYSQL_OUTCOME_UNKNOWN` with `error.detail.cause` (the code
+  and path the unkeyed answer has) instead of `POLICYSQL_INTERNAL`; a forwarded owner reply is
+  checked against the same table (ADR 0030, amendment). No state or event changes; `step_json`
+  returns different replies for existing inputs, so `ABI_VERSION` is 20 and the owner wire
+  version is `"3"`.
 
 
 ## Migration
