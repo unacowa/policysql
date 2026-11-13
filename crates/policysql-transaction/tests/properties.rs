@@ -333,12 +333,10 @@ fn run_reaching(actions: &[Action]) -> Result<Reached, TestCaseError> {
             Action::Abandon => {
                 feed_checked(&mut engine, &json!({"type": "abandon"}))?;
                 // The engine runs the one Persist, then discards everything.
-                if engine
-                    .outstanding
-                    .as_ref()
-                    .is_some_and(|effect| effect["type"] == "persist")
+                if let Some(effect) = engine.outstanding.clone()
+                    && effect["type"] == "persist"
                 {
-                    engine.store = engine.persist_text.take();
+                    engine.apply_persist(&effect);
                 }
                 engine.lose();
                 // A lost owner's effects never complete (ADR 0022).

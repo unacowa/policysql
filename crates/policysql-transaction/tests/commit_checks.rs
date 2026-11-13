@@ -3,7 +3,10 @@
 
 mod common;
 
-use common::{Engine, OWNER, T0, begin, code, command, phase_of, sequence_text, statement_text};
+use common::{
+    Engine, OWNER, T0, begin, code, command, phase_of, rejects_commit, sequence_text,
+    statement_text,
+};
 use policysql_transaction::sha256_hex;
 use serde_json::{Value, json};
 
@@ -833,4 +836,205 @@ fn a_callback_parameter_namespace_collision_executes_nothing() {
         "no COMMIT"
     );
     assert_eq!(engine.compiler.live_handles(), 0);
+}
+
+/// Where the held `Persist` sits in the COMMIT's life.
+#[derive(Clone, Copy, Debug)]
+enum Held {
+    /// `committing`, before the COMMIT is sent.
+    Committing,
+    /// `commit_unknown`, after the COMMIT's outcome was lost.
+    CommitUnknown,
+    /// `committed`, after the COMMIT succeeded.
+    Committed,
+}
+
+/// How the volatile state is lost while the `Persist` is held (both end in `fail_closed`).
+#[derive(Clone, Copy, Debug)]
+enum Break {
+    /// The volatile state is cut in half and the timer fires (`volatile_invalid`, a reset).
+    Corrupt,
+    /// The host abandons the transaction.
+    Abandon,
+}
+
+/// Drives a commit to the `Persist` of `held` and takes it from the engine, as a held put.
+fn hold_persist(engine: &mut Engine, held: Held) -> Value {
+    validating(engine);
+    // The validator allows, the binding is checked, `committing` is persisted.
+    engine.resolve(true, "unknown");
+    engine.resolve(true, "unknown");
+    let committing = engine.outstanding.clone();
+    assert_eq!(
+        committing.as_ref().map(|effect| effect["type"].clone()),
+        Some(json!("persist"))
+    );
+    if matches!(held, Held::Committing) {
+        return engine.outstanding.take().unwrap_or_default();
+    }
+    engine.resolve(true, "unknown");
+    assert_eq!(
+        engine
+            .outstanding
+            .as_ref()
+            .map(|effect| effect["type"].clone()),
+        Some(json!("commit"))
+    );
+    engine.resolve(matches!(held, Held::Committed), "timeout");
+    let effect = engine.outstanding.take().unwrap_or_default();
+    assert_eq!(effect["type"], "persist", "{held:?}");
+    effect
+}
+
+/// Runs the scenario of #152 up to the owner's loss: `held` is taken as a held put, the volatile
+/// state is lost, the successor's own `Persist` (if any) ends with `successor`, and the held put
+/// lands before it (`held_first`) or after it.
+fn lose_after_held_persist(
+    held: Held,
+    brk: Break,
+    successor: Option<bool>,
+    held_first: bool,
+) -> Engine {
+    let mut engine = checked();
+    let held_effect = hold_persist(&mut engine, held);
+    match brk {
+        Break::Corrupt => {
+            if let Some(text) = engine.volatile.as_mut() {
+                text.truncate(text.len() / 2);
+            }
+            engine.feed(&json!({"type": "timerFired"}));
+            if engine.outstanding.is_none() {
+                // After a reset, an outcome nobody awaits makes the successor persist
+                // the record it loaded.
+                engine.feed(&json!({"type": "validatorReplied", "id": 101, "ok": true,
+                    "decision": {"version": "1", "allowed": true}}));
+            }
+        }
+        Break::Abandon => {
+            engine.feed(&json!({"type": "abandon"}));
+        }
+    }
+    if held_first {
+        engine.apply_persist(&held_effect);
+    }
+    if let (Some(ok), Some(effect)) = (successor, engine.outstanding.clone()) {
+        assert_eq!(effect["type"], "persist");
+        engine.resolve(ok, "unavailable");
+    } else {
+        assert!(successor.is_none(), "no successor persist");
+    }
+    if !held_first {
+        engine.apply_persist(&held_effect);
+    }
+    engine.lose();
+    engine
+}
+
+/// The COMMIT's persisted record survives a `Persist` that lands after the volatile state was
+/// lost (#152): a `Persist` writes the text of the step that emitted it, whatever else was
+/// persisted or failed meanwhile, so the record is never emptied or moved back, and the retry
+/// is never a definite rejection of a COMMIT that may have been sent.
+#[test]
+fn a_held_persist_after_the_volatile_state_is_lost_never_empties_the_record() {
+    use Break::{Abandon, Corrupt};
+    use Held::{CommitUnknown, Committed, Committing};
+    // (held persist, break, successor persist outcome, held persist lands first,
+    //  stored phase, retry reply code)
+    let unknown = Some("POLICYSQL_COMMIT_OUTCOME_UNKNOWN");
+    let cases = [
+        (
+            CommitUnknown,
+            Corrupt,
+            Some(false),
+            false,
+            "commit_unknown",
+            unknown,
+        ),
+        (
+            CommitUnknown,
+            Corrupt,
+            Some(true),
+            false,
+            "commit_unknown",
+            unknown,
+        ),
+        (
+            CommitUnknown,
+            Corrupt,
+            Some(true),
+            true,
+            "commit_unknown",
+            unknown,
+        ),
+        (
+            CommitUnknown,
+            Abandon,
+            None,
+            false,
+            "commit_unknown",
+            unknown,
+        ),
+        (
+            Committing,
+            Corrupt,
+            Some(false),
+            false,
+            "committing",
+            unknown,
+        ),
+        (
+            Committing,
+            Corrupt,
+            Some(true),
+            false,
+            "committing",
+            unknown,
+        ),
+        (
+            Committing,
+            Corrupt,
+            Some(true),
+            true,
+            "commit_unknown",
+            unknown,
+        ),
+        (Committing, Abandon, None, false, "committing", unknown),
+        (Committed, Corrupt, Some(false), false, "committed", None),
+        (Committed, Corrupt, Some(true), false, "committed", None),
+        (Committed, Abandon, None, false, "committed", None),
+    ];
+    for (held, brk, successor, held_first, phase, expected) in cases {
+        let label = format!("{held:?} {brk:?} successor {successor:?} held first {held_first}");
+        let mut engine = lose_after_held_persist(held, brk, successor, held_first);
+        assert_eq!(
+            phase_of(engine.store.as_deref()).as_deref(),
+            Some(phase),
+            "{label}"
+        );
+        let reply = engine.run(&command("commit", &sequence_text(2)));
+        match expected {
+            Some(code_expected) => assert_eq!(code(&reply), Some(code_expected), "{label}"),
+            None => assert_eq!(reply["value"]["status"], "committed", "{label}: {reply}"),
+        }
+        assert!(!rejects_commit(&reply) || expected.is_some(), "{label}");
+        // `committing` is never followed by a phase before it.
+        let stored = &engine.observed.stored_phases;
+        if let Some(at) = stored.iter().position(|phase| phase == "committing") {
+            assert!(
+                stored[at..]
+                    .iter()
+                    .all(|phase| ["committing", "commit_unknown", "committed"]
+                        .contains(&phase.as_str())),
+                "{label}: {stored:?}"
+            );
+        }
+    }
+}
+
+/// The engine model's own guard: a `Persist` without the text of its step is a model error.
+#[test]
+#[should_panic(expected = "a persist effect without its text")]
+fn the_model_refuses_a_persist_without_its_text() {
+    let mut engine = Engine::new();
+    engine.apply_persist(&json!({"type": "persist", "id": 1}));
 }

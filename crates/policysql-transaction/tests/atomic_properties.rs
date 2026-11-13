@@ -224,7 +224,7 @@ fn run(setup: &Setup, actions: &[Action]) -> (Engine, Vec<(usize, Option<Value>,
                     if let Some(effect) = engine.outstanding.take()
                         && effect["type"] == "persist"
                     {
-                        engine.store = engine.persist_text.take();
+                        engine.apply_persist(&effect);
                     }
                     engine.pending_rows.clear();
                     engine.envelope_open = false;

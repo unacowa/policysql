@@ -443,8 +443,8 @@ fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
                             engine.observed.not_committed_fed = true;
                         }
                     }
-                    if effect["type"] == "persist" {
-                        persist(&mut engine, *ok);
+                    if effect["type"] == "persist" && *ok {
+                        engine.apply_persist(&effect);
                     }
                     last_outcome = Some(event.clone());
                     feed_checked(&mut engine, &mut watch, &event)?;
@@ -512,12 +512,10 @@ fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
             }
             Action::Abandon => {
                 feed_checked(&mut engine, &mut watch, &json!({"type": "abandon"}))?;
-                if engine
-                    .outstanding
-                    .as_ref()
-                    .is_some_and(|effect| effect["type"] == "persist")
+                if let Some(effect) = engine.outstanding.clone()
+                    && effect["type"] == "persist"
                 {
-                    engine.store = engine.persist_text.take();
+                    engine.apply_persist(&effect);
                 }
                 engine.lose();
                 watch.connection.clear();
@@ -535,7 +533,7 @@ fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
                         engine.observed.committed_fed = true;
                     }
                     if effect["type"] == "persist" {
-                        persist(&mut engine, true);
+                        engine.apply_persist(&effect);
                     }
                     reached.late |= effect["type"] == "callValidator";
                     feed_checked(&mut engine, &mut watch, &event)?;
@@ -600,7 +598,7 @@ fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
                         engine.observed.committed_fed = true;
                     }
                     if effect["type"] == "persist" {
-                        persist(&mut engine, true);
+                        engine.apply_persist(&effect);
                     }
                     feed_checked(&mut engine, &mut watch, &event)?;
                 }
@@ -647,18 +645,6 @@ fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
         );
     }
     Ok(reached)
-}
-
-/// The engine model's Persist outcome: the store takes the text on success.
-fn persist(engine: &mut Engine, ok: bool) {
-    if ok {
-        engine.store = engine.persist_text.take();
-        if let Some(phase) = phase_of(engine.store.as_deref()) {
-            engine.observed.stored_phases.push(phase);
-        }
-    } else {
-        engine.persist_text = None;
-    }
 }
 
 /// The outcome event of an effect.
@@ -773,4 +759,35 @@ fn the_generator_reaches_every_outcome() {
 #[test]
 fn limits_are_the_shared_defaults() {
     assert_eq!(LIMITS.max_callback_rows, 100);
+}
+
+/// #152: a Persist held across a reset lands after a later Persist failed; it writes its own
+/// text, so the committing record is never lost and the retry is not a rejection.
+#[test]
+fn seed_152() {
+    use Action::{CorruptVolatile, Decide, Hold, Lose, Release, Resolve, RetryCommit};
+    let ok = || Resolve { ok: true, class: 0 };
+    let actions = vec![
+        ok(),
+        ok(),
+        ok(),
+        ok(),
+        ok(),
+        Resolve {
+            ok: false,
+            class: 0,
+        },
+        Hold,
+        CorruptVolatile,
+        Decide(4),
+        Resolve {
+            ok: false,
+            class: 0,
+        },
+        Release,
+        Lose,
+        RetryCommit,
+    ];
+    let result = run(1, &actions);
+    assert!(result.is_ok(), "{result:?}");
 }
