@@ -40,7 +40,7 @@ Examples:
 ### INSERT
 
 - explicit target columns and `VALUES` rows;
-- registered literals and named parameters;
+- values that are a literal or a named parameter only (optionally parenthesized); a column or any other expression is rejected before its name is resolved;
 - server-owned presets disjoint from client columns;
 - post-state checks over every inserted row;
 - optional independently authorized `RETURNING`.
@@ -48,7 +48,7 @@ Examples:
 ### UPDATE
 
 - one base resource;
-- explicit assignments using literals or named parameters only;
+- explicit assignments whose right-hand side is a literal or a named parameter only (optionally parenthesized); a column or any other expression there is rejected before its name is resolved;
 - pre-state policy filter and client predicate; the client predicate may reference only the role's regular select columns;
 - server-owned presets disjoint from client assignments;
 - post-state checks over every changed row;

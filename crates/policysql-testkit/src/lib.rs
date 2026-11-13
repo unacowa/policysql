@@ -2399,6 +2399,7 @@ resources:
         "negative-limit-parameter",
         "server-parameter-collision",
         "statement-smuggling",
+        "value-position-column",
         "window-joined-resource",
     ];
 

@@ -21,6 +21,8 @@ RETURNING id, title, status;
 
 policyで許可されていないcolumnは指定できません。`author_id`や`created_at`などのserver-owned columnはpresetから追加できます。
 
+`VALUES`の各値には、literalかnamed parameterだけを書けます。列や式を書くと、その列が存在するかどうかにかかわらず400 `POLICYSQL_UNSUPPORTED_SQL`（`detail.feature`は`insert`）になります。
+
 ```yaml
 insert:
   columns: [title, status]
@@ -48,6 +50,8 @@ SET title = :title,
 WHERE id = :id
 RETURNING id, title, status;
 ```
+
+`SET`の右辺には、literalかnamed parameterだけを書けます。列や式を書くと、その列が存在するかどうかにかかわらず400 `POLICYSQL_UNSUPPORTED_SQL`（`detail.feature`は`update`）になります。
 
 ```yaml
 update:

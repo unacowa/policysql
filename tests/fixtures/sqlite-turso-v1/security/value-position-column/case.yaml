@@ -1,0 +1,9 @@
+id: sqlite.security.value-position-column
+profile: sqlite-turso-v1
+description: UPDATEのSETの右辺に禁止列を書き、列が存在するかを応答のcodeから推測する攻撃を、名前を解決する前に形で拒否する (#155)
+covers:
+  - statement.update.direct
+  - binding.known-column
+  - threat.forbidden-column-inference
+tests: [negative, bypass]
+expected: deny

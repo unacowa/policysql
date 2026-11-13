@@ -619,6 +619,13 @@ impl SqliteFrontend {
             if !seen.insert(column.id) {
                 return Err(BindError::DuplicateWriteColumn);
             }
+            // A value position is decided on its syntax, before a name in it is resolved (#155).
+            if !is_value_syntax(&set.expr) {
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::Update,
+                    "UPDATE assignment expression",
+                ));
+            }
             let (value, logical_type) = state.bind_scalar(
                 &set.expr,
                 ColumnUsage::Write,
@@ -628,6 +635,7 @@ impl SqliteFrontend {
             if logical_type != column.value.logical_type {
                 return Err(BindError::IncompatibleTypes);
             }
+            // Unreachable after `is_value_syntax`; kept as the check of the bound form.
             if !matches!(
                 &value,
                 BoundExpr::ClientParameter { .. } | BoundExpr::Literal(_)
@@ -739,6 +747,13 @@ impl SqliteFrontend {
             }
             let mut row = Vec::with_capacity(values.len());
             for (value, column) in values.iter().zip(&descriptors) {
+                // A value position is decided on its syntax, before a name in it is resolved (#155).
+                if !is_value_syntax(value) {
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::Insert,
+                        "INSERT value expression",
+                    ));
+                }
                 let (value, logical_type) = state.bind_scalar(
                     value,
                     ColumnUsage::Write,
@@ -748,6 +763,7 @@ impl SqliteFrontend {
                 if logical_type != column.value.logical_type {
                     return Err(BindError::IncompatibleTypes);
                 }
+                // Unreachable after `is_value_syntax`; kept as the check of the bound form.
                 if !matches!(
                     &value,
                     BoundExpr::ClientParameter { .. } | BoundExpr::Literal(_)
@@ -1985,6 +2001,22 @@ fn explicit_alias(alias: Option<&As>) -> Option<&str> {
         .map(|alias| alias.name().as_str())
 }
 
+/// Whether `expression` is a literal or a parameter, under any number of single-item
+/// parentheses (`((:v))`): the only form a position that holds a value accepts (an INSERT value,
+/// an UPDATE assignment, a JSON collection path). Decided on the syntax alone, before any name
+/// is resolved, so that a column written there is refused the same way whether it exists, is
+/// hidden from the role, or does not exist (#155, #123).
+fn is_value_syntax(expression: &Expr) -> bool {
+    let mut expression = expression;
+    loop {
+        match expression {
+            Expr::Parenthesized(items) if items.len() == 1 => expression = &items[0],
+            Expr::Literal(_) | Expr::Variable(_) => return true,
+            _ => return false,
+        }
+    }
+}
+
 fn ensure_unique_result_names(projections: &[BoundProjection]) -> Result<(), BindError> {
     let mut names = std::collections::BTreeSet::new();
     for projection in projections {
@@ -2992,12 +3024,110 @@ mod tests {
                 "SELECT id FROM projects WHERE id = X'00'",
                 BindError::Unsupported(UnsupportedFeature::Literal, "literal"),
             ),
+            // Likewise in a value position: an identifier is refused on its syntax (#155).
             (
                 "UPDATE projects SET name = \"renamed\" WHERE id = :id",
-                BindError::UnknownColumn,
+                BindError::Unsupported(UnsupportedFeature::Update, "UPDATE assignment expression"),
             ),
             (
                 "INSERT INTO projects (id) VALUES (X'00')",
+                BindError::Unsupported(UnsupportedFeature::Literal, "literal"),
+            ),
+        ] {
+            assert_eq!(frontend.bind(sql, &catalog()), Err(expected), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_value_position_is_decided_on_its_syntax_before_a_name_is_resolved() {
+        let frontend = SqliteFrontend::default();
+        let update = Err(BindError::Unsupported(
+            UnsupportedFeature::Update,
+            "UPDATE assignment expression",
+        ));
+        let insert = Err(BindError::Unsupported(
+            UnsupportedFeature::Insert,
+            "INSERT value expression",
+        ));
+        // A column written where a value belongs is refused alike whether it exists, is hidden
+        // from the role (the binder cannot tell), has another type, or does not exist.
+        for column in [
+            "tenant_id",
+            "nope",
+            "projects.tenant_id",
+            "projects.nope",
+            "x.tenant_id",
+            "\"tenant_id\"",
+            "\"nope\"",
+            "metadata",
+        ] {
+            for template in [
+                "UPDATE projects SET name = {C} WHERE id = :id",
+                "UPDATE projects SET name = lower({C}) WHERE id = :id",
+                "UPDATE projects SET name = {C} || 'a' WHERE id = :id",
+                "UPDATE projects SET name = CAST({C} AS TEXT) WHERE id = :id",
+                "UPDATE projects SET name = CASE WHEN {C} = 'x' THEN 'a' ELSE 'b' END WHERE id = :id",
+                "UPDATE projects SET name = ({C}) WHERE id = :id",
+                "UPDATE projects SET name = ((({C}))) WHERE id = :id",
+            ] {
+                let sql = template.replace("{C}", column);
+                assert_eq!(frontend.bind(&sql, &catalog()), update, "{sql}");
+            }
+            for template in [
+                "INSERT INTO projects (id, name) VALUES (:id, {C})",
+                "INSERT INTO projects (id, name) VALUES (:id, lower({C}))",
+            ] {
+                let sql = template.replace("{C}", column);
+                assert_eq!(frontend.bind(&sql, &catalog()), insert, "{sql}");
+            }
+        }
+        // Any other form that is not a literal or a parameter is refused without a name too.
+        for sql in [
+            "UPDATE projects SET name = lower(:v) WHERE id = :id",
+            "UPDATE projects SET name = 'a' || 'b' WHERE id = :id",
+            "UPDATE projects SET status = 1 + 1 WHERE id = :id",
+            "UPDATE projects SET status = -1 WHERE id = :id",
+            "UPDATE projects SET name = (SELECT name FROM projects) WHERE id = :id",
+        ] {
+            assert_eq!(frontend.bind(sql, &catalog()), update, "{sql}");
+        }
+        for sql in [
+            "INSERT INTO projects (id, name) VALUES (:id, lower(:v))",
+            "INSERT INTO projects (id, name) VALUES (:id, 'a' || 'b')",
+            "INSERT INTO projects (id, status) VALUES (:id, 1 + 1)",
+            "INSERT INTO projects (id, status) VALUES (:id, -1)",
+            "INSERT INTO projects (id, name) VALUES (:id, (SELECT name FROM projects))",
+        ] {
+            assert_eq!(frontend.bind(sql, &catalog()), insert, "{sql}");
+        }
+        for sql in [
+            "UPDATE projects SET name = (:n) WHERE id = :id",
+            "UPDATE projects SET name = ((:n)) WHERE id = :id",
+            "UPDATE projects SET name = 'x' WHERE id = :id",
+            "INSERT INTO projects (id, name) VALUES (:id, (:n))",
+        ] {
+            assert!(frontend.bind(sql, &catalog()).is_ok(), "{sql}");
+        }
+        // What a literal or a parameter is refused for, after the syntax, is unchanged.
+        for (sql, expected) in [
+            (
+                "UPDATE projects SET name = NULL WHERE id = :id",
+                BindError::NullComparison,
+            ),
+            (
+                "UPDATE projects SET name = ? WHERE id = :id",
+                BindError::PositionalParameter,
+            ),
+            (
+                "UPDATE projects SET name = :__policysql_x WHERE id = :id",
+                BindError::ReservedParameterNamespace,
+            ),
+            (
+                "UPDATE projects SET name = CURRENT_TIMESTAMP WHERE id = :id",
+                BindError::Unsupported(UnsupportedFeature::Literal, "literal"),
+            ),
+            (
+                "INSERT INTO projects (id, name) VALUES (:id, X'00')",
                 BindError::Unsupported(UnsupportedFeature::Literal, "literal"),
             ),
         ] {

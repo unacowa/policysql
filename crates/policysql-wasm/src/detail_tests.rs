@@ -664,13 +664,14 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "SELECT id FROM projects WHERE {C} = TRUE",
         "SELECT id FROM projects WHERE {C} = 'a'",
     ];
-    // Different codes: the binder refuses a column used as an inserted or assigned value as
-    // an unsupported form before it resolves the name, so a hidden column is `UNSUPPORTED_SQL`
-    // and a missing one `FORBIDDEN_COLUMN`. Found by this test; the public code was already
-    // different before `detail`.
-    const VALUE_POSITION_CODE_SPLITS: [&str; 2] = [
-        "INSERT INTO projects (id, name) VALUES (:id, {C})",
-        "UPDATE projects SET name = {C} WHERE id = :id",
+    // Different codes: the binder resolves a hidden name and goes on to refuse a later part of the
+    // statement for a reason of its own (an unsupported form), while a missing name stops at the
+    // name. The value positions are decided on their syntax first (#155), but a name anywhere else
+    // is resolved in the binder's walk order; the root fix is #154.
+    const LATER_REFUSAL_CODE_SPLITS: [&str; 3] = [
+        "SELECT {C} FROM projects WHERE id = 1 + 1",
+        "UPDATE projects SET {C} = :v WHERE id = 1 + 1",
+        "UPDATE projects SET {C} = lower(:v) WHERE id = :id",
     ];
     // The hidden name compiles and the missing one is refused: a column that a derived table
     // or a CTE carries but the outer statement does not use is not checked (#141).
@@ -680,10 +681,14 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
     ];
     // A hidden column of another type is run with the templates that do not themselves ask for a
     // type (a value or a function argument), so that what differs is the name and not a
-    // parameter value of the wrong type; the literal comparisons are the type probes.
-    const TYPED_TEMPLATES: [&str; 22] = [
+    // parameter value of the wrong type; the literal comparisons are the type probes. The value
+    // positions are refused on their syntax before a type is looked at, so they are here too.
+    const TYPED_TEMPLATES: [&str; 25] = [
         "SELECT {C} FROM projects",
         "SELECT projects.{C} FROM projects",
+        "INSERT INTO projects (id, name) VALUES (:id, {C})",
+        "UPDATE projects SET name = {C} WHERE id = :id",
+        "UPDATE projects SET name = lower({C}) WHERE id = :id",
         "SELECT id FROM projects WHERE {C} IS NULL",
         "SELECT id FROM projects ORDER BY {C}",
         "UPDATE projects SET name = :v WHERE {C} IS NULL",
@@ -731,9 +736,18 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "SELECT id FROM tasks WHERE EXISTS (SELECT 1 FROM projects WHERE projects.{C} = :v)",
         "INSERT INTO projects ({C}) VALUES (:v)",
         "INSERT INTO projects (id, name) VALUES (:id, {C})",
+        "INSERT INTO projects (id, name) VALUES (:id, lower({C}))",
         "INSERT INTO projects (id, name) VALUES (:id, :n) RETURNING {C}",
         "UPDATE projects SET {C} = :v WHERE id = :id",
+        "UPDATE projects SET {C} = :v WHERE id = 1 + 1",
+        "UPDATE projects SET {C} = lower(:v) WHERE id = :id",
+        "SELECT {C} FROM projects WHERE id = 1 + 1",
         "UPDATE projects SET name = {C} WHERE id = :id",
+        "UPDATE projects SET name = lower({C}) WHERE id = :id",
+        "UPDATE projects SET name = CASE WHEN {C} = :v THEN :a ELSE :b END WHERE id = :id",
+        "UPDATE projects SET name = ({C}) WHERE id = :id",
+        "UPDATE projects SET name = \"{C}\" WHERE id = :id",
+        "UPDATE projects SET count = {C} + 1 WHERE id = :id",
         "UPDATE projects SET name = :v WHERE {C} = :id",
         "UPDATE projects SET name = :v WHERE id = :id RETURNING {C}",
         "DELETE FROM projects WHERE {C} = :v",
@@ -886,7 +900,7 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         listed(&[
             &POLICY_ORDER_CODE_SPLITS,
             &TYPE_CODE_SPLITS,
-            &VALUE_POSITION_CODE_SPLITS,
+            &LATER_REFUSAL_CODE_SPLITS,
         ]),
         "the codes of a hidden name and a missing one differ exactly where listed"
     );
@@ -900,7 +914,7 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         listed(&[&BOTH_ACCEPTED]),
         "a hidden resource and a missing one both compile exactly where listed"
     );
-    assert!(checked >= 438, "{checked}");
+    assert!(checked >= 480, "{checked}");
 }
 
 /// A request over several statements, for one endpoint.
