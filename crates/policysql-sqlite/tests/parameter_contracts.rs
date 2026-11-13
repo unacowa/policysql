@@ -680,25 +680,15 @@ fn limit_and_offset_parameters_are_non_negative() {
     let filtered = bind("SELECT id FROM projects WHERE name = :v", &catalog);
     assert!(!non_negative_of(&filtered, &catalog, "v"));
 
-    // The flag is the union over every occurrence, whatever their order.
-    for limit_first in [false, true] {
-        let mut statement = select(Some(BoundExpr::Equal(
-            Box::new(BoundExpr::Column(column(1))),
-            Box::new(int_param("n")),
-        )));
-        statement.limit = Some(int_param("n"));
-        let mut statement = BoundStatement::Select(Box::new(statement));
-        if limit_first {
-            let BoundStatement::Select(inner) = &mut statement else {
-                unreachable!("built as a SELECT")
-            };
-            inner.predicate = Some(BoundExpr::Equal(
-                Box::new(int_param("n")),
-                Box::new(BoundExpr::Column(column(1))),
-            ));
-        }
-        assert!(non_negative_of(&statement, &catalog, "n"), "{limit_first}");
-    }
+    // A parameter compared with a column and used as the LIMIT is a row bound (the opposite
+    // visit order is `a_row_bound_parameter_is_non_negative_in_any_visit_order_…`).
+    let mut compared = select(Some(BoundExpr::Equal(
+        Box::new(BoundExpr::Column(column(1))),
+        Box::new(int_param("n")),
+    )));
+    compared.limit = Some(int_param("n"));
+    let compared = BoundStatement::Select(Box::new(compared));
+    assert!(non_negative_of(&compared, &catalog, "n"));
 
     // The policy's `MIN(client, policy limit)` keeps the client side a row bound.
     let policy = PolicyBundle::activate(POLICY, &catalog, snapshot())
@@ -723,4 +713,38 @@ fn limit_and_offset_parameters_are_non_negative() {
         "{}",
         plan.protected_sql()
     );
+}
+
+/// The `non_negative` flag is the union over every occurrence, whatever order the walker visits
+/// them in, and holds under any wrapper of a `LIMIT` / `OFFSET` expression (#136). SQL reaches
+/// neither shape, so the IR is built by hand.
+#[test]
+fn a_row_bound_parameter_is_non_negative_in_any_visit_order_and_under_any_wrapper() {
+    let catalog = catalog();
+    // An EXISTS select with a LIMIT parameter is walked (inside the predicate) before the outer
+    // HAVING occurrence of the same parameter, which is not a row bound: the last one must not win.
+    let mut inner = select(None);
+    inner.limit = Some(int_param("n"));
+    let mut outer = select(Some(BoundExpr::Exists(Box::new(inner))));
+    outer.having = Some(BoundExpr::Equal(
+        Box::new(BoundExpr::Column(column(1))),
+        Box::new(int_param("n")),
+    ));
+    let statement = BoundStatement::Select(Box::new(outer));
+    assert!(non_negative_of(&statement, &catalog, "n"));
+    // A wrapper other than `Least` keeps the parameter a row bound, on LIMIT and on OFFSET.
+    for offset in [false, true] {
+        let mut wrapped = select(None);
+        let bound = Some(BoundExpr::CastText(Box::new(int_param("m"))));
+        if offset {
+            wrapped.offset = bound;
+        } else {
+            wrapped.limit = bound;
+        }
+        let statement = BoundStatement::Select(Box::new(wrapped));
+        assert!(
+            non_negative_of(&statement, &catalog, "m"),
+            "offset {offset}"
+        );
+    }
 }

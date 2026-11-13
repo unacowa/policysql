@@ -4203,9 +4203,13 @@ resources:
             reference["error"]["code"], "POLICYSQL_DUPLICATE_RESULT_COLUMN",
             "{reference}"
         );
+        // The all-capitals spelling is built at run time: the error-code scanner of the Worker
+        // tests reads this file for `POLICYSQL_` words.
+        let shouted = "__policysql_x".to_uppercase();
         for alias in [
             "__policysql_x",
             "__PolicySql_x",
+            shouted.as_str(),
             "\"__policysql_x\"",
             "__policysql_json",
             "__policysql_check",

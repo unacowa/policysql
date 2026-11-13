@@ -683,10 +683,14 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
     // type (a value or a function argument), so that what differs is the name and not a
     // parameter value of the wrong type; the literal comparisons are the type probes. The value
     // positions are refused on their syntax before a type is looked at, so they are here too.
-    const TYPED_TEMPLATES: [&str; 25] = [
+    const TYPED_TEMPLATES: [&str; 29] = [
         "SELECT {C} FROM projects",
         "SELECT projects.{C} FROM projects",
         "INSERT INTO projects (id, name) VALUES (:id, {C})",
+        "INSERT INTO projects (id, name) VALUES (:id, :n), (:id2, {C})",
+        "SELECT id FROM projects LIMIT {C}",
+        "SELECT id FROM projects LIMIT 1 OFFSET {C}",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.id, {C}) AS j",
         "UPDATE projects SET name = {C} WHERE id = :id",
         "UPDATE projects SET name = lower({C}) WHERE id = :id",
         "SELECT id FROM projects WHERE {C} IS NULL",
@@ -737,6 +741,10 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         "INSERT INTO projects ({C}) VALUES (:v)",
         "INSERT INTO projects (id, name) VALUES (:id, {C})",
         "INSERT INTO projects (id, name) VALUES (:id, lower({C}))",
+        "INSERT INTO projects (id, name) VALUES (:id, :n), (:id2, {C})",
+        "SELECT id FROM projects LIMIT {C}",
+        "SELECT id FROM projects LIMIT 1 OFFSET {C}",
+        "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.id, {C}) AS j",
         "INSERT INTO projects (id, name) VALUES (:id, :n) RETURNING {C}",
         "UPDATE projects SET {C} = :v WHERE id = :id",
         "UPDATE projects SET {C} = :v WHERE id = 1 + 1",
@@ -914,7 +922,7 @@ fn a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same
         listed(&[&BOTH_ACCEPTED]),
         "a hidden resource and a missing one both compile exactly where listed"
     );
-    assert!(checked >= 480, "{checked}");
+    assert!(checked >= 520, "{checked}");
 }
 
 /// A request over several statements, for one endpoint.

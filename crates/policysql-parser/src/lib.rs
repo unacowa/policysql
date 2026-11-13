@@ -3176,6 +3176,9 @@ mod tests {
             for template in [
                 "INSERT INTO projects (id, name) VALUES (:id, {C})",
                 "INSERT INTO projects (id, name) VALUES (:id, lower({C}))",
+                // Every row is checked, not only the first.
+                "INSERT INTO projects (id, name) VALUES (:id, :n), (:id2, {C})",
+                "INSERT INTO projects (id, name) VALUES (:id, :n), (:id2, :n2), (:id3, lower({C}))",
             ] {
                 let sql = template.replace("{C}", column);
                 assert_eq!(frontend.bind(&sql, &catalog()), insert, "{sql}");

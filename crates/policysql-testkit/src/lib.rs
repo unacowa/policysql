@@ -2496,36 +2496,43 @@ resources:
                         &expectation.code,
                     );
                 }
-                // Refused before the policy: by the parser or binder, or by the client's values.
-                "parse" | "binding" | "parameter_validation" => {
-                    let code = match bound {
-                        Err(error) => rejection_code(classify_bind_error(&error).kind),
-                        Ok(statement) => {
-                            assert_eq!(
-                                expectation.stage, "parameter_validation",
-                                "{directory} must not bind"
-                            );
-                            let error = compile_with_fixture_parameters(
-                                &root, &catalog, &bundle, &statement, &session,
-                            )
-                            .err()
-                            .unwrap_or_else(|| unreachable!("{directory} must be refused"));
-                            match compile_failure(&error, 0) {
-                                GatewayError::Rejected { rejection, .. } => {
-                                    rejection_code(rejection.kind)
-                                }
-                                other => unreachable!("{directory}: not a rejection: {other:?}"),
-                            }
-                        }
-                    };
-                    assert_eq!(code, expectation.code, "{directory}");
+                // Refused by the parser or the binder: the SQL must not bind.
+                "parse" | "binding" => {
+                    let error = bound.err().unwrap_or_else(|| {
+                        unreachable!("{directory}: a {} fixture must not bind", expectation.stage)
+                    });
+                    assert_eq!(
+                        rejection_code(classify_bind_error(&error).kind),
+                        expectation.code,
+                        "{directory}"
+                    );
                 }
-                // Older fixtures whose stage names no layer the test reproduces (`policy`).
-                _ => {
+                // Refused by the client's values: the SQL binds and the policy accepts it.
+                "parameter_validation" => {
+                    let statement = bound
+                        .unwrap_or_else(|error| unreachable!("{directory} must bind: {error}"));
+                    let error = compile_with_fixture_parameters(
+                        &root, &catalog, &bundle, &statement, &session,
+                    )
+                    .err()
+                    .unwrap_or_else(|| unreachable!("{directory} must be refused"));
+                    let GatewayError::Rejected { rejection, .. } = compile_failure(&error, 0)
+                    else {
+                        unreachable!("{directory}: not a rejection");
+                    };
+                    assert_eq!(
+                        rejection_code(rejection.kind),
+                        expectation.code,
+                        "{directory}"
+                    );
+                }
+                // Older fixtures whose stage names no layer the test reproduces.
+                "policy" => {
                     if let Ok(statement) = bound {
                         assert!(bundle.compile_select(&statement, &session).is_err());
                     }
                 }
+                other => unreachable!("{directory}: unknown stage {other}"),
             }
             let executor = RecordingExecutor::<()>::default();
             assert_eq!(executor.call_count(), 0);

@@ -62,7 +62,7 @@ HTTP statusとの対応、request ID header、retry規則は[HTTP共通仕様](.
 | `POLICYSQL_MULTIPLE_STATEMENTS` | 400 | statementが複数含まれる |
 | `POLICYSQL_UNSUPPORTED_SQL` | 400 | 対応範囲外の構文。`detail.feature`に、対応していない構文の名前（SQLの構文名。[detailの値](#detailの値)）を返す。識別子やSQLの断片は返さない |
 | `POLICYSQL_SQL_TOO_COMPLEX` | 400 | 入力は上限内だが、policyを合成して生成した文が下流の複雑さの上限（parserの式の高さ・再帰の深さ、結果列2,000、host parameter 32,766、LIKE/GLOBのpattern 50,000 bytes、envelopeのcolumn metadata 1 MiB、またはDBが複雑さを理由に拒否）に達した。pathは`/statements/<i>`で、messageは固定。`detail.complexity`は達した上限の名前（[detailの値](#detailの値)）で、生成した文の長さや位置は返さない。COMMITより前に検知するため何もcommitされず、clientは拒否（`PolicySqlRejectedError`）として扱う。対話型transactionでは`failed`として閉じ、後続のcommandは409 `POLICYSQL_TRANSACTION_UNAVAILABLE`になる。`Idempotency-Key`付きのAtomic Executeでcompile時（emit時）に検出された場合は500 `POLICYSQL_OUTCOME_UNKNOWN`（結果不明。`detail.cause.code`がこのcode。保存済み結果は返さず、何も実行しない）、unkeyedのAtomic Execute・Explain・DB実行時の拒否はこのcodeで、同じrequestを再送しても成功しない |
-| `POLICYSQL_DUPLICATE_RESULT_COLUMN` | 400 | alias適用後のresult column名が重複した |
+| `POLICYSQL_DUPLICATE_RESULT_COLUMN` | 400 | alias適用後のresult column名が重複した。空のalias、`__policysql_`で始まるalias（大文字小文字を区別しない）も含む |
 | `POLICYSQL_INVALID_PARAMETER` | 400 | parameterの不足、型、値が不正。`detail.reason`に理由（[detailの値](#detailの値)）を返す。どのparameterかは返さない |
 | `POLICYSQL_AMBIGUOUS_PARAMETER_TYPE` | 400 | Explainでparameter型を一意に証明できない |
 | `POLICYSQL_RESERVED_PARAMETER` | 400 | server用のparameter名を使用した |

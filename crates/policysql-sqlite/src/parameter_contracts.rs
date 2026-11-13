@@ -123,6 +123,7 @@ pub fn analyze_client_parameters(
             parameters: BTreeMap::new(),
             type_conflict: false,
         },
+        in_row_bound: false,
     };
     visitor.statement(statement);
     visitor.analysis
@@ -209,8 +210,6 @@ enum Position<'a> {
     Assignment(&'a BoundColumn),
     /// Directly compared with a column (`=`, `<`, `LIKE`, `IN (...)`, ...).
     Compared(&'a BoundColumn),
-    /// `LIMIT` / `OFFSET`: never nullable, never column-constrained, non-negative.
-    RowBound,
     /// Any other position; never nullable and not column-constrained.
     Other,
 }
@@ -218,6 +217,10 @@ enum Position<'a> {
 struct Visitor<'a> {
     catalog: &'a Catalog,
     analysis: ClientParameterAnalysis,
+    /// Set while a `LIMIT` / `OFFSET` expression is walked: every client parameter under it,
+    /// whatever wraps it, is non-negative (a shape that is not known is not left without the
+    /// contract).
+    in_row_bound: bool,
 }
 
 impl Visitor<'_> {
@@ -303,16 +306,11 @@ impl Visitor<'_> {
     }
 
     /// `LIMIT` / `OFFSET`. The policy composes its cap as `Least(client, policy)`
-    /// (`apply_policy_limit`), so the client side of a `Least` is still a row bound.
+    /// (`apply_policy_limit`); whatever the shape, a client parameter below is a row bound.
     fn row_bound(&mut self, expression: Option<&BoundExpr>) {
-        match expression {
-            Some(BoundExpr::Least(client, policy)) => {
-                self.row_bound(Some(client));
-                self.row_bound(Some(policy));
-            }
-            Some(expression) => self.expr_at(expression, Position::RowBound),
-            None => {}
-        }
+        let outer = std::mem::replace(&mut self.in_row_bound, true);
+        self.optional(expression);
+        self.in_row_bound = outer;
     }
 
     fn assignment(&mut self, assignment: &BoundAssignment) {
@@ -453,9 +451,9 @@ impl Visitor<'_> {
                 false,
             ),
             Position::Compared(column) => (Some(column), false, false),
-            Position::RowBound => (None, false, true),
             Position::Other => (None, false, false),
         };
+        let non_negative = non_negative || self.in_row_bound;
         let contract = self
             .analysis
             .parameters
