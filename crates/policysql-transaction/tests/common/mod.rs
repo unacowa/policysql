@@ -447,8 +447,6 @@ pub struct Engine {
     pub callback_outstanding: Option<Value>,
     /// `configuredChecks` of the host facts.
     pub configured: Vec<String>,
-    /// The durable text a pending `Persist` writes.
-    pub persist_text: Option<String>,
     pub transcript: Vec<TranscriptLine>,
     pub observed: Observed,
     /// Client commands awaiting a reply (`kind` or `kind:sequence`), oldest first.
@@ -501,7 +499,6 @@ impl Engine {
             outstanding: None,
             callback_outstanding: None,
             configured: Vec::new(),
-            persist_text: None,
             transcript: Vec::new(),
             observed: Observed::default(),
             waiting: Vec::new(),
@@ -634,11 +631,10 @@ impl Engine {
                 }
                 Some("commit") => self.observed.commits_emitted += 1,
                 Some("rollback") => self.observed.rollbacks_emitted += 1,
-                Some("persist") => {
-                    if phase_of(self.durable.as_deref()).as_deref() == Some("committing") {
-                        self.observed.persist_committing_emitted = true;
-                    }
-                    self.persist_text.clone_from(&self.durable);
+                Some("persist")
+                    if phase_of(self.durable.as_deref()).as_deref() == Some("committing") =>
+                {
+                    self.observed.persist_committing_emitted = true;
                 }
                 _ => {}
             }
@@ -646,10 +642,18 @@ impl Engine {
                 self.observed
                     .awaited
                     .push(effect["type"].as_str().unwrap_or("").to_owned());
+                // A Persist writes the durable text of the step that emitted it (ADR 0024),
+                // so the outstanding effect carries that text, as the engine's closure does.
+                let mut effect = effect.clone();
+                if effect["type"] == "persist" {
+                    let text = self.durable.clone();
+                    assert!(text.is_some(), "persist without a durable text: {output}");
+                    effect["durableText"] = json!(text);
+                }
                 if callback_pending.is_some() && callback_pending == effect["id"].as_u64() {
-                    self.callback_outstanding = Some(effect.clone());
+                    self.callback_outstanding = Some(effect);
                 } else {
-                    self.outstanding = Some(effect.clone());
+                    self.outstanding = Some(effect);
                 }
             }
         }
@@ -855,16 +859,10 @@ impl Engine {
             (Some("setTimer"), true) => json!({"type": "timerSet", "id": id}),
             (Some("setTimer"), false) => json!({"type": "timerFailed", "id": id}),
             (Some("persist"), true) => {
-                self.store = self.persist_text.take();
-                if let Some(phase) = phase_of(self.store.as_deref()) {
-                    self.observed.stored_phases.push(phase);
-                }
+                self.apply_persist(effect);
                 json!({"type": "persisted", "id": id})
             }
-            (Some("persist"), false) => {
-                self.persist_text = None;
-                json!({"type": "persistFailed", "id": id})
-            }
+            (Some("persist"), false) => json!({"type": "persistFailed", "id": id}),
             (Some("callValidator"), true) => json!({
                 "type": "validatorReplied", "id": id, "ok": true,
                 "decision": {"version": "1", "allowed": true},
@@ -875,6 +873,20 @@ impl Engine {
             _ => return None,
         };
         Some(self.feed(&event))
+    }
+
+    /// A `Persist` that succeeded: the store takes the text of the step that emitted it. A
+    /// store is only ever written, never emptied (the owner store has `get` and `put`).
+    pub fn apply_persist(&mut self, effect: &Value) {
+        let text = effect["durableText"].as_str();
+        assert!(
+            text.is_some(),
+            "a persist effect without its text: {effect}"
+        );
+        self.store = text.map(str::to_owned);
+        if let Some(phase) = phase_of(self.store.as_deref()) {
+            self.observed.stored_phases.push(phase);
+        }
     }
 
     /// Resolves every outstanding effect successfully.
@@ -895,7 +907,6 @@ impl Engine {
         self.volatile = None;
         self.outstanding = None;
         self.callback_outstanding = None;
-        self.persist_text = None;
         self.compiler = FakeCompiler {
             triggers: self.compiler.triggers.clone(),
             checks: self.compiler.checks.clone(),

@@ -37,6 +37,8 @@ enum Action {
         ok: bool,
         class: u8,
     },
+    /// The client lane's outstanding Persist reports a failure but has landed.
+    FailedButLanded,
     /// Answer the validator: 0 deny, 1 malformed, 2 non-2xx, 3 allow, 4 an allow addressed to
     /// the previous validator's id (or an id never issued): stale, it must not advance.
     Decide(u8),
@@ -64,6 +66,7 @@ fn action() -> impl Strategy<Value = Action> {
         10 => (prop_oneof![8 => Just(0u8), 1 => Just(1u8), 1 => Just(2u8)], prop_oneof![8 => Just(0i8), 1 => Just(-1i8), 1 => Just(1i8)], prop_oneof![8 => Just(0u8), 1 => Just(1u8), 1 => Just(2u8)], prop::bool::weighted(0.75)).prop_map(|(token, offset, sql, whole)| Action::Callback { token, offset, sql, whole }),
         6 => (prop::bool::weighted(0.92), 0u8..8).prop_map(|(ok, class)| Action::ResolveCallback { ok, class }),
         6 => (prop::bool::weighted(0.9), 0u8..8).prop_map(|(ok, class)| Action::Resolve { ok, class }),
+        8 => Just(Action::FailedButLanded),
         4 => (0u8..5).prop_map(Action::Decide),
         2 => Just(Action::Timer),
         2 => prop_oneof![0u16..50, 900u16..1_100, 3_900u16..4_100].prop_map(Action::Advance),
@@ -443,9 +446,25 @@ fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
                             engine.observed.not_committed_fed = true;
                         }
                     }
-                    if effect["type"] == "persist" {
-                        persist(&mut engine, *ok);
+                    if effect["type"] == "persist" && *ok {
+                        engine.apply_persist(&effect);
                     }
+                    last_outcome = Some(event.clone());
+                    feed_checked(&mut engine, &mut watch, &event)?;
+                }
+            }
+            Action::FailedButLanded => {
+                // A Persist reported failed that landed anyway (ADR 0024: the store "may hold"
+                // `committing`): the outcome is `persistFailed`, the store has the text.
+                if let Some(effect) = engine.outstanding.clone()
+                    && effect["type"] == "persist"
+                {
+                    engine.outstanding = None;
+                    engine.apply_persist(&effect);
+                    reached.failed_landed = true;
+                    reached.failed_landed_committing |=
+                        phase_of(effect["durableText"].as_str()).as_deref() == Some("committing");
+                    let event = outcome(&effect, false, "unknown");
                     last_outcome = Some(event.clone());
                     feed_checked(&mut engine, &mut watch, &event)?;
                 }
@@ -512,12 +531,10 @@ fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
             }
             Action::Abandon => {
                 feed_checked(&mut engine, &mut watch, &json!({"type": "abandon"}))?;
-                if engine
-                    .outstanding
-                    .as_ref()
-                    .is_some_and(|effect| effect["type"] == "persist")
+                if let Some(effect) = engine.outstanding.clone()
+                    && effect["type"] == "persist"
                 {
-                    engine.store = engine.persist_text.take();
+                    engine.apply_persist(&effect);
                 }
                 engine.lose();
                 watch.connection.clear();
@@ -535,7 +552,7 @@ fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
                         engine.observed.committed_fed = true;
                     }
                     if effect["type"] == "persist" {
-                        persist(&mut engine, true);
+                        engine.apply_persist(&effect);
                     }
                     reached.late |= effect["type"] == "callValidator";
                     feed_checked(&mut engine, &mut watch, &event)?;
@@ -600,7 +617,7 @@ fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
                         engine.observed.committed_fed = true;
                     }
                     if effect["type"] == "persist" {
-                        persist(&mut engine, true);
+                        engine.apply_persist(&effect);
                     }
                     feed_checked(&mut engine, &mut watch, &event)?;
                 }
@@ -647,18 +664,6 @@ fn run(checks: usize, actions: &[Action]) -> Result<Reached, TestCaseError> {
         );
     }
     Ok(reached)
-}
-
-/// The engine model's Persist outcome: the store takes the text on success.
-fn persist(engine: &mut Engine, ok: bool) {
-    if ok {
-        engine.store = engine.persist_text.take();
-        if let Some(phase) = phase_of(engine.store.as_deref()) {
-            engine.observed.stored_phases.push(phase);
-        }
-    } else {
-        engine.persist_text = None;
-    }
 }
 
 /// The outcome event of an effect.
@@ -710,6 +715,10 @@ struct Reached {
     stale: bool,
     second: bool,
     second_committed: bool,
+    /// A Persist reported failed that landed anyway.
+    failed_landed: bool,
+    /// ... and it was the `committing` record.
+    failed_landed_committing: bool,
 }
 
 /// One or two triggered checks, then actions after reaching the first validator call
@@ -741,7 +750,7 @@ fn the_generator_reaches_every_outcome() {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::TestRunner;
     let mut runner = TestRunner::deterministic();
-    let mut counts = [0usize; 9];
+    let mut counts = [0usize; 11];
     for _ in 0..1_000 {
         let Ok(tree) = path().new_tree(&mut runner) else {
             continue;
@@ -760,12 +769,14 @@ fn the_generator_reaches_every_outcome() {
             reached.stale,
             reached.second,
             reached.second_committed,
+            reached.failed_landed,
+            reached.failed_landed_committing,
         ]) {
             *count += usize::from(hit);
         }
     }
     eprintln!(
-        "reached [validated, callback, committed, rejected, limit, late, stale, second check, committed after two checks] in 1000 runs: {counts:?}"
+        "reached [validated, callback, committed, rejected, limit, late, stale, second check, committed after two checks, failed persist landed, failed committing persist landed] in 1000 runs: {counts:?}"
     );
     assert!(counts.iter().all(|count| *count >= 10), "{counts:?}");
 }
@@ -773,4 +784,37 @@ fn the_generator_reaches_every_outcome() {
 #[test]
 fn limits_are_the_shared_defaults() {
     assert_eq!(LIMITS.max_callback_rows, 100);
+}
+
+/// #152: a Persist held across a reset lands after a later Persist failed; it writes its own
+/// text, so the committing record is never lost and the retry is not a rejection. `run` checks
+/// the property (no rejection after COMMIT); the reply itself is checked by the table in
+/// `commit_checks.rs`, which reaches the same scene by name.
+#[test]
+fn seed_152() {
+    use Action::{CorruptVolatile, Decide, Hold, Lose, Release, Resolve, RetryCommit};
+    let ok = || Resolve { ok: true, class: 0 };
+    let actions = vec![
+        ok(),
+        ok(),
+        ok(),
+        ok(),
+        ok(),
+        Resolve {
+            ok: false,
+            class: 0,
+        },
+        Hold,
+        CorruptVolatile,
+        Decide(4),
+        Resolve {
+            ok: false,
+            class: 0,
+        },
+        Release,
+        Lose,
+        RetryCommit,
+    ];
+    let result = run(1, &actions);
+    assert!(result.is_ok(), "{result:?}");
 }
