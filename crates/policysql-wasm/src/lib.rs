@@ -4067,6 +4067,124 @@ resources:
         assert!(denied.contains("POLICYSQL_UNSUPPORTED_SQL"));
     }
 
+    /// A JSON collection's path (#123) is a literal or a parameter, decided on its syntax before a
+    /// name in it is resolved: a column that exists, is hidden from the role, or does not exist is
+    /// answered alike, by both endpoints, and the accepted forms are the ones that compiled before.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn json_collection_path_and_alias_are_refused_before_the_database_alike() {
+        let catalog = r"
+version: 1
+resources:
+  projects:
+    source: { table: projects }
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      metadata:
+        type: json
+        representation: object
+        jsonSchema:
+          type: object
+          additionalProperties: false
+          properties:
+            score: { type: integer }
+            label: { type: string }
+";
+        let policy = r"
+version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns: [id, metadata]
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          allow_aggregations: true
+          limit: 10
+";
+        let runtime = PolicySqlRuntime::new(
+            catalog,
+            policy,
+            "schema_json_collection",
+            "policy_json_collection",
+            r#"{"max_rows":10,"max_result_bytes":10000,"timeout_ms":1000,"max_statements":2}"#,
+        )
+        .unwrap_or_else(|_| unreachable!("valid runtime"));
+        let auth = r#"{"principal":"test:user","subject":"user_1","role":"member","roles":["member"],"access":["execute","explain"],"session":{"tenant_id":"tenant_1"}}"#;
+        let compile =
+            |sql: &str, params: &serde_json::Value, endpoint: &str| -> serde_json::Value {
+                let request = serde_json::json!({"statements": [{"sql": sql, "params": params}]});
+                serde_json::from_str(&runtime.compile_json(
+                    auth,
+                    &request.to_string(),
+                    endpoint,
+                    crate::TEST_CONTEXT,
+                ))
+                .unwrap_or_else(|error| unreachable!("valid JSON: {error}"))
+            };
+        let with_path = |path: &str| {
+            format!(
+                "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, {path}) AS j"
+            )
+        };
+
+        let mut refused = Vec::new();
+        for path in [
+            "p.tenant_id",
+            "p.nope",
+            "lower(p.tenant_id)",
+            "lower(p.nope)",
+            "CASE WHEN p.tenant_id = 'x' THEN '$' ELSE '$.label' END",
+            "CASE WHEN p.nope = 'x' THEN '$' ELSE '$.label' END",
+            "tenant_id",
+            "nope",
+            "p.id",
+            "j.key",
+        ] {
+            for endpoint in ["execute", "explain"] {
+                let output = compile(&with_path(path), &serde_json::json!({}), endpoint);
+                assert_eq!(
+                    output["error"]["code"], "POLICYSQL_UNSUPPORTED_SQL",
+                    "{endpoint} {path}: {output}"
+                );
+                assert_eq!(
+                    output["error"]["detail"],
+                    serde_json::json!({"feature": "json_collection"}),
+                    "{endpoint} {path}"
+                );
+                assert_eq!(output["log"]["shape"], "JSON path", "{endpoint} {path}");
+                refused.push(output["error"].clone());
+            }
+        }
+        assert!(
+            refused.windows(2).all(|pair| pair[0] == pair[1]),
+            "every refusal of a path is the same answer: {refused:?}"
+        );
+
+        // The accepted forms are unchanged.
+        let literal = compile(&with_path("'$'"), &serde_json::json!({}), "execute");
+        let parameter = compile(
+            &with_path(":path"),
+            &serde_json::json!({"path": "$"}),
+            "execute",
+        );
+        for output in [&literal, &parameter] {
+            assert!(output.get("error").is_none(), "{output}");
+        }
+        let sql_of = |output: &serde_json::Value| {
+            output["statements"][0]["protectedSql"]
+                .as_str()
+                .unwrap_or_else(|| unreachable!("protected SQL"))
+                .to_owned()
+        };
+        assert!(
+            sql_of(&literal)
+                .contains("JSON_EACH (\"__policysql_t0\".\"metadata\", :__policysql_literal_0)")
+        );
+        assert!(sql_of(&parameter).contains("JSON_EACH (\"__policysql_t0\".\"metadata\", :path)"));
+    }
+
     #[test]
     fn mutation_result_check_is_validated_before_handle_release() {
         let runtime = runtime();

@@ -422,6 +422,15 @@ impl SqliteFrontend {
                 "JSON table arguments",
             ));
         }
+        // The path is a string literal or a named parameter, the forms the result's JSON Schema
+        // is derived from (`json_path_value`). Decided on the syntax before any name is resolved,
+        // so a column there is refused alike whether it exists (#123).
+        if !is_value_syntax(&arguments[1]) {
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON path",
+            ));
+        }
         let recursive = match canonical(name.name.as_str()).as_str() {
             "json_each" => false,
             "json_tree" => true,
@@ -2360,6 +2369,62 @@ mod tests {
                 .bind(sql, &catalog())
                 .unwrap_or_else(|error| unreachable!("documented JSON collection: {error}"));
             assert!(matches!(statement, BoundStatement::JsonCollectionSelect(_)));
+        }
+        for sql in [
+            "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, ('$')) AS j",
+            "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, :path) AS j",
+            "SELECT json_group_array(j.value) AS items FROM projects AS p, json_tree(p.metadata, '$') AS j",
+        ] {
+            assert!(
+                SqliteFrontend::default().bind(sql, &catalog()).is_ok(),
+                "{sql}"
+            );
+        }
+        // A path is a literal or a parameter, decided on its syntax before a name in it is
+        // resolved: a column there is refused alike whether it exists or not (#123).
+        let refused = Err(BindError::Unsupported(
+            UnsupportedFeature::JsonCollection,
+            "JSON path",
+        ));
+        for path in [
+            "p.tenant_id",
+            "p.nope",
+            "tenant_id",
+            "nope",
+            "lower(p.tenant_id)",
+            "lower(p.nope)",
+            "CASE WHEN p.tenant_id = 'x' THEN '$' ELSE '$.label' END",
+            "CASE WHEN p.nope = 'x' THEN '$' ELSE '$.label' END",
+            "p.tenant_id || ''",
+            "CAST(p.tenant_id AS TEXT)",
+            "p.id",
+            "j.key",
+            "'$' || '.label'",
+            "lower(:path)",
+        ] {
+            let sql = format!(
+                "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, {path}) AS j"
+            );
+            assert_eq!(
+                SqliteFrontend::default().bind(&sql, &catalog()),
+                refused,
+                "{sql}"
+            );
+        }
+        // What a literal or a parameter is refused for, after the syntax, is unchanged.
+        for (path, expected) in [
+            ("1", BindError::IncompatibleTypes),
+            ("NULL", BindError::NullComparison),
+            ("?", BindError::PositionalParameter),
+        ] {
+            let sql = format!(
+                "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, {path}) AS j"
+            );
+            assert_eq!(
+                SqliteFrontend::default().bind(&sql, &catalog()),
+                Err(expected),
+                "{sql}"
+            );
         }
         for sql in [
             "SELECT j.value FROM projects AS p, json_each(p.metadata, '$') AS j",

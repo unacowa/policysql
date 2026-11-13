@@ -305,6 +305,8 @@ FROM posts;
 
 user-defined function、extension function、side effectを持つfunctionは使用できません。
 
+`json_each()`・`json_tree()`のpath（2番目の引数）には、文字列literalかnamed parameterだけを指定できます。列や式（`lower(...)`、`CASE`、`||`など）は、その列が存在するかどうかにかかわらず400 `POLICYSQL_UNSUPPORTED_SQL`（`detail.feature`は`json_collection`）になります。
+
 ## LIMITとOFFSET
 
 LIMITとOFFSETには、0以上のinteger literalまたはparameterを指定できます。

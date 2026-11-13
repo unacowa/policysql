@@ -2393,6 +2393,7 @@ resources:
         "exists-outside-where",
         "forbidden-filter-column",
         "forbidden-order-column",
+        "json-collection-forbidden-path",
         "missing-policy",
         "mutation-delete-forbidden-filter-column",
         "mutation-forbidden-filter-column",

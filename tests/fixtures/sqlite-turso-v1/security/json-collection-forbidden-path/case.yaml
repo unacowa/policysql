@@ -1,0 +1,8 @@
+id: sqlite.security.json-collection-forbidden-path
+profile: sqlite-turso-v1
+description: JSON collectionのpath引数に禁止列を含む式を書き、禁止列の値で結果を変える攻撃を、名前を解決する前に形で拒否する (#123)
+covers:
+  - source.json-table.collection
+  - threat.forbidden-column-inference
+tests: [negative, bypass]
+expected: deny

@@ -232,7 +232,7 @@ SQL resultの型は、SQLiteの最初のrowから推測しません。0 rowで�
 
 未知のfunction、適合するsignatureがない呼び出し、安定した結果型を導出できない式は拒否します。`unknown`として実行してから型を推測するfallbackはありません。
 
-SQLite標準の`json_extract()`、`json_each()`、`json_tree()`にliteral pathを渡す場合は、Catalogの`jsonSchema`から到達する型を導出します。path parameterの値がある場合は、その値を実行前に検証して到達型を導出します。値のないExplainでは、Schema上で到達可能な全型の有限unionを予測として返します。PolicySQL独自のJSON path構文は追加しません。
+`json_each()`、`json_tree()`のpathはliteralかparameterに限ります。SQLite標準の`json_extract()`、`json_each()`、`json_tree()`にliteral pathを渡す場合は、Catalogの`jsonSchema`から到達する型を導出します。path parameterの値がある場合は、その値を実行前に検証して到達型を導出します。値のないExplainでは、Schema上で到達可能な全型の有限unionを予測として返します。PolicySQL独自のJSON path構文は追加しません。
 
 ### datetime関数
 
