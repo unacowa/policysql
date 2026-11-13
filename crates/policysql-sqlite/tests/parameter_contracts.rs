@@ -600,3 +600,127 @@ fn acceptance_regressions_are_unchanged() {
         .is_ok()
     );
 }
+
+fn int_param(value: &str) -> BoundExpr {
+    BoundExpr::ClientParameter {
+        name: name(value),
+        logical_type: LogicalType::Int64,
+    }
+}
+
+fn non_negative_of(statement: &BoundStatement, catalog: &Catalog, parameter: &str) -> bool {
+    analyze_client_parameters(statement, catalog)
+        .contracts()
+        .unwrap_or_else(|_| unreachable!("no type conflict"))[&name(parameter)]
+        .non_negative()
+}
+
+#[test]
+fn limit_and_offset_parameters_are_non_negative() {
+    // SQLite reads a negative LIMIT as no bound, so `MIN(-1, policy limit)` would lift the policy
+    // cap (#136). The contract is checked before execution.
+    for value in [0, 5, 1000, i64::MAX] {
+        assert!(
+            compile(
+                "SELECT id FROM projects LIMIT :n",
+                &[("n", LogicalValue::Int64(value))]
+            )
+            .is_ok(),
+            "{value}"
+        );
+    }
+    assert!(
+        compile(
+            "SELECT id FROM projects LIMIT 5 OFFSET :o",
+            &[("o", LogicalValue::Int64(0))]
+        )
+        .is_ok()
+    );
+    for (sql, key, value) in [
+        (
+            "SELECT id FROM projects LIMIT :n",
+            "n",
+            LogicalValue::Int64(-1),
+        ),
+        (
+            "SELECT id FROM projects LIMIT :n",
+            "n",
+            LogicalValue::Int64(i64::MIN),
+        ),
+        (
+            "SELECT id FROM projects LIMIT 5 OFFSET :o",
+            "o",
+            LogicalValue::Int64(-1),
+        ),
+        (
+            "SELECT id FROM projects LIMIT :n OFFSET :n",
+            "n",
+            LogicalValue::Int64(-1),
+        ),
+        (
+            "SELECT id FROM projects LIMIT :n",
+            "n",
+            LogicalValue::Number(1.5),
+        ),
+        ("SELECT id FROM projects LIMIT :n", "n", text("5")),
+        ("SELECT id FROM projects LIMIT :n", "n", LogicalValue::Null),
+    ] {
+        assert!(
+            matches!(
+                compile(sql, &[(key, value.clone())]),
+                Err(CompileError::ClientParameterTypeMismatch)
+            ),
+            "{sql}: {value:?}"
+        );
+    }
+
+    let catalog = catalog();
+    let limited = bind("SELECT id FROM projects LIMIT :n", &catalog);
+    assert!(non_negative_of(&limited, &catalog, "n"));
+    let filtered = bind("SELECT id FROM projects WHERE name = :v", &catalog);
+    assert!(!non_negative_of(&filtered, &catalog, "v"));
+
+    // The flag is the union over every occurrence, whatever their order.
+    for limit_first in [false, true] {
+        let mut statement = select(Some(BoundExpr::Equal(
+            Box::new(BoundExpr::Column(column(1))),
+            Box::new(int_param("n")),
+        )));
+        statement.limit = Some(int_param("n"));
+        let mut statement = BoundStatement::Select(Box::new(statement));
+        if limit_first {
+            let BoundStatement::Select(inner) = &mut statement else {
+                unreachable!("built as a SELECT")
+            };
+            inner.predicate = Some(BoundExpr::Equal(
+                Box::new(int_param("n")),
+                Box::new(BoundExpr::Column(column(1))),
+            ));
+        }
+        assert!(non_negative_of(&statement, &catalog, "n"), "{limit_first}");
+    }
+
+    // The policy's `MIN(client, policy limit)` keeps the client side a row bound.
+    let policy = PolicyBundle::activate(POLICY, &catalog, snapshot())
+        .unwrap_or_else(|error| unreachable!("fixture policy: {error}"));
+    let session = TrustedSession::new(
+        RoleName::new("member").unwrap_or_else(|_| unreachable!()),
+        "user",
+        BTreeMap::from([("tenant_id".to_owned(), "tenant_a".to_owned())]),
+    )
+    .unwrap_or_else(|_| unreachable!());
+    let output = policy
+        .compile_select(&limited, &session)
+        .unwrap_or_else(|error| unreachable!("{error}"));
+    assert!(non_negative_of(&output.plan.statement, &catalog, "n"));
+    let plan = compile(
+        "SELECT id FROM projects LIMIT :n",
+        &[("n", LogicalValue::Int64(1))],
+    )
+    .unwrap_or_else(|error| unreachable!("{error}"));
+    assert!(
+        plan.protected_sql().contains("LIMIT MIN (:n, 100)"),
+        "{}",
+        plan.protected_sql()
+    );
+}

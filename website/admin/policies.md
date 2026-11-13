@@ -350,7 +350,7 @@ WHERE EXISTS (SELECT 1 FROM posts
 limit: 100
 ```
 
-clientがより小さいLIMITを指定することはできますが、この値を超える指定やLIMITの省略によって上限を回避することはできません。
+clientがより小さいLIMITを指定することはできますが、この値を超える指定やLIMITの省略によって上限を回避することはできません。負の値のLIMITも拒否されます。
 
 ## Aggregation
 

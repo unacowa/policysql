@@ -1894,10 +1894,16 @@ impl BindState<'_> {
         ))
     }
 
+    /// `LIMIT` / `OFFSET`: a non-negative 64-bit integer literal or a named parameter (#136).
+    /// A literal that is not one (`-1`, `1.5`, `'x'`, `NULL`, a number past `i64::MAX`) is a value
+    /// error, answered as a parameter value that breaks the same contract; any other form is
+    /// unsupported, refused without resolving a name in it.
     fn bind_limit(&mut self, expression: &Expr) -> Result<BoundExpr, BindError> {
         match expression {
             Expr::Literal(Literal::Numeric(value)) => {
                 let value = value.parse::<i64>().map_err(|_| BindError::InvalidLimit)?;
+                // turso_parser never puts a sign in the token (`-1` is a unary minus), but the
+                // contract is checked here and not inferred from the lexer.
                 if value < 0 {
                     return Err(BindError::InvalidLimit);
                 }
@@ -1906,7 +1912,16 @@ impl BindState<'_> {
             Expr::Variable(_) => self
                 .bind_scalar(expression, ColumnUsage::Filter, Some(LogicalType::Int64), 0)
                 .map(|(bound, _)| bound),
-            _ => Err(BindError::InvalidLimit),
+            Expr::Literal(_) => Err(BindError::InvalidLimit),
+            Expr::Unary(UnaryOperator::Negative, inner)
+                if matches!(inner.as_ref(), Expr::Literal(Literal::Numeric(_))) =>
+            {
+                Err(BindError::InvalidLimit)
+            }
+            _ => Err(BindError::Unsupported(
+                UnsupportedFeature::Expression,
+                "LIMIT expression",
+            )),
         }
     }
 
@@ -2190,7 +2205,9 @@ impl fmt::Display for BindError {
             }
             Self::InvalidLiteral => formatter.write_str("literal is invalid"),
             Self::NullComparison => formatter.write_str("NULL requires IS NULL"),
-            Self::InvalidLimit => formatter.write_str("LIMIT must be non-negative"),
+            Self::InvalidLimit => {
+                formatter.write_str("LIMIT and OFFSET take a non-negative integer")
+            }
             Self::InvalidResultName => formatter.write_str("result name is invalid"),
             Self::DuplicateResultName => formatter.write_str("result names must be unique"),
             Self::DuplicateWriteColumn => formatter.write_str("write column is duplicated"),
@@ -2705,6 +2722,64 @@ mod tests {
                 Err(expected)
             );
         }
+    }
+
+    #[test]
+    fn limit_and_offset_take_a_non_negative_integer_literal_or_a_parameter() {
+        for sql in [
+            "SELECT id FROM projects LIMIT 0",
+            "SELECT id FROM projects LIMIT 5",
+            "SELECT id FROM projects LIMIT 9223372036854775807",
+            "SELECT id FROM projects LIMIT :n",
+            "SELECT id FROM projects LIMIT 5 OFFSET :o",
+            "SELECT id FROM projects LIMIT 5, 10",
+        ] {
+            assert!(
+                SqliteFrontend::default().bind(sql, &catalog()).is_ok(),
+                "{sql}"
+            );
+        }
+        for sql in [
+            "SELECT id FROM projects LIMIT -1",
+            "SELECT id FROM projects LIMIT 1 OFFSET -1",
+            "SELECT id FROM projects LIMIT 5, -1",
+            "SELECT id FROM projects LIMIT 1.5",
+            "SELECT id FROM projects LIMIT 'x'",
+            "SELECT id FROM projects LIMIT NULL",
+            "SELECT id FROM projects LIMIT 0x10",
+            "SELECT id FROM projects LIMIT 99999999999999999999",
+        ] {
+            assert_eq!(
+                SqliteFrontend::default().bind(sql, &catalog()),
+                Err(BindError::InvalidLimit),
+                "{sql}"
+            );
+        }
+        let unsupported = Err(BindError::Unsupported(
+            UnsupportedFeature::Expression,
+            "LIMIT expression",
+        ));
+        for sql in [
+            "SELECT id FROM projects LIMIT id",
+            "SELECT id FROM projects LIMIT nope",
+            "SELECT id FROM projects LIMIT (5)",
+            "SELECT id FROM projects LIMIT 1 + 1",
+            "SELECT id FROM projects LIMIT +5",
+            "SELECT id FROM projects LIMIT -:n",
+            "SELECT id FROM projects LIMIT (SELECT 1)",
+        ] {
+            assert_eq!(
+                SqliteFrontend::default().bind(sql, &catalog()),
+                unsupported,
+                "{sql}"
+            );
+        }
+        // A name in a `LIMIT` is never resolved: an existing column and a missing one are
+        // refused the same way.
+        assert_eq!(
+            SqliteFrontend::default().bind("SELECT id FROM projects LIMIT tenant_id", &catalog()),
+            SqliteFrontend::default().bind("SELECT id FROM projects LIMIT nope", &catalog()),
+        );
     }
 
     #[test]

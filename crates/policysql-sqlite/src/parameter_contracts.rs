@@ -16,6 +16,11 @@
 //! proof: `validate_client_parameters` binds a supplied NULL as SQL NULL only
 //! for a `nullable` parameter and rejects it everywhere else, and Explain
 //! metadata reports the same flag, so both always agree for every type.
+//!
+//! A parameter in `LIMIT` or `OFFSET` (alone, or as the client side of the policy's
+//! `MIN(client, policy)`) is `non_negative`: a supplied value must be an integer `>= 0`. SQLite
+//! reads a negative `LIMIT` as no bound, so `MIN(-1, policy)` would lift the policy's row cap
+//! (#136). The flag is the union over every occurrence, the opposite of `nullable`.
 
 use crate::CompileError;
 use policysql_catalog::Catalog;
@@ -34,6 +39,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct ClientParameterContract {
     logical_type: LogicalType,
     nullable: bool,
+    non_negative: bool,
     columns: Vec<BoundColumn>,
 }
 
@@ -49,6 +55,12 @@ impl ClientParameterContract {
     #[must_use]
     pub const fn nullable(&self) -> bool {
         self.nullable
+    }
+
+    /// `true` when some occurrence is a `LIMIT` or `OFFSET`: the value must be an integer `>= 0`.
+    #[must_use]
+    pub const fn non_negative(&self) -> bool {
+        self.non_negative
     }
 
     /// Catalog columns whose value contract every supplied value must satisfy
@@ -144,6 +156,9 @@ pub(crate) fn validate_client_parameters(
         {
             return Err(CompileError::ClientParameterTypeMismatch);
         }
+        if contract.non_negative && !matches!(value, LogicalValue::Int64(value) if *value >= 0) {
+            return Err(CompileError::ClientParameterTypeMismatch);
+        }
         for column in &contract.columns {
             let descriptor = column_descriptor(catalog, column)
                 .ok_or(CompileError::ClientParameterTypeMismatch)?;
@@ -194,6 +209,8 @@ enum Position<'a> {
     Assignment(&'a BoundColumn),
     /// Directly compared with a column (`=`, `<`, `LIKE`, `IN (...)`, ...).
     Compared(&'a BoundColumn),
+    /// `LIMIT` / `OFFSET`: never nullable, never column-constrained, non-negative.
+    RowBound,
     /// Any other position; never nullable and not column-constrained.
     Other,
 }
@@ -281,8 +298,21 @@ impl Visitor<'_> {
         self.optional(predicate.as_ref());
         self.optional(having.as_ref());
         self.orders(order_by);
-        self.optional(limit.as_ref());
-        self.optional(offset.as_ref());
+        self.row_bound(limit.as_ref());
+        self.row_bound(offset.as_ref());
+    }
+
+    /// `LIMIT` / `OFFSET`. The policy composes its cap as `Least(client, policy)`
+    /// (`apply_policy_limit`), so the client side of a `Least` is still a row bound.
+    fn row_bound(&mut self, expression: Option<&BoundExpr>) {
+        match expression {
+            Some(BoundExpr::Least(client, policy)) => {
+                self.row_bound(Some(client));
+                self.row_bound(Some(policy));
+            }
+            Some(expression) => self.expr_at(expression, Position::RowBound),
+            None => {}
+        }
     }
 
     fn assignment(&mut self, assignment: &BoundAssignment) {
@@ -416,13 +446,15 @@ impl Visitor<'_> {
         logical_type: LogicalType,
         position: Position<'_>,
     ) {
-        let (column, nullable) = match position {
+        let (column, nullable, non_negative) = match position {
             Position::Assignment(column) => (
                 Some(column),
                 column_descriptor(self.catalog, column).is_some_and(|value| value.nullable),
+                false,
             ),
-            Position::Compared(column) => (Some(column), false),
-            Position::Other => (None, false),
+            Position::Compared(column) => (Some(column), false, false),
+            Position::RowBound => (None, false, true),
+            Position::Other => (None, false, false),
         };
         let contract = self
             .analysis
@@ -431,12 +463,14 @@ impl Visitor<'_> {
             .or_insert_with(|| ClientParameterContract {
                 logical_type,
                 nullable,
+                non_negative,
                 columns: Vec::new(),
             });
         if contract.logical_type != logical_type {
             self.analysis.type_conflict = true;
         }
         contract.nullable &= nullable;
+        contract.non_negative |= non_negative;
         if let Some(column) = column
             && !contract.columns.iter().any(|known| known.id == column.id)
         {

@@ -316,7 +316,7 @@ ORDER BY published_at DESC
 LIMIT :limit OFFSET :offset;
 ```
 
-policy limitとdeployment limitがある場合は、最も小さい値が実効上限になります。負数、実数、文字列、NULLは受け付けません。
+policy limitとdeployment limitがある場合は、最も小さい値が実効上限になります。parameterの値も0以上の整数でなければなりません。負数、実数、文字列、NULLは、literalでもparameterの値でも400 `POLICYSQL_INVALID_PARAMETER`（`detail.reason`は`value`）になります。列や式（`LIMIT (5)`、`LIMIT 1 + 1`など）は400 `POLICYSQL_UNSUPPORTED_SQL`です。
 
 ## Column permission
 

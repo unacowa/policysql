@@ -1428,8 +1428,8 @@ fn a_bytes_parameter_over_the_value_limit_names_it() {
     );
 }
 
-/// What carries no `detail.limit` is pinned, so that a later change names it on purpose: a
-/// `LIMIT` clause with an invalid value (not a configured limit) and the derived compile input.
+/// What carries no `detail.limit` is pinned, so that a later change names it on purpose: the
+/// derived compile input.
 /// An empty statement is `INVALID_SQL`, not `INVALID_REQUEST`, so the envelope check on an empty
 /// SQL (`EnvelopeAt`) is not reachable from a client.
 #[test]
@@ -1437,15 +1437,6 @@ fn a_bound_without_a_capabilities_key_carries_no_limit() {
     let small = runtime_with(
         r#"{"max_rows":2,"max_result_bytes":64000,"timeout_ms":1000,"max_statements":2,"max_request_bytes":65536}"#,
     );
-    for sql in [
-        "SELECT id FROM projects LIMIT -1",
-        "SELECT id FROM projects LIMIT 'x'",
-    ] {
-        let output = compile_on(&small, &one(sql), "execute");
-        assert_eq!(code(&output), "POLICYSQL_LIMIT_EXCEEDED", "{sql}: {output}");
-        assert_eq!(detail(&output), None, "{sql}");
-        assert_eq!(log(&output)["reason"], "bind.InvalidLimit", "{sql}");
-    }
     // A SELECT without a result column is not a projection limit: the parser refuses it.
     let output = compile_on(&small, &one("SELECT FROM projects"), "execute");
     assert_eq!(code(&output), "POLICYSQL_INVALID_SQL", "{output}");
@@ -1465,6 +1456,98 @@ fn a_bound_without_a_capabilities_key_carries_no_limit() {
     assert_eq!(code(&output), "POLICYSQL_REQUEST_TOO_LARGE", "{output}");
     assert_eq!(output["error"]["path"], Value::Null);
     assert_eq!(detail(&output), None);
+}
+
+/// A `LIMIT` / `OFFSET` is a non-negative integer, as a literal and as a parameter value (#136):
+/// anything else is the answer of a parameter value that breaks its contract, and a form that is
+/// neither a literal nor a parameter is unsupported, refused without resolving a name in it.
+#[test]
+fn a_limit_or_offset_that_is_not_a_non_negative_integer_is_an_invalid_parameter() {
+    for sql in [
+        "SELECT id FROM projects LIMIT -1",
+        "SELECT id FROM projects LIMIT 1 OFFSET -1",
+        "SELECT id FROM projects LIMIT 5, -1",
+        "SELECT id FROM projects LIMIT 'x'",
+        "SELECT id FROM projects LIMIT 1.5",
+        "SELECT id FROM projects LIMIT NULL",
+    ] {
+        let output = compile(sql);
+        assert_eq!(
+            code(&output),
+            "POLICYSQL_INVALID_PARAMETER",
+            "{sql}: {output}"
+        );
+        assert_eq!(detail(&output), Some(&json!({"reason": "value"})), "{sql}");
+        assert_eq!(log(&output)["reason"], "bind.InvalidLimit", "{sql}");
+        assert_eq!(output["error"]["path"], "/statements/0", "{sql}");
+    }
+    for (sql, params) in [
+        ("SELECT id FROM projects LIMIT :n", json!({"n": -1})),
+        (
+            "SELECT id FROM projects LIMIT :n",
+            json!({"n": -9_223_372_036_854_775_808_i64}),
+        ),
+        (
+            "SELECT id FROM projects LIMIT 5 OFFSET :o",
+            json!({"o": -1}),
+        ),
+        (
+            "SELECT id FROM projects LIMIT :n OFFSET :n",
+            json!({"n": -1}),
+        ),
+    ] {
+        let output = compile_params(sql, &params);
+        assert_eq!(
+            code(&output),
+            "POLICYSQL_INVALID_PARAMETER",
+            "{sql} {params}: {output}"
+        );
+        assert_eq!(detail(&output), Some(&json!({"reason": "value"})));
+        assert_eq!(
+            log(&output)["reason"],
+            "compile.ClientParameterTypeMismatch",
+            "{sql} {params}"
+        );
+        let text = output.to_string();
+        assert!(!text.contains("\"n\"") && !text.contains("-1"), "{text}");
+    }
+    for sql in [
+        "SELECT id FROM projects LIMIT id",
+        "SELECT id FROM projects LIMIT private_note",
+        "SELECT id FROM projects LIMIT nope",
+        "SELECT id FROM projects LIMIT (5)",
+        "SELECT id FROM projects LIMIT 1 + 1",
+    ] {
+        let output = compile(sql);
+        assert_eq!(
+            code(&output),
+            "POLICYSQL_UNSUPPORTED_SQL",
+            "{sql}: {output}"
+        );
+        assert_eq!(
+            detail(&output),
+            Some(&json!({"feature": "expression"})),
+            "{sql}"
+        );
+    }
+    assert_eq!(
+        compile("SELECT id FROM projects LIMIT private_note")["error"],
+        compile("SELECT id FROM projects LIMIT nope")["error"]
+    );
+    for value in [0, 5, 1000] {
+        let output = compile_params("SELECT id FROM projects LIMIT :n", &json!({"n": value}));
+        assert!(output.get("error").is_none(), "{value}: {output}");
+        assert!(
+            output.to_string().contains("LIMIT MIN (:n, 100)"),
+            "{value}: {output}"
+        );
+    }
+    let explain = compile_with(
+        AUTH,
+        &json!({"sql": "SELECT id FROM projects LIMIT :n", "params": {}}),
+        "explain",
+    );
+    assert!(explain.get("error").is_none(), "{explain}");
 }
 
 /// A body over `maxRequestBytes` or `maxJsonValues` names it, through both body checks; the other

@@ -1,0 +1,10 @@
+id: sqlite.security.negative-limit-parameter
+profile: sqlite-turso-v1
+description: LIMITのparameterに負の値を渡してMIN(:limit, policy limit)を負にし、SQLiteが上限なしと読むことでpolicy limitを外す攻撃を、実行前のparameter検証で拒否する (#136)
+covers:
+  - clause.limit
+  - policy.select.limit
+  - expression.named-parameter
+  - threat.negative-limit-parameter
+tests: [negative, bypass]
+expected: deny
