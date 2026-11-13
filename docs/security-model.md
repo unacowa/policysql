@@ -121,10 +121,10 @@ Server literal parameters (`__policysql_literal_*`) carry string, bytes, and JSO
 | #114 | P1 | A client `EXISTS` outside `WHERE` (a JOIN `ON`, `HAVING`, or the SELECT list) reached the database without that resource's row policy. | Fixed (#113) |
 | #116 | P3 | An UPDATE or DELETE `WHERE` could reference columns the role cannot read, which `RETURNING` and the affected-row count then revealed. | Fixed (#117) |
 | #115 | P4 | `allow_aggregations` applied only to a `COUNT(*)` directly in the SELECT list, so `CASE`, `HAVING`, and JOINs bypassed it. | Fixed (#119) |
-| #136 | P1 | A negative client `LIMIT` parameter was accepted and emitted as `MIN(:param, limit)`, which SQLite reads as no bound, so the policy limit did not hold. | Fixed (#TBD) |
-| #155 | Column existence | A column written as an INSERT value or UPDATE assignment was `UNSUPPORTED_SQL` when it existed and `FORBIDDEN_COLUMN` when it did not. | Fixed (#TBD) |
-| #123 | P1 | The policy layer did not check the columns of a JSON collection path; only the result descriptor's failure kept such a statement from the database. | Fixed (#TBD) |
-| #137 | P5 | A JSON collection's output alias was not checked against the `__policysql_` prefix. | Fixed (#TBD) |
+| #136 | P1 | A negative client `LIMIT` parameter was accepted and emitted as `MIN(:param, limit)`, which SQLite reads as no bound, so the policy limit did not hold. | Fixed (#184) |
+| #155 | Column existence | A column written as an INSERT value or UPDATE assignment was `UNSUPPORTED_SQL` when it existed and `FORBIDDEN_COLUMN` when it did not. | Fixed (#184) |
+| #123 | P1 | The policy layer did not check the columns of a JSON collection path; only the result descriptor's failure kept such a statement from the database. | Fixed (#184) |
+| #137 | P5 | A JSON collection's output alias was not checked against the `__policysql_` prefix. | Fixed (#184) |
 | #118 | P3 (specification) | An update or delete `filter` wider than the select `filter` lets the client `WHERE` probe rows that SELECT cannot see. | Not composed by decision; documented (#135); P3 scoped above; lint planned (#134) |
 
 ### Verification status
