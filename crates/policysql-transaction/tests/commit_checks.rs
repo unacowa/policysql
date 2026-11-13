@@ -886,19 +886,33 @@ fn hold_persist(engine: &mut Engine, held: Held) -> Value {
     effect
 }
 
+/// What the successor's own `Persist` (the one a reset, or an `abandon`, emits) does.
+#[derive(Clone, Copy, Debug)]
+enum Successor {
+    /// The step emits no `Persist` (the record already is terminal).
+    Absent,
+    /// The step emits one and the owner vanishes before it runs: it never lands.
+    Dropped,
+    /// It lands.
+    Lands,
+    /// It fails and does not land.
+    Fails,
+}
+
 /// Runs the scenario of #152 up to the owner's loss: `held` is taken as a held put, the volatile
-/// state is lost, the successor's own `Persist` (if any) ends with `successor`, and the held put
-/// lands before it (`held_first`) or after it.
+/// state is lost, the successor's own `Persist` ends as `successor` says, and the held put lands
+/// before it (`held_first`) or after it.
 fn lose_after_held_persist(
     held: Held,
     brk: Break,
-    successor: Option<bool>,
+    successor: Successor,
     held_first: bool,
 ) -> Engine {
     let mut engine = checked();
     let held_effect = hold_persist(&mut engine, held);
     match brk {
         Break::Corrupt => {
+            assert!(engine.volatile.is_some(), "nothing to corrupt");
             if let Some(text) = engine.volatile.as_mut() {
                 text.truncate(text.len() / 2);
             }
@@ -917,11 +931,17 @@ fn lose_after_held_persist(
     if held_first {
         engine.apply_persist(&held_effect);
     }
-    if let (Some(ok), Some(effect)) = (successor, engine.outstanding.clone()) {
-        assert_eq!(effect["type"], "persist");
-        engine.resolve(ok, "unavailable");
-    } else {
-        assert!(successor.is_none(), "no successor persist");
+    let emitted = engine.outstanding.clone();
+    match (successor, emitted) {
+        (Successor::Absent, emitted) => {
+            assert!(emitted.is_none(), "an unexpected persist: {emitted:?}");
+        }
+        (Successor::Dropped, Some(effect)) => assert_eq!(effect["type"], "persist"),
+        (Successor::Lands | Successor::Fails, Some(effect)) => {
+            assert_eq!(effect["type"], "persist");
+            engine.resolve(matches!(successor, Successor::Lands), "unavailable");
+        }
+        (successor, None) => unreachable!("{successor:?}: the step emitted no persist"),
     }
     if !held_first {
         engine.apply_persist(&held_effect);
@@ -932,20 +952,36 @@ fn lose_after_held_persist(
 
 /// The COMMIT's persisted record survives a `Persist` that lands after the volatile state was
 /// lost (#152): a `Persist` writes the text of the step that emitted it, whatever else was
-/// persisted or failed meanwhile, so the record is never emptied or moved back, and the retry
-/// is never a definite rejection of a COMMIT that may have been sent.
+/// persisted or failed meanwhile, so the record is never emptied and never moves back before
+/// `committing`, and the retry is never a definite rejection of a COMMIT that may have been
+/// sent.
+///
+/// A real store applies puts in the order they were called, so the rows with `held_first`
+/// false and a landing successor (the held put lands after the later one) are orders only the
+/// model allows. The rows with `held_first` true after a landing successor's emission are the
+/// production order.
 #[test]
 fn a_held_persist_after_the_volatile_state_is_lost_never_empties_the_record() {
     use Break::{Abandon, Corrupt};
     use Held::{CommitUnknown, Committed, Committing};
-    // (held persist, break, successor persist outcome, held persist lands first,
-    //  stored phase, retry reply code)
+    use Successor::{Absent, Dropped, Fails, Lands};
+    // (held persist, break, successor persist, held persist lands first, stored phase,
+    //  retry reply code: `None` replays the committed response)
     let unknown = Some("POLICYSQL_COMMIT_OUTCOME_UNKNOWN");
     let cases = [
         (
             CommitUnknown,
             Corrupt,
-            Some(false),
+            Fails,
+            false,
+            "commit_unknown",
+            unknown,
+        ),
+        // Model-only order: the held put lands after the later one (same text here).
+        (
+            CommitUnknown,
+            Corrupt,
+            Lands,
             false,
             "commit_unknown",
             unknown,
@@ -953,15 +989,7 @@ fn a_held_persist_after_the_volatile_state_is_lost_never_empties_the_record() {
         (
             CommitUnknown,
             Corrupt,
-            Some(true),
-            false,
-            "commit_unknown",
-            unknown,
-        ),
-        (
-            CommitUnknown,
-            Corrupt,
-            Some(true),
+            Lands,
             true,
             "commit_unknown",
             unknown,
@@ -969,39 +997,30 @@ fn a_held_persist_after_the_volatile_state_is_lost_never_empties_the_record() {
         (
             CommitUnknown,
             Abandon,
-            None,
+            Absent,
             false,
             "commit_unknown",
             unknown,
         ),
-        (
-            Committing,
-            Corrupt,
-            Some(false),
-            false,
-            "committing",
-            unknown,
-        ),
-        (
-            Committing,
-            Corrupt,
-            Some(true),
-            false,
-            "committing",
-            unknown,
-        ),
-        (
-            Committing,
-            Corrupt,
-            Some(true),
-            true,
-            "commit_unknown",
-            unknown,
-        ),
-        (Committing, Abandon, None, false, "committing", unknown),
-        (Committed, Corrupt, Some(false), false, "committed", None),
-        (Committed, Corrupt, Some(true), false, "committed", None),
-        (Committed, Abandon, None, false, "committed", None),
+        (Committing, Corrupt, Fails, false, "committing", unknown),
+        // Model-only order: `committing` lands after the successor's `commit_unknown`.
+        (Committing, Corrupt, Lands, false, "committing", unknown),
+        // Production order.
+        (Committing, Corrupt, Lands, true, "commit_unknown", unknown),
+        // The abandon's persist never runs: the owner vanished first.
+        (Committing, Abandon, Dropped, false, "committing", unknown),
+        // Production order: `abandon` runs its persist, which lands after the held one.
+        (Committing, Abandon, Lands, true, "commit_unknown", unknown),
+        // Model-only order.
+        (Committing, Abandon, Lands, false, "committing", unknown),
+        (Committing, Abandon, Fails, false, "committing", unknown),
+        (Committed, Corrupt, Fails, false, "committed", None),
+        // Model-only order: `committed` lands after the successor's `commit_unknown`.
+        (Committed, Corrupt, Lands, false, "committed", None),
+        // Production order: the successor's `commit_unknown` lands over `committed`; an
+        // unknown outcome for a committed transaction is allowed (ADR 0007), a rejection is not.
+        (Committed, Corrupt, Lands, true, "commit_unknown", unknown),
+        (Committed, Abandon, Absent, false, "committed", None),
     ];
     for (held, brk, successor, held_first, phase, expected) in cases {
         let label = format!("{held:?} {brk:?} successor {successor:?} held first {held_first}");
@@ -1016,7 +1035,7 @@ fn a_held_persist_after_the_volatile_state_is_lost_never_empties_the_record() {
             Some(code_expected) => assert_eq!(code(&reply), Some(code_expected), "{label}"),
             None => assert_eq!(reply["value"]["status"], "committed", "{label}: {reply}"),
         }
-        assert!(!rejects_commit(&reply) || expected.is_some(), "{label}");
+        assert!(!rejects_commit(&reply), "{label}: {reply}");
         // `committing` is never followed by a phase before it.
         let stored = &engine.observed.stored_phases;
         if let Some(at) = stored.iter().position(|phase| phase == "committing") {
