@@ -672,3 +672,33 @@ Naming the unnamed bounds. The `path` of `INVALID_REQUEST` and `/statements/<i>/
 for a `SELECT` with an `expect` (it needs a wider `cause.path` form). Moving `LIMIT -1` to another
 code. `maxCallbackQueriesPerCheck` as a `TRANSACTION_LIMITS` value once the validator-facing code
 for it is made the same (#158).
+
+## Amendment (#136, #155, #123, #137)
+
+### Classification
+
+| Input | Before | After |
+| --- | --- | --- |
+| A `LIMIT` / `OFFSET` literal that is not a non-negative 64-bit integer (`LIMIT -1`, `1.5`, `'x'`, `NULL`) | 413 `LIMIT_EXCEEDED`, no `detail` | 400 `INVALID_PARAMETER`, `reason: value` (`bind.InvalidLimit`) |
+| A negative `LIMIT` / `OFFSET` parameter value | accepted | 400 `INVALID_PARAMETER`, `reason: value` (`compile.ClientParameterTypeMismatch`) |
+| A `LIMIT` / `OFFSET` that is neither a literal nor a parameter | 413 `LIMIT_EXCEEDED`, no `detail` | 400 `UNSUPPORTED_SQL`, `feature: expression` |
+| An INSERT value or UPDATE assignment that is neither a literal nor a parameter | `insert` / `update` or `expression` when the binder got that far; 403 `FORBIDDEN_COLUMN` for a column that does not exist; `INVALID_PARAMETER` for a column of another type | 400 `UNSUPPORTED_SQL`, `feature: insert` / `update`, decided before a name is resolved |
+| A JSON collection path that is neither a literal nor a parameter | `protected_statement` (emit) for an existing column, 403 for a missing one | 400 `UNSUPPORTED_SQL`, `feature: json_collection`, before a name is resolved |
+| A JSON collection result name in the `__policysql_` namespace | accepted | `DUPLICATE_RESULT_COLUMN`, as every other result name |
+
+No code, `detail` key or enumeration value is added. `reason: value` already meant "a supplied value that does not fit
+the parameter's type or contract"; a `LIMIT` / `OFFSET` literal is the same contract written into the SQL, so the two
+are one answer. "Moving `LIMIT -1` to another code", left out by amendment F, is done; the row "An invalid `LIMIT`
+clause" of amendment F's table of places without a name no longer applies.
+
+### Existence of a hidden column
+
+The split "a column used as an inserted or assigned value is `UNSUPPORTED_SQL` when it exists and `FORBIDDEN_COLUMN` when
+it does not" of amendment C is closed, and so is the same split in a JSON collection path. The differential test lists
+instead the places where the binder resolves a hidden name and then refuses a later part of the statement
+(`LATER_REFUSAL_CODE_SPLITS`); the root fix stays #154.
+
+### Versions
+
+ABI 26 (the snapshot is `...:abi-26`); the owner wire version stays `"6"`, because the owner reply, the `detail` table
+and the enumerations are unchanged (the difference is a snapshot skew). Consequences are those of section Consequences.

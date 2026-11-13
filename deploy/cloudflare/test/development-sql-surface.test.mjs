@@ -209,6 +209,32 @@ test("the shipped WASM rejects unprotected EXISTS, unobservable mutation filter 
   );
 });
 
+// Regressions of the S security fixes that must hold in the shipped WASM (#136, #155, #123, #137).
+test("the shipped WASM refuses a negative LIMIT, a column in a value position or a JSON path, and a reserved JSON alias", () => {
+  const compile = (sql, params = {}) => JSON.parse(runtime.compile_json(
+    auth, JSON.stringify({ statements: [{ sql, params }] }), "execute", JSON.stringify({ nowMs: Date.now() }),
+  ));
+  const code = (sql, params) => compile(sql, params).error?.code;
+  // #136: a negative LIMIT parameter would lift the policy limit (SQLite reads it as no bound).
+  assert.equal(code("SELECT id FROM posts LIMIT :limit", { limit: -1 }), "POLICYSQL_INVALID_PARAMETER");
+  assert.equal(code("SELECT id FROM posts LIMIT :limit", { limit: 0 }), undefined);
+  assert.equal(code("SELECT id FROM posts LIMIT -1"), "POLICYSQL_INVALID_PARAMETER");
+  // #155: a column written as a value is refused before its name is resolved.
+  const hidden = compile("UPDATE posts SET title = internal_notes WHERE id = 'x'").error;
+  const missing = compile("UPDATE posts SET title = no_such_column WHERE id = 'x'").error;
+  assert.equal(hidden.code, "POLICYSQL_UNSUPPORTED_SQL");
+  assert.deepEqual(hidden, missing);
+  // #123: the same for a JSON collection path.
+  const path = (column) => compile(`SELECT json_group_array(j.value) AS items FROM posts AS p, json_each(p.metadata, ${column}) AS j`).error;
+  assert.equal(path("p.internal_notes").code, "POLICYSQL_UNSUPPORTED_SQL");
+  assert.deepEqual(path("p.internal_notes"), path("p.no_such_column"));
+  // #137: a JSON collection's output name is not in the server's namespace.
+  assert.equal(
+    code("SELECT json_group_array(j.value) AS __policysql_x FROM posts AS p, json_each(p.metadata, '$') AS j"),
+    "POLICYSQL_DUPLICATE_RESULT_COLUMN",
+  );
+});
+
 test("development Catalog and policy compile every advertised SQL family", () => {
   for (const fixture of accepted) {
     const compiled = JSON.parse(runtime.compile_json(

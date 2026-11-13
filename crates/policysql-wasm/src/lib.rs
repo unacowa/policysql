@@ -117,7 +117,15 @@ use wasm_bindgen::prelude::*;
 /// 25: issue #162: `compile_json` takes a fourth argument, the request context JSON
 /// `{"nowMs": <integer>}`, and a preset may be `{ now: {} }` (the compile's time, ADR 0031);
 /// the machine's `Compiler::compile` takes the step's `now_ms`. No identity value changed.
-const ABI_VERSION: u32 = 25;
+/// 26: issues #136, #155, #123, #137: a client `LIMIT` / `OFFSET` parameter must be an integer
+/// `>= 0` (400 `POLICYSQL_INVALID_PARAMETER`, `reason: value`); a `LIMIT` / `OFFSET` literal that
+/// is not one is the same answer (was 413 `POLICYSQL_LIMIT_EXCEEDED` without `detail`), and a form
+/// that is neither a literal nor a parameter is `feature: expression`; an INSERT value, an UPDATE
+/// assignment and a JSON collection path that are neither a literal nor a parameter are refused
+/// before any name in them is resolved (`feature: insert`, `update`, `json_collection`); a JSON
+/// collection result name in the `__policysql_` namespace is `POLICYSQL_DUPLICATE_RESULT_COLUMN`.
+/// No identity value changed.
+const ABI_VERSION: u32 = 26;
 /// The fixed JSON levels the machine adds when it wraps an interactive command in the
 /// one-statement envelope `{"statements":[{"sql":...,"params":...}]}`: the envelope object and
 /// the statement object. A client command at [`policysql_transaction::strict::MAX_DEPTH`] must

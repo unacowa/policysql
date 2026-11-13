@@ -725,6 +725,9 @@ today.
 - **Request time (#162, ABI 25).** `Compiler::compile` takes the compiling step's `now_ms`
   (`CompileFacts`) and `compile_json` takes the request context (ADR 0031). No state or event
   changes; the owner wire version stays `"6"`.
+- **Value positions and row bounds (#136, #155, #123, #137; ABI 26).** No state or event changes; compile refusals
+  change code or feature as ADR 0030's amendment lists, so `step_json` returns different replies for existing inputs and
+  `ABI_VERSION` is 26; the owner wire version stays `"6"`.
 
 
 ## Migration
