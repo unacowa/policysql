@@ -516,6 +516,10 @@ impl SqliteFrontend {
         let output_name = explicit_alias(output_alias.as_ref())
             .ok_or(BindError::InvalidResultName)
             .and_then(|name| ResultName::new(name).map_err(|_| BindError::InvalidResultName))?;
+        // The same namespace check as every other result name (#137).
+        if is_reserved_result_name(&output_name) {
+            return Err(BindError::InvalidResultName);
+        }
         let predicate = where_clause
             .as_deref()
             .map(|expression| state.bind_boolean(expression, ColumnUsage::Filter, 0))
@@ -2026,10 +2030,15 @@ fn is_value_syntax(expression: &Expr) -> bool {
     }
 }
 
+/// A result name in the server's `__policysql_` namespace, compared without regard to ASCII case.
+fn is_reserved_result_name(name: &ResultName) -> bool {
+    canonical(name.as_str()).starts_with("__policysql_")
+}
+
 fn ensure_unique_result_names(projections: &[BoundProjection]) -> Result<(), BindError> {
     let mut names = std::collections::BTreeSet::new();
     for projection in projections {
-        if canonical(projection.output_name.as_str()).starts_with("__policysql_") {
+        if is_reserved_result_name(&projection.output_name) {
             return Err(BindError::InvalidResultName);
         }
         if !names.insert(canonical(projection.output_name.as_str())) {
@@ -2984,6 +2993,32 @@ mod tests {
             &catalog(),
         );
         assert_eq!(error, Err(BindError::InvalidResultName));
+        // A JSON collection's output name is checked as every other result name (#137).
+        for alias in [
+            "__policysql_x",
+            "__PolicySql_x",
+            "\"__policysql_x\"",
+            "__policysql_json",
+            "__policysql_check",
+        ] {
+            let sql = format!(
+                "SELECT json_group_array(j.value) AS {alias} FROM projects AS p, json_each(p.metadata, '$') AS j"
+            );
+            assert_eq!(
+                SqliteFrontend::default().bind(&sql, &catalog()),
+                Err(BindError::InvalidResultName),
+                "{sql}"
+            );
+        }
+        for alias in ["items", "\"Items\"", "policysql_x", "_policysql_x"] {
+            let sql = format!(
+                "SELECT json_group_array(j.value) AS {alias} FROM projects AS p, json_each(p.metadata, '$') AS j"
+            );
+            assert!(
+                SqliteFrontend::default().bind(&sql, &catalog()).is_ok(),
+                "{sql}"
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,9 @@
+id: sqlite.security.json-collection-reserved-alias
+profile: sqlite-turso-v1
+description: JSON collectionのSELECTの出力名にserver用の予約prefix __policysql_ を使い、server側の名前と見分けのつかない結果列を作る攻撃を拒否する (#137)
+covers:
+  - source.json-table.collection
+  - result.unique-name
+  - threat.parameter-name-collision
+tests: [negative, bypass]
+expected: deny

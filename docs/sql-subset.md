@@ -15,7 +15,7 @@ PolicySQL accepts a strict, capability-gated SQLite subset. A deployment adverti
 - registered side-effect-free scalar functions `LOWER(string)`, `UPPER(string)`, and `JSON_EXTRACT(json, string)`, with exact arity/type checking and ordinary column permission on every argument;
 - explicitly aliased typed projections using searched `CASE`, string concatenation `||`, and `CAST(... AS TEXT)`; every branch/input is provenance checked and other arithmetic, bitwise, simple-CASE, and CAST shapes remain denied;
 - `LIKE` and `GLOB` string predicates; `ESCAPE` remains outside the registered surface;
-- unique, non-empty output names under SQLite ASCII case-insensitive comparison;
+- unique, non-empty output names under SQLite ASCII case-insensitive comparison; names beginning with `__policysql_` (ASCII case-insensitive) are reserved for the server and rejected in every SELECT form, JSON collections included;
 - conditional output columns only as direct base-column projections with optional aliases;
 - a JSON collection: `SELECT json_group_array(<alias>.value) AS <name> FROM <resource> AS <r>, json_each(<r>.<json column>, <path>) AS <alias> [WHERE ...]` (or `json_tree`), when `allow_aggregations` permits it and the document column is a regular column; `<path>` is a string literal or a named parameter (optionally parenthesized), whose value selects a part of the column's Catalog JSON Schema; a column or any other expression there is rejected before its name is resolved.
 

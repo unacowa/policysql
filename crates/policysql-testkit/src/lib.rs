@@ -2394,6 +2394,7 @@ resources:
         "forbidden-filter-column",
         "forbidden-order-column",
         "json-collection-forbidden-path",
+        "json-collection-reserved-alias",
         "missing-policy",
         "mutation-delete-forbidden-filter-column",
         "mutation-forbidden-filter-column",

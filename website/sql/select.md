@@ -71,7 +71,7 @@ FROM posts
 JOIN authors ON authors.id = posts.author_id;
 ```
 
-空のaliasと重複aliasはdatabaseへ送信する前に拒否されます。これによりJSON rowのkeyと`redactions[].column`を一意に対応付けられます。
+空のaliasと重複aliasはdatabaseへ送信する前に拒否されます。`__policysql_`で始まるalias（大文字小文字を区別しない）はserver用に予約されているため、JSONの集合（`json_each`など）を含むすべてのSELECTで拒否されます（`POLICYSQL_DUPLICATE_RESULT_COLUMN`）。これによりJSON rowのkeyと`redactions[].column`を一意に対応付けられます。
 
 `SELECT *`と`table.*`は使用できません。返却する列を明示することで、schema変更によって非公開列が結果へ加わることを防ぎます。
 

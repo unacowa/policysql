@@ -4183,6 +4183,43 @@ resources:
                 .contains("JSON_EACH (\"__policysql_t0\".\"metadata\", :__policysql_literal_0)")
         );
         assert!(sql_of(&parameter).contains("JSON_EACH (\"__policysql_t0\".\"metadata\", :path)"));
+
+        // The output name of a JSON collection is checked against the server's reserved prefix
+        // like every other result name (#137): the same answer as `SELECT id AS __policysql_x`.
+        let reference = compile(
+            "SELECT id AS __policysql_x FROM projects",
+            &serde_json::json!({}),
+            "execute",
+        );
+        assert_eq!(
+            reference["error"]["code"], "POLICYSQL_DUPLICATE_RESULT_COLUMN",
+            "{reference}"
+        );
+        for alias in [
+            "__policysql_x",
+            "__PolicySql_x",
+            "\"__policysql_x\"",
+            "__policysql_json",
+            "__policysql_check",
+        ] {
+            let sql = format!(
+                "SELECT json_group_array(j.value) AS {alias} FROM projects AS p, json_each(p.metadata, '$') AS j"
+            );
+            for endpoint in ["execute", "explain"] {
+                let output = compile(&sql, &serde_json::json!({}), endpoint);
+                assert_eq!(
+                    output["error"], reference["error"],
+                    "{endpoint} {alias}: {output}"
+                );
+                assert!(output["error"].get("detail").is_none(), "{alias}");
+            }
+        }
+        let allowed = compile(
+            "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, '$') AS j",
+            &serde_json::json!({}),
+            "execute",
+        );
+        assert!(allowed.get("error").is_none(), "{allowed}");
     }
 
     #[test]

@@ -98,7 +98,7 @@ A SELECT that contains an aggregate (an aggregate function, `GROUP BY`, or `HAVI
 
 ### P5: server ownership
 
-The values of session-derived server parameters (`__policysql_session_*`) and of preset columns are determined by the policy, the trusted session, and the compile's time (a host fact the client cannot supply) alone, and the values of `now` presets are bound to `__policysql_now_*`; they do not depend on the client's SQL or parameter values. The client can neither define nor bind a parameter in the `__policysql_` namespace: client parameter names with that prefix are rejected. Result column names with that prefix are rejected for SELECT, constant SELECT, client `EXISTS` projections, and `RETURNING`. Known gap: the output alias of a JSON collection SELECT is not checked for the prefix (#137; see [Verification status](#verification-status)).
+The values of session-derived server parameters (`__policysql_session_*`) and of preset columns are determined by the policy, the trusted session, and the compile's time (a host fact the client cannot supply) alone, and the values of `now` presets are bound to `__policysql_now_*`; they do not depend on the client's SQL or parameter values. The client can neither define nor bind a parameter in the `__policysql_` namespace: client parameter names with that prefix are rejected. Result column names with that prefix are rejected for SELECT, constant SELECT, JSON collection SELECT, client `EXISTS` projections, and `RETURNING`.
 
 Server literal parameters (`__policysql_literal_*`) carry string, bytes, and JSON literals from two sources: the client's SQL and the policy (filters, checks, presets). The name does not tell them apart. A literal from the client's SQL is client-chosen by design and outside P5; a literal from the policy is covered by P5. Invariant 11 checks the round trip of client string literals only.
 
@@ -124,6 +124,7 @@ Server literal parameters (`__policysql_literal_*`) carry string, bytes, and JSO
 | #136 | P1 | A negative client `LIMIT` parameter was accepted and emitted as `MIN(:param, limit)`, which SQLite reads as no bound, so the policy limit did not hold. | Fixed (#TBD) |
 | #155 | Column existence | A column written as an INSERT value or UPDATE assignment was `UNSUPPORTED_SQL` when it existed and `FORBIDDEN_COLUMN` when it did not. | Fixed (#TBD) |
 | #123 | P1 | The policy layer did not check the columns of a JSON collection path; only the result descriptor's failure kept such a statement from the database. | Fixed (#TBD) |
+| #137 | P5 | A JSON collection's output alias was not checked against the `__policysql_` prefix. | Fixed (#TBD) |
 | #118 | P3 (specification) | An update or delete `filter` wider than the select `filter` lets the client `WHERE` probe rows that SELECT cannot see. | Not composed by decision; documented (#135); P3 scoped above; lint planned (#134) |
 
 ### Verification status
@@ -136,12 +137,11 @@ Update this table whenever a child issue of #120 lands. Today every property is 
 | P2 | Mutation fixtures (`tests/fixtures/sqlite-turso-v1/mutation/`, including `update-now-preset`), `deploy/cloudflare/test/now.test.mjs`, and unit tests | #127, #131 |
 | P3 | Unit test `mutation_where_is_limited_to_observable_columns`; fixtures `security/mutation-forbidden-filter-column` and `security/mutation-delete-forbidden-filter-column` | #125, #126; lint for the #118 scope (#134) |
 | P4 | Unit test `aggregate_and_window_gates_cover_every_position_and_joined_resource`; fixtures `security/aggregate-*` and `security/window-joined-resource` | #125, #126 |
-| P5 | Core and parser unit tests for the reserved namespace; fixtures `security/server-parameter-collision` and `mutation/update-now-preset`; `deploy/cloudflare/test/now.test.mjs` | #127 |
+| P5 | Core and parser unit tests for the reserved namespace; fixtures `security/server-parameter-collision`, `security/json-collection-reserved-alias` and `mutation/update-now-preset`; `deploy/cloudflare/test/now.test.mjs` | #127 |
 
 Known gaps:
 
 - P3: the #118 scope above is a property of the specification.
-- P5, JSON collection: the output alias is not checked against the `__policysql_` prefix (#137). Whether a client can exploit this is unverified.
 - Existence of a hidden column, and its logical type: the binder and the decoding of parameter values run before the policy against the Binding Catalog, so a column the role cannot read is told from one that does not exist wherever the binder resolves the name and then refuses something else: an `INVALID_PARAMETER` on a type mismatch (`WHERE tenant_id = 1`), an unsupported form later in the statement (`SELECT tenant_id FROM projects WHERE id = 1 + 1` is `UNSUPPORTED_SQL`, and `FORBIDDEN_COLUMN` with a name that does not exist), and a policy refusal of another reason (aggregation or windows off) that precedes the column check; a hidden column that only a derived table or a CTE carries compiles (#141). A value position (an INSERT value, an UPDATE assignment, a JSON collection path) is decided on its syntax before any name in it is resolved, so a column there is answered alike. The `detail` (`reason: type`, `feature: cast`) makes a second type-dependent failure cheaper to read; it adds no fact the code does not already give (#154). The test `a_missing_name_and_a_hidden_one_are_answered_alike_where_the_code_is_the_same` lists each place.
 - Existence of a resource the role has a policy on, for any operation: a client can tell it from a name that does not exist (for example `DELETE FROM tasks WHERE nope = :v` is `FORBIDDEN_COLUMN` when the role has only a select policy on `tasks`, and `MISSING_POLICY` for a name that does not exist). The role's Explain compiles that resource, so its existence is information the policy gives. A resource the role has no policy on is not told from a name that does not exist (#145 pull request D).
 
