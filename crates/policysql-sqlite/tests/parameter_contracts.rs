@@ -600,3 +600,151 @@ fn acceptance_regressions_are_unchanged() {
         .is_ok()
     );
 }
+
+fn int_param(value: &str) -> BoundExpr {
+    BoundExpr::ClientParameter {
+        name: name(value),
+        logical_type: LogicalType::Int64,
+    }
+}
+
+fn non_negative_of(statement: &BoundStatement, catalog: &Catalog, parameter: &str) -> bool {
+    analyze_client_parameters(statement, catalog)
+        .contracts()
+        .unwrap_or_else(|_| unreachable!("no type conflict"))[&name(parameter)]
+        .non_negative()
+}
+
+#[test]
+fn limit_and_offset_parameters_are_non_negative() {
+    // SQLite reads a negative LIMIT as no bound, so `MIN(-1, policy limit)` would lift the policy
+    // cap (#136). The contract is checked before execution.
+    for value in [0, 5, 1000, i64::MAX] {
+        assert!(
+            compile(
+                "SELECT id FROM projects LIMIT :n",
+                &[("n", LogicalValue::Int64(value))]
+            )
+            .is_ok(),
+            "{value}"
+        );
+    }
+    assert!(
+        compile(
+            "SELECT id FROM projects LIMIT 5 OFFSET :o",
+            &[("o", LogicalValue::Int64(0))]
+        )
+        .is_ok()
+    );
+    for (sql, key, value) in [
+        (
+            "SELECT id FROM projects LIMIT :n",
+            "n",
+            LogicalValue::Int64(-1),
+        ),
+        (
+            "SELECT id FROM projects LIMIT :n",
+            "n",
+            LogicalValue::Int64(i64::MIN),
+        ),
+        (
+            "SELECT id FROM projects LIMIT 5 OFFSET :o",
+            "o",
+            LogicalValue::Int64(-1),
+        ),
+        (
+            "SELECT id FROM projects LIMIT :n OFFSET :n",
+            "n",
+            LogicalValue::Int64(-1),
+        ),
+        (
+            "SELECT id FROM projects LIMIT :n",
+            "n",
+            LogicalValue::Number(1.5),
+        ),
+        ("SELECT id FROM projects LIMIT :n", "n", text("5")),
+        ("SELECT id FROM projects LIMIT :n", "n", LogicalValue::Null),
+    ] {
+        assert!(
+            matches!(
+                compile(sql, &[(key, value.clone())]),
+                Err(CompileError::ClientParameterTypeMismatch)
+            ),
+            "{sql}: {value:?}"
+        );
+    }
+
+    let catalog = catalog();
+    let limited = bind("SELECT id FROM projects LIMIT :n", &catalog);
+    assert!(non_negative_of(&limited, &catalog, "n"));
+    let filtered = bind("SELECT id FROM projects WHERE name = :v", &catalog);
+    assert!(!non_negative_of(&filtered, &catalog, "v"));
+
+    // A parameter compared with a column and used as the LIMIT is a row bound (the opposite
+    // visit order is `a_row_bound_parameter_is_non_negative_in_any_visit_order_…`).
+    let mut compared = select(Some(BoundExpr::Equal(
+        Box::new(BoundExpr::Column(column(1))),
+        Box::new(int_param("n")),
+    )));
+    compared.limit = Some(int_param("n"));
+    let compared = BoundStatement::Select(Box::new(compared));
+    assert!(non_negative_of(&compared, &catalog, "n"));
+
+    // The policy's `MIN(client, policy limit)` keeps the client side a row bound.
+    let policy = PolicyBundle::activate(POLICY, &catalog, snapshot())
+        .unwrap_or_else(|error| unreachable!("fixture policy: {error}"));
+    let session = TrustedSession::new(
+        RoleName::new("member").unwrap_or_else(|_| unreachable!()),
+        "user",
+        BTreeMap::from([("tenant_id".to_owned(), "tenant_a".to_owned())]),
+    )
+    .unwrap_or_else(|_| unreachable!());
+    let output = policy
+        .compile_select(&limited, &session)
+        .unwrap_or_else(|error| unreachable!("{error}"));
+    assert!(non_negative_of(&output.plan.statement, &catalog, "n"));
+    let plan = compile(
+        "SELECT id FROM projects LIMIT :n",
+        &[("n", LogicalValue::Int64(1))],
+    )
+    .unwrap_or_else(|error| unreachable!("{error}"));
+    assert!(
+        plan.protected_sql().contains("LIMIT MIN (:n, 100)"),
+        "{}",
+        plan.protected_sql()
+    );
+}
+
+/// The `non_negative` flag is the union over every occurrence, whatever order the walker visits
+/// them in, and holds under any wrapper of a `LIMIT` / `OFFSET` expression (#136). SQL reaches
+/// neither shape, so the IR is built by hand.
+#[test]
+fn a_row_bound_parameter_is_non_negative_in_any_visit_order_and_under_any_wrapper() {
+    let catalog = catalog();
+    // An EXISTS select with a LIMIT parameter is walked (inside the predicate) before the outer
+    // HAVING occurrence of the same parameter, which is not a row bound: the last one must not win.
+    let mut inner = select(None);
+    inner.limit = Some(int_param("n"));
+    let mut outer = select(Some(BoundExpr::Exists(Box::new(inner))));
+    outer.having = Some(BoundExpr::Equal(
+        Box::new(BoundExpr::Column(column(1))),
+        Box::new(int_param("n")),
+    ));
+    let statement = BoundStatement::Select(Box::new(outer));
+    assert!(non_negative_of(&statement, &catalog, "n"));
+    // A wrapper other than `Least` keeps the parameter a row bound, on LIMIT and on OFFSET.
+    for offset in [false, true] {
+        let mut wrapped = select(None);
+        let bound = Some(BoundExpr::CastText(Box::new(int_param("m"))));
+        if offset {
+            wrapped.offset = bound;
+        } else {
+            wrapped.limit = bound;
+        }
+        let statement = BoundStatement::Select(Box::new(wrapped));
+        assert!(
+            non_negative_of(&statement, &catalog, "m"),
+            "offset {offset}"
+        );
+    }
+}

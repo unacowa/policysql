@@ -25,7 +25,7 @@ PolicySQLはSQLiteの全grammarを無条件に受け付けません。resource�
     <tr><td>window function</td><td>yes</td><td>policyとCapabilitiesで許可</td></tr>
     <tr><td>function / JSON</td><td>yes</td><td>deployment allowlist内</td></tr>
     <tr><td>LIMIT / OFFSET</td><td>yes</td><td>非負integer</td></tr>
-    <tr><td>INSERT VALUES</td><td>yes</td><td>明示的なtarget column</td></tr>
+    <tr><td>INSERT VALUES</td><td>yes</td><td>明示的なtarget column、値はliteralかnamed parameter</td></tr>
     <tr><td>UPDATE</td><td>yes</td><td>許可assignmentとrow filter</td></tr>
     <tr><td>DELETE</td><td>yes</td><td>row filterを適用</td></tr>
     <tr><td>RETURNING</td><td>yes</td><td>独立したcolumn permission</td></tr>

@@ -1,0 +1,4 @@
+stage: binding
+code: POLICYSQL_DUPLICATE_RESULT_COLUMN
+executor_calls: 0
+public_message_contains_hidden_identifier: false

@@ -9,14 +9,15 @@ PolicySQL accepts a strict, capability-gated SQLite subset. A deployment adverti
 - `INNER JOIN` and `LEFT JOIN` only when every base resource has its own select policy and every referenced column is allowed;
 - boolean predicates using registered operators and named parameters;
 - provenance-preserving qualified correlated `EXISTS` in a SELECT's `WHERE` only (an `EXISTS` in a JOIN `ON`, `HAVING`, a projection, `ORDER BY`, `LIMIT`/`OFFSET`, or a mutation is rejected), whose inner projection is the exact constant `1` or permitted direct columns (optionally aliased; computed expressions such as `CASE`, functions, and `COUNT(*)` are rejected), transparent single-resource derived tables, and one transparent/filtered non-recursive CTE that may feed an outer JOIN;
-- `ORDER BY` over permitted direct columns or resolved projection aliases, plus non-negative integer literal/named-parameter `LIMIT` and `OFFSET`;
+- `ORDER BY` over permitted direct columns or resolved projection aliases, plus `LIMIT` and `OFFSET` as a non-negative integer literal or a named parameter whose value must be a non-negative integer (a negative value is `POLICYSQL_INVALID_PARAMETER`; any other form is rejected);
 - `COUNT(*)` with direct `GROUP BY`/closed `HAVING` only when deployment capability and `allow_aggregations` permit it and every referenced column is allowed;
 - inline `ROW_NUMBER` only when deployment capability and `allow_windows` permit it and every referenced column is allowed;
 - registered side-effect-free scalar functions `LOWER(string)`, `UPPER(string)`, and `JSON_EXTRACT(json, string)`, with exact arity/type checking and ordinary column permission on every argument;
 - explicitly aliased typed projections using searched `CASE`, string concatenation `||`, and `CAST(... AS TEXT)`; every branch/input is provenance checked and other arithmetic, bitwise, simple-CASE, and CAST shapes remain denied;
 - `LIKE` and `GLOB` string predicates; `ESCAPE` remains outside the registered surface;
-- unique, non-empty output names under SQLite ASCII case-insensitive comparison;
-- conditional output columns only as direct base-column projections with optional aliases.
+- unique, non-empty output names under SQLite ASCII case-insensitive comparison; names beginning with `__policysql_` (ASCII case-insensitive) are reserved for the server and rejected in every SELECT form, JSON collections included;
+- conditional output columns only as direct base-column projections with optional aliases;
+- a JSON collection: `SELECT json_group_array(<alias>.value) AS <name> FROM <resource> AS <r>, json_each(<r>.<json column>, <path>) AS <alias> [WHERE ...]` (or `json_tree`), when `allow_aggregations` permits it and the document column is a regular column; `<path>` is a string literal or a named parameter (optionally parenthesized), whose value selects a part of the column's Catalog JSON Schema; a column or any other expression there is rejected before its name is resolved.
 
 String literals use SQLite single quotes with `''` as the only escape. The binder strictly decodes each token (outer quotes removed, `''` turned into `'`) and the emitter binds the decoded value as a server-owned `__policysql_literal_N` parameter, so `'it''s'` compares with `it's` and `'''x'''` with `'x'`. Anything else is rejected: a NUL character inside the quotes (SQLite reports an unrecognized token; every other control character is kept verbatim, as in SQLite), a double-quoted `"x"` is an identifier, never a string, and blob (`X'..'`) and `NULL` literals are outside the subset. Before sealing, the emitted-plan verifier re-encodes every client literal value and requires it to reproduce the original token; a server literal that still begins and ends with `'` is accepted only when it is such a verified decoded value or a policy-configured literal ([issue #39](https://github.com/unacowa/policysql/issues/39)). These comparisons are set-based: they do not check which placeholder carries which value or how many times it is bound (the structural comparison of the re-parsed statement covers the emitter). The per-literal round-trip is what catches a decoder regression, independently of the binder. When a plan carries no client literal record, only values that look quoted are rejected; other values pass vacuously.
 
@@ -40,7 +41,7 @@ Examples:
 ### INSERT
 
 - explicit target columns and `VALUES` rows;
-- registered literals and named parameters;
+- values that are a literal or a named parameter only (optionally parenthesized); a column or any other expression is rejected before its name is resolved, and a negative number (`-1`) is a unary expression, not a literal: pass it as a parameter;
 - server-owned presets disjoint from client columns;
 - post-state checks over every inserted row;
 - optional independently authorized `RETURNING`.
@@ -48,7 +49,7 @@ Examples:
 ### UPDATE
 
 - one base resource;
-- explicit assignments using literals or named parameters only;
+- explicit assignments whose right-hand side is a literal or a named parameter only (optionally parenthesized); a column or any other expression there is rejected before its name is resolved, and a negative number (`-1`) is a unary expression, not a literal: pass it as a parameter;
 - pre-state policy filter and client predicate; the client predicate may reference only the role's regular select columns;
 - server-owned presets disjoint from client assignments;
 - post-state checks over every changed row;

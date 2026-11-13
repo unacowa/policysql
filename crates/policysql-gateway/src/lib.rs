@@ -586,8 +586,9 @@ pub const fn classify_bind_error(error: &BindError) -> Rejection {
         BindError::ExpressionDepth => {
             limit_rejection(LimitName::MaxExpressionDepth, "bind.ExpressionDepth")
         }
-        // Not a configured limit (the `LIMIT` clause's value is invalid): no `detail.limit`.
-        BindError::InvalidLimit => Rejection::plain(Kind::LimitExceeded, "bind.InvalidLimit"),
+        // A `LIMIT` / `OFFSET` literal that is not a non-negative integer (#136): the answer of a
+        // parameter value that breaks the same contract (`compile.ClientParameterTypeMismatch`).
+        BindError::InvalidLimit => parameter_rejection(ParameterReason::Value, "bind.InvalidLimit"),
         BindError::UnknownResource => Rejection::plain(Kind::MissingPolicy, "bind.UnknownResource"),
         BindError::Unsupported(feature, shape) => Rejection {
             kind: Kind::UnsupportedSql,
@@ -1179,7 +1180,7 @@ resources:
     }
 
     #[test]
-    fn a_binder_limit_names_its_configured_limit_and_a_bad_limit_clause_names_none() {
+    fn a_binder_limit_names_its_configured_limit() {
         for (error, limit, reason) in [
             (
                 BindError::ProjectionLimit,
@@ -1203,11 +1204,16 @@ resources:
             assert_eq!(rejection.detail, Some(RejectionDetail::Limit(limit)));
             assert_eq!(rejection.reason, reason);
         }
-        // The `LIMIT` clause's value is not a configured limit, and a policy count is checked at
-        // activation only: both are `LIMIT_EXCEEDED` without a `detail.limit`.
+        // The `LIMIT` clause's value is a parameter-value error, not a configured limit (#136): no
+        // `detail.limit`. A policy count is checked at activation only: `LIMIT_EXCEEDED` without a
+        // `detail.limit`.
         let invalid = classify_bind_error(&BindError::InvalidLimit);
-        assert_eq!(invalid.kind, RejectionKind::LimitExceeded);
-        assert_eq!(invalid.detail, None);
+        assert_eq!(invalid.kind, RejectionKind::InvalidParameter);
+        assert_eq!(
+            invalid.detail,
+            Some(RejectionDetail::Parameter(ParameterReason::Value))
+        );
+        assert_eq!(invalid.reason, "bind.InvalidLimit");
         let policies = policy_rejection(&PolicyError::TooManyPolicies);
         assert_eq!(policies.kind, RejectionKind::LimitExceeded);
         assert_eq!(policies.detail, None);

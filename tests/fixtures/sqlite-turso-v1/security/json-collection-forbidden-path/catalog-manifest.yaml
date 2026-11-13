@@ -1,0 +1,9 @@
+version: 1
+resources:
+  projects:
+    source: { table: projects }
+    columns:
+      id: { type: string }
+      tenant_id: { type: string }
+      secret: { type: string }
+      metadata: { type: json }

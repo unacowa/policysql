@@ -1167,11 +1167,12 @@ mod tests {
         ValueDescriptor, ValueRepresentation,
     };
     use policysql_execution::ExecutionLimits;
+    use policysql_gateway::{GatewayError, RejectionKind, classify_bind_error, compile_failure};
     use policysql_ir::BoundStatement;
     use policysql_parser::SqliteFrontend;
     use policysql_policy::{PolicyBundle, PolicyError};
     use policysql_sqlite::{
-        compile_verified_delete, compile_verified_insert, compile_verified_select,
+        CompileError, compile_verified_delete, compile_verified_insert, compile_verified_select,
         compile_verified_update,
     };
     use std::collections::{BTreeMap, BTreeSet};
@@ -2310,6 +2311,80 @@ resources:
         assert_eq!(code, expected_code, "{directory}");
     }
 
+    /// The public code `policysql-gateway` gives a rejection kind (the strings of the WASM
+    /// boundary's `rejection_body`). Exhaustive, so a new kind is a decision here.
+    fn rejection_code(kind: RejectionKind) -> &'static str {
+        match kind {
+            RejectionKind::InvalidRequest => "POLICYSQL_INVALID_REQUEST",
+            RejectionKind::InvalidSql => "POLICYSQL_INVALID_SQL",
+            RejectionKind::MultipleStatements => "POLICYSQL_MULTIPLE_STATEMENTS",
+            RejectionKind::UnsupportedSql => "POLICYSQL_UNSUPPORTED_SQL",
+            RejectionKind::MissingPolicy => "POLICYSQL_MISSING_POLICY",
+            RejectionKind::ForbiddenOperation => "POLICYSQL_FORBIDDEN_OPERATION",
+            RejectionKind::ForbiddenColumn => "POLICYSQL_FORBIDDEN_COLUMN",
+            RejectionKind::ForbiddenColumnContext => "POLICYSQL_FORBIDDEN_COLUMN_CONTEXT",
+            RejectionKind::DuplicateResultColumn => "POLICYSQL_DUPLICATE_RESULT_COLUMN",
+            RejectionKind::InvalidParameter => "POLICYSQL_INVALID_PARAMETER",
+            RejectionKind::AmbiguousParameterType => "POLICYSQL_AMBIGUOUS_PARAMETER_TYPE",
+            RejectionKind::ReservedParameter => "POLICYSQL_RESERVED_PARAMETER",
+            RejectionKind::PresetColumn => "POLICYSQL_PRESET_COLUMN",
+            RejectionKind::LimitExceeded => "POLICYSQL_LIMIT_EXCEEDED",
+            RejectionKind::ExpectationFailed => "POLICYSQL_EXPECTATION_FAILED",
+        }
+    }
+
+    /// Compiles a bound fixture statement with the fixture's client parameters: the policy must
+    /// accept it, so that the refusal under test is the one of the client's values.
+    fn compile_with_fixture_parameters(
+        root: &Path,
+        catalog: &Catalog,
+        bundle: &PolicyBundle,
+        statement: &BoundStatement,
+        session: &TrustedSession,
+    ) -> Result<(), CompileError> {
+        let limits = ExecutionLimits {
+            max_rows: 100,
+            max_result_bytes: 10_000,
+            timeout_ms: 1_000,
+            max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
+        };
+        let parameters = fixture_parameters(root);
+        let snapshot = catalog.snapshot().clone();
+        let unreachable_policy = |error: PolicyError| -> ! {
+            unreachable!("the policy must accept the fixture statement: {error}")
+        };
+        match statement {
+            BoundStatement::Insert(_) => {
+                let output = bundle
+                    .compile_insert(statement, session, &context())
+                    .unwrap_or_else(|error| unreachable_policy(error));
+                compile_verified_insert(&output.plan, catalog, parameters, limits, snapshot)
+                    .map(|_| ())
+            }
+            BoundStatement::Update(_) => {
+                let output = bundle
+                    .compile_update(statement, session, &context())
+                    .unwrap_or_else(|error| unreachable_policy(error));
+                compile_verified_update(&output.plan, catalog, parameters, limits, snapshot)
+                    .map(|_| ())
+            }
+            BoundStatement::Delete(_) => {
+                let output = bundle
+                    .compile_delete(statement, session)
+                    .unwrap_or_else(|error| unreachable_policy(error));
+                compile_verified_delete(&output.plan, catalog, parameters, limits, snapshot)
+                    .map(|_| ())
+            }
+            _ => {
+                let output = bundle
+                    .compile_select(statement, session)
+                    .unwrap_or_else(|error| unreachable_policy(error));
+                compile_verified_select(&output.plan, catalog, parameters, limits, snapshot)
+                    .map(|_| ())
+            }
+        }
+    }
+
     /// Denied security fixtures under `tests/fixtures/sqlite-turso-v1/security`.
     const SECURITY_DENY_FIXTURES: &[&str] = &[
         "aggregate-exists-resource",
@@ -2318,14 +2393,19 @@ resources:
         "exists-outside-where",
         "forbidden-filter-column",
         "forbidden-order-column",
+        "json-collection-forbidden-path",
+        "json-collection-reserved-alias",
         "missing-policy",
         "mutation-delete-forbidden-filter-column",
         "mutation-forbidden-filter-column",
+        "negative-limit-parameter",
         "server-parameter-collision",
         "statement-smuggling",
+        "value-position-column",
         "window-joined-resource",
     ];
 
+    #[allow(clippy::too_many_lines)]
     fn verify_denied_security_fixtures() {
         let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures/sqlite-turso-v1/security");
@@ -2403,19 +2483,56 @@ resources:
                 read_yaml(&root.join("expected/rejection.yaml"))
                     .unwrap_or_else(|error| unreachable!("{directory} rejection: {error}"));
             let bound = SqliteFrontend::default().bind(&read_fixture(&root, "input.sql"), &catalog);
-            if expectation.stage == "authorization" {
-                // An authorization fixture must reach the policy layer, or it tests nothing.
-                let statement =
-                    bound.unwrap_or_else(|error| unreachable!("{directory} must bind: {error}"));
-                assert_policy_rejection(
-                    directory,
-                    &bundle,
-                    &statement,
-                    &session,
-                    &expectation.code,
-                );
-            } else if let Ok(statement) = bound {
-                assert!(bundle.compile_select(&statement, &session).is_err());
+            match expectation.stage.as_str() {
+                "authorization" => {
+                    // An authorization fixture must reach the policy layer, or it tests nothing.
+                    let statement = bound
+                        .unwrap_or_else(|error| unreachable!("{directory} must bind: {error}"));
+                    assert_policy_rejection(
+                        directory,
+                        &bundle,
+                        &statement,
+                        &session,
+                        &expectation.code,
+                    );
+                }
+                // Refused by the parser or the binder: the SQL must not bind.
+                "parse" | "binding" => {
+                    let error = bound.err().unwrap_or_else(|| {
+                        unreachable!("{directory}: a {} fixture must not bind", expectation.stage)
+                    });
+                    assert_eq!(
+                        rejection_code(classify_bind_error(&error).kind),
+                        expectation.code,
+                        "{directory}"
+                    );
+                }
+                // Refused by the client's values: the SQL binds and the policy accepts it.
+                "parameter_validation" => {
+                    let statement = bound
+                        .unwrap_or_else(|error| unreachable!("{directory} must bind: {error}"));
+                    let error = compile_with_fixture_parameters(
+                        &root, &catalog, &bundle, &statement, &session,
+                    )
+                    .err()
+                    .unwrap_or_else(|| unreachable!("{directory} must be refused"));
+                    let GatewayError::Rejected { rejection, .. } = compile_failure(&error, 0)
+                    else {
+                        unreachable!("{directory}: not a rejection");
+                    };
+                    assert_eq!(
+                        rejection_code(rejection.kind),
+                        expectation.code,
+                        "{directory}"
+                    );
+                }
+                // Older fixtures whose stage names no layer the test reproduces.
+                "policy" => {
+                    if let Ok(statement) = bound {
+                        assert!(bundle.compile_select(&statement, &session).is_err());
+                    }
+                }
+                other => unreachable!("{directory}: unknown stage {other}"),
             }
             let executor = RecordingExecutor::<()>::default();
             assert_eq!(executor.call_count(), 0);
@@ -2645,6 +2762,126 @@ resources:
         let width = negative.result().len();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get(width), Some(&SqlValue::Integer(0)));
+    }
+
+    /// Issue #136 differential: SQLite reads a negative `LIMIT` as no bound, so a negative client
+    /// parameter in `MIN(:limit, policy limit)` would lift the policy cap. The contract refuses it
+    /// before execution; the protected SQL itself, run with a negative value, would not hold.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn negative_limit_parameter_would_lift_the_policy_cap_on_sqlite() {
+        use rusqlite::types::Value as SqlValue;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/sqlite-turso-v1/security/negative-limit-parameter");
+        let snapshot = SnapshotId::new("security_negative_limit_parameter")
+            .unwrap_or_else(|error| unreachable!("fixture snapshot: {error}"));
+        let catalog = string_fixture_catalog(&root, &snapshot);
+        let bundle = PolicyBundle::activate(
+            &read_fixture(&root, "policy.yaml"),
+            &catalog,
+            snapshot.clone(),
+        )
+        .unwrap_or_else(|error| unreachable!("fixture policy: {error}"));
+        let statement = SqliteFrontend::default()
+            .bind(&read_fixture(&root, "input.sql"), &catalog)
+            .unwrap_or_else(|error| unreachable!("fixture binds: {error}"));
+        let protected = bundle
+            .compile_select(&statement, &mutation_session())
+            .unwrap_or_else(|error| unreachable!("fixture compiles: {error}"));
+        let compile = |limit: i64| {
+            compile_verified_select(
+                &protected.plan,
+                &catalog,
+                BTreeMap::from([(
+                    ClientParameterName::new("limit")
+                        .unwrap_or_else(|error| unreachable!("valid parameter: {error}")),
+                    LogicalValue::Int64(limit),
+                )]),
+                ExecutionLimits {
+                    max_rows: 100,
+                    max_result_bytes: 10_000,
+                    timeout_ms: 1_000,
+                    max_bytes_per_value: policysql_core::bytes::DEFAULT_MAX_BYTES_PER_VALUE,
+                },
+                snapshot.clone(),
+            )
+        };
+
+        // 1. The policy cap is composed as `MIN(:limit, 2)`.
+        let verified = compile(1)
+            .unwrap_or_else(|error| unreachable!("a non-negative limit compiles: {error}"));
+        assert!(
+            verified.protected_sql().contains("LIMIT MIN (:limit, 2)"),
+            "{}",
+            verified.protected_sql()
+        );
+
+        let connection = rusqlite::Connection::open_in_memory()
+            .unwrap_or_else(|error| unreachable!("database: {error}"));
+        connection
+            .execute_batch(&read_fixture(&root, "schema.sql"))
+            .unwrap_or_else(|error| unreachable!("schema: {error}"));
+        for (id, tenant) in [
+            ("p1", "tenant_1"),
+            ("p2", "tenant_1"),
+            ("p3", "tenant_1"),
+            ("p4", "tenant_1"),
+            ("p5", "tenant_1"),
+            ("p6", "tenant_2"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO projects (id, tenant_id, name) VALUES (?1, ?2, 'n')",
+                    [id, tenant],
+                )
+                .unwrap_or_else(|error| unreachable!("seed: {error}"));
+        }
+        let arguments =
+            |plan: &policysql_execution::VerifiedExecutionPlan<policysql_sqlite::SqliteProfile>,
+             limit: i64| {
+                plan.server_parameters()
+                    .iter()
+                    .map(|(name, value)| (name.as_str().to_owned(), value.clone()))
+                    .chain([("limit".to_owned(), LogicalValue::Int64(limit))])
+                    .collect::<BTreeMap<_, _>>()
+            };
+        let ids = |rows: Vec<Vec<SqlValue>>| {
+            rows.into_iter()
+                .filter_map(|row| match row.into_iter().next() {
+                    Some(SqlValue::Text(id)) => Some(id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // 2. Every non-negative limit returns `min(limit, 2)` rows, the first ones of tenant_1.
+        for (limit, expected) in [(0, 0), (1, 1), (2, 2), (5, 2)] {
+            let verified = compile(limit)
+                .unwrap_or_else(|error| unreachable!("limit {limit} compiles: {error}"));
+            let returned = ids(raw_rows(
+                &connection,
+                verified.protected_sql(),
+                &arguments(&verified, limit),
+            ));
+            assert_eq!(returned, ["p1", "p2"][..expected].to_vec(), "limit {limit}");
+        }
+
+        // 3. The danger the contract exists for: the same SQL with a negative value returns every
+        //    row of the tenant, past the policy cap. A SQLite that stops doing so changes this.
+        assert_eq!(
+            ids(raw_rows(
+                &connection,
+                verified.protected_sql(),
+                &arguments(&verified, -1)
+            )),
+            ["p1", "p2", "p3", "p4", "p5"].map(str::to_owned).to_vec()
+        );
+
+        // 4. Compile refuses the negative value before any execution.
+        assert!(matches!(
+            compile(-1),
+            Err(CompileError::ClientParameterTypeMismatch)
+        ));
     }
 
     #[test]

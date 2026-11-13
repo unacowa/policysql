@@ -44,7 +44,7 @@ Semantics:
 - the same column name cannot appear more than once in the list;
 - a conditional value is visible only when `visible_if` is SQL TRUE; FALSE and UNKNOWN return JSON `null` with a redaction entry;
 - the row filter is combined with the caller predicate;
-- the effective result limit is the stricter of caller limit and policy limit (a negative caller `LIMIT` parameter currently defeats this; see [Verification status](security-model.md#verification-status));
+- the effective result limit is the stricter of caller limit and policy limit; a caller `LIMIT` or `OFFSET` must be a non-negative integer;
 - deployment capabilities describe the maximum SQL surface the runtime can safely execute, but they do not grant access by themselves;
 - every JOIN resource must have its own select policy for the caller role, and every JOIN expression column must be present in the corresponding policy's regular `columns` list;
 - `allow_aggregations` is a default-false gate for aggregate functions, `GROUP BY`, and `HAVING`; every referenced column still requires regular column permission;

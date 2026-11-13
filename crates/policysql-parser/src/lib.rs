@@ -422,6 +422,15 @@ impl SqliteFrontend {
                 "JSON table arguments",
             ));
         }
+        // The path is a string literal or a named parameter, the forms the result's JSON Schema
+        // is derived from (`json_path_value`). Decided on the syntax before any name is resolved,
+        // so a column there is refused alike whether it exists (#123).
+        if !is_value_syntax(&arguments[1]) {
+            return Err(BindError::Unsupported(
+                UnsupportedFeature::JsonCollection,
+                "JSON path",
+            ));
+        }
         let recursive = match canonical(name.name.as_str()).as_str() {
             "json_each" => false,
             "json_tree" => true,
@@ -507,6 +516,10 @@ impl SqliteFrontend {
         let output_name = explicit_alias(output_alias.as_ref())
             .ok_or(BindError::InvalidResultName)
             .and_then(|name| ResultName::new(name).map_err(|_| BindError::InvalidResultName))?;
+        // The same namespace check as every other result name (#137).
+        if is_reserved_result_name(&output_name) {
+            return Err(BindError::InvalidResultName);
+        }
         let predicate = where_clause
             .as_deref()
             .map(|expression| state.bind_boolean(expression, ColumnUsage::Filter, 0))
@@ -619,6 +632,13 @@ impl SqliteFrontend {
             if !seen.insert(column.id) {
                 return Err(BindError::DuplicateWriteColumn);
             }
+            // A value position is decided on its syntax, before a name in it is resolved (#155).
+            if !is_value_syntax(&set.expr) {
+                return Err(BindError::Unsupported(
+                    UnsupportedFeature::Update,
+                    "UPDATE assignment expression",
+                ));
+            }
             let (value, logical_type) = state.bind_scalar(
                 &set.expr,
                 ColumnUsage::Write,
@@ -628,6 +648,7 @@ impl SqliteFrontend {
             if logical_type != column.value.logical_type {
                 return Err(BindError::IncompatibleTypes);
             }
+            // Unreachable after `is_value_syntax`; kept as the check of the bound form.
             if !matches!(
                 &value,
                 BoundExpr::ClientParameter { .. } | BoundExpr::Literal(_)
@@ -739,6 +760,13 @@ impl SqliteFrontend {
             }
             let mut row = Vec::with_capacity(values.len());
             for (value, column) in values.iter().zip(&descriptors) {
+                // A value position is decided on its syntax, before a name in it is resolved (#155).
+                if !is_value_syntax(value) {
+                    return Err(BindError::Unsupported(
+                        UnsupportedFeature::Insert,
+                        "INSERT value expression",
+                    ));
+                }
                 let (value, logical_type) = state.bind_scalar(
                     value,
                     ColumnUsage::Write,
@@ -748,6 +776,7 @@ impl SqliteFrontend {
                 if logical_type != column.value.logical_type {
                     return Err(BindError::IncompatibleTypes);
                 }
+                // Unreachable after `is_value_syntax`; kept as the check of the bound form.
                 if !matches!(
                     &value,
                     BoundExpr::ClientParameter { .. } | BoundExpr::Literal(_)
@@ -1894,10 +1923,16 @@ impl BindState<'_> {
         ))
     }
 
+    /// `LIMIT` / `OFFSET`: a non-negative 64-bit integer literal or a named parameter (#136).
+    /// A literal that is not one (`-1`, `1.5`, `'x'`, `NULL`, a number past `i64::MAX`) is a value
+    /// error, answered as a parameter value that breaks the same contract; any other form is
+    /// unsupported, refused without resolving a name in it.
     fn bind_limit(&mut self, expression: &Expr) -> Result<BoundExpr, BindError> {
         match expression {
             Expr::Literal(Literal::Numeric(value)) => {
                 let value = value.parse::<i64>().map_err(|_| BindError::InvalidLimit)?;
+                // turso_parser never puts a sign in the token (`-1` is a unary minus), but the
+                // contract is checked here and not inferred from the lexer.
                 if value < 0 {
                     return Err(BindError::InvalidLimit);
                 }
@@ -1906,7 +1941,16 @@ impl BindState<'_> {
             Expr::Variable(_) => self
                 .bind_scalar(expression, ColumnUsage::Filter, Some(LogicalType::Int64), 0)
                 .map(|(bound, _)| bound),
-            _ => Err(BindError::InvalidLimit),
+            Expr::Literal(_) => Err(BindError::InvalidLimit),
+            Expr::Unary(UnaryOperator::Negative, inner)
+                if matches!(inner.as_ref(), Expr::Literal(Literal::Numeric(_))) =>
+            {
+                Err(BindError::InvalidLimit)
+            }
+            _ => Err(BindError::Unsupported(
+                UnsupportedFeature::Expression,
+                "LIMIT expression",
+            )),
         }
     }
 
@@ -1970,10 +2014,31 @@ fn explicit_alias(alias: Option<&As>) -> Option<&str> {
         .map(|alias| alias.name().as_str())
 }
 
+/// Whether `expression` is a literal or a parameter, under any number of single-item
+/// parentheses (`((:v))`): the only form a position that holds a value accepts (an INSERT value,
+/// an UPDATE assignment, a JSON collection path). Decided on the syntax alone, before any name
+/// is resolved, so that a column written there is refused the same way whether it exists, is
+/// hidden from the role, or does not exist (#155, #123).
+fn is_value_syntax(expression: &Expr) -> bool {
+    let mut expression = expression;
+    loop {
+        match expression {
+            Expr::Parenthesized(items) if items.len() == 1 => expression = &items[0],
+            Expr::Literal(_) | Expr::Variable(_) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// A result name in the server's `__policysql_` namespace, compared without regard to ASCII case.
+fn is_reserved_result_name(name: &ResultName) -> bool {
+    canonical(name.as_str()).starts_with("__policysql_")
+}
+
 fn ensure_unique_result_names(projections: &[BoundProjection]) -> Result<(), BindError> {
     let mut names = std::collections::BTreeSet::new();
     for projection in projections {
-        if canonical(projection.output_name.as_str()).starts_with("__policysql_") {
+        if is_reserved_result_name(&projection.output_name) {
             return Err(BindError::InvalidResultName);
         }
         if !names.insert(canonical(projection.output_name.as_str())) {
@@ -2190,7 +2255,9 @@ impl fmt::Display for BindError {
             }
             Self::InvalidLiteral => formatter.write_str("literal is invalid"),
             Self::NullComparison => formatter.write_str("NULL requires IS NULL"),
-            Self::InvalidLimit => formatter.write_str("LIMIT must be non-negative"),
+            Self::InvalidLimit => {
+                formatter.write_str("LIMIT and OFFSET take a non-negative integer")
+            }
             Self::InvalidResultName => formatter.write_str("result name is invalid"),
             Self::DuplicateResultName => formatter.write_str("result names must be unique"),
             Self::DuplicateWriteColumn => formatter.write_str("write column is duplicated"),
@@ -2311,6 +2378,62 @@ mod tests {
                 .bind(sql, &catalog())
                 .unwrap_or_else(|error| unreachable!("documented JSON collection: {error}"));
             assert!(matches!(statement, BoundStatement::JsonCollectionSelect(_)));
+        }
+        for sql in [
+            "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, ('$')) AS j",
+            "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, :path) AS j",
+            "SELECT json_group_array(j.value) AS items FROM projects AS p, json_tree(p.metadata, '$') AS j",
+        ] {
+            assert!(
+                SqliteFrontend::default().bind(sql, &catalog()).is_ok(),
+                "{sql}"
+            );
+        }
+        // A path is a literal or a parameter, decided on its syntax before a name in it is
+        // resolved: a column there is refused alike whether it exists or not (#123).
+        let refused = Err(BindError::Unsupported(
+            UnsupportedFeature::JsonCollection,
+            "JSON path",
+        ));
+        for path in [
+            "p.tenant_id",
+            "p.nope",
+            "tenant_id",
+            "nope",
+            "lower(p.tenant_id)",
+            "lower(p.nope)",
+            "CASE WHEN p.tenant_id = 'x' THEN '$' ELSE '$.label' END",
+            "CASE WHEN p.nope = 'x' THEN '$' ELSE '$.label' END",
+            "p.tenant_id || ''",
+            "CAST(p.tenant_id AS TEXT)",
+            "p.id",
+            "j.key",
+            "'$' || '.label'",
+            "lower(:path)",
+        ] {
+            let sql = format!(
+                "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, {path}) AS j"
+            );
+            assert_eq!(
+                SqliteFrontend::default().bind(&sql, &catalog()),
+                refused,
+                "{sql}"
+            );
+        }
+        // What a literal or a parameter is refused for, after the syntax, is unchanged.
+        for (path, expected) in [
+            ("1", BindError::IncompatibleTypes),
+            ("NULL", BindError::NullComparison),
+            ("?", BindError::PositionalParameter),
+        ] {
+            let sql = format!(
+                "SELECT json_group_array(j.value) AS items FROM projects AS p, json_each(p.metadata, {path}) AS j"
+            );
+            assert_eq!(
+                SqliteFrontend::default().bind(&sql, &catalog()),
+                Err(expected),
+                "{sql}"
+            );
         }
         for sql in [
             "SELECT j.value FROM projects AS p, json_each(p.metadata, '$') AS j",
@@ -2708,6 +2831,64 @@ mod tests {
     }
 
     #[test]
+    fn limit_and_offset_take_a_non_negative_integer_literal_or_a_parameter() {
+        for sql in [
+            "SELECT id FROM projects LIMIT 0",
+            "SELECT id FROM projects LIMIT 5",
+            "SELECT id FROM projects LIMIT 9223372036854775807",
+            "SELECT id FROM projects LIMIT :n",
+            "SELECT id FROM projects LIMIT 5 OFFSET :o",
+            "SELECT id FROM projects LIMIT 5, 10",
+        ] {
+            assert!(
+                SqliteFrontend::default().bind(sql, &catalog()).is_ok(),
+                "{sql}"
+            );
+        }
+        for sql in [
+            "SELECT id FROM projects LIMIT -1",
+            "SELECT id FROM projects LIMIT 1 OFFSET -1",
+            "SELECT id FROM projects LIMIT 5, -1",
+            "SELECT id FROM projects LIMIT 1.5",
+            "SELECT id FROM projects LIMIT 'x'",
+            "SELECT id FROM projects LIMIT NULL",
+            "SELECT id FROM projects LIMIT 0x10",
+            "SELECT id FROM projects LIMIT 99999999999999999999",
+        ] {
+            assert_eq!(
+                SqliteFrontend::default().bind(sql, &catalog()),
+                Err(BindError::InvalidLimit),
+                "{sql}"
+            );
+        }
+        let unsupported = Err(BindError::Unsupported(
+            UnsupportedFeature::Expression,
+            "LIMIT expression",
+        ));
+        for sql in [
+            "SELECT id FROM projects LIMIT id",
+            "SELECT id FROM projects LIMIT nope",
+            "SELECT id FROM projects LIMIT (5)",
+            "SELECT id FROM projects LIMIT 1 + 1",
+            "SELECT id FROM projects LIMIT +5",
+            "SELECT id FROM projects LIMIT -:n",
+            "SELECT id FROM projects LIMIT (SELECT 1)",
+        ] {
+            assert_eq!(
+                SqliteFrontend::default().bind(sql, &catalog()),
+                unsupported,
+                "{sql}"
+            );
+        }
+        // A name in a `LIMIT` is never resolved: an existing column and a missing one are
+        // refused the same way.
+        assert_eq!(
+            SqliteFrontend::default().bind("SELECT id FROM projects LIMIT tenant_id", &catalog()),
+            SqliteFrontend::default().bind("SELECT id FROM projects LIMIT nope", &catalog()),
+        );
+    }
+
+    #[test]
     fn binds_offset_glob_like_and_direct_projection_order_alias() {
         let statement = SqliteFrontend::default()
             .bind(
@@ -2812,6 +2993,32 @@ mod tests {
             &catalog(),
         );
         assert_eq!(error, Err(BindError::InvalidResultName));
+        // A JSON collection's output name is checked as every other result name (#137).
+        for alias in [
+            "__policysql_x",
+            "__PolicySql_x",
+            "\"__policysql_x\"",
+            "__policysql_json",
+            "__policysql_check",
+        ] {
+            let sql = format!(
+                "SELECT json_group_array(j.value) AS {alias} FROM projects AS p, json_each(p.metadata, '$') AS j"
+            );
+            assert_eq!(
+                SqliteFrontend::default().bind(&sql, &catalog()),
+                Err(BindError::InvalidResultName),
+                "{sql}"
+            );
+        }
+        for alias in ["items", "\"Items\"", "policysql_x", "_policysql_x"] {
+            let sql = format!(
+                "SELECT json_group_array(j.value) AS {alias} FROM projects AS p, json_each(p.metadata, '$') AS j"
+            );
+            assert!(
+                SqliteFrontend::default().bind(&sql, &catalog()).is_ok(),
+                "{sql}"
+            );
+        }
     }
 
     #[test]
@@ -2917,12 +3124,113 @@ mod tests {
                 "SELECT id FROM projects WHERE id = X'00'",
                 BindError::Unsupported(UnsupportedFeature::Literal, "literal"),
             ),
+            // Likewise in a value position: an identifier is refused on its syntax (#155).
             (
                 "UPDATE projects SET name = \"renamed\" WHERE id = :id",
-                BindError::UnknownColumn,
+                BindError::Unsupported(UnsupportedFeature::Update, "UPDATE assignment expression"),
             ),
             (
                 "INSERT INTO projects (id) VALUES (X'00')",
+                BindError::Unsupported(UnsupportedFeature::Literal, "literal"),
+            ),
+        ] {
+            assert_eq!(frontend.bind(sql, &catalog()), Err(expected), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_value_position_is_decided_on_its_syntax_before_a_name_is_resolved() {
+        let frontend = SqliteFrontend::default();
+        let update = Err(BindError::Unsupported(
+            UnsupportedFeature::Update,
+            "UPDATE assignment expression",
+        ));
+        let insert = Err(BindError::Unsupported(
+            UnsupportedFeature::Insert,
+            "INSERT value expression",
+        ));
+        // A column written where a value belongs is refused alike whether it exists, is hidden
+        // from the role (the binder cannot tell), has another type, or does not exist.
+        for column in [
+            "tenant_id",
+            "nope",
+            "projects.tenant_id",
+            "projects.nope",
+            "x.tenant_id",
+            "\"tenant_id\"",
+            "\"nope\"",
+            "metadata",
+        ] {
+            for template in [
+                "UPDATE projects SET name = {C} WHERE id = :id",
+                "UPDATE projects SET name = lower({C}) WHERE id = :id",
+                "UPDATE projects SET name = {C} || 'a' WHERE id = :id",
+                "UPDATE projects SET name = CAST({C} AS TEXT) WHERE id = :id",
+                "UPDATE projects SET name = CASE WHEN {C} = 'x' THEN 'a' ELSE 'b' END WHERE id = :id",
+                "UPDATE projects SET name = ({C}) WHERE id = :id",
+                "UPDATE projects SET name = ((({C}))) WHERE id = :id",
+            ] {
+                let sql = template.replace("{C}", column);
+                assert_eq!(frontend.bind(&sql, &catalog()), update, "{sql}");
+            }
+            for template in [
+                "INSERT INTO projects (id, name) VALUES (:id, {C})",
+                "INSERT INTO projects (id, name) VALUES (:id, lower({C}))",
+                // Every row is checked, not only the first.
+                "INSERT INTO projects (id, name) VALUES (:id, :n), (:id2, {C})",
+                "INSERT INTO projects (id, name) VALUES (:id, :n), (:id2, :n2), (:id3, lower({C}))",
+            ] {
+                let sql = template.replace("{C}", column);
+                assert_eq!(frontend.bind(&sql, &catalog()), insert, "{sql}");
+            }
+        }
+        // Any other form that is not a literal or a parameter is refused without a name too.
+        for sql in [
+            "UPDATE projects SET name = lower(:v) WHERE id = :id",
+            "UPDATE projects SET name = 'a' || 'b' WHERE id = :id",
+            "UPDATE projects SET status = 1 + 1 WHERE id = :id",
+            "UPDATE projects SET status = -1 WHERE id = :id",
+            "UPDATE projects SET name = (SELECT name FROM projects) WHERE id = :id",
+        ] {
+            assert_eq!(frontend.bind(sql, &catalog()), update, "{sql}");
+        }
+        for sql in [
+            "INSERT INTO projects (id, name) VALUES (:id, lower(:v))",
+            "INSERT INTO projects (id, name) VALUES (:id, 'a' || 'b')",
+            "INSERT INTO projects (id, status) VALUES (:id, 1 + 1)",
+            "INSERT INTO projects (id, status) VALUES (:id, -1)",
+            "INSERT INTO projects (id, name) VALUES (:id, (SELECT name FROM projects))",
+        ] {
+            assert_eq!(frontend.bind(sql, &catalog()), insert, "{sql}");
+        }
+        for sql in [
+            "UPDATE projects SET name = (:n) WHERE id = :id",
+            "UPDATE projects SET name = ((:n)) WHERE id = :id",
+            "UPDATE projects SET name = 'x' WHERE id = :id",
+            "INSERT INTO projects (id, name) VALUES (:id, (:n))",
+        ] {
+            assert!(frontend.bind(sql, &catalog()).is_ok(), "{sql}");
+        }
+        // What a literal or a parameter is refused for, after the syntax, is unchanged.
+        for (sql, expected) in [
+            (
+                "UPDATE projects SET name = NULL WHERE id = :id",
+                BindError::NullComparison,
+            ),
+            (
+                "UPDATE projects SET name = ? WHERE id = :id",
+                BindError::PositionalParameter,
+            ),
+            (
+                "UPDATE projects SET name = :__policysql_x WHERE id = :id",
+                BindError::ReservedParameterNamespace,
+            ),
+            (
+                "UPDATE projects SET name = CURRENT_TIMESTAMP WHERE id = :id",
+                BindError::Unsupported(UnsupportedFeature::Literal, "literal"),
+            ),
+            (
+                "INSERT INTO projects (id, name) VALUES (:id, X'00')",
                 BindError::Unsupported(UnsupportedFeature::Literal, "literal"),
             ),
         ] {

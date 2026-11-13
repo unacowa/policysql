@@ -16,6 +16,11 @@ leaves:
     kind: threat
     status: planned
     required_tests: [bypass]
+  - id: threat.negative-limit-parameter
+    profile: common
+    kind: threat
+    status: planned
+    required_tests: [bypass]
   - id: threat.row-policy-replacement
     profile: common
     kind: threat

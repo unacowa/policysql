@@ -125,7 +125,7 @@ pub struct OrderBy {
     pub desc: bool,
 }
 
-/// `LIMIT <count> [OFFSET 1]`. The count is always 1..=3 (never negative: see issue #136).
+/// `LIMIT <count> [OFFSET 1]`. The count is always 1..=3 (never negative: a negative count is refused before execution, #136).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limit {
     pub count: Value,

@@ -595,7 +595,7 @@ fn non_string_quoting_and_blob_literals_are_rejected_before_execution() {
         ),
         (
             "UPDATE items SET name = \"x\" WHERE id = 'seed' RETURNING id",
-            RejectionKind::ForbiddenColumn,
+            RejectionKind::UnsupportedSql,
         ),
     ] {
         assert!(

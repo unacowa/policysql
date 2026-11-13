@@ -71,7 +71,7 @@ FROM posts
 JOIN authors ON authors.id = posts.author_id;
 ```
 
-空のaliasと重複aliasはdatabaseへ送信する前に拒否されます。これによりJSON rowのkeyと`redactions[].column`を一意に対応付けられます。
+空のaliasと重複aliasはdatabaseへ送信する前に拒否されます。`__policysql_`で始まるalias（大文字小文字を区別しない）はserver用に予約されているため、JSONの集合（`json_each`など）を含むすべてのSELECTで拒否されます（`POLICYSQL_DUPLICATE_RESULT_COLUMN`）。これによりJSON rowのkeyと`redactions[].column`を一意に対応付けられます。
 
 `SELECT *`と`table.*`は使用できません。返却する列を明示することで、schema変更によって非公開列が結果へ加わることを防ぎます。
 
@@ -305,6 +305,8 @@ FROM posts;
 
 user-defined function、extension function、side effectを持つfunctionは使用できません。
 
+`json_each()`・`json_tree()`のpath（2番目の引数）には、文字列literalかnamed parameterだけを指定できます。列や式（`lower(...)`、`CASE`、`||`など）は、その列が存在するかどうかにかかわらず400 `POLICYSQL_UNSUPPORTED_SQL`（`detail.feature`は`json_collection`）になります。
+
 ## LIMITとOFFSET
 
 LIMITとOFFSETには、0以上のinteger literalまたはparameterを指定できます。
@@ -316,7 +318,7 @@ ORDER BY published_at DESC
 LIMIT :limit OFFSET :offset;
 ```
 
-policy limitとdeployment limitがある場合は、最も小さい値が実効上限になります。負数、実数、文字列、NULLは受け付けません。
+policy limitとdeployment limitがある場合は、最も小さい値が実効上限になります。parameterの値も0以上の整数でなければなりません。負数、実数、文字列、NULLは、literalでもparameterの値でも400 `POLICYSQL_INVALID_PARAMETER`（`detail.reason`は`value`）になります。列や式（`LIMIT (5)`、`LIMIT 1 + 1`など）は400 `POLICYSQL_UNSUPPORTED_SQL`です。
 
 ## Column permission
 

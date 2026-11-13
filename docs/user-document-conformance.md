@@ -41,7 +41,6 @@ adapter, and relevant HTTP response are backed by regression evidence.
 | Contract | Outstanding implementation and evidence |
 | --- | --- |
 | Durable Object owner loss in the real environment | Owner loss is verified only locally (owner port, switch and step-machine tests). The real-environment smoke cannot evict one object on demand, and a redeploy restart lands after the four-second transaction deadline, so it would observe expiry rather than loss (#42). |
-| Policy `limit` caps every SELECT (`website/security/auth-and-policy.md`) | A negative client `LIMIT` parameter is accepted and emitted as `MIN(:param, limit)`, which SQLite treats as unbounded; the binder rejects only negative literals (#136) |
 
 Future backend profiles and newly advertised SQL leaves require their own conformance rows and
 evidence before release. Defining a shared Client contract does not establish support for another

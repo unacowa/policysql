@@ -710,6 +710,9 @@ impl PolicyBundle {
         reject_select_only_constructs(
             std::iter::once(&select.path).chain(select.predicate.iter()),
         )?;
+        // The binder admits only a literal or a parameter as the path; the policy checks its columns
+        // anyway, without relying on that (#123).
+        validate_client_expression(&select.path, &policy.regular_columns)?;
         if let Some(predicate) = &select.predicate {
             validate_client_expression(predicate, &policy.regular_columns)?;
         }
@@ -2570,10 +2573,14 @@ mod tests {
     use super::{PolicyBundle, PolicyError};
     use policysql_catalog::{Catalog, ResourceDescriptor};
     use policysql_core::{
-        ColumnName, LogicalType, ResourceId, ResourceName, RoleName, SessionKey, SnapshotId,
-        TrustedSession, ValueDescriptor, ValueRepresentation,
+        ClientParameterName, ColumnName, LogicalType, LogicalValue, ResourceId, ResourceName,
+        ResultName, RoleName, SessionKey, SnapshotId, TrustedSession, ValueDescriptor,
+        ValueRepresentation,
     };
-    use policysql_ir::{BoundExpr, BoundStatement};
+    use policysql_ir::{
+        BoundColumn, BoundExpr, BoundJsonCollectionSelect, BoundStatement, ColumnUsage,
+        ScalarFunction,
+    };
     use policysql_parser::SqliteFrontend;
     use policysql_testkit::{
         OracleRow, OracleSession, OracleValue, TruthValue, evaluate_select_filter,
@@ -2644,6 +2651,97 @@ mod tests {
                 .unwrap_or_else(|error| unreachable!("valid snapshot: {error}")),
         )
         .unwrap_or_else(|error| unreachable!("valid policy: {error}"))
+    }
+
+    /// The binder admits only a literal or a parameter as a JSON collection's path, and SQL never
+    /// reaches the policy with anything else, so the statements are built by hand: the policy
+    /// checks the columns of the path itself, without relying on the binder (#123).
+    #[test]
+    fn json_collection_path_columns_are_checked_by_the_policy() {
+        let bundle = activate(
+            "version: 1
+resources:
+  projects:
+    roles:
+      member:
+        select:
+          columns:
+            - id
+            - name
+            - { name: private_note, visible_if: { created_by: { eq: { session: subject_id } } }, on_deny: null }
+          filter: { tenant_id: { eq: { session: tenant_id } } }
+          allow_aggregations: true
+",
+        );
+        let catalog = catalog();
+        let projects = catalog
+            .resource("projects")
+            .unwrap_or_else(|| unreachable!("the fixture resource"));
+        let column = |name: &str| {
+            let descriptor = projects
+                .column(name)
+                .unwrap_or_else(|| unreachable!("the fixture column {name}"));
+            BoundColumn {
+                id: descriptor.id,
+                logical_type: LogicalType::String,
+                usage: ColumnUsage::Aggregate,
+            }
+        };
+        let literal = |value: &str| BoundExpr::Literal(LogicalValue::String(value.to_owned()));
+        let compile = |path: BoundExpr| {
+            bundle.compile_select(
+                &BoundStatement::JsonCollectionSelect(BoundJsonCollectionSelect {
+                    resource: projects.id,
+                    alias: Some("p".to_owned()),
+                    document: column("name"),
+                    path,
+                    recursive: false,
+                    output_name: ResultName::new("items")
+                        .unwrap_or_else(|error| unreachable!("valid name: {error}")),
+                    predicate: None,
+                }),
+                &session("member"),
+            )
+        };
+        // A literal and a parameter are the forms the binder admits.
+        assert!(compile(literal("$")).is_ok());
+        assert!(
+            compile(BoundExpr::ClientParameter {
+                name: ClientParameterName::new("path")
+                    .unwrap_or_else(|error| unreachable!("valid name: {error}")),
+                logical_type: LogicalType::String,
+            })
+            .is_ok()
+        );
+        // A column the role cannot read, however it is wrapped, is refused.
+        let status = || Box::new(BoundExpr::Column(column("status")));
+        for path in [
+            BoundExpr::Column(column("status")),
+            BoundExpr::ScalarFunction {
+                function: ScalarFunction::Lower,
+                arguments: vec![BoundExpr::Column(column("status"))],
+                logical_type: LogicalType::String,
+            },
+            BoundExpr::Case {
+                branches: vec![(
+                    BoundExpr::Equal(status(), Box::new(literal("x"))),
+                    literal("$"),
+                )],
+                else_expression: Some(Box::new(literal("$.label"))),
+                logical_type: LogicalType::String,
+            },
+            BoundExpr::Concat(status(), Box::new(literal(""))),
+            BoundExpr::CastText(status()),
+            // A conditional column is not a regular column either.
+            BoundExpr::Column(column("private_note")),
+        ] {
+            assert!(
+                matches!(compile(path.clone()), Err(PolicyError::ForbiddenColumn)),
+                "{path:?}"
+            );
+        }
+        // A regular column is a matter of the binder's form check, not of the policy's columns.
+        assert!(compile(BoundExpr::Column(column("id"))).is_ok());
     }
 
     #[test]

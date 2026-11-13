@@ -1,0 +1,1 @@
+CREATE TABLE projects (id TEXT NOT NULL, tenant_id TEXT NOT NULL, metadata TEXT NOT NULL) STRICT;
